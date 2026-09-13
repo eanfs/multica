@@ -15,7 +15,7 @@
 | 端点 | 响应形状 |
 |------|---------|
 | `GET /api/aurora/skills` | `{skills:[{id,name,name_en,category,credits,input[],output[],featured,available}]}` |
-| `POST /api/aurora/generations` `{skillId,prompt}` | `201 {generation:{id,skillId,prompt,status,creditsReserved}}`；余额不足 `402`（`status="failed"`） |
+| `POST /api/aurora/generations` `{skillId,prompt}` | `201 {generation:{id,skillId,prompt,status,creditsReserved}}`；余额不足 `402`（`status="failed"`）；月次数/并发超限 `429`（Plan 5 Task 6）；频率闸门 `429`（Plan 3 Task 7） |
 | `GET /api/aurora/generations?limit=50` | `{generations:[...]}`（Plan 3.5） |
 | `GET /api/aurora/generations/{id}` | `{generation:{...,status,assets:[...]}}`（Plan 3.5；status 服务端派生自 task，轮询进度用） |
 | `GET /api/aurora/assets` / `GET /api/aurora/assets/{id}/download` / `DELETE /api/aurora/assets/{id}` | Plan 3.5 契约（作品库） |
@@ -142,9 +142,9 @@ git commit -m "feat(aurora): core types, schemas, api and query hooks"
 
 **Files:**
 - Create: `packages/views/aurora/skill-directory.tsx`（功能网格 + 分类 tab + 搜索，对应 aurora `page.tsx` 的 agents grid；`available=false` 技能置灰 + 「即将上线」badge）
-- Create: `packages/views/aurora/generation-composer.tsx`（抽屉任务窗，输入 prompt → `useCreateAuroraGeneration`；unavailable 技能禁用提交；402 余额不足展示充值引导）
+- Create: `packages/views/aurora/generation-composer.tsx`（抽屉任务窗，输入 prompt → `useCreateAuroraGeneration`；unavailable 技能禁用提交；402 余额不足展示充值引导；429 限额/限流展示「本月次数或并发已达上限」提示）
 - Create: `packages/views/aurora/works-list.tsx`（我的作品：`useAuroraGenerations` + `useAuroraAssets` 真实端点 + 下载/删除）
-- Create: `packages/views/aurora/billing.tsx`（余额 + 流水（`reference` 经 catalog 映射技能名）+ 充值入口占位）
+- Create: `packages/views/aurora/billing.tsx`（余额 + 流水 + 充值入口占位；流水展示：`reference` 为 generation id 时经 catalog 映射技能名，Plan 5 的 `sub:`/`signup:`/`expire`/topup 引用按 **kind 兜底标签**显示——`billing.transaction.kind.*` 四语 key）
 - Create: `packages/views/aurora/*.test.tsx`（组件 happy path）
 - Create: i18n 文案（`packages/views/locales/{en,zh-Hans,ko,ja}/aurora.json` + `locales/index.ts` 注册——**四语全 key**，`parity.test.ts` 强制缺一 CI 挂；中文文案遵循 `apps/docs/content/docs/developers/conventions.mdx` 词汇表）
 - Modify: `packages/views/package.json`
@@ -207,7 +207,7 @@ git commit -m "feat(aurora): Next.js app wiring for skill directory, works and b
 ## Deferred / 边界
 
 - **桌面/移动端**：MVP 仅 Web（spec §13）。
-- **充值 UI**：`billing.tsx` 只做余额 + 流水（`reference` 映射技能名）+ 充值入口占位；真实 Stripe checkout 属后续 Plan 5（订阅 + 支付）。
+- **充值/订阅 UI**：本计划的充值入口占位已由 Plan 5 Task 7 接线（订阅卡片 + checkout 跳转 + topup，`2026-09-13-aurora-subscriptions-payments.md`）。
 - **WebSocket 实时进度**：MVP 轮询（Task 1 的 `useAuroraGenerationDetail` refetchInterval）；`task:progress` 事件帧已存在（`packages/core/types/events.ts:30`），实时化二期——届时服务端加协议常量 + 生产者 + listener，前端扩展事件 union + `use-realtime-sync.ts`。
 - **make up / 容器化**：`make up C=aurora`（`scripts/dev-env.sh:34` 的 `ALL_COMPONENTS`）与 Dockerfile 留二阶段；MVP 用 `pnpm dev:aurora` + next dev 代理。
 
@@ -220,7 +220,7 @@ git commit -m "feat(aurora): Next.js app wiring for skill directory, works and b
 
 ## 执行交接
 
-实现顺序：Plan 1 → Plan 2 → Plan 3.5 Task 1（查询）→ Plan 3 → Plan 3.5 其余 → Plan 4 → Plan safety（内容审核 + 权益门禁）。「可对外销售」还需后续 Plan 5（订阅 + Stripe，尚未编写）。
+实现顺序：Plan 1 → Plan 2 → Plan 3.5 Task 1（查询）→ Plan 3 → Plan 3.5 其余 → Plan 4 → Plan safety（内容审核 + 权益门禁）→ Plan 5（订阅 + Stripe，`2026-09-13-aurora-subscriptions-payments.md`，已编写）。
 
 ## 修订记录（2026-09-13 评审回写）
 

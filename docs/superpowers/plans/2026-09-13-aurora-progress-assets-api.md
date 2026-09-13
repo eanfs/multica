@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - 不加外键/级联；asset 删除 = 应用代码删 storage 对象 + 删行（一个事务）。
-- 新建索引必须 `CREATE INDEX CONCURRENTLY` 单文件 + 注册 `cmd/migrate/main.go` 的 `concurrentIndexCleanups`/`concurrentDownIndexCleanups`（`TestEveryConcurrentUpBuildHasCleanup` 强制，Plan 2 同款步骤）。
+- 新建索引必须 `CREATE INDEX CONCURRENTLY` 单文件 + **只注册 `concurrentIndexCleanups`（up 映射）**（`TestEveryConcurrentUpBuildHasCleanup` 强制）：`concurrentDownIndexCleanups` 只收 down 方向重建索引的 migration（`main.go:303-311`），本计划的 down 只有 `DROP INDEX CONCURRENTLY`，注册进 down 映射会被 `TestConcurrentIndexCleanupsMatchTheirMigrations` 判挂。up 注册后 pre-hook 自动派生。
 - migration 序号以合并时 `server/migrations` 最新为准顺延（本计划假设 456 起；若与 Plan safety 的 459 冲突则按合并顺序重排）。
 - 所有响应走 `parseWithFallback` 契约（前端侧 Plan 4 schema 已对齐本文档字段名）。
 - 端点全部挂在既有 auth + workspace 成员分组内（无匿名路径）。
@@ -44,7 +44,7 @@
   - `DeleteAuroraAsset`（`:exec`：`WHERE id=$1 AND workspace_id=$2`，返回行数判断存在性）
 - 索引：`aurora_generation(workspace_id, created_at DESC)`、`aurora_asset(generation_id)`、`aurora_asset(workspace_id, created_at DESC)`——各单文件 CONCURRENTLY。
 
-- [ ] **Step 1: 写查询 + 迁移 + 注册 cleanup 映射**（模式同 Plan 2 Task 1 Step 1/2）
+- [ ] **Step 1: 写查询 + 迁移 + 注册 cleanup 映射**（模式同 Plan 2 Task 1 Step 1/2——up 映射 only）
 - [ ] **Step 2: `make sqlc` + `make test` 验证**（`go test ./internal/migrations/` 不应用迁移——用 `make test`）
 - [ ] **Step 3: Commit**
 

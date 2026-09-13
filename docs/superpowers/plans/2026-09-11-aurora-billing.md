@@ -20,7 +20,7 @@
 - 新建索引用 `CREATE UNIQUE INDEX CONCURRENTLY`，**每个索引单独一个 migration 文件**（`credit_ledger.idempotency_key` 唯一索引单列一个文件），且**必须注册进 `cmd/migrate/main.go` 的 `concurrentIndexCleanups`/`concurrentDownIndexCleanups`**（`TestEveryConcurrentUpBuildHasCleanup` 强制，见 Task 1 Step 2）。
 - 代码注释英文；gofmt/go vet/显式检查 error。
 - 金额单位 micro-credit（`BIGINT`），`1 USD = 1000 credit`，前端展示除以 1e6。
-- kind 枚举与 cloud 钱包契约一致：`topup | deduction | refund | adjustment`（`expire` 留给二期月额度过期）。月额度发放 = `adjustment`，Stripe 充值 = `topup`。
+- kind 枚举与 cloud 钱包契约一致：`topup | deduction | refund | adjustment`（`expire` 由 Plan 5 Task 4 实现——`LedgerKindExpire` + `Expire`）。月额度发放 = `adjustment`，Stripe 充值 = `topup`。
 - 账本写入必须**幂等**：先查幂等键短路（快速路径），余额变更与流水插入同事务；流水插入冲突（`pgx.ErrNoRows`）视为已处理（rollback + 返回 nil）。
 - 从请求边界读 UUID 用 `parseUUIDOrBadRequest`；不 open-code `INSERT...RETURNING`（走 sqlc）。
 
@@ -39,7 +39,7 @@
 **Interfaces:**
 - Produces：
   - `credit_balance`：`user_id uuid PK`、`available_micro bigint NOT NULL DEFAULT 0`、`updated_at timestamptz`。
-  - `credit_ledger`：`id uuid PK`、`user_id uuid`、`workspace_id uuid`、`kind text`（`topup|deduction|refund|adjustment`）、`amount_micro bigint`（有符号，deduction 为负）、`balance_after_micro bigint`、`reference text`（操作对象：generation id / Stripe 事件 id）、`idempotency_key text`、`created_at timestamptz`。唯一索引 `credit_ledger(idempotency_key)`。
+  - `credit_ledger`：`id uuid PK`、`user_id uuid`、`workspace_id uuid`、`kind text`（`topup|deduction|refund|adjustment|expire`）、`amount_micro bigint`（有符号，deduction/expire 为负）、`balance_after_micro bigint`、`reference text`（操作对象：generation id / Stripe 事件 id / Plan 5 发放键 `sub:`/`signup:`/`<userID>:<YYYY-MM>`）、`idempotency_key text`、`created_at timestamptz`。唯一索引 `credit_ledger(idempotency_key)`。
   - sqlc 查询：`GetCreditBalance`（`:one`，无行时返回 `pgx.ErrNoRows`）、`EnsureCreditBalance`（`INSERT ... ON CONFLICT DO NOTHING`）、`DeductCreditBalance`（条件 `available_micro >= $2` 的 UPDATE，0 行=余额不足 → `pgx.ErrNoRows`）、`CreditCreditBalance`（`available_micro + $2`）、`GetCreditLedgerByIdempotencyKey`（`:one`，幂等快速路径）、`InsertCreditLedger`（`ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`，冲突时 `pgx.ErrNoRows`）、`ListCreditTransactions`（`:many`）。
 
 - [ ] **Step 1: 写 migration 文件**
@@ -66,12 +66,15 @@ DROP TABLE IF EXISTS credit_balance;
 
 ```sql
 -- Append-only credit ledger. kind follows the cloud wallet contract
--- (packages/core/types/billing.ts): topup | deduction | refund | adjustment;
--- "expire" is reserved for phase-2 monthly-quota expiry. amount_micro is
--- signed (deduction negative, others positive). reference names the
--- operation's subject (generation id / Stripe event id) so the transactions
--- UI can show what each row was for. idempotency_key makes retries safe; the
--- unique index enforcing it lives in its own migration file.
+-- (packages/core/types/billing.ts): topup | deduction | refund | adjustment
+-- | expire (expire is implemented by Plan 5's monthly settlement).
+-- amount_micro is signed (deduction/expire negative, others positive).
+-- reference names the operation's subject — a generation id, a Stripe event
+-- id, or a Plan 5 grant key ("sub:<userID>:<YYYY-MM>", "signup:<userID>",
+-- "<userID>:<YYYY-MM>") — so the transactions UI can label each row; the
+-- UI falls back to kind-based labels for non-generation references.
+-- idempotency_key makes retries safe; the unique index enforcing it lives
+-- in its own migration file.
 CREATE TABLE IF NOT EXISTS credit_ledger (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL,
@@ -108,7 +111,7 @@ DROP INDEX CONCURRENTLY IF EXISTS credit_ledger_idempotency_key_idx;
 
 - [ ] **Step 2: 注册并发索引 cleanup 映射（2026-09-13 评审新增）**
 
-`server/cmd/migrate/main.go`：仓库测试 `TestEveryConcurrentUpBuildHasCleanup` / `...Down...`（`cmd/migrate/migrate_mul5999_index_retry_test.go:73-124`）会 glob 全部真实 migration，强制每个使用 `CREATE [UNIQUE] INDEX CONCURRENTLY` 的 migration 在 `concurrentIndexCleanups`（`main.go:141`）与 `concurrentDownIndexCleanups`（`main.go:308`）注册**同名条目**；不注册则测试挂。为 `credit_ledger_idempotency_key_idx` 在两张映射表各加一条（清理动作参考已有条目；本索引无前置依赖，`preMigrationHooks`/`preRollbackHooks` 不需要改动）。
+`server/cmd/migrate/main.go`：仓库测试 `TestEveryConcurrentUpBuildHasCleanup`（`cmd/migrate/migrate_mul5999_index_retry_test.go:73-124`）会 glob 全部真实 migration，强制每个 up 方向使用 `CREATE [UNIQUE] INDEX CONCURRENTLY` 的 migration 在 `concurrentIndexCleanups`（`main.go:141`）注册**同名条目**；不注册则测试挂。为 `credit_ledger_idempotency_key_idx` 在 up 映射加一条即可——**不要注册 `concurrentDownIndexCleanups`**：down 文件只是 `DROP INDEX CONCURRENTLY`，而 down 映射只收「down 方向重建索引」的 migration（`main.go:303-311`），注册进去会被 `TestConcurrentIndexCleanupsMatchTheirMigrations` 判挂。up 注册后 `preMigrationHooks` 自动派生，无需手加。
 
 - [ ] **Step 3: 写 sqlc 查询文件**
 
@@ -153,12 +156,12 @@ LIMIT $2;
 
 - [ ] **Step 4: 运行 sqlc**
 
-Run: `cd server && make sqlc`
+Run: `make sqlc`（仓库根执行）
 Expected: 生成上述查询。`DeductCreditBalance`/`CreditCreditBalance` 为 `(int64, error)`（`:one` 单列）；**无匹配行时返回 `pgx.ErrNoRows`**（sqlc `:one` 语义，仓库先例 `UpdateIssueStatus` + `workspace_scope_guard_test.go:89-100`）；`InsertCreditLedger` 冲突时同样返回 `pgx.ErrNoRows`（先例 `CreateRetryTask`，`fail_task_successor_test.go:135-170`）。字段名以生成为准：预期 `amount_micro` → `AmountMicro`（sqlc 仅对 `id` 做首字母大写特判，其余 snake→Camel，先例 `AvatarUrl`/`McpConfig`）。
 
 - [ ] **Step 5: 验证 migration**
 
-Run: `cd server && make test`（先跑 `go run ./cmd/migrate up` 再跑全部 Go 测试；`go test ./internal/migrations/` 不会应用新迁移）
+Run: `make test`（仓库根执行；先跑 `go run ./cmd/migrate up` 再跑全部 Go 测试；`go test ./internal/migrations/` 不会应用新迁移）
 Expected: 迁移成功应用；`TestEveryConcurrentUpBuildHasCleanup` 通过（Step 2 已注册）；Go 测试全绿。
 
 - [ ] **Step 6: Commit**
@@ -306,7 +309,8 @@ var ErrInsufficientCredits = errors.New("insufficient credits")
 
 // Ledger kinds follow the cloud wallet contract
 // (packages/core/types/billing.ts): topup | deduction | refund | adjustment.
-// "expire" is reserved for phase-2 monthly-quota expiry.
+// "expire" is added by Plan 5 (LedgerKindExpire + Expire, monthly
+// settlement).
 const (
 	LedgerKindTopup      = "topup"
 	LedgerKindDeduction  = "deduction"
@@ -561,7 +565,7 @@ git commit -m "feat(aurora): billing balance and transactions endpoints"
 - **Stripe 充值 / 订阅产品线**：需要 Stripe key、checkout session、webhook 验签、`subscription` 权益表。`Grant(kind="topup")` 已预留为 webhook 的落账入口。Plan 2 只做账本 + 只读 API。
 - **权益门禁 enforcement**：self-host 下 `entitlement` 云 URL 未配置即 fail-open——`BaseURL` 为空 → `enabled=false`、Provider 为 nil、所有 gate 返回 `ActionOff`（`entitlement/client.go:48-50/95-100`，`router.go:459-463`）。另注意 `normalizePolicy` 目前**硬性要求两个 gate 都在**（`client.go:278-299`）：将来加 `GateAurora*` 时旧 policy 会整体被拒，需与 `normalizePolicy` 同 PR 修改（Plan 5/safety 处理）。
 - **`aurora_generation.credits_reserved/charged` 写入**：由 Plan 3（执行层）在入队时调 `h.Credit.Reserve` 并把预留金额写回 generation 行；失败/卡死退款也由 Plan 3 Task 4 接现有 sweeper 终态路径。
-- **`expire` 交易与两步冻结账本**：二期（spec §6.2）。
+- **两步冻结账本**：二期（spec §6.2）；`expire` 交易已由 Plan 5 Task 4 实现（`LedgerKindExpire` + `Expire` + 月结算循环）。
 
 ## Self-Review
 
@@ -572,7 +576,7 @@ git commit -m "feat(aurora): billing balance and transactions endpoints"
 
 ## 执行交接
 
-Plan 2 完成。后续顺序：Plan 3（执行层）→ Plan 3.5（进度与作品库 API）→ Plan 4（前端）→ Plan safety。「可对外销售」还需后续 Plan 5（订阅 + Stripe + 权益门禁，尚未编写）。
+Plan 2 完成。后续顺序：Plan 3（执行层）→ Plan 3.5（进度与作品库 API）→ Plan 4（前端）→ Plan safety → Plan 5（订阅 + Stripe + 权益门禁，`2026-09-13-aurora-subscriptions-payments.md`，已编写）。
 
 ## 修订记录（2026-09-13 评审回写）
 

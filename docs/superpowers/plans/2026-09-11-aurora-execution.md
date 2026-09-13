@@ -243,7 +243,7 @@ git commit -m "feat(aurora): rate-limit generation creation"
 - **水平扩展**：MVP 先单节点沙箱；多节点调度与 `@hyperframes/aws-lambda` 渲染路径作后续扩展（spec §12）。
 - **生成式视频（Veo/Runway）与数字人（HeyGen Avatar）**：第二阶段，本计划只覆盖 HyperFrames 确定性视频（spec §9.2）。
 - **确定性 Skill 快速通道**：纯确定性 skill（证件照/字幕/Excel）仍走 agent，后续可绕过 agent 直跑流水线（spec §4.5 技术债）。
-- **权益门禁（`GateAurora*`）**：Plan 5/safety（`normalizePolicy` 双 gate 硬校验需同步改）。
+- **权益门禁（`GateAurora*`）**：本地 enforcement 在 Plan 5 Task 6（`aurora.LimitsForUser`）；cloud `GateName`/`normalizePolicy` 扩展待接云时同 PR 处理（Plan safety Deferred）。
 - **内容审核**：Plan safety（prompt 关键词 + 图片 NSFW adapter）。
 - **per-skill TTL**：MVP 用 `MULTICA_AGENT_TIMEOUT`（daemon 级）+ sweeper 常数兜底；按 skill 配置二期。
 - **origin 列**：MVP 不加（`aurora_generation.task_id` 反查归属）。
@@ -256,7 +256,7 @@ git commit -m "feat(aurora): rate-limit generation creation"
 
 ## 执行交接
 
-Plan 3 完成。后续顺序：Plan 3.5（进度与作品库 API）→ Plan 4（前端）→ Plan safety（频率闸门已在本计划 Task 7 提前落地，剩内容审核与权益门禁）。「可对外销售」还需后续 Plan 5（订阅 + Stripe，尚未编写）。
+Plan 3 完成。后续顺序：Plan 3.5（进度与作品库 API）→ Plan 4（前端）→ Plan safety（频率闸门已在本计划 Task 7 提前落地，剩内容审核与权益门禁）→ Plan 5（订阅 + Stripe，`2026-09-13-aurora-subscriptions-payments.md`，已编写）。
 
 ## 修订记录（2026-09-13 评审回写）
 

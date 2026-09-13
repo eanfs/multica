@@ -136,7 +136,7 @@ MVP 的视频 Skill 用 [HyperFrames](https://github.com/heygen-com/hyperframes)
 
 ### 6.3 权益门禁
 
-扩展 `server/internal/entitlement` 的 `GateName`（当前仅 `GateIssueCount`/`GateAutopilotRuns`），新增 Aurora 门禁（如 `GateAuroraGenerations`、`GateAuroraConcurrency`）。注意 `entitlement/client.go` 对 gate 集合有硬校验，需同步改 `normalizePolicy`。
+扩展 `server/internal/entitlement` 的 `GateName`（当前仅 `GateIssueCount`/`GateAutopilotRuns`），新增 Aurora 门禁（如 `GateAuroraGenerations`、`GateAuroraConcurrency`）。注意 `entitlement/client.go` 对 gate 集合有硬校验，需同步改 `normalizePolicy`。> 2026-09-13 修订：self-host MVP 的权益门禁由**本地 enforcement** 承担（Plan 5 Task 6，`aurora.LimitsForUser`，值来自 `TierCatalog`）；cloud `GateName`/`normalizePolicy` 扩展待接 cloud 时同一 PR 处理（Plan 5 Deferred / Plan safety Deferred）。
 
 ## 7. 认证 / 账户
 
@@ -165,7 +165,7 @@ MVP 的视频 Skill 用 [HyperFrames](https://github.com/heygen-com/hyperframes)
 
 ### 9.1 MVP（技术里程碑，不可对外销售）
 
-> 2026-09-13 修订：Plan 1–4 + 3.5 + safety 合起来交付的是**技术 MVP**（目录 + 账本 + 执行链路），不含支付。达到「可对外销售」还需后续 Plan 5（订阅产品线 + Stripe 充值 + 权益门禁，尚未编写）。
+> 2026-09-13 修订：Plan 1–4 + 3.5 + safety 合起来交付的是**技术 MVP**（目录 + 账本 + 执行链路），不含支付。达到「可对外销售」需 Plan 5（订阅产品线 + Stripe 充值 + 权益门禁）——已编写：`docs/superpowers/plans/2026-09-13-aurora-subscriptions-payments.md`。
 
 | # | 功能 | 说明 |
 |---|------|------|
@@ -173,7 +173,7 @@ MVP 的视频 Skill 用 [HyperFrames](https://github.com/heygen-com/hyperframes)
 | 2 | Skill 目录（中英双语） | 16 功能目录，服务端单一事实来源 |
 | 3 | 确定性优先的三类 Skill | 文字类（小红书文案/简历/文件总结/录音转写）+ 图片类（海报/小红书图片/商品图/文字生图/图片修改/证件照）+ 视频类（文生视频/图生视频/剪辑字幕，HyperFrames 确定性渲染）。目录 16 条中 13 条可用；`avatar-video`/`ppt`/`excel` 标记 `available=false`，二阶段开放 |
 | 4 | 异步任务 + 进度 + 产物下载 | 入队 → 沙箱执行 → 实时进度 → `aurora_asset` 下载 |
-| 5 | 积分账本闭环 | 余额 + 流水 + 预留/退款/发放（订阅档位 + Stripe 充值属后续 Plan 5，本里程碑不含） |
+| 5 | 积分账本闭环 | 余额 + 流水 + 预留/退款/发放（订阅档位 + Stripe 充值已由 Plan 5 编写——`2026-09-13-aurora-subscriptions-payments.md`；本技术 MVP 里程碑不含支付实现） |
 | 6 | 作品库 | asset 列表/下载/删除 |
 | 7 | 安全硬性条件（见 §10） | 沙箱隔离 + 频率闸门 + 调用上限 + 内容审核 |
 | 8 | 支付 | Stripe（全球） |
@@ -223,7 +223,7 @@ MVP 的视频 Skill 用 [HyperFrames](https://github.com/heygen-com/hyperframes)
 - 生成式真人生成（Veo/Runway）与数字人口播（HeyGen Avatar）—— 第二阶段，MVP 视频全部走 HyperFrames 确定性渲染。
 - 社交平台 API 自动发布 —— 第二阶段。
 - 模板市场 / 公开 API —— 第三阶段。
-- 订阅产品线 / Stripe 支付 —— 技术 MVP 不做，属「可对外销售」里程碑（后续 Plan 5）。
+- 订阅产品线 / Stripe 支付 —— 技术 MVP 不做，属「可对外销售」里程碑（Plan 5 已编写，`2026-09-13-aurora-subscriptions-payments.md`）。
 
 ## 14. 修订记录（2026-09-13 评审回写）
 

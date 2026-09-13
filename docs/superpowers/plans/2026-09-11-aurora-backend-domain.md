@@ -121,12 +121,12 @@ SELECT count(*) FROM member WHERE user_id = $1;
 
 - [ ] **Step 3: 运行 sqlc 生成代码**
 
-Run: `cd server && make sqlc`
+Run: `make sqlc`（仓库根执行——无 `server/Makefile`，sqlc 目标是根 Makefile 的）
 Expected: 生成 `CreateAuroraGeneration`、`GetAuroraGeneration`、`CountWorkspacesForUser` 与 `AuroraGeneration`/`AuroraAsset` model。确认 `CreateAuroraGenerationParams` 的字段名是 `WorkspaceID`/`UserID`/`SkillID`/`Prompt`（sqlc 对 `workspace_id`→`WorkspaceID` 的 snake_case→CamelCase 转换），`UserID`/`WorkspaceID` 类型为 `pgtype.UUID`。若字段名与计划不一致，以 `make sqlc` 生成为准改后续代码。
 
 - [ ] **Step 4: 验证 migration 可应用**
 
-Run: `cd server && make test`（注意：`go test ./internal/migrations/` **不会**应用新迁移——其测试按名定向；`make test` 会先跑 `go run ./cmd/migrate up`，再跑全部 Go 测试）
+Run: `make test`（仓库根执行；注意：`go test ./internal/migrations/` **不会**应用新迁移——其测试按名定向；`make test` 会先跑 `go run ./cmd/migrate up`，再跑全部 Go 测试）
 Expected: 迁移成功应用，Go 测试全绿。
 
 - [ ] **Step 5: Commit**
@@ -787,7 +787,7 @@ git commit -m "feat(aurora): auto-provision personal workspace on signup"
 
 ## 执行交接
 
-Plan 1 已补全到零占位。后续顺序：Plan 2（计费）→ Plan 3（执行层）→ Plan 3.5（进度与作品库 API）→ Plan 4（前端）→ Plan safety（频率闸门 + 内容审核）。「可对外销售」还需后续 Plan 5（订阅产品线 + Stripe + 权益门禁，尚未编写）。建议先按本计划实现并 `make test` 全绿，再进 Plan 2。
+Plan 1 已补全到零占位。后续顺序：Plan 2（计费）→ Plan 3（执行层）→ Plan 3.5（进度与作品库 API）→ Plan 4（前端）→ Plan safety（频率闸门 + 内容审核）→ Plan 5（订阅 + Stripe + 权益门禁，`2026-09-13-aurora-subscriptions-payments.md`，已编写）。建议先按本计划实现并 `make test` 全绿，再进 Plan 2。
 
 ## 修订记录（2026-09-13 评审回写）
 

@@ -72,7 +72,7 @@ git commit -m "feat(aurora): wire moderation into generation create and completi
 
 - **供应商审核 API**：adapter 接口已就位，二阶段替换默认实现（火山/阿里内容安全等，中英双语 + 社媒合规规则），密钥仅服务端。
 - **视频帧级审核**：MVP 只做元数据校验；帧级抽帧审核二期。
-- **权益门禁 `GateAurora*`**：self-host 下 `entitlement` 未配 BaseURL 即 fail-open（`client.go:48-50/95-100`，Provider 为 nil → `ActionOff`），MVP 无需云端即可运行；接云端时需同一 PR 改 `entitlement/types.go` 的 `GateName` 枚举 **+** `normalizePolicy`（`client.go:278-299` 硬性要求两个 gate 都在，加第三个 gate 会让旧 policy 整体被拒）**+** 消费点（`GateAuroraGenerations` 创建端点、`GateAuroraConcurrency` 并发上限）。此项属后续 Plan 5（订阅+权益）前置。
+- **权益门禁 `GateAurora*`（cloud）**：self-host 下 `entitlement` 未配 BaseURL 即 fail-open（`client.go:48-50/95-100`，Provider 为 nil → `ActionOff`），MVP 无需云端即可运行。**本地 enforcement 已由 Plan 5 Task 6 落地**（`aurora.LimitsForUser`：月次数/并发，值来自 `TierCatalog`）；接云端时需同一 PR 改 `entitlement/types.go` 的 `GateName` 枚举 **+** `normalizePolicy`（`client.go:278-299` 硬性要求两个 gate 都在，加第三个 gate 会让旧 policy 整体被拒）**+** 消费点（`GateAuroraGenerations` 创建端点、`GateAuroraConcurrency` 并发上限）——见 Plan 5 Deferred。
 - **审核复核 UI**：`moderation_log` 记录已落库，人工复核界面与申诉流程二期。
 
 ## Self-Review
@@ -83,4 +83,4 @@ git commit -m "feat(aurora): wire moderation into generation create and completi
 
 ## 执行交接
 
-完成顺序：Plan 3.5 → Plan 4 → 本计划（可在 Plan 4 之后、上线前完成；Task 1 可随时先行）。「可对外销售」里程碑还需后续 Plan 5（订阅 + Stripe + 权益门禁 enforcement，尚未编写）。
+完成顺序：Plan 3.5 → Plan 4 → 本计划（可在 Plan 4 之后、上线前完成；Task 1 可随时先行）→ Plan 5（订阅 + Stripe + 权益门禁 enforcement，`2026-09-13-aurora-subscriptions-payments.md`，已编写）。
