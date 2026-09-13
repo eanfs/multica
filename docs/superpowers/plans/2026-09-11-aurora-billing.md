@@ -1,10 +1,12 @@
 # Aurora 积分账本 + 计费 — 实现计划（Plan 2）
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> 修订：2026-09-13（评审回写，详见文末「修订记录」）
 
 **Goal:** 在 Go 后端建立 Aurora 的积分账本核心：余额 + 流水 + 预留/退款/发放的幂等服务，以及余额/流水只读 API。订阅产品线与 Stripe 充值**不在本计划**（见「Deferred」）。
 
-**Architecture:** 新建 `credit_balance` / `credit_ledger` 表与 sqlc 查询；新建 `server/internal/aurora/credit.go` 的 `CreditService`（`Reserve`/`Refund`/`Grant`/`Balance`，事务 + 幂等键）；新增 `GET /api/aurora/billing/balance` 与 `GET /api/aurora/billing/transactions` 两个只读端点。契约沿用 `packages/core/types/billing.ts`（micro-credit，1 USD = 1000 credit）。
+**Architecture:** 新建 `credit_balance` / `credit_ledger` 表与 sqlc 查询；新建 `server/internal/aurora/credit.go` 的 `CreditService`（`Reserve`/`Refund`/`Grant`/`Balance`，事务 + 幂等键）；新增 `GET /api/aurora/billing/balance` 与 `GET /api/aurora/billing/transactions` 两个只读端点。契约逐字沿用 `packages/core/types/billing.ts`（micro-credit，1 USD = 1000 credit，kind 枚举 `topup/deduction/refund/expire/adjustment`——已核实 `types/billing.ts:26-31`）。
 
 **Tech Stack:** Go 1.26、sqlc、pgx/v5、`server/internal/testutil`。
 
@@ -15,28 +17,30 @@
 ## Global Constraints
 
 - 不加外键/级联；关系与清理在应用代码处理。
-- 新建索引用 `CREATE UNIQUE INDEX CONCURRENTLY`，**每个索引单独一个 migration 文件**（`credit_ledger.idempotency_key` 唯一索引单列一个文件）。
+- 新建索引用 `CREATE UNIQUE INDEX CONCURRENTLY`，**每个索引单独一个 migration 文件**（`credit_ledger.idempotency_key` 唯一索引单列一个文件），且**必须注册进 `cmd/migrate/main.go` 的 `concurrentIndexCleanups`/`concurrentDownIndexCleanups`**（`TestEveryConcurrentUpBuildHasCleanup` 强制，见 Task 1 Step 2）。
 - 代码注释英文；gofmt/go vet/显式检查 error。
 - 金额单位 micro-credit（`BIGINT`），`1 USD = 1000 credit`，前端展示除以 1e6。
-- 账本写入必须**幂等**（唯一 `idempotency_key` + `ON CONFLICT DO NOTHING`）且**事务内**完成「余额变更 + 流水插入」。
+- kind 枚举与 cloud 钱包契约一致：`topup | deduction | refund | adjustment`（`expire` 留给二期月额度过期）。月额度发放 = `adjustment`，Stripe 充值 = `topup`。
+- 账本写入必须**幂等**：先查幂等键短路（快速路径），余额变更与流水插入同事务；流水插入冲突（`pgx.ErrNoRows`）视为已处理（rollback + 返回 nil）。
 - 从请求边界读 UUID 用 `parseUUIDOrBadRequest`；不 open-code `INSERT...RETURNING`（走 sqlc）。
 
 ---
 
-### Task 1: `credit_balance` 与 `credit_ledger` 表 + 唯一索引
+### Task 1: `credit_balance` 与 `credit_ledger` 表 + 唯一索引 + 并发索引注册
 
 **Files:**
 - Create: `server/migrations/453_credit_balance.up.sql` / `.down.sql`
 - Create: `server/migrations/454_credit_ledger.up.sql` / `.down.sql`
 - Create: `server/migrations/455_credit_ledger_idempotency_key_idx.up.sql` / `.down.sql`
 - Create: `server/pkg/db/queries/credit.sql`
+- Modify: `server/cmd/migrate/main.go`（注册并发索引 cleanup 映射）
 - 自动生成：`make sqlc`
 
 **Interfaces:**
 - Produces：
   - `credit_balance`：`user_id uuid PK`、`available_micro bigint NOT NULL DEFAULT 0`、`updated_at timestamptz`。
-  - `credit_ledger`：`id uuid PK`、`user_id uuid`、`workspace_id uuid`、`kind text`（`grant|deduction|refund`）、`amount_micro bigint`（有符号）、`balance_after_micro bigint`、`idempotency_key text`、`created_at timestamptz`。唯一索引 `credit_ledger(idempotency_key)`。
-  - sqlc 查询：`GetCreditBalance`（`:one`，无行时返回 `sql.ErrNoRows`）、`EnsureCreditBalance`（`INSERT ... ON CONFLICT DO NOTHING`）、`DeductCreditBalance`（条件 `available_micro >= $2` 的 UPDATE，0 行=余额不足）、`CreditCreditBalance`（`available_micro + $2`）、`InsertCreditLedger`（`ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`）、`ListCreditTransactions`（`:many`）。
+  - `credit_ledger`：`id uuid PK`、`user_id uuid`、`workspace_id uuid`、`kind text`（`topup|deduction|refund|adjustment`）、`amount_micro bigint`（有符号，deduction 为负）、`balance_after_micro bigint`、`reference text`（操作对象：generation id / Stripe 事件 id）、`idempotency_key text`、`created_at timestamptz`。唯一索引 `credit_ledger(idempotency_key)`。
+  - sqlc 查询：`GetCreditBalance`（`:one`，无行时返回 `pgx.ErrNoRows`）、`EnsureCreditBalance`（`INSERT ... ON CONFLICT DO NOTHING`）、`DeductCreditBalance`（条件 `available_micro >= $2` 的 UPDATE，0 行=余额不足 → `pgx.ErrNoRows`）、`CreditCreditBalance`（`available_micro + $2`）、`GetCreditLedgerByIdempotencyKey`（`:one`，幂等快速路径）、`InsertCreditLedger`（`ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`，冲突时 `pgx.ErrNoRows`）、`ListCreditTransactions`（`:many`）。
 
 - [ ] **Step 1: 写 migration 文件**
 
@@ -61,9 +65,13 @@ DROP TABLE IF EXISTS credit_balance;
 `server/migrations/454_credit_ledger.up.sql`：
 
 ```sql
--- Append-only credit ledger. kind: grant | deduction | refund. amount_micro is
--- signed (deduction negative, grant/refund positive). idempotency_key makes
--- retries safe; the unique index enforcing it lives in its own migration.
+-- Append-only credit ledger. kind follows the cloud wallet contract
+-- (packages/core/types/billing.ts): topup | deduction | refund | adjustment;
+-- "expire" is reserved for phase-2 monthly-quota expiry. amount_micro is
+-- signed (deduction negative, others positive). reference names the
+-- operation's subject (generation id / Stripe event id) so the transactions
+-- UI can show what each row was for. idempotency_key makes retries safe; the
+-- unique index enforcing it lives in its own migration file.
 CREATE TABLE IF NOT EXISTS credit_ledger (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL,
@@ -71,6 +79,7 @@ CREATE TABLE IF NOT EXISTS credit_ledger (
     kind TEXT NOT NULL,
     amount_micro BIGINT NOT NULL,
     balance_after_micro BIGINT NOT NULL,
+    reference TEXT NOT NULL,
     idempotency_key TEXT NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
 );
@@ -97,7 +106,11 @@ CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS credit_ledger_idempotency_key_idx
 DROP INDEX CONCURRENTLY IF EXISTS credit_ledger_idempotency_key_idx;
 ```
 
-- [ ] **Step 2: 写 sqlc 查询文件**
+- [ ] **Step 2: 注册并发索引 cleanup 映射（2026-09-13 评审新增）**
+
+`server/cmd/migrate/main.go`：仓库测试 `TestEveryConcurrentUpBuildHasCleanup` / `...Down...`（`cmd/migrate/migrate_mul5999_index_retry_test.go:73-124`）会 glob 全部真实 migration，强制每个使用 `CREATE [UNIQUE] INDEX CONCURRENTLY` 的 migration 在 `concurrentIndexCleanups`（`main.go:141`）与 `concurrentDownIndexCleanups`（`main.go:308`）注册**同名条目**；不注册则测试挂。为 `credit_ledger_idempotency_key_idx` 在两张映射表各加一条（清理动作参考已有条目；本索引无前置依赖，`preMigrationHooks`/`preRollbackHooks` 不需要改动）。
+
+- [ ] **Step 3: 写 sqlc 查询文件**
 
 `server/pkg/db/queries/credit.sql`：
 
@@ -121,34 +134,37 @@ SET available_micro = available_micro + $2, updated_at = now()
 WHERE user_id = $1
 RETURNING available_micro;
 
+-- name: GetCreditLedgerByIdempotencyKey :one
+SELECT id FROM credit_ledger WHERE idempotency_key = $1;
+
 -- name: InsertCreditLedger :one
-INSERT INTO credit_ledger (user_id, workspace_id, kind, amount_micro, balance_after_micro, idempotency_key)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO credit_ledger (user_id, workspace_id, kind, amount_micro, balance_after_micro, reference, idempotency_key)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (idempotency_key) DO NOTHING
 RETURNING id;
 
 -- name: ListCreditTransactions :many
-SELECT id, user_id, workspace_id, kind, amount_micro, balance_after_micro, idempotency_key, created_at
+SELECT id, user_id, workspace_id, kind, amount_micro, balance_after_micro, reference, idempotency_key, created_at
 FROM credit_ledger
 WHERE user_id = $1
 ORDER BY created_at DESC
 LIMIT $2;
 ```
 
-- [ ] **Step 3: 运行 sqlc**
+- [ ] **Step 4: 运行 sqlc**
 
 Run: `cd server && make sqlc`
-Expected: 生成上述查询；`DeductCreditBalance`/`CreditCreditBalance` 返回 `(int64, error)`（`:one` 单列）。确认 `DeductCreditBalance` 在 `WHERE` 不满足时返回 `pgx.ErrNoRows` 还是 `(0, nil)`——sqlc 的 `:one` UPDATE 无匹配行会返回 `pgx.ErrNoRows`，余额不足用这个错误区分（本计划的 `Reserve` 依赖此语义）。
+Expected: 生成上述查询。`DeductCreditBalance`/`CreditCreditBalance` 为 `(int64, error)`（`:one` 单列）；**无匹配行时返回 `pgx.ErrNoRows`**（sqlc `:one` 语义，仓库先例 `UpdateIssueStatus` + `workspace_scope_guard_test.go:89-100`）；`InsertCreditLedger` 冲突时同样返回 `pgx.ErrNoRows`（先例 `CreateRetryTask`，`fail_task_successor_test.go:135-170`）。字段名以生成为准：预期 `amount_micro` → `AmountMicro`（sqlc 仅对 `id` 做首字母大写特判，其余 snake→Camel，先例 `AvatarUrl`/`McpConfig`）。
 
-- [ ] **Step 4: 验证 migration**
+- [ ] **Step 5: 验证 migration**
 
-Run: `cd server && go test ./internal/migrations/ -run . -count=1`
-Expected: 通过。
+Run: `cd server && make test`（先跑 `go run ./cmd/migrate up` 再跑全部 Go 测试；`go test ./internal/migrations/` 不会应用新迁移）
+Expected: 迁移成功应用；`TestEveryConcurrentUpBuildHasCleanup` 通过（Step 2 已注册）；Go 测试全绿。
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add server/migrations/453_credit_balance.* server/migrations/454_credit_ledger.* server/migrations/455_credit_ledger_idempotency_key_idx.* server/pkg/db/queries/credit.sql server/pkg/db/generated/
+git add server/migrations/453_credit_balance.* server/migrations/454_credit_ledger.* server/migrations/455_credit_ledger_idempotency_key_idx.* server/pkg/db/queries/credit.sql server/pkg/db/generated/ server/cmd/migrate/main.go
 git commit -m "feat(aurora): add credit balance and ledger tables"
 ```
 
@@ -165,14 +181,14 @@ git commit -m "feat(aurora): add credit balance and ledger tables"
 - Consumes: Task 1 的 sqlc 查询；`pgx.Tx` 事务。
 - Produces（Plan 3 的扣费依赖）：
   - `aurora.NewCreditService(q *db.Queries, tx aurora.TxBeginner) *CreditService`
-  - `(*CreditService).Reserve(ctx, userID, workspaceID pgtype.UUID, amountMicro int64, reference string) error` —— 幂等扣减，`idempotency_key = "reserve:"+reference`；余额不足返回 `aurora.ErrInsufficientCredits`。
-  - `(*CreditService).Refund(ctx, userID, workspaceID pgtype.UUID, amountMicro int64, reference string) error` —— 幂等回充，`idempotency_key = "refund:"+reference`。
-  - `(*CreditService).Grant(ctx, userID, workspaceID pgtype.UUID, amountMicro int64, reference string) error` —— 发放（未来 Stripe webhook 调用），`idempotency_key = "grant:"+reference`。
+  - `(*CreditService).Reserve(ctx, userID, workspaceID pgtype.UUID, amountMicro int64, reference string) error` —— 幂等扣减（kind=`deduction`），`idempotency_key = "reserve:"+reference`（reference = generation id）；余额不足返回 `aurora.ErrInsufficientCredits`。
+  - `(*CreditService).Refund(ctx, userID, workspaceID pgtype.UUID, amountMicro int64, reference string) error` —— 幂等回充（kind=`refund`），`idempotency_key = "refund:"+reference`。
+  - `(*CreditService).Grant(ctx, userID, workspaceID pgtype.UUID, amountMicro int64, kind, reference string) error` —— 发放（kind ∈ `topup|adjustment`，非法 kind 报错；月额度发放用 `adjustment`，未来 Stripe webhook 充值用 `topup`），`idempotency_key = "grant:"+reference`。
   - `(*CreditService).Balance(ctx, userID pgtype.UUID) (int64, error)` —— 无行返回 `(0, nil)`。
 
 - [ ] **Step 1: 写失败测试**
 
-`server/internal/aurora/credit_test.go`（package `aurora_test`，用 `DATABASE_URL` 建池，跳过逻辑同 handler TestMain）：
+`server/internal/aurora/credit_test.go`（package `aurora_test`，用 `DATABASE_URL` 建池，跳过逻辑同 handler TestMain；raw pgxpool + fallback DSN 是仓库先例，见 `internal/service/task_claim_race_test.go:22-43`）：
 
 ```go
 package aurora_test
@@ -185,6 +201,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/aurora"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -208,11 +225,7 @@ func newUUID(t *testing.T, pool *pgxpool.Pool) pgtype.UUID {
 	if err := pool.QueryRow(context.Background(), `SELECT gen_random_uuid()::text`).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
-	u, err := aurora.ParseUUID(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return u
+	return util.MustParseUUID(id)
 }
 
 func TestReserveAndRefundAreIdempotent(t *testing.T) {
@@ -220,7 +233,9 @@ func TestReserveAndRefundAreIdempotent(t *testing.T) {
 	user := newUUID(t, pool)
 	ws := newUUID(t, pool)
 
-	_ = svc.Grant(context.Background(), user, ws, 1000, "seed")
+	if err := svc.Grant(context.Background(), user, ws, 1000, aurora.LedgerKindAdjustment, "seed"); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
 	if err := svc.Reserve(context.Background(), user, ws, 300, "gen-1"); err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -236,6 +251,10 @@ func TestReserveAndRefundAreIdempotent(t *testing.T) {
 	if err := svc.Refund(context.Background(), user, ws, 300, "gen-1"); err != nil {
 		t.Fatalf("Refund: %v", err)
 	}
+	// 幂等：重复 refund 不应再加。
+	if err := svc.Refund(context.Background(), user, ws, 300, "gen-1"); err != nil {
+		t.Fatalf("Refund retry: %v", err)
+	}
 	bal, _ = svc.Balance(context.Background(), user)
 	if bal != 1000 {
 		t.Fatalf("balance after refund = %d, want 1000", bal)
@@ -250,13 +269,20 @@ func TestReserveFailsWhenInsufficient(t *testing.T) {
 		t.Fatalf("Reserve with empty balance: err = %v, want ErrInsufficientCredits", err)
 	}
 }
-```
 
-> `aurora.ParseUUID(s) (pgtype.UUID, error)` 是本计划新增的导出 helper（封装 `util.ParseUUID`，避免测试直接 import util）。若不想加，测试里用 `util.MustParseUUID`。实现时二选一并保持一致。
+func TestGrantRejectsInvalidKind(t *testing.T) {
+	svc, pool := newTestCreditService(t)
+	user := newUUID(t, pool)
+	ws := newUUID(t, pool)
+	if err := svc.Grant(context.Background(), user, ws, 100, "bogus", "seed"); err == nil {
+		t.Fatal("Grant with invalid kind should fail")
+	}
+}
+```
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd server && go test ./internal/aurora/ -run 'TestReserve'`
+Run: `cd server && go test ./internal/aurora/ -run 'TestReserve|TestGrant'`
 Expected: 编译失败（`CreditService` 不存在）。
 
 - [ ] **Step 3: 实现**
@@ -273,23 +299,30 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 var ErrInsufficientCredits = errors.New("insufficient credits")
+
+// Ledger kinds follow the cloud wallet contract
+// (packages/core/types/billing.ts): topup | deduction | refund | adjustment.
+// "expire" is reserved for phase-2 monthly-quota expiry.
+const (
+	LedgerKindTopup      = "topup"
+	LedgerKindDeduction  = "deduction"
+	LedgerKindRefund     = "refund"
+	LedgerKindAdjustment = "adjustment"
+)
 
 // TxBeginner is the narrow transaction-starting surface CreditService needs.
 type TxBeginner interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
-// ParseUUID is the safe UUID parser for callers outside the handler package.
-func ParseUUID(s string) (pgtype.UUID, error) { return util.ParseUUID(s) }
-
 // CreditService owns Aurora credit accounting. Every write is idempotent via a
-// derived idempotency_key and runs inside one transaction (balance change +
-// ledger insert commit or roll back together).
+// derived idempotency_key: the pre-check short-circuits retries before any
+// balance change, and a concurrent duplicate that loses the ledger-insert race
+// rolls back and returns nil (the committed transaction already applied it).
 type CreditService struct {
 	queries *db.Queries
 	tx      TxBeginner
@@ -307,25 +340,40 @@ func (s *CreditService) Balance(ctx context.Context, userID pgtype.UUID) (int64,
 	return bal, err
 }
 
-// Reserve deducts amountMicro, keyed by "reserve:"+reference so retries are safe.
+// Reserve deducts amountMicro and records a "deduction" ledger row, keyed by
+// "reserve:"+reference (the generation id) so retries are safe.
 func (s *CreditService) Reserve(ctx context.Context, userID, workspaceID pgtype.UUID, amountMicro int64, reference string) error {
-	return s.adjust(ctx, userID, workspaceID, amountMicro, "deduction", "reserve:"+reference)
+	return s.adjust(ctx, userID, workspaceID, -amountMicro, LedgerKindDeduction, "reserve:"+reference, reference)
 }
 
-// Refund credits amountMicro back, keyed by "refund:"+reference.
+// Refund credits amountMicro back and records a "refund" ledger row, keyed by
+// "refund:"+reference.
 func (s *CreditService) Refund(ctx context.Context, userID, workspaceID pgtype.UUID, amountMicro int64, reference string) error {
-	return s.adjust(ctx, userID, workspaceID, -amountMicro, "refund", "refund:"+reference)
+	return s.adjust(ctx, userID, workspaceID, amountMicro, LedgerKindRefund, "refund:"+reference, reference)
 }
 
-// Grant adds amountMicro (future Stripe webhook calls this), keyed by "grant:"+reference.
-func (s *CreditService) Grant(ctx context.Context, userID, workspaceID pgtype.UUID, amountMicro int64, reference string) error {
-	return s.adjust(ctx, userID, workspaceID, -amountMicro, "grant", "grant:"+reference)
+// Grant adds amountMicro and records a ledger row of the given kind. Monthly
+// quota grants use LedgerKindAdjustment; Stripe purchases use LedgerKindTopup
+// (the Plan 5 webhook calls this). Keyed by "grant:"+reference.
+func (s *CreditService) Grant(ctx context.Context, userID, workspaceID pgtype.UUID, amountMicro int64, kind, reference string) error {
+	if kind != LedgerKindTopup && kind != LedgerKindAdjustment {
+		return fmt.Errorf("invalid grant kind %q", kind)
+	}
+	return s.adjust(ctx, userID, workspaceID, amountMicro, kind, "grant:"+reference, reference)
 }
 
 // adjust applies a signed delta: negative delta = deduct (must have balance),
-// positive delta = credit. Idempotent: if the ledger row already exists the
-// transaction commits with no balance change.
-func (s *CreditService) adjust(ctx context.Context, userID, workspaceID pgtype.UUID, delta int64, kind, idempotencyKey string) error {
+// positive delta = credit. Idempotent: the fast-path pre-check makes retries
+// no-ops; a concurrent duplicate loses the ledger-insert race, rolls back its
+// redundant balance change and returns nil.
+func (s *CreditService) adjust(ctx context.Context, userID, workspaceID pgtype.UUID, delta int64, kind, idempotencyKey, reference string) error {
+	// Fast path: if the ledger row already exists, the operation was applied.
+	if _, err := s.queries.GetCreditLedgerByIdempotencyKey(ctx, idempotencyKey); err == nil {
+		return nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+
 	tx, err := s.tx.Begin(ctx)
 	if err != nil {
 		return err
@@ -340,14 +388,14 @@ func (s *CreditService) adjust(ctx context.Context, userID, workspaceID pgtype.U
 	var balanceAfter int64
 	if delta < 0 {
 		balanceAfter, err = qtx.DeductCreditBalance(ctx, db.DeductCreditBalanceParams{
-			UserID: userID, Amount: -delta,
+			UserID: userID, AmountMicro: -delta,
 		})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrInsufficientCredits
 		}
 	} else {
 		balanceAfter, err = qtx.CreditCreditBalance(ctx, db.CreditCreditBalanceParams{
-			UserID: userID, Amount: delta,
+			UserID: userID, AmountMicro: delta,
 		})
 	}
 	if err != nil {
@@ -356,24 +404,30 @@ func (s *CreditService) adjust(ctx context.Context, userID, workspaceID pgtype.U
 
 	if _, err := qtx.InsertCreditLedger(ctx, db.InsertCreditLedgerParams{
 		UserID: userID, WorkspaceID: workspaceID, Kind: kind,
-		AmountMicro: delta, BalanceAfterMicro: balanceAfter, IdempotencyKey: idempotencyKey,
+		AmountMicro: delta, BalanceAfterMicro: balanceAfter,
+		Reference: reference, IdempotencyKey: idempotencyKey,
 	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Concurrent duplicate: the other transaction already committed
+			// this operation; our rolled-back balance change was redundant.
+			return nil
+		}
 		return err
 	}
 	return tx.Commit(ctx)
 }
 ```
 
-> `DeductCreditBalanceParams` / `CreditCreditBalanceParams` 字段名（`UserID`/`Amount`）以 `make sqlc` 生成为准；`amount_micro` 列会生成 `Amount` 或 `AmountMicro`，按生成结果对齐。`GetCreditBalance` 无行返回 `pgx.ErrNoRows`（sqlc `:one` 语义），`Balance` 里已处理。
+> `DeductCreditBalanceParams` / `CreditCreditBalanceParams` 字段名（预期 `UserID`/`AmountMicro`）以 `make sqlc` 生成为准（Task 1 Step 4）。
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cd server && go test ./internal/aurora/ -run 'TestReserve'`
-Expected: 两个测试 PASS。
+Run: `cd server && go test ./internal/aurora/ -run 'TestReserve|TestGrant'`
+Expected: 三个测试 PASS。
 
 - [ ] **Step 5: 接入 `Handler` 并 Commit**
 
-`server/internal/handler/handler.go`：在 `Handler` 结构体加 `Credit *aurora.CreditService`，`New` 里加 `Credit: aurora.NewCreditService(queries, txStarter)`（`txStarter` 已实现 `Begin`）。
+`server/internal/handler/handler.go`：在 `Handler` 结构体加 `Credit *aurora.CreditService`，`New` 里加 `Credit: aurora.NewCreditService(queries, txStarter)`（`txStarter` 已实现 `Begin`，`handler.go:58-59`）。
 
 ```bash
 git add server/internal/aurora/credit.go server/internal/aurora/credit_test.go server/internal/handler/handler.go
@@ -393,7 +447,7 @@ git commit -m "feat(aurora): idempotent credit ledger service"
 - Consumes: `h.Credit`（Task 2）、`h.Queries.ListCreditTransactions`。
 - Produces：
   - `GET /api/aurora/billing/balance` → `200 {"availableMicro":<int64>}`。
-  - `GET /api/aurora/billing/transactions?limit=50` → `200 {"transactions":[{id,kind,amountMicro,balanceAfterMicro,createdAt}]}`。
+  - `GET /api/aurora/billing/transactions?limit=50` → `200 {"transactions":[{id,kind,amountMicro,balanceAfterMicro,reference,createdAt}]}`。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -411,7 +465,12 @@ func TestAuroraBillingBalance(t *testing.T) {
 func TestAuroraBillingTransactions(t *testing.T) {
 	req := newRequest(http.MethodGet, "/api/aurora/billing/transactions?limit=50", nil)
 	out := testutil.Decode[struct {
-		Transactions []map[string]any `json:"transactions"`
+		Transactions []struct {
+			Kind             string `json:"kind"`
+			AmountMicro      int64  `json:"amountMicro"`
+			BalanceAfterMicro int64  `json:"balanceAfterMicro"`
+			Reference        string `json:"reference"`
+		} `json:"transactions"`
 	}](t, testHandler.ListAuroraBillingTransactions, req, http.StatusOK)
 	_ = out // 新用户空列表
 }
@@ -469,7 +528,7 @@ func (h *Handler) ListAuroraBillingTransactions(w http.ResponseWriter, r *http.R
 		out = append(out, map[string]any{
 			"id": uuidToString(row.ID), "kind": row.Kind,
 			"amountMicro": row.AmountMicro, "balanceAfterMicro": row.BalanceAfterMicro,
-			"createdAt": row.CreatedAt.Time,
+			"reference": row.Reference, "createdAt": row.CreatedAt.Time,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"transactions": out})
@@ -499,16 +558,28 @@ git commit -m "feat(aurora): billing balance and transactions endpoints"
 
 ## Deferred（不在本计划，明确留给后续）
 
-- **Stripe 充值 / 订阅产品线**：需要 Stripe key、checkout session、webhook 验签、`subscription` 权益表。`Grant` 已预留为 webhook 的落账入口。Plan 2 只做账本 + 只读 API。
-- **权益门禁 enforcement**：self-host 下 `entitlement` 云 URL 未配置即全部放行；`GateAuroraGenerations` 门禁扩展留到接 cloud 时再补（`entitlement/types.go` 的 `GateName` 枚举 + `normalizePolicy` 同步）。
-- **`aurora_generation.credits_reserved/charged` 写入**：由 Plan 3（执行层）在入队时调 `h.Credit.Reserve` 并把预留金额写回 generation 行。
+- **Stripe 充值 / 订阅产品线**：需要 Stripe key、checkout session、webhook 验签、`subscription` 权益表。`Grant(kind="topup")` 已预留为 webhook 的落账入口。Plan 2 只做账本 + 只读 API。
+- **权益门禁 enforcement**：self-host 下 `entitlement` 云 URL 未配置即 fail-open——`BaseURL` 为空 → `enabled=false`、Provider 为 nil、所有 gate 返回 `ActionOff`（`entitlement/client.go:48-50/95-100`，`router.go:459-463`）。另注意 `normalizePolicy` 目前**硬性要求两个 gate 都在**（`client.go:278-299`）：将来加 `GateAurora*` 时旧 policy 会整体被拒，需与 `normalizePolicy` 同 PR 修改（Plan 5/safety 处理）。
+- **`aurora_generation.credits_reserved/charged` 写入**：由 Plan 3（执行层）在入队时调 `h.Credit.Reserve` 并把预留金额写回 generation 行；失败/卡死退款也由 Plan 3 Task 4 接现有 sweeper 终态路径。
+- **`expire` 交易与两步冻结账本**：二期（spec §6.2）。
 
 ## Self-Review
 
-- **Spec 覆盖**：§6.2 积分账本（balance/ledger/幂等/预留/退款/发放）→ Task 1/2；§6 余额/流水展示 → Task 3；§6.1 订阅与 §6.3 门禁 → Deferred（已明确）。
-- **类型一致性**：`CreditService` 方法签名在测试（Task 2）与实现一致；`DeductCreditBalance`/`CreditCreditBalance` 的 `pgx.ErrNoRows` 语义在 Task 1 Step 3 与 Task 2 代码一致。
-- **幂等正确性**：`idempotency_key` 唯一索引（Task 1 单文件）+ `ON CONFLICT DO NOTHING`（Task 2）双层保证重试安全。
+- **Spec 覆盖**：§6.2 积分账本（balance/ledger/幂等/预留/退款/发放/`reference` 列）→ Task 1/2；§6 余额/流水展示 → Task 3；§6.1 订阅与 §6.3 门禁 → Deferred（已明确）。
+- **契约一致性**：kind 枚举逐字对齐 `packages/core/types/billing.ts:26-31`（`topup|deduction|refund|adjustment`）；micro-credit 单位、`availableMicro`/`amountMicro` 字段名与 Plan 4 schema 一致。
+- **幂等正确性**：三层——`idempotency_key` 唯一索引（Task 1，并发索引已注册 cleanup 映射）+ 快速路径预查（`GetCreditLedgerByIdempotencyKey`）+ 插入冲突 `pgx.ErrNoRows` 视为已处理（回滚冗余余额变更）；并发同 key 双事务下仅赢家落账。
+- **语义正确性**：`adjust` 约定 negative=deduct/positive=credit，`Reserve` 传负、`Refund`/`Grant` 传正；`DeductCreditBalance` 的 `available_micro >= $2` 条件保证不超扣（0 行 → `ErrInsufficientCredits`）。
 
 ## 执行交接
 
-Plan 2 完成。剩余 Plan 3（执行层）、Plan 4（前端）。
+Plan 2 完成。后续顺序：Plan 3（执行层）→ Plan 3.5（进度与作品库 API）→ Plan 4（前端）→ Plan safety。「可对外销售」还需后续 Plan 5（订阅 + Stripe + 权益门禁，尚未编写）。
+
+## 修订记录（2026-09-13 评审回写）
+
+| 处 | 修正 |
+|----|------|
+| 全局 | kind 枚举 `grant\|deduction\|refund` → 对齐契约 `topup\|deduction\|refund\|adjustment`（`types/billing.ts:26-31`）；`Grant` 加 kind 参数 |
+| Task 1 | `credit_ledger` 加 `reference` 列；新增 Step 2：并发索引必须注册 `cmd/migrate/main.go` 的 `concurrentIndexCleanups`/`concurrentDownIndexCleanups`（否则 `TestEveryConcurrentUpBuildHasCleanup` 挂）；验证命令改 `make test` |
+| Task 2 | 修复三重缺陷：符号反转（`Reserve`/`Refund`/`Grant` 的 delta 传反）、幂等失效（余额先改、冲突被当错误）、`ON CONFLICT DO NOTHING` 的 `pgx.ErrNoRows` 语义（仓库先例 `CreateRetryTask`）；改为快速路径预查 + 冲突视为已处理；`ParseUUID` 包装移除（测试直接用 `util.MustParseUUID`）；`_ = svc.Grant` 忽略错误改为显式检查；补 `TestGrantRejectsInvalidKind` |
+| Task 3 | 流水响应加 `reference` 字段 |
+| Deferred | entitlement fail-open 与 `normalizePolicy` 双 gate 硬校验已核实并注明 |

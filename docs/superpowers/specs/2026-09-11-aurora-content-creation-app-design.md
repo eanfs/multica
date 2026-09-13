@@ -2,6 +2,7 @@
 
 - 日期：2026-09-11
 - 状态：已确认（待实现计划）
+- 修订：2026-09-13（评审回写：据代码库核实修正 §4.1/§4.2/§5/§6.2/§7/§8/§9.1/§10，详见 §14 修订记录）
 - 分支：`feat/integerat-aurora-ai`
 - 关联来源：`aurora-ai-agents` 仓库（Apex AI 工具中心）的前端设计与 16 个 Skill 目录
 
@@ -29,6 +30,8 @@
 | D10 | 视频生成 | **HyperFrames**（[heygen-com/hyperframes](https://github.com/heygen-com/hyperframes)，Apache 2.0）确定性 HTML→MP4 渲染，self-host 跑在 fleet 节点 |
 
 D7/D8/D9 的一致含义：**Aurora 是完全 self-host 的部署**，`multica-cloud` 的 fleet/订阅/钱包在本地都不可用（`cloudruntime/baseURL` 为空即 `ErrDisabled`）。「复用 Cloud 钱包」落地为**复用其 schema/API 契约**（见 `packages/core/types/billing.ts`：`micro-credit BIGINT`、`1 USD = 1000 credit`、交易类型 `topup/deduction/refund/expire/adjustment`、批次 `purchase/bonus/adjustment`），前端 `packages/core/billing` 的类型与查询几乎可直接沿用。
+
+> 2026-09-13 修订：经代码库核实，`packages/core/types/billing.ts:26-31` 的 kind 枚举确为 `topup/deduction/refund/expire/adjustment`，本地账本已按此逐字对齐（Plan 2 修订）；`packages/core/billing` 的查询（`queries.ts`/`mutations.ts`）也已存在，MVP 可复用。
 
 ## 3. 系统架构
 
@@ -74,15 +77,15 @@ apps/aurora (Next.js) ──► packages/core (query/api/hooks) ──► Go ser
 
 Multica 的 agent 运行时是**在用户机器上跑 coding CLI（claude/codex 等 25 种）** 的桌面 daemon 模型（`server/pkg/agent` + `server/internal/daemon`），不是托管式 SaaS 调用。对消费者不可接受，因此执行底座必须**服务端托管**。
 
-`server/internal/cloudruntime/client.go`（255 行）只是指向私有 multica-cloud fleet 的 HTTP 代理（`provision/terminate/exec/gateway`）。self-host 下需要自建 fleet。
+`server/internal/cloudruntime/client.go` 是指向私有 multica-cloud 的**通用 HTTP 代理**（`Do(Method, Path, ...)`，实际路径形如 `/api/v1/nodes`、`/nodes/start|stop|reboot|status|exec`，见 `server/internal/handler/cloud_runtime.go:41-97`；不存在 provision/terminate/gateway 命名）。self-host 下需要自建 fleet，本地 controller 按同样的节点路径契约实现即可。
 
 ### 4.2 self-host runtime fleet 设计
 
 复用 Multica 的 daemon 执行器，但**把 daemon 部署到沙箱化的服务端节点**，而不是用户桌面：
 
 1. **fleet controller（新建）**：负责 provision/terminate 沙箱节点（容器或 microVM）、健康检查、节点生命周期。对外暴露与 `cloudruntime` 相同的契约（`/nodes`、`/start`、`/stop`、`/exec`、`/status`），这样本地 `cloudruntime/client.go` 的调用模式可复用，只是 `baseURL` 指向自建 controller。
-2. **沙箱节点**：每个节点跑一个 `daemon` 进程（复用 `server/internal/daemon`），以「托管 runtime」身份注册到 `AgentRuntime`（`daemon_id` + `owner_id` + `visibility` 标记为托管）。节点内用**容器/VM 级隔离**（Docker/gVisor/Firecracker），出网白名单、CPU/内存/时长上限。
-3. **任务流**：用户提交 → `AgentTaskQueue` 入队（新增 `origin=aurora` 任务类型）→ 沙箱 daemon claim → 本地 spawn coding CLI → 产物回写。
+2. **沙箱节点**：每个节点跑一个 `daemon` 进程（复用 `server/internal/daemon`）。`DaemonRegister` 目前硬编码 `runtime_mode='local'`（`handler/daemon.go:501/558/692`），沙箱 daemon 经**新增的 managed 注册路径**（server-issued token 校验 + 托管标记）注册，并按现有 claim 机制认领未绑定机器的 runtime（`daemon_id IS NULL` 容忍分支，`handler/daemon.go:1745-1751`）。节点内用**容器/VM 级隔离**（Docker/gVisor/Firecracker），出网白名单、CPU/内存/时长上限。
+3. **任务流**：用户提交 → 复用 `EnqueueQuickCreateTask` 入队（`agent_task_queue` **无 origin 列**；归属经 `aurora_generation.task_id` 反查，MVP 不加列）→ 沙箱 daemon claim → 本地 spawn coding CLI → 产物回写。
 4. **成本/确定性护栏**：`max_turns` 上限、per-task 调用上限 guard、`TaskUsage` 计量反推积分；确定性产物（PPT/Excel/字幕裁剪）尽量走确定性 MCP 工具，不让 agent 自由发挥。
 
 ### 4.3 媒体生成 MCP
@@ -112,7 +115,7 @@ MVP 的视频 Skill 用 [HyperFrames](https://github.com/heygen-com/hyperframes)
 > 遵循仓库硬约束：不加外键/级联删除，索引用 `CREATE INDEX CONCURRENTLY`（每个索引单独 migration 文件）。
 
 - **复用 `Agent` / `Skill` / `AgentSkill`**：16 个技能表示为系统 Agent 行（`system_key` 如 `aurora:*`），任务/队列/运行时机制零改造。
-- 新建 `aurora_skill_catalog`：消费者面向元数据（`skill_id`、`credits` 定价、`category`、`input/output` 类型、`featured`、i18n 显示名）。单一事实来源，替代 aurora 当前 `lib/skill-runtime.ts` 与 `app/page.tsx` 双份不同步的问题。
+- `aurora_skill_catalog`：**评审修订为 Go 常量**（Plan 1 偏离声明）——消费者面向元数据（`skill_id`、`credits` 定价、`category`、`input/output` 类型、`featured`、`available`、i18n 显示名）以 `server/internal/aurora/catalog.go` 为单一事实来源，替代 aurora 当前 `lib/skill-runtime.ts` 与 `app/page.tsx` 双份不同步的问题；后台改价需求出现时再建表。
 - 新建 `aurora_generation`：一次用户提交 = 一行，关联 `AgentTaskQueue.task_id`，字段 `status`、`skill_id`、`prompt`、输入资产、输出资产、`credits_reserved`/`credits_charged`、`error`。
 - 新建 `aurora_asset`：内容资产（图/视频/文案/文档），媒体 URL/存储、版本、格式、平台目标。
 - 新建 `credit_balance` + `credit_ledger`（见 §6）。
@@ -127,9 +130,9 @@ MVP 的视频 Skill 用 [HyperFrames](https://github.com/heygen-com/hyperframes)
 ### 6.2 积分账本（本地自建，复用 Cloud 钱包契约）
 
 - 契约沿用 `packages/core/types/billing.ts`：`micro-credit BIGINT`、`1 USD = 1000 credit`、交易类型 `topup/deduction/refund/expire/adjustment`、批次 `purchase/bonus/adjustment`。
-- 新建 `credit_balance`（余额）与 `credit_ledger`（流水），事务 + 幂等 + 对账。
+- 新建 `credit_balance`（余额）与 `credit_ledger`（流水），事务 + 幂等 + 对账；`credit_ledger` 含 `reference` 列（generation id / Stripe 事件 id），流水 UI 据此显示技能名。
 - 订阅月额度 = 按月发放 credit（`adjustment` 交易）；超额另购 = `topup`（Stripe checkout → webhook → 记账）。
-- **扣费**：任务完成 → `TaskUsage` 成本 × 加价率（`APEX_CREDIT_MARGIN` 思路）→ 换算 credit → 冻结/结算两步扣减；任务开始前预留 `credits_reserved`（沿用 aurora 概念）。
+- **扣费（评审修订为一步制）**：创建时 `Reserve` 预留即扣（`credits_reserved` = skill 目录价），成功结算（`credits_charged` = 预留额），失败/卡死全额 `Refund`。卡死任务由现有 sweeper（`runtime_sweeper.go`：dispatch 5min / running 2.5h / offline 3h）归入终态 failed 后走退款；两步冻结账本与 `TaskUsage` 成本 × 加价率的精细化计费留二期。
 
 ### 6.3 权益门禁
 
@@ -138,7 +141,7 @@ MVP 的视频 Skill 用 [HyperFrames](https://github.com/heygen-com/hyperframes)
 ## 7. 认证 / 账户
 
 - 复用邮箱 6 位验证码 + Google OAuth + JWT cookie + 自助注册（默认开放）。
-- **新增**：注册即静默开通个人 workspace（单成员 owner）——复用全部 workspace 中间件，改动最小。Aurora 注册后自动建「个人空间」，`DISABLE_WORKSPACE_CREATION` 不影响这条内部开通路径。
+- **新增**：注册即静默开通个人 workspace（单成员 owner）——钩子放在 `findOrCreateUser` 内、每次登录幂等调用（一条 count 查询），一处覆盖邮箱验证码与 Google OAuth 两个入口（二者是 `findOrCreateUser` 仅有的调用点，`auth.go:413/649`），瞬态失败随下次登录自愈。`DISABLE_WORKSPACE_CREATION` 只在 `CreateWorkspace` handler 检查（`workspace.go:213`），不影响这条内部开通路径。
 - 双语/时区已内建（`packages/core/i18n`、`user.language`/`timezone`）。
 
 ## 8. 前端设计（apps/aurora）
@@ -150,9 +153,9 @@ MVP 的视频 Skill 用 [HyperFrames](https://github.com/heygen-com/hyperframes)
 | 单页 `page.tsx` 全 state | `packages/views/aurora/`（共享业务页）+ `packages/core`（query/hooks/store，Zustand 存 client state，TanStack Query 存 server state） |
 | `lib/skill-runtime.ts` 与 `page.tsx` 双份目录 | 单一事实来源 `GET /api/aurora/skills`，前端消费 schema 化响应 |
 | `POST /api/tasks`（占位） | `POST /api/aurora/generations`（真实入队） |
-| 无实时 | WebSocket（复用 `server/internal/realtime`）推送任务进度/产物就绪 |
+| 无实时 | MVP 轮询 `GET /api/aurora/generations/{id}`（Plan 3.5）；WebSocket 实时化二期——`task:progress` 事件帧已存在（`packages/core/types/events.ts:30`），届时服务端加协议常量 + 生产者 + listener 即可 |
 | 积分 mock | 真实 `credit_balance`/`credit_ledger` + 充值/用量 API |
-| 简体中文硬编码 | 中英双语（复用 `packages/core/i18n`，补 en 文案） |
+| 简体中文硬编码 | 四语 i18n（en/zh-Hans/ko/ja，`packages/core/i18n` + `packages/views/locales`；parity 测试强制四语全 key，缺一 CI 挂） |
 | Cloudflare vinext + dsh | Next.js + Go（方案 B 已决定弃用 dsh skill-worker） |
 
 - 设计 token 复用 `packages/ui/styles` 语义 token；遵循仓库 UI 规则（font 用 `--text-*` 尺度、避免硬编码色）。
@@ -160,15 +163,17 @@ MVP 的视频 Skill 用 [HyperFrames](https://github.com/heygen-com/hyperframes)
 
 ## 9. 上线功能评估与分期
 
-### 9.1 MVP（可对外销售）
+### 9.1 MVP（技术里程碑，不可对外销售）
+
+> 2026-09-13 修订：Plan 1–4 + 3.5 + safety 合起来交付的是**技术 MVP**（目录 + 账本 + 执行链路），不含支付。达到「可对外销售」还需后续 Plan 5（订阅产品线 + Stripe 充值 + 权益门禁，尚未编写）。
 
 | # | 功能 | 说明 |
 |---|------|------|
 | 1 | 认证 + 注册自动开个人空间 | 邮箱验证码 + Google OAuth |
 | 2 | Skill 目录（中英双语） | 16 功能目录，服务端单一事实来源 |
-| 3 | 确定性优先的三类 Skill | 文字类（小红书文案/简历/文件总结/录音转写）+ 图片类（海报/小红书图片/商品图/文字生图/图片修改/证件照）+ 视频类（文生视频/图生视频/剪辑字幕，HyperFrames 确定性渲染） |
+| 3 | 确定性优先的三类 Skill | 文字类（小红书文案/简历/文件总结/录音转写）+ 图片类（海报/小红书图片/商品图/文字生图/图片修改/证件照）+ 视频类（文生视频/图生视频/剪辑字幕，HyperFrames 确定性渲染）。目录 16 条中 13 条可用；`avatar-video`/`ppt`/`excel` 标记 `available=false`，二阶段开放 |
 | 4 | 异步任务 + 进度 + 产物下载 | 入队 → 沙箱执行 → 实时进度 → `aurora_asset` 下载 |
-| 5 | 计费闭环 | 订阅档位 + 积分额度 + 充值（Stripe）+ 扣费 + 账单/用量明细 |
+| 5 | 积分账本闭环 | 余额 + 流水 + 预留/退款/发放（订阅档位 + Stripe 充值属后续 Plan 5，本里程碑不含） |
 | 6 | 作品库 | asset 列表/下载/删除 |
 | 7 | 安全硬性条件（见 §10） | 沙箱隔离 + 频率闸门 + 调用上限 + 内容审核 |
 | 8 | 支付 | Stripe（全球） |
@@ -186,15 +191,15 @@ MVP 的视频 Skill 用 [HyperFrames](https://github.com/heygen-com/hyperframes)
 对齐 aurora ADR-0001 的三条上线硬性条件，并因 self-host fleet 强化：
 
 1. **沙箱隔离**：容器/VM 级隔离 + 出网白名单 + 资源上限。服务端跑任意 coding CLI = 我们服务器执行用户 prompt 的任意代码，隔离不是可选项。
-2. **工具面收窄**：关 `tool-bash` 等危险工具行，`permission-presets`，per-task 调用上限 `guard`（按 task 分键）。
-3. **频率闸门**：匿名/新用户任务创建频率限制。
-4. **内容审核**：prompt 审核 + 生成物审核（社媒内容合规，含中英双语）。
+2. **工具面收窄**（2026-09-13 现状核实：CLI 启动**硬编码** `--permission-mode bypassPermissions`（`pkg/agent/claude.go:720`）/`--dangerously-skip-permissions`（`antigravity.go:457`）；`MaxTurns` 存在但 daemon 从不设置（`pkg/agent/agent.go:39`）；permission-presets 与 guard **不存在**——均为**待建能力**）：主栈 additively 支持 per-agent 窄配置（默认不改变用户 agent），Aurora 系统 agent 显式窄配置 + `MaxTurns`；per-task 调用上限 guard 二期。
+3. **频率闸门**：`POST /api/aurora/generations` per-user 限流（Plan safety Task 1）。
+4. **内容审核**：MVP 关键词 + 图片 NSFW 检测（adapter 可替换，Plan safety）；供应商审核与社媒合规二期。
 5. **密钥安全**：供应商密钥仅服务端读取，绝不暴露前端。
 
 ## 11. 错误处理 / 测试 / 可观测性
 
 - **API 兼容**：所有 Aurora API 响应走 `parseWithFallback` + zod schema（沿用仓库 API 兼容规则），配 malformed-response 测试。
-- **幂等扣费**：账本写入事务 + 幂等键；任务终态从 durable 结果归约（沿用 Multica 的「不许解析模型 prose」原则）。
+- **幂等扣费**：账本写入事务 + 幂等键（先查幂等键短路，并发冲突视为已处理）；任务终态从 durable 结果归约（沿用 Multica 的「不许解析模型 prose」原则）；产物回传走结构化 out-of-band 上报（`ReportTaskUsage` 同款通道），不经模型 prose。
 - **测试分层**：纯逻辑/账本状态机 → `packages/core/*.test.ts`；组件/页面 → `packages/views/*.test.tsx`；Go 后端用 `internal/testutil`（`dbfx`/`Call`）。DB-backed 测试经 `testutil`，不 open-code `INSERT...RETURNING`。
 - **可观测**：复用 `TaskUsage`/`TaskUsageHourly` + Prometheus（`metrics/pricing.go`）+ PostHog（`analytics`）。
 
@@ -208,6 +213,7 @@ MVP 的视频 Skill 用 [HyperFrames](https://github.com/heygen-com/hyperframes)
 | 积分扣费从零建（本地无账本） | 后端工作量 | 复用 cloud 钱包契约，前端类型沿用 |
 | Stripe 本地集成 + 订阅产品线新建 | 计费复杂度 | MVP 先单一订阅档位 + 积分 topup，再扩展 |
 | 视频渲染基建（headless Chrome + FFmpeg 入沙箱） | 节点镜像增大、冷启动变慢 | 预烘焙含 HyperFrames 的节点镜像；`@hyperframes/aws-lambda` 渲染路径作水平扩展备选 |
+| 产物回传通道缺失（`TaskResult` 无 Attachments，`daemon/types.go:287-310`） | 作品库无数据 | Plan 3 Task 4 新增：沙箱 daemon 直传 storage + out-of-band artifact 上报 |
 
 ## 13. 非目标（MVP 明确不做）
 
@@ -217,3 +223,19 @@ MVP 的视频 Skill 用 [HyperFrames](https://github.com/heygen-com/hyperframes)
 - 生成式真人生成（Veo/Runway）与数字人口播（HeyGen Avatar）—— 第二阶段，MVP 视频全部走 HyperFrames 确定性渲染。
 - 社交平台 API 自动发布 —— 第二阶段。
 - 模板市场 / 公开 API —— 第三阶段。
+- 订阅产品线 / Stripe 支付 —— 技术 MVP 不做，属「可对外销售」里程碑（后续 Plan 5）。
+
+## 14. 修订记录（2026-09-13 评审回写）
+
+据仓库代码核实（四组事实核查）对本文的修正：
+
+| 处 | 修正 |
+|----|------|
+| §4.1 | `cloudruntime` 是通用代理（`Do(Method/Path)`），路径为 `/api/v1/nodes`、`/nodes/start\|stop\|reboot\|status\|exec`；无 provision/terminate/gateway 命名 |
+| §4.2 | `agent_task_queue` 无 origin 列，归属经 `aurora_generation.task_id` 反查；沙箱 daemon 走新增 managed 注册路径（`DaemonRegister` 硬编码 `runtime_mode='local'`） |
+| §5 | `aurora_skill_catalog` 改 Go 常量（Plan 1 偏离），加 `available` 标志 |
+| §6.2 | 账本 kind 对齐真实契约 `topup/deduction/refund/expire/adjustment`（`types/billing.ts:26-31`）；扣费改一步制（预留即扣 + 失败退款，sweeper 兜底卡死）；加 `reference` 列 |
+| §7 | 个人空间钩子进 `findOrCreateUser`（覆盖 VerifyCode + GoogleLogin 两个入口，每次登录幂等自愈） |
+| §8 | 前端实时改轮询（Plan 3.5）；i18n 四语（en/zh-Hans/ko/ja，parity 测试强制） |
+| §9.1 | 里程碑重定义：技术 MVP（不含支付）；「可对外销售」需后续 Plan 5 |
+| §10 | 工具面收窄/guard 现状核实（不存在，待建）；频率闸门与内容审核入 Plan safety |

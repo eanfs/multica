@@ -126,8 +126,8 @@ Expected: 生成 `CreateAuroraGeneration`、`GetAuroraGeneration`、`CountWorksp
 
 - [ ] **Step 4: 验证 migration 可应用**
 
-Run: `cd server && go test ./internal/migrations/ -run . -count=1`
-Expected: migration lint/apply 相关测试通过（新表可建）。
+Run: `cd server && make test`（注意：`go test ./internal/migrations/` **不会**应用新迁移——其测试按名定向；`make test` 会先跑 `go run ./cmd/migrate up`，再跑全部 Go 测试）
+Expected: 迁移成功应用，Go 测试全绿。
 
 - [ ] **Step 5: Commit**
 
@@ -149,10 +149,10 @@ git commit -m "feat(aurora): add generation and asset tables"
 
 **Interfaces:**
 - Produces：
-  - `aurora.SkillCatalogEntry{ ID, Name, NameEn, Category string; Credits int; Input, Output []string; Featured bool }`（json tag 见下）。
-  - `aurora.Catalog() []SkillCatalogEntry`（16 条，固定顺序）。
-  - `aurora.Exists(id string) bool`。
-  - 端点 `GET /api/aurora/skills` → `200 {"skills":[{...}]}`，条目字段：`id`、`name`、`name_en`、`category`、`credits`、`input`、`output`、`featured`。Plan 4 的 zod schema 与前端消费以这个 JSON 为准。
+  - `aurora.SkillCatalogEntry{ ID, Name, NameEn, Category string; Credits int; Input, Output []string; Featured, Available bool }`（json tag 见下）。
+  - `aurora.Catalog() []SkillCatalogEntry`（16 条，固定顺序；13 条 `available=true`，`avatar-video`/`ppt`/`excel` 为 `false`——二阶段技能）。
+  - `aurora.Lookup(id string) (SkillCatalogEntry, bool)` 与 `aurora.Exists(id string) bool`。
+  - 端点 `GET /api/aurora/skills` → `200 {"skills":[{...}]}`，条目字段：`id`、`name`、`name_en`、`category`、`credits`、`input`、`output`、`featured`、`available`。Plan 4 的 zod schema 与前端消费以这个 JSON 为准。
 
 - [ ] **Step 1: 写 catalog 失败测试**
 
@@ -190,6 +190,28 @@ func TestCatalogHasSixteenEntriesAndUniqueIDs(t *testing.T) {
 	}
 }
 
+func TestCatalogAvailability(t *testing.T) {
+	cat := aurora.Catalog()
+	available := 0
+	for _, e := range cat {
+		if e.Available {
+			available++
+		}
+	}
+	if available != 13 {
+		t.Fatalf("expected 13 available skills, got %d", available)
+	}
+	for _, id := range []string{"avatar-video", "ppt", "excel"} {
+		e, ok := aurora.Lookup(id)
+		if !ok {
+			t.Fatalf("Lookup(%q) = not found", id)
+		}
+		if e.Available {
+			t.Fatalf("phase-2 skill %q should be unavailable", id)
+		}
+	}
+}
+
 func TestExists(t *testing.T) {
 	if !aurora.Exists("xhs-image") {
 		t.Fatal("Exists(xhs-image) = false, want true")
@@ -197,12 +219,15 @@ func TestExists(t *testing.T) {
 	if aurora.Exists("nope") {
 		t.Fatal("Exists(nope) = true, want false")
 	}
+	if _, ok := aurora.Lookup("xhs-image"); !ok {
+		t.Fatal("Lookup(xhs-image) = not found, want found")
+	}
 }
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd server && go test ./internal/aurora/ -run 'TestCatalogHasSixteenEntriesAndUniqueIDs|TestExists'`
+Run: `cd server && go test ./internal/aurora/ -run 'TestCatalogHasSixteenEntriesAndUniqueIDs|TestCatalogAvailability|TestExists'`
 Expected: 编译失败（`aurora` 包不存在）。
 
 - [ ] **Step 3: 实现 catalog**
@@ -218,52 +243,61 @@ package aurora
 
 // SkillCatalogEntry is one consumer-facing skill in the directory.
 type SkillCatalogEntry struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`     // Chinese display name
-	NameEn   string   `json:"name_en"`  // English display name
-	Category string   `json:"category"` // image | video | content | office
-	Credits  int      `json:"credits"`
-	Input    []string `json:"input"`
-	Output   []string `json:"output"`
-	Featured bool     `json:"featured"`
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`     // Chinese display name
+	NameEn    string   `json:"name_en"`  // English display name
+	Category  string   `json:"category"` // image | video | content | office
+	Credits   int      `json:"credits"`
+	Input     []string `json:"input"`
+	Output    []string `json:"output"`
+	Featured  bool     `json:"featured"`
+	Available bool     `json:"available"` // false = phase-2 skill, shown but not submittable
 }
 
-// Catalog returns the 16 skills in fixed display order.
+// Catalog returns the 16 skills in fixed display order. avatar-video, ppt and
+// excel are phase-2 skills (spec §9.2): listed with Available=false, and
+// CreateAuroraGeneration rejects them until their execution paths exist.
 func Catalog() []SkillCatalogEntry {
 	return []SkillCatalogEntry{
-		{ID: "poster", Name: "海报制作", NameEn: "Poster", Category: "image", Credits: 760, Input: []string{"text", "image"}, Output: []string{"image"}, Featured: true},
-		{ID: "xhs-image", Name: "小红书图片", NameEn: "Xiaohongshu Image", Category: "image", Credits: 620, Input: []string{"text", "image"}, Output: []string{"image"}, Featured: true},
-		{ID: "product-image", Name: "商品图制作", NameEn: "Product Image", Category: "image", Credits: 860, Input: []string{"text", "image"}, Output: []string{"image"}},
-		{ID: "text-image", Name: "文字生成图片", NameEn: "Text to Image", Category: "image", Credits: 680, Input: []string{"text"}, Output: []string{"image"}},
-		{ID: "image-edit", Name: "图片修改", NameEn: "Image Edit", Category: "image", Credits: 520, Input: []string{"text", "image"}, Output: []string{"image"}},
-		{ID: "id-photo", Name: "证件照制作", NameEn: "ID Photo", Category: "image", Credits: 360, Input: []string{"image", "text"}, Output: []string{"image"}},
-		{ID: "image-video", Name: "图片生成视频", NameEn: "Image to Video", Category: "video", Credits: 1880, Input: []string{"image", "text"}, Output: []string{"video"}},
-		{ID: "text-video", Name: "文字生成视频", NameEn: "Text to Video", Category: "video", Credits: 1680, Input: []string{"text"}, Output: []string{"video"}},
-		{ID: "video-captions", Name: "视频剪辑与字幕", NameEn: "Video Captions", Category: "video", Credits: 980, Input: []string{"video", "text"}, Output: []string{"video"}},
-		{ID: "avatar-video", Name: "数字人口播", NameEn: "Avatar Video", Category: "video", Credits: 1480, Input: []string{"text", "image", "audio"}, Output: []string{"video"}},
-		{ID: "xhs-copy", Name: "小红书文案", NameEn: "Xiaohongshu Copy", Category: "content", Credits: 260, Input: []string{"text", "document"}, Output: []string{"text"}},
-		{ID: "resume", Name: "简历制作", NameEn: "Resume", Category: "office", Credits: 420, Input: []string{"text", "document"}, Output: []string{"pdf", "text"}},
-		{ID: "document-summary", Name: "文件总结", NameEn: "Document Summary", Category: "office", Credits: 380, Input: []string{"document", "text"}, Output: []string{"text"}},
-		{ID: "transcription", Name: "录音转文字", NameEn: "Transcription", Category: "office", Credits: 300, Input: []string{"audio", "video"}, Output: []string{"text"}},
-		{ID: "ppt", Name: "PPT 制作", NameEn: "PPT", Category: "office", Credits: 820, Input: []string{"text", "document", "spreadsheet", "image"}, Output: []string{"pptx", "pdf"}},
-		{ID: "excel", Name: "Excel 数据分析", NameEn: "Excel Analysis", Category: "office", Credits: 460, Input: []string{"spreadsheet", "text"}, Output: []string{"xlsx", "pdf", "text"}},
+		{ID: "poster", Name: "海报制作", NameEn: "Poster", Category: "image", Credits: 760, Input: []string{"text", "image"}, Output: []string{"image"}, Featured: true, Available: true},
+		{ID: "xhs-image", Name: "小红书图片", NameEn: "Xiaohongshu Image", Category: "image", Credits: 620, Input: []string{"text", "image"}, Output: []string{"image"}, Featured: true, Available: true},
+		{ID: "product-image", Name: "商品图制作", NameEn: "Product Image", Category: "image", Credits: 860, Input: []string{"text", "image"}, Output: []string{"image"}, Available: true},
+		{ID: "text-image", Name: "文字生成图片", NameEn: "Text to Image", Category: "image", Credits: 680, Input: []string{"text"}, Output: []string{"image"}, Available: true},
+		{ID: "image-edit", Name: "图片修改", NameEn: "Image Edit", Category: "image", Credits: 520, Input: []string{"text", "image"}, Output: []string{"image"}, Available: true},
+		{ID: "id-photo", Name: "证件照制作", NameEn: "ID Photo", Category: "image", Credits: 360, Input: []string{"image", "text"}, Output: []string{"image"}, Available: true},
+		{ID: "image-video", Name: "图片生成视频", NameEn: "Image to Video", Category: "video", Credits: 1880, Input: []string{"image", "text"}, Output: []string{"video"}, Available: true},
+		{ID: "text-video", Name: "文字生成视频", NameEn: "Text to Video", Category: "video", Credits: 1680, Input: []string{"text"}, Output: []string{"video"}, Available: true},
+		{ID: "video-captions", Name: "视频剪辑与字幕", NameEn: "Video Captions", Category: "video", Credits: 980, Input: []string{"video", "text"}, Output: []string{"video"}, Available: true},
+		{ID: "avatar-video", Name: "数字人口播", NameEn: "Avatar Video", Category: "video", Credits: 1480, Input: []string{"text", "image", "audio"}, Output: []string{"video"}, Available: false},
+		{ID: "xhs-copy", Name: "小红书文案", NameEn: "Xiaohongshu Copy", Category: "content", Credits: 260, Input: []string{"text", "document"}, Output: []string{"text"}, Available: true},
+		{ID: "resume", Name: "简历制作", NameEn: "Resume", Category: "office", Credits: 420, Input: []string{"text", "document"}, Output: []string{"pdf", "text"}, Available: true},
+		{ID: "document-summary", Name: "文件总结", NameEn: "Document Summary", Category: "office", Credits: 380, Input: []string{"document", "text"}, Output: []string{"text"}, Available: true},
+		{ID: "transcription", Name: "录音转文字", NameEn: "Transcription", Category: "office", Credits: 300, Input: []string{"audio", "video"}, Output: []string{"text"}, Available: true},
+		{ID: "ppt", Name: "PPT 制作", NameEn: "PPT", Category: "office", Credits: 820, Input: []string{"text", "document", "spreadsheet", "image"}, Output: []string{"pptx", "pdf"}, Available: false},
+		{ID: "excel", Name: "Excel 数据分析", NameEn: "Excel Analysis", Category: "office", Credits: 460, Input: []string{"spreadsheet", "text"}, Output: []string{"xlsx", "pdf", "text"}, Available: false},
 	}
+}
+
+// Lookup returns the catalog entry for id, or ok=false when unknown.
+func Lookup(id string) (SkillCatalogEntry, bool) {
+	for _, e := range Catalog() {
+		if e.ID == id {
+			return e, true
+		}
+	}
+	return SkillCatalogEntry{}, false
 }
 
 // Exists reports whether id names a catalog entry.
 func Exists(id string) bool {
-	for _, e := range Catalog() {
-		if e.ID == id {
-			return true
-		}
-	}
-	return false
+	_, ok := Lookup(id)
+	return ok
 }
 ```
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cd server && go test ./internal/aurora/ -run 'TestCatalogHasSixteenEntriesAndUniqueIDs|TestExists'`
+Run: `cd server && go test ./internal/aurora/ -run 'TestCatalogHasSixteenEntriesAndUniqueIDs|TestCatalogAvailability|TestExists'`
 Expected: PASS。
 
 - [ ] **Step 5: 写 handler 失败测试**
@@ -284,19 +318,29 @@ func TestListAuroraSkills(t *testing.T) {
 	req := newRequest(http.MethodGet, "/api/aurora/skills", nil)
 	out := testutil.Decode[struct {
 		Skills []struct {
-			ID       string   `json:"id"`
-			Name     string   `json:"name"`
-			NameEn   string   `json:"name_en"`
-			Category string   `json:"category"`
-			Credits  int      `json:"credits"`
-			Input    []string `json:"input"`
-			Output   []string `json:"output"`
-			Featured bool     `json:"featured"`
+			ID        string   `json:"id"`
+			Name      string   `json:"name"`
+			NameEn    string   `json:"name_en"`
+			Category  string   `json:"category"`
+			Credits   int      `json:"credits"`
+			Input     []string `json:"input"`
+			Output    []string `json:"output"`
+			Featured  bool     `json:"featured"`
+			Available bool     `json:"available"`
 		} `json:"skills"`
 	}](t, testHandler.ListAuroraSkills, req, http.StatusOK)
 
 	if len(out.Skills) != 16 {
 		t.Fatalf("expected 16 skills, got %d", len(out.Skills))
+	}
+	available := 0
+	for _, s := range out.Skills {
+		if s.Available {
+			available++
+		}
+	}
+	if available != 13 {
+		t.Fatalf("expected 13 available skills in response, got %d", available)
 	}
 }
 ```
@@ -390,6 +434,16 @@ func TestCreateAuroraGenerationRejectsUnknownSkill(t *testing.T) {
 	testutil.Call(t, testHandler.CreateAuroraGeneration, req).Want(http.StatusBadRequest)
 }
 
+func TestCreateAuroraGenerationRejectsUnavailableSkill(t *testing.T) {
+	// avatar-video is phase-2 (spec §9.2): listed in the catalog but not
+	// submittable until its execution path exists.
+	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
+		"skillId": "avatar-video",
+		"prompt":  "x",
+	})
+	testutil.Call(t, testHandler.CreateAuroraGeneration, req).Want(http.StatusBadRequest)
+}
+
 func TestCreateAuroraGenerationRejectsMissingPrompt(t *testing.T) {
 	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
 		"skillId": "xhs-image",
@@ -458,6 +512,11 @@ func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "unknown skill")
 		return
 	}
+	entry, _ := aurora.Lookup(req.SkillID)
+	if !entry.Available {
+		writeError(w, http.StatusBadRequest, "skill not available")
+		return
+	}
 
 	row, err := h.Queries.CreateAuroraGeneration(r.Context(), db.CreateAuroraGenerationParams{
 		WorkspaceID: workspaceID,
@@ -491,7 +550,7 @@ r.Post("/api/aurora/generations", h.CreateAuroraGeneration)
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd server && go test ./internal/handler/ -run TestCreateAuroraGeneration`
-Expected: 三个测试 PASS（含 RejectsUnknownSkill / RejectsMissingPrompt）。
+Expected: 四个测试 PASS（含 RejectsUnknownSkill / RejectsUnavailableSkill / RejectsMissingPrompt）。
 
 - [ ] **Step 5: Commit**
 
@@ -505,7 +564,7 @@ git commit -m "feat(aurora): create generation rows"
 ### Task 4: 注册即自动开通个人 workspace
 
 **Files:**
-- Modify: `server/internal/handler/auth.go`（`VerifyCode`，约 :376-459）
+- Modify: `server/internal/handler/auth.go`（`findOrCreateUser`，约 :178-210）
 - Modify: `server/internal/handler/auth.go`（新增 `ensurePersonalWorkspace` 方法，或放同文件末尾）
 - Create: `server/internal/handler/auth_personal_workspace_test.go`
 - Create: `server/internal/handler/aurora.go`（若把 `ensurePersonalWorkspace` 放 aurora.go 也可；本计划放 `auth.go` 因其属账户域）
@@ -579,13 +638,49 @@ func TestEnsurePersonalWorkspaceSkipsExisting(t *testing.T) {
 		t.Fatalf("existing user workspace count changed: before=%d after=%d", before, after)
 	}
 }
+
+// 登录路径：新 email 走 findOrCreateUser 应自动开通个人空间（覆盖
+// VerifyCode 与 GoogleLogin 两个入口——二者是 findOrCreateUser 仅有的调用点）；
+// 再次登录（isNew=false）幂等，不重复建。
+func TestFindOrCreateUserProvisionsPersonalWorkspace(t *testing.T) {
+	email := "findorcreate-" + t.Name() + "@multica.ai"
+	user, isNew, err := testHandler.findOrCreateUser(context.Background(), email)
+	if err != nil {
+		t.Fatalf("findOrCreateUser: %v", err)
+	}
+	if !isNew {
+		t.Fatal("first call should be a new user")
+	}
+	n := dbfx.Count(t,
+		`SELECT count(*) FROM workspace WHERE id IN (SELECT workspace_id FROM member WHERE user_id = $1)`,
+		uuidToString(user.ID),
+	)
+	if n != 1 {
+		t.Fatalf("expected 1 personal workspace after signup, got %d", n)
+	}
+
+	_, isNew2, err := testHandler.findOrCreateUser(context.Background(), email)
+	if err != nil {
+		t.Fatalf("second findOrCreateUser: %v", err)
+	}
+	if isNew2 {
+		t.Fatal("second call should not be a new user")
+	}
+	n2 := dbfx.Count(t,
+		`SELECT count(*) FROM workspace WHERE id IN (SELECT workspace_id FROM member WHERE user_id = $1)`,
+		uuidToString(user.ID),
+	)
+	if n2 != 1 {
+		t.Fatalf("second call should not create another workspace, got %d", n2)
+	}
+}
 ```
 
 > `dbfx.User(t, name, email)` 返回 string id（见 `server/internal/testutil/db.go:140`）；`dbfx.Count` 返回 int（`db.go:126`）。
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd server && go test ./internal/handler/ -run TestEnsurePersonalWorkspace`
+Run: `cd server && go test ./internal/handler/ -run 'TestEnsurePersonalWorkspace|TestFindOrCreateUserProvisionsPersonalWorkspace'`
 Expected: 编译失败（`ensurePersonalWorkspace` 未定义）。
 
 - [ ] **Step 3: 实现 `ensurePersonalWorkspace`**
@@ -653,27 +748,27 @@ func (h *Handler) ensurePersonalWorkspace(ctx context.Context, userID pgtype.UUI
 > - `issuestatus.Ensure(ctx, qtx, ws.ID)` 签名见 `workspace.go:291`。
 > - slug 用 `user-` + 去连字符后的 userID 前 12 位，天然唯一；若 `uuidToString` 不可用，用 `userID.String()` 取前缀。
 
-- [ ] **Step 4: 在 `VerifyCode` 接入**
+- [ ] **Step 4: 在 `findOrCreateUser` 接入（2026-09-13 评审修订）**
 
-`server/internal/handler/auth.go` `VerifyCode` 内，在 `findOrCreateUser` 成功、`isNew` 判断之后、`issueJWT` 之前（约 :427-431 之间）插入：
+`server/internal/handler/auth.go` `findOrCreateUser`（:178-210）内，用户行已落库（新用户 INSERT 已提交）之后、`return user, isNew, nil` 之前插入：
 
 ```go
-	if isNew {
-		if err := h.ensurePersonalWorkspace(r.Context(), user.ID, user.Name); err != nil {
-			// Personal-workspace provisioning is best-effort: a failure must not
-			// block login. The user can still create a workspace manually.
-			slog.Warn("failed to provision personal workspace", "error", err, "user_id", uuidToString(user.ID))
-		}
-		obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.Signup(uuidToString(user.ID), user.Email, signupSourceFromRequest(r)))
+	// Best-effort personal-workspace provisioning. Runs on every login —
+	// not just signup — so a transient failure self-heals on the next
+	// login, and both VerifyCode and Google OAuth signups are covered
+	// because they are the only two callers of findOrCreateUser
+	// (auth.go:413 and :649).
+	if err := h.ensurePersonalWorkspace(ctx, user.ID, user.Name); err != nil {
+		slog.Warn("failed to provision personal workspace", "error", err, "user_id", uuidToString(user.ID))
 	}
 ```
 
-> `user` 类型为 `db.User`；确认 `user.Name` 字段名（`db.User` 有 `Name`，见 models）。若 `findOrCreateUser` 返回的 `user` 没有 `Name` 字段，用空串调用（`ensurePersonalWorkspace` 内部会回落为 "Personal Workspace"）。
+> 修订说明：原计划只挂 `VerifyCode` 的 isNew 分支，会漏掉 Google OAuth 首登（`GoogleLogin` 在 `auth.go:649` 也调 `findOrCreateUser` 并有独立 isNew 分支），且 best-effort 失败无重试。改为挂 `findOrCreateUser` 内部 + 每次登录幂等调用（一条 count 查询），一处覆盖两个入口并自愈瞬态失败。`user` 类型为 `db.User`，`Name` 字段已确认存在（models.go）；若 `findOrCreateUser` 内部用事务创建用户，钩子须放在该事务提交之后（实现时核对）。
 
 - [ ] **Step 5: 运行测试确认通过**
 
-Run: `cd server && go test ./internal/handler/ -run 'TestEnsurePersonalWorkspace'`
-Expected: 两个测试 PASS。
+Run: `cd server && go test ./internal/handler/ -run 'TestEnsurePersonalWorkspace|TestFindOrCreateUserProvisionsPersonalWorkspace'`
+Expected: 三个测试 PASS。
 
 - [ ] **Step 6: Commit**
 
@@ -686,10 +781,19 @@ git commit -m "feat(aurora): auto-provision personal workspace on signup"
 
 ## Self-Review
 
-- **Spec 覆盖**：§5 的 `aurora_generation`/`aurora_asset` 表 → Task 1；§8 的 `GET /api/aurora/skills` 单一事实来源 → Task 2；§8 的 `POST /api/aurora/generations` → Task 3；§7 的「注册即开通个人空间」→ Task 4。§4 执行层 → Plan 3；§6 计费 → Plan 2；§8 前端 → Plan 4。**YAGNI 偏离（已在 Plan 1 声明）**：§5 的 `aurora_skill_catalog` 表改为 Go 常量，需后台改价时再加表。
+- **Spec 覆盖**：§5 的 `aurora_generation`/`aurora_asset` 表 → Task 1；§8 的 `GET /api/aurora/skills` 单一事实来源 → Task 2；§8 的 `POST /api/aurora/generations` → Task 3；§7 的「注册即开通个人空间」→ Task 4（钩子在 `findOrCreateUser`，覆盖邮箱验证码 + Google OAuth 双入口）。§4 执行层 → Plan 3；§6 计费 → Plan 2；进度/作品库 API → Plan 3.5；§8 前端 → Plan 4；安全 → Plan safety。**YAGNI 偏离（已在 Plan 1 声明）**：§5 的 `aurora_skill_catalog` 表改为 Go 常量，需后台改价时再加表。
 - **占位符**：已消除 `<module>`/`<querier类型>` 等；唯一保留的「以 `make sqlc` 生成为准 / 以 `workspace.go` 用法为准」是**签名核对提示**，不是缺内容——因为 sqlc 生成字段名无法在写计划时 100% 确定，但 SQL 语义已定死，实现者按生成结果对齐即可。
 - **类型一致性**：`SkillCatalogEntry` 字段在 catalog（Task 2 Step 3）与 handler 测试（Task 2 Step 5）一致；`CreateAuroraGenerationParams` 字段在 Task 1 SQL 与 Task 3 代码一致；`ensurePersonalWorkspace` 签名在 Task 4 测试与实现一致。
 
 ## 执行交接
 
-Plan 1 已补全到零占位。剩余 Plan 2（计费）/Plan 3（执行层）/Plan 4（前端）尚未写。建议先按本计划实现并 `make test` 全绿，再写 Plan 2。
+Plan 1 已补全到零占位。后续顺序：Plan 2（计费）→ Plan 3（执行层）→ Plan 3.5（进度与作品库 API）→ Plan 4（前端）→ Plan safety（频率闸门 + 内容审核）。「可对外销售」还需后续 Plan 5（订阅产品线 + Stripe + 权益门禁，尚未编写）。建议先按本计划实现并 `make test` 全绿，再进 Plan 2。
+
+## 修订记录（2026-09-13 评审回写）
+
+| 处 | 修正 |
+|----|------|
+| Task 1 Step 4 | 验证命令改为 `make test`（`go test ./internal/migrations/` 不会应用新迁移，其测试按名定向） |
+| Task 2 | `SkillCatalogEntry` 加 `Available` 字段；`avatar-video`/`ppt`/`excel` 置 `false`（spec §9.2 二阶段）；新增 `Lookup`；测试补 `TestCatalogAvailability`（13 可用） |
+| Task 3 | 创建时拒绝 unavailable 技能（新增 `TestCreateAuroraGenerationRejectsUnavailableSkill`） |
+| Task 4 | 个人空间钩子从 `VerifyCode` 的 isNew 分支改为 `findOrCreateUser` 内部、每次登录幂等调用——覆盖 Google OAuth 首登（`auth.go:649` 是第二调用点）并自愈瞬态失败；新增 `TestFindOrCreateUserProvisionsPersonalWorkspace` |
