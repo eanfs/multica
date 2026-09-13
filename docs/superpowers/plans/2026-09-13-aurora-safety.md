@@ -83,4 +83,4 @@ git commit -m "feat(aurora): wire moderation into generation create and completi
 
 ## 执行交接
 
-完成顺序：Plan 3.5 → Plan 4 → 本计划（可在 Plan 4 之后、上线前完成；Task 1 可随时先行）。「可对外销售」里程碑还需后续 Plan 5（订阅 + Stripe + 权益门禁 enforcement，尚未编写）。
+完成顺序：Plan 3.5 → Plan 4 → 本计划（可在 Plan 4 之后、上线前完成；Task 1 可随时先行）→ Plan 5（订阅 + Stripe + 权益门禁 enforcement，`2026-09-13-aurora-subscriptions-payments.md`，已编写）。

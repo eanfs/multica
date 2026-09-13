@@ -572,7 +572,7 @@ git commit -m "feat(aurora): billing balance and transactions endpoints"
 
 ## 执行交接
 
-Plan 2 完成。后续顺序：Plan 3（执行层）→ Plan 3.5（进度与作品库 API）→ Plan 4（前端）→ Plan safety。「可对外销售」还需后续 Plan 5（订阅 + Stripe + 权益门禁，尚未编写）。
+Plan 2 完成。后续顺序：Plan 3（执行层）→ Plan 3.5（进度与作品库 API）→ Plan 4（前端）→ Plan safety → Plan 5（订阅 + Stripe + 权益门禁，`2026-09-13-aurora-subscriptions-payments.md`，已编写）。
 
 ## 修订记录（2026-09-13 评审回写）
 

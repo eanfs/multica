@@ -256,7 +256,7 @@ git commit -m "feat(aurora): rate-limit generation creation"
 
 ## 执行交接
 
-Plan 3 完成。后续顺序：Plan 3.5（进度与作品库 API）→ Plan 4（前端）→ Plan safety（频率闸门已在本计划 Task 7 提前落地，剩内容审核与权益门禁）。「可对外销售」还需后续 Plan 5（订阅 + Stripe，尚未编写）。
+Plan 3 完成。后续顺序：Plan 3.5（进度与作品库 API）→ Plan 4（前端）→ Plan safety（频率闸门已在本计划 Task 7 提前落地，剩内容审核与权益门禁）→ Plan 5（订阅 + Stripe，`2026-09-13-aurora-subscriptions-payments.md`，已编写）。
 
 ## 修订记录（2026-09-13 评审回写）
 

@@ -220,7 +220,7 @@ git commit -m "feat(aurora): Next.js app wiring for skill directory, works and b
 
 ## 执行交接
 
-实现顺序：Plan 1 → Plan 2 → Plan 3.5 Task 1（查询）→ Plan 3 → Plan 3.5 其余 → Plan 4 → Plan safety（内容审核 + 权益门禁）。「可对外销售」还需后续 Plan 5（订阅 + Stripe，尚未编写）。
+实现顺序：Plan 1 → Plan 2 → Plan 3.5 Task 1（查询）→ Plan 3 → Plan 3.5 其余 → Plan 4 → Plan safety（内容审核 + 权益门禁）→ Plan 5（订阅 + Stripe，`2026-09-13-aurora-subscriptions-payments.md`，已编写）。
 
 ## 修订记录（2026-09-13 评审回写）
 

@@ -787,7 +787,7 @@ git commit -m "feat(aurora): auto-provision personal workspace on signup"
 
 ## 执行交接
 
-Plan 1 已补全到零占位。后续顺序：Plan 2（计费）→ Plan 3（执行层）→ Plan 3.5（进度与作品库 API）→ Plan 4（前端）→ Plan safety（频率闸门 + 内容审核）。「可对外销售」还需后续 Plan 5（订阅产品线 + Stripe + 权益门禁，尚未编写）。建议先按本计划实现并 `make test` 全绿，再进 Plan 2。
+Plan 1 已补全到零占位。后续顺序：Plan 2（计费）→ Plan 3（执行层）→ Plan 3.5（进度与作品库 API）→ Plan 4（前端）→ Plan safety（频率闸门 + 内容审核）→ Plan 5（订阅 + Stripe + 权益门禁，`2026-09-13-aurora-subscriptions-payments.md`，已编写）。建议先按本计划实现并 `make test` 全绿，再进 Plan 2。
 
 ## 修订记录（2026-09-13 评审回写）
 
