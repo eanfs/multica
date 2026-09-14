@@ -202,6 +202,31 @@ type Attachment struct {
 	SourceContextID pgtype.UUID        `json:"source_context_id"`
 }
 
+type AuroraAsset struct {
+	ID           pgtype.UUID        `json:"id"`
+	GenerationID pgtype.UUID        `json:"generation_id"`
+	WorkspaceID  pgtype.UUID        `json:"workspace_id"`
+	Kind         string             `json:"kind"`
+	MediaUrl     pgtype.Text        `json:"media_url"`
+	Format       pgtype.Text        `json:"format"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
+type AuroraGeneration struct {
+	ID              pgtype.UUID        `json:"id"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	UserID          pgtype.UUID        `json:"user_id"`
+	SkillID         string             `json:"skill_id"`
+	Prompt          string             `json:"prompt"`
+	Status          string             `json:"status"`
+	TaskID          pgtype.UUID        `json:"task_id"`
+	CreditsReserved int64              `json:"credits_reserved"`
+	CreditsCharged  int64              `json:"credits_charged"`
+	Error           pgtype.Text        `json:"error"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Autopilot struct {
 	ID                 pgtype.UUID        `json:"id"`
 	WorkspaceID        pgtype.UUID        `json:"workspace_id"`

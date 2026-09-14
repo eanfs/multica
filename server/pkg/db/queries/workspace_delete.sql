@@ -320,6 +320,15 @@ deleted_hourly AS (
 deleted_attachments AS (
     DELETE FROM attachment WHERE workspace_id = $1
 ),
+-- Aurora content-creation rows are workspace-keyed leaf data with no FK, so
+-- both are swept here by workspace_id. Assets reference generations by
+-- application-level id only, so order is not load-bearing.
+deleted_aurora_assets AS (
+    DELETE FROM aurora_asset WHERE workspace_id = $1
+),
+deleted_aurora_generations AS (
+    DELETE FROM aurora_generation WHERE workspace_id = $1
+),
 deleted_channel_outbound_cards AS (
     DELETE FROM channel_outbound_card_message
     WHERE chat_session_id IN (SELECT id FROM ws_sessions)
