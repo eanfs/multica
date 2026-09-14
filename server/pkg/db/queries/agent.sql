@@ -2124,7 +2124,17 @@ WHERE recovery.author_type = 'system'
   AND source.autopilot_run_id IS NULL
   AND source.issue_id IS NOT NULL
   AND source.agent_id <> failed.agent_id
-  AND COALESCE(source_status.category, source_issue.status) NOT IN ('done', 'cancelled', 'backlog')
+  -- The source issue must still be live -- the same gate the Go side applies in
+  -- loadDelegatedFailureRecoveryTarget. Two vocabularies, on purpose: status
+  -- holds the built-in keys and is the only signal a workspace whose catalog
+  -- was never seeded has, while category is the four-value lifecycle a custom
+  -- status carries. One coalesced comparison cannot cover both -- since
+  -- MUL-7240 a seeded built-in coalesces to its category, so 'cancelled' and
+  -- 'backlog' stopped matching at all. 'backlog' stays a key test: parking is
+  -- built-in behavior a custom unstarted status does not inherit. (MUL-7364)
+  AND source_issue.status NOT IN ('done', 'cancelled', 'backlog')
+  -- Include the old terminal spelling until the independent backfill finishes.
+  AND COALESCE(source_status.category, '') NOT IN ('done', 'closed', 'cancelled')
   AND source_agent.archived_at IS NULL
   AND source_agent.runtime_id IS NOT NULL
   AND source_agent.workspace_id = source_issue.workspace_id
