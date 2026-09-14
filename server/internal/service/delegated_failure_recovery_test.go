@@ -302,6 +302,108 @@ func TestPendingDelegatedFailureSweepSkipsCustomTerminalSourceIssue(t *testing.T
 	}
 }
 
+// The SQL prefilter is what keeps the recovery outbox scan from growing with
+// history. A signal whose source issue can never resume has to be dropped
+// THERE: the Go gate downstream discards it without stamping
+// recovery_settled_at, so anything that reaches Go stays in the scan forever
+// and spends part of maxPerTick on every tick.
+//
+// MUL-7240 disabled most of it silently. The predicate read
+// issue_status.category but compared it against the old seven-value key
+// vocabulary, and once a workspace's catalog is seeded — every production
+// workspace, per migration 469 — COALESCE returns that category: 'cancelled'
+// arrives as 'closed' and 'backlog' as 'unstarted', leaving only 'done' still
+// excluded. An unseeded workspace falls back to the raw key, so both are
+// covered here: the two vocabularies are each only reachable in one of them.
+// (MUL-7364)
+func TestPendingDelegatedFailureSweepPrefiltersUnresumableSourceIssues(t *testing.T) {
+	ctx := context.Background()
+	for _, catalog := range []struct {
+		name   string
+		seeded bool
+	}{
+		{"seeded catalog", true},
+		{"unseeded catalog", false},
+	} {
+		t.Run(catalog.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name string
+				// status the source issue ends up on. customCategory, when set,
+				// makes it a custom key created with that lifecycle first.
+				status         string
+				customCategory string
+				wantScanned    bool
+			}{
+				{name: "built-in cancelled", status: "cancelled"},
+				{name: "built-in backlog", status: "backlog"},
+				{name: "built-in done", status: "done"},
+				{name: "custom closed-category status", status: "shelved", customCategory: "closed"},
+				{name: "pre-backfill cancelled category", status: "legacy_shelved", customCategory: "cancelled"},
+				{name: "pre-backfill custom backlog stays live", status: "legacy_later", customCategory: "backlog", wantScanned: true},
+				{name: "source issue still live", status: "in_progress", wantScanned: true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					f, svc := seedDelegatedFailureFixture(t)
+					workspaceUUID, err := util.ParseUUID(f.workspaceID)
+					if err != nil {
+						t.Fatalf("parse workspace id: %v", err)
+					}
+					if catalog.seeded {
+						if err := svc.Queries.SeedIssueStatusEntries(ctx, workspaceUUID); err != nil {
+							t.Fatalf("seed status catalog: %v", err)
+						}
+					}
+					if tc.customCategory != "" {
+						if _, err := f.pool.Exec(ctx, `
+							INSERT INTO issue_status (
+								workspace_id, key, name, description, category, color, is_system, position
+							) VALUES ($1, $2, 'Shelved', '', $3, '#6b7280', false, 1)`,
+							f.workspaceID, tc.status, tc.customCategory); err != nil {
+							t.Fatalf("insert custom status: %v", err)
+						}
+					}
+
+					failedID := f.insertWorkerTask(t, "failed", "comment", 1, 2)
+					if _, err := f.pool.Exec(ctx, `
+						UPDATE agent_task_queue
+						SET failure_reason = 'agent_error.process_failure', error = 'worker exited', completed_at = now()
+						WHERE id = $1`, failedID); err != nil {
+						t.Fatalf("stamp failed task: %v", err)
+					}
+					// The signal has to exist before the source issue moves:
+					// creating it runs the same Go gate being bypassed here.
+					target, created, err := svc.ensureDelegatedFailureRecoveryComment(ctx, failedID)
+					if err != nil || target == nil || !created {
+						t.Fatalf("ensure recovery comment = target %v created %v err %v", target != nil, created, err)
+					}
+					if _, err := f.pool.Exec(ctx, `UPDATE issue SET status = $2 WHERE id = $1`, f.issueID, tc.status); err != nil {
+						t.Fatalf("move source issue to %q: %v", tc.status, err)
+					}
+
+					// Asserted against this fixture's own signal rather than the
+					// sweep's totals: the scan is not workspace-scoped.
+					pending, err := svc.Queries.ListPendingDelegatedFailureRecoveries(ctx, 1000)
+					if err != nil {
+						t.Fatalf("list pending recoveries: %v", err)
+					}
+					scanned := false
+					for _, comment := range pending {
+						if comment.ID == target.comment.ID {
+							scanned = true
+							break
+						}
+					}
+					if scanned != tc.wantScanned {
+						t.Fatalf("recovery signal scanned = %v, want %v — a source issue on %q %s",
+							scanned, tc.wantScanned, tc.status,
+							map[bool]string{true: "must stay in the outbox scan", false: "can never resume, so the row is rescanned and re-discarded forever"}[tc.wantScanned])
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestPendingDelegatedFailureSweepRequeuesTerminalUndeliveredTask(t *testing.T) {
 	for _, terminalStatus := range []string{"failed", "cancelled"} {
 		t.Run(terminalStatus, func(t *testing.T) {
