@@ -1875,6 +1875,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireWorkspaceMember(queries))
 
+			// Aurora skill catalog
+			r.Get("/api/aurora/skills", h.ListAuroraSkills)
+
 			// Assignee frequency
 			r.Get("/api/assignee-frequency", h.GetAssigneeFrequency)
 
