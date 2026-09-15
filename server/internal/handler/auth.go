@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/logger"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -194,22 +195,38 @@ func (h *Handler) findOrCreateUser(ctx context.Context, email string) (user db.U
 		return db.User{}, false, err
 	}
 
-	if !isNew {
-		return user, false, nil
+	if isNew {
+		name := email
+		if at := strings.Index(email, "@"); at > 0 {
+			name = email[:at]
+		}
+		created, err := h.Queries.CreateUser(ctx, db.CreateUserParams{
+			Name:  name,
+			Email: email,
+		})
+		if err != nil {
+			return db.User{}, false, err
+		}
+		user = created
 	}
 
-	name := email
-	if at := strings.Index(email, "@"); at > 0 {
-		name = email[:at]
+	// Best-effort personal-workspace provisioning. Runs on every login — not
+	// just signup — so a transient failure self-heals on the next login, and
+	// both VerifyCode and Google OAuth signups are covered because they are
+	// the only two callers of findOrCreateUser. Guarded on TxStarter so the
+	// handler unit tests that stub Queries with a mock (which cannot back a
+	// transaction) skip the side effect.
+	if h.TxStarter != nil {
+		if err := h.ensurePersonalWorkspace(ctx, user.ID, user.Name); err != nil {
+			slog.Warn("failed to provision personal workspace", "error", err, "user_id", uuidToString(user.ID))
+		}
+	} else if isNew {
+		// A handler built outside New() (unit tests stub Queries) cannot back a
+		// transaction; log so a real wiring mistake is never silent.
+		slog.Warn("personal-workspace provisioning skipped: handler has no transaction starter", "user_id", uuidToString(user.ID))
 	}
-	created, err := h.Queries.CreateUser(ctx, db.CreateUserParams{
-		Name:  name,
-		Email: email,
-	})
-	if err != nil {
-		return db.User{}, false, err
-	}
-	return created, true, nil
+
+	return user, isNew, nil
 }
 
 // signupSourceFromRequest reads the attribution cookie the web frontend
@@ -833,4 +850,61 @@ func (h *Handler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, h.userToResponse(updatedUser))
+}
+
+// ensurePersonalWorkspace gives a newly-created user a single-member owner
+// workspace, so Aurora signups land with a place to create generations without
+// going through the manual workspace-creation flow. Idempotent: if the user
+// already belongs to any workspace it is a no-op. Runs in one transaction so
+// the workspace, owner membership and issue-status seed commit or roll back
+// together.
+func (h *Handler) ensurePersonalWorkspace(ctx context.Context, userID pgtype.UUID, userName string) error {
+	existing, err := h.Queries.CountWorkspacesForUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if existing > 0 {
+		return nil
+	}
+
+	name := strings.TrimSpace(userName)
+	if name == "" {
+		name = "Personal Workspace"
+	} else {
+		name = name + " 的个人空间"
+	}
+	// Full UUID (32 hex) in the slug, not a truncated prefix: a 48-bit prefix
+	// could collide across users, and a collision would hit the workspace.slug
+	// unique constraint on every subsequent login, silently leaving the user
+	// without a personal workspace forever.
+	slug := "user-" + strings.ReplaceAll(uuidToString(userID), "-", "")
+
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	qtx := h.Queries.WithTx(tx)
+	ws, err := qtx.CreateWorkspace(ctx, db.CreateWorkspaceParams{
+		Name:        name,
+		Slug:        slug,
+		Description: ptrToText(nil),
+		Context:     ptrToText(nil),
+		IssuePrefix: defaultIssuePrefixFromSlug(slug),
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := qtx.CreateMember(ctx, db.CreateMemberParams{
+		WorkspaceID: ws.ID,
+		UserID:      userID,
+		Role:        "owner",
+	}); err != nil {
+		return err
+	}
+	if err := issuestatus.Ensure(ctx, qtx, ws.ID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
