@@ -2331,8 +2331,9 @@ func TestVerifyCodeAcceptsConfiguredDevCodeOutsideProduction(t *testing.T) {
 
 	t.Cleanup(func() {
 		testPool.Exec(ctx, `DELETE FROM verification_code WHERE email = $1`, email)
-		testPool.Exec(ctx, `DELETE FROM "user" WHERE email = $1`, email)
 	})
+	// Registered up front so a failed run leaves no user/workspace rows behind.
+	cleanupPersonalWorkspaceByEmail(t, email)
 
 	createVerificationCodeForTest(t, email, "123456")
 
@@ -2453,14 +2454,15 @@ func TestVerifyCodeBruteForceProtection(t *testing.T) {
 	}
 }
 
-func TestVerifyCodeNewUserHasNoWorkspace(t *testing.T) {
+func TestVerifyCodeNewUserGetsPersonalWorkspace(t *testing.T) {
 	const email = "workspace-verify-test@multica.ai"
 	ctx := context.Background()
 
 	t.Cleanup(func() {
 		testPool.Exec(ctx, `DELETE FROM verification_code WHERE email = $1`, email)
-		testPool.Exec(ctx, `DELETE FROM "user" WHERE email = $1`, email)
 	})
+	// Registered up front so a failed run leaves no user/workspace rows behind.
+	cleanupPersonalWorkspaceByEmail(t, email)
 
 	// Send code
 	w := httptest.NewRecorder()
@@ -2492,13 +2494,14 @@ func TestVerifyCodeNewUserHasNoWorkspace(t *testing.T) {
 		t.Fatalf("GetUserByEmail: %v", err)
 	}
 
-	// New users should have no workspaces (/workspaces/new creates one)
+	// Signup provisions a single-member personal workspace; /workspaces/new
+	// creates further ones.
 	workspaces, err := testHandler.Queries.ListWorkspaces(ctx, user.ID)
 	if err != nil {
 		t.Fatalf("ListWorkspaces: %v", err)
 	}
-	if len(workspaces) != 0 {
-		t.Fatalf("ListWorkspaces: expected 0 workspaces for new user, got %d", len(workspaces))
+	if len(workspaces) != 1 {
+		t.Fatalf("ListWorkspaces: expected 1 personal workspace for new user, got %d", len(workspaces))
 	}
 }
 

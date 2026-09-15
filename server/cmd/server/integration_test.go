@@ -361,11 +361,22 @@ func TestSendCodeAndVerify(t *testing.T) {
 	meResp.Body.Close()
 }
 
-func TestVerifyCodeNewUserHasNoWorkspace(t *testing.T) {
+func TestVerifyCodeNewUserGetsPersonalWorkspace(t *testing.T) {
 	const email = "new-integration-verify@multica.ai"
 	ctx := context.Background()
 
 	t.Cleanup(func() {
+		// Remove the personal workspace (and its seeded statuses) before the
+		// user row, since deleting the user cascades the member rows that the
+		// workspace lookup keys on.
+		testPool.Exec(ctx, `
+			DELETE FROM issue_status WHERE workspace_id IN (
+				SELECT workspace_id FROM member WHERE user_id = (SELECT id FROM "user" WHERE email = $1)
+			)`, email)
+		testPool.Exec(ctx, `
+			DELETE FROM workspace WHERE id IN (
+				SELECT workspace_id FROM member WHERE user_id = (SELECT id FROM "user" WHERE email = $1)
+			)`, email)
 		testPool.Exec(ctx, `DELETE FROM verification_code WHERE email = $1`, email)
 		testPool.Exec(ctx, `DELETE FROM "user" WHERE email = $1`, email)
 	})
@@ -402,7 +413,8 @@ func TestVerifyCodeNewUserHasNoWorkspace(t *testing.T) {
 	}
 	readJSON(t, resp, &loginResp)
 
-	// New users should have no workspaces (/workspaces/new creates one)
+	// Signup provisions a single-member personal workspace; /workspaces/new
+	// creates further ones.
 	req, _ := http.NewRequest("GET", testServer.URL+"/api/workspaces", nil)
 	req.Header.Set("Authorization", "Bearer "+loginResp.Token)
 	workspacesResp, err := http.DefaultClient.Do(req)
@@ -421,8 +433,8 @@ func TestVerifyCodeNewUserHasNoWorkspace(t *testing.T) {
 	}
 	readJSON(t, workspacesResp, &workspaces)
 
-	if len(workspaces) != 0 {
-		t.Fatalf("expected 0 workspaces for new user, got %d", len(workspaces))
+	if len(workspaces) != 1 {
+		t.Fatalf("expected 1 personal workspace for new user, got %d", len(workspaces))
 	}
 }
 
