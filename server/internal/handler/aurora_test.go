@@ -54,3 +54,51 @@ func TestListAuroraSkills(t *testing.T) {
 		t.Errorf("unexpected poster response: %#v", poster)
 	}
 }
+
+func TestCreateAuroraGeneration(t *testing.T) {
+	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
+		"skillId": "xhs-image",
+		"prompt":  "生成一张新加坡亲子游封面",
+	})
+	out := testutil.Decode[struct {
+		Generation struct {
+			ID              string `json:"id"`
+			SkillID         string `json:"skillId"`
+			Prompt          string `json:"prompt"`
+			Status          string `json:"status"`
+			CreditsReserved int64  `json:"creditsReserved"`
+		} `json:"generation"`
+	}](t, testHandler.CreateAuroraGeneration, req, http.StatusCreated)
+
+	if out.Generation.Status != "queued" {
+		t.Fatalf("expected queued, got %q", out.Generation.Status)
+	}
+	if out.Generation.SkillID != "xhs-image" {
+		t.Fatalf("expected skillId xhs-image, got %q", out.Generation.SkillID)
+	}
+}
+
+func TestCreateAuroraGenerationRejectsUnknownSkill(t *testing.T) {
+	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
+		"skillId": "nope",
+		"prompt":  "x",
+	})
+	testutil.Call(t, testHandler.CreateAuroraGeneration, req).Want(http.StatusBadRequest)
+}
+
+func TestCreateAuroraGenerationRejectsUnavailableSkill(t *testing.T) {
+	// avatar-video is phase-2 (spec §9.2): listed in the catalog but not
+	// submittable until its execution path exists.
+	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
+		"skillId": "avatar-video",
+		"prompt":  "x",
+	})
+	testutil.Call(t, testHandler.CreateAuroraGeneration, req).Want(http.StatusBadRequest)
+}
+
+func TestCreateAuroraGenerationRejectsMissingPrompt(t *testing.T) {
+	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
+		"skillId": "xhs-image",
+	})
+	testutil.Call(t, testHandler.CreateAuroraGeneration, req).Want(http.StatusBadRequest)
+}
