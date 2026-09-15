@@ -173,11 +173,29 @@ func (h *Handler) issueJWT(user db.User) (string, error) {
 	return token.SignedString(auth.JWTSecret())
 }
 
+// nameFromEmail derives the placeholder display name for a new account: the
+// local part of the address, or the whole address when it carries no "@".
+func nameFromEmail(email string) string {
+	if at := strings.Index(email, "@"); at > 0 {
+		return email[:at]
+	}
+	return email
+}
+
 // findOrCreateUser returns the existing user for an email, or creates one if
-// none exists. isNew reports whether this call created the user — the signup
-// event fires on that edge, covering both the verification-code and Google
-// OAuth entry points.
-func (h *Handler) findOrCreateUser(ctx context.Context, email string) (user db.User, isNew bool, err error) {
+// none exists. displayName is the name the caller already knows for the
+// account — GoogleLogin passes the Google profile name, VerifyCode has none —
+// and falls back to the email prefix when empty. It only applies to a user
+// created by this call: an existing account keeps its stored name, which only
+// GoogleLogin's profile sync ever upgrades.
+//
+// It is applied before the personal-workspace provisioning below, so the space
+// is named after the display name rather than the email-prefix placeholder
+// (#13).
+//
+// isNew reports whether this call created the user — the signup event fires on
+// that edge, covering both the verification-code and Google OAuth entry points.
+func (h *Handler) findOrCreateUser(ctx context.Context, email, displayName string) (user db.User, isNew bool, err error) {
 	if auth.IsTemporarilyDisabledUserEmail(email) {
 		return db.User{}, false, auth.ErrTemporarilyDisabledUser
 	}
@@ -196,9 +214,9 @@ func (h *Handler) findOrCreateUser(ctx context.Context, email string) (user db.U
 	}
 
 	if isNew {
-		name := email
-		if at := strings.Index(email, "@"); at > 0 {
-			name = email[:at]
+		name := strings.TrimSpace(displayName)
+		if name == "" {
+			name = nameFromEmail(email)
 		}
 		created, err := h.Queries.CreateUser(ctx, db.CreateUserParams{
 			Name:  name,
@@ -428,7 +446,7 @@ func (h *Handler) VerifyCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, isNew, err := h.findOrCreateUser(r.Context(), email)
+	user, isNew, err := h.findOrCreateUser(r.Context(), email, "")
 	if err != nil {
 		if errors.Is(err, auth.ErrTemporarilyDisabledUser) {
 			writeError(w, http.StatusForbidden, auth.TemporarilyDisabledUserError)
@@ -670,7 +688,11 @@ func (h *Handler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, isNew, err := h.findOrCreateUser(r.Context(), email)
+	// Hand the profile name to provisioning up front: findOrCreateUser creates
+	// the account and its personal workspace in one step, so a name applied only
+	// afterwards would leave the space named after the email prefix (#13).
+	googleName := strings.TrimSpace(gUser.Name)
+	user, isNew, err := h.findOrCreateUser(r.Context(), email, googleName)
 	if err != nil {
 		if writeGoogleLoginActionableError(w, err) {
 			return
@@ -684,14 +706,17 @@ func (h *Handler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 		obsmetrics.RecordEvent(h.Analytics, h.Metrics, evt)
 	}
 
-	// Update name and avatar from Google profile if the user was just created
-	// (default name is email prefix) or has no avatar yet.
+	// Upgrade name and avatar from the Google profile: an account that signed up
+	// with an email code still carries the email-prefix placeholder, and any
+	// account may be missing an avatar. A user created by this request already
+	// carries the profile name, so only the avatar branch can match for them.
 	needsUpdate := false
+	previousName := user.Name
 	newName := user.Name
 	newAvatar := user.AvatarUrl
 
-	if gUser.Name != "" && user.Name == strings.Split(email, "@")[0] {
-		newName = gUser.Name
+	if googleName != "" && user.Name == nameFromEmail(email) {
+		newName = googleName
 		needsUpdate = true
 	}
 	if gUser.Picture != "" && !user.AvatarUrl.Valid {
@@ -707,6 +732,18 @@ func (h *Handler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 		})
 		if err == nil {
 			user = updated
+		}
+	}
+
+	// The personal workspace is named after the display name it was provisioned
+	// with, so an upgrade has to carry the space along — an account renamed here
+	// would otherwise keep "<email prefix> 的个人空间" for good. Best-effort, like
+	// provisioning itself: a failure just leaves the space under its old name.
+	// Gated on the write above landing, so a failed user update never renames a
+	// space out from under an unchanged row.
+	if user.Name != previousName {
+		if err := h.syncPersonalWorkspaceName(r.Context(), user.ID, previousName, user.Name); err != nil {
+			slog.Warn("failed to rename personal workspace", "error", err, "user_id", uuidToString(user.ID))
 		}
 	}
 
@@ -852,6 +889,24 @@ func (h *Handler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.userToResponse(updatedUser))
 }
 
+// personalWorkspaceSlug is the deterministic slug of a user's auto-provisioned
+// personal workspace. The full UUID (32 hex) is in the slug, not a truncated
+// prefix: a 48-bit prefix could collide across users, and a collision would hit
+// the workspace.slug unique constraint on every subsequent login, silently
+// leaving the user without a personal workspace forever.
+func personalWorkspaceSlug(userID pgtype.UUID) string {
+	return "user-" + strings.ReplaceAll(uuidToString(userID), "-", "")
+}
+
+// personalWorkspaceName derives a personal workspace's name from its owner's
+// display name.
+func personalWorkspaceName(ownerName string) string {
+	if name := strings.TrimSpace(ownerName); name != "" {
+		return name + " 的个人空间"
+	}
+	return "Personal Workspace"
+}
+
 // ensurePersonalWorkspace gives a newly-created user a single-member owner
 // workspace, so Aurora signups land with a place to create generations without
 // going through the manual workspace-creation flow. Idempotent: if the user
@@ -867,17 +922,8 @@ func (h *Handler) ensurePersonalWorkspace(ctx context.Context, userID pgtype.UUI
 		return nil
 	}
 
-	name := strings.TrimSpace(userName)
-	if name == "" {
-		name = "Personal Workspace"
-	} else {
-		name = name + " 的个人空间"
-	}
-	// Full UUID (32 hex) in the slug, not a truncated prefix: a 48-bit prefix
-	// could collide across users, and a collision would hit the workspace.slug
-	// unique constraint on every subsequent login, silently leaving the user
-	// without a personal workspace forever.
-	slug := "user-" + strings.ReplaceAll(uuidToString(userID), "-", "")
+	name := personalWorkspaceName(userName)
+	slug := personalWorkspaceSlug(userID)
 
 	tx, err := h.TxStarter.Begin(ctx)
 	if err != nil {
@@ -907,4 +953,28 @@ func (h *Handler) ensurePersonalWorkspace(ctx context.Context, userID pgtype.UUI
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// syncPersonalWorkspaceName carries a display-name upgrade through to the
+// personal workspace that was named after the old name (#13). Only a space
+// still carrying the previous derived name is renamed — one the user renamed
+// themselves is left alone — and a user who owns no personal workspace is a
+// no-op.
+func (h *Handler) syncPersonalWorkspaceName(ctx context.Context, userID pgtype.UUID, previousName, newName string) error {
+	workspace, err := h.Queries.GetWorkspaceBySlug(ctx, personalWorkspaceSlug(userID))
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if workspace.Name != personalWorkspaceName(previousName) {
+		return nil
+	}
+
+	_, err = h.Queries.UpdateWorkspace(ctx, db.UpdateWorkspaceParams{
+		ID:   workspace.ID,
+		Name: pgtype.Text{String: personalWorkspaceName(newName), Valid: true},
+	})
+	return err
 }
