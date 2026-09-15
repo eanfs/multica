@@ -2,11 +2,18 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/multica-ai/multica/server/internal/aurora"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
+
+// maxAuroraGenerationBodyBytes caps the request body for generation creation.
+// A content prompt is small; the cap keeps an unbounded write from bloating
+// the TEXT column.
+const maxAuroraGenerationBodyBytes = 256 * 1024
 
 // ListAuroraSkills returns the full catalog, including unavailable phase-2 skills.
 // The router requires authentication and workspace membership.
@@ -25,7 +32,9 @@ type AuroraGenerationResponse struct {
 
 // CreateAuroraGeneration creates a queued generation row for the current user
 // in the resolved workspace. Execution is wired in Plan 3; credits reservation
-// lands in Plan 2.
+// lands in Plan 2. The router guards this route with RequireHumanActor and
+// RequireWorkspaceMember: machine credentials cannot create generations, and
+// workspace membership is re-validated on every request.
 func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := parseUUIDOrBadRequest(w, h.resolveWorkspaceID(r), "workspace_id")
 	if !ok {
@@ -40,23 +49,29 @@ func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxAuroraGenerationBodyBytes)
 	var req struct {
 		SkillID string `json:"skillId"`
 		Prompt  string `json:"prompt"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.SkillID == "" || req.Prompt == "" {
+	if req.SkillID == "" || strings.TrimSpace(req.Prompt) == "" {
 		writeError(w, http.StatusBadRequest, "skillId and prompt are required")
 		return
 	}
-	if !aurora.Exists(req.SkillID) {
+	entry, ok := aurora.Lookup(req.SkillID)
+	if !ok {
 		writeError(w, http.StatusBadRequest, "unknown skill")
 		return
 	}
-	entry, _ := aurora.Lookup(req.SkillID)
 	if !entry.Available {
 		writeError(w, http.StatusBadRequest, "skill not available")
 		return

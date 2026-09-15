@@ -1877,7 +1877,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			// Aurora skill catalog
 			r.Get("/api/aurora/skills", h.ListAuroraSkills)
-			r.Post("/api/aurora/generations", h.CreateAuroraGeneration)
+			// Creating a generation reserves owner credits once Plan 2 lands,
+			// so it is human-only, like the billing routes above.
+			r.With(handler.RequireHumanActor).Post("/api/aurora/generations", h.CreateAuroraGeneration)
 
 			// Assignee frequency
 			r.Get("/api/assignee-frequency", h.GetAssigneeFrequency)
