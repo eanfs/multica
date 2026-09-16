@@ -309,6 +309,9 @@ deleted_aurora_assets AS (
 deleted_aurora_generations AS (
     DELETE FROM aurora_generation WHERE workspace_id = $1
 ),
+deleted_credit_ledger AS (
+    DELETE FROM credit_ledger WHERE workspace_id = $1
+),
 deleted_channel_outbound_cards AS (
     DELETE FROM channel_outbound_card_message
     WHERE chat_session_id IN (SELECT id FROM ws_sessions)
@@ -497,6 +500,9 @@ WHERE channel_media_pending_object.workspace_id = $1
 // Aurora content-creation rows are workspace-keyed leaf data with no FK, so
 // both are swept here by workspace_id. Assets reference generations by
 // application-level id only, so order is not load-bearing.
+// credit_ledger is workspace-attributed history with no FK. Only these rows go
+// with the workspace; the user's wallet (credit_balance) is user-scoped, so a
+// teardown never destroys a balance the user still owns.
 // Same no-FK chore as chat_draft_restore above. Matched on workspace_id rather
 // than the session set because that column exists precisely so this statement
 // does not have to join through chat_session, which it deletes in this same CTE.

@@ -617,6 +617,24 @@ type ContactSalesInquiry struct {
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 }
 
+type CreditBalance struct {
+	UserID         pgtype.UUID        `json:"user_id"`
+	AvailableMicro int64              `json:"available_micro"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type CreditLedger struct {
+	ID                pgtype.UUID        `json:"id"`
+	UserID            pgtype.UUID        `json:"user_id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	Kind              string             `json:"kind"`
+	AmountMicro       int64              `json:"amount_micro"`
+	BalanceAfterMicro int64              `json:"balance_after_micro"`
+	Reference         string             `json:"reference"`
+	IdempotencyKey    string             `json:"idempotency_key"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+}
+
 type DaemonConnection struct {
 	ID              pgtype.UUID        `json:"id"`
 	AgentID         pgtype.UUID        `json:"agent_id"`

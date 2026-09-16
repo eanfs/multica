@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS credit_ledger_idempotency_key_idx;

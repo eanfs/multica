@@ -329,6 +329,12 @@ deleted_aurora_assets AS (
 deleted_aurora_generations AS (
     DELETE FROM aurora_generation WHERE workspace_id = $1
 ),
+-- credit_ledger is workspace-attributed history with no FK. Only these rows go
+-- with the workspace; the user's wallet (credit_balance) is user-scoped, so a
+-- teardown never destroys a balance the user still owns.
+deleted_credit_ledger AS (
+    DELETE FROM credit_ledger WHERE workspace_id = $1
+),
 deleted_channel_outbound_cards AS (
     DELETE FROM channel_outbound_card_message
     WHERE chat_session_id IN (SELECT id FROM ws_sessions)
