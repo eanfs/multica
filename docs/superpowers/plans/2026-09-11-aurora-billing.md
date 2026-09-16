@@ -29,9 +29,9 @@
 ### Task 1: `credit_balance` 与 `credit_ledger` 表 + 唯一索引 + 并发索引注册
 
 **Files:**
-- Create: `server/migrations/453_credit_balance.up.sql` / `.down.sql`
-- Create: `server/migrations/454_credit_ledger.up.sql` / `.down.sql`
-- Create: `server/migrations/455_credit_ledger_idempotency_key_idx.up.sql` / `.down.sql`
+- Create: `server/migrations/481_credit_balance.up.sql` / `.down.sql`
+- Create: `server/migrations/482_credit_ledger.up.sql` / `.down.sql`
+- Create: `server/migrations/483_credit_ledger_idempotency_key_idx.up.sql` / `.down.sql`
 - Create: `server/pkg/db/queries/credit.sql`
 - Modify: `server/cmd/migrate/main.go`（注册并发索引 cleanup 映射）
 - 自动生成：`make sqlc`
@@ -44,7 +44,7 @@
 
 - [ ] **Step 1: 写 migration 文件**
 
-`server/migrations/453_credit_balance.up.sql`：
+`server/migrations/481_credit_balance.up.sql`：
 
 ```sql
 -- Aurora credit wallet: one row per user. available_micro is the spendable
@@ -56,13 +56,13 @@ CREATE TABLE IF NOT EXISTS credit_balance (
 );
 ```
 
-`server/migrations/453_credit_balance.down.sql`：
+`server/migrations/481_credit_balance.down.sql`：
 
 ```sql
 DROP TABLE IF EXISTS credit_balance;
 ```
 
-`server/migrations/454_credit_ledger.up.sql`：
+`server/migrations/482_credit_ledger.up.sql`：
 
 ```sql
 -- Append-only credit ledger. kind follows the cloud wallet contract
@@ -88,13 +88,13 @@ CREATE TABLE IF NOT EXISTS credit_ledger (
 );
 ```
 
-`server/migrations/454_credit_ledger.down.sql`：
+`server/migrations/482_credit_ledger.down.sql`：
 
 ```sql
 DROP TABLE IF EXISTS credit_ledger;
 ```
 
-`server/migrations/455_credit_ledger_idempotency_key_idx.up.sql`：
+`server/migrations/483_credit_ledger_idempotency_key_idx.up.sql`：
 
 ```sql
 -- Idempotency key uniqueness, in its own file because CREATE UNIQUE INDEX
@@ -103,7 +103,7 @@ CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS credit_ledger_idempotency_key_idx
     ON credit_ledger (idempotency_key);
 ```
 
-`server/migrations/455_credit_ledger_idempotency_key_idx.down.sql`：
+`server/migrations/483_credit_ledger_idempotency_key_idx.down.sql`：
 
 ```sql
 DROP INDEX CONCURRENTLY IF EXISTS credit_ledger_idempotency_key_idx;
@@ -167,7 +167,7 @@ Expected: 迁移成功应用；`TestEveryConcurrentUpBuildHasCleanup` 通过（S
 - [ ] **Step 6: Commit**
 
 ```bash
-git add server/migrations/453_credit_balance.* server/migrations/454_credit_ledger.* server/migrations/455_credit_ledger_idempotency_key_idx.* server/pkg/db/queries/credit.sql server/pkg/db/generated/ server/cmd/migrate/main.go
+git add server/migrations/481_credit_balance.* server/migrations/482_credit_ledger.* server/migrations/483_credit_ledger_idempotency_key_idx.* server/pkg/db/queries/credit.sql server/pkg/db/generated/ server/cmd/migrate/main.go
 git commit -m "feat(aurora): add credit balance and ledger tables"
 ```
 
@@ -177,7 +177,7 @@ git commit -m "feat(aurora): add credit balance and ledger tables"
 
 **Files:**
 - Create: `server/internal/aurora/credit.go`
-- Create: `server/internal/aurora/credit_test.go`
+- Modify: `server/internal/handler/aurora_test.go`（追加 credit service 测试与 `creditTestReset` 辅助函数）
 - Modify: `server/internal/handler/handler.go`（在 `Handler` 加 `Credit *aurora.CreditService` 字段，`New` 里构造）
 
 **Interfaces:**
@@ -191,104 +191,104 @@ git commit -m "feat(aurora): add credit balance and ledger tables"
 
 - [ ] **Step 1: 写失败测试**
 
-`server/internal/aurora/credit_test.go`（package `aurora_test`，用 `DATABASE_URL` 建池，跳过逻辑同 handler TestMain；raw pgxpool + fallback DSN 是仓库先例，见 `internal/service/task_claim_race_test.go:22-43`）：
+`server/internal/handler/aurora_test.go` 追加（package `handler`，复用本包既有基建 `testHandler` / `testPool` / `testUserID` / `testWorkspaceID` 与包内 `parseUUID`，不新建 DB 池、不引入 `DATABASE_URL`）。该文件 import 块需补 `"context"` 与 `github.com/multica-ai/multica/server/internal/aurora`：
 
 ```go
-package aurora_test
-
-import (
-	"context"
-	"os"
-	"testing"
-
-	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/multica-ai/multica/server/internal/aurora"
-	"github.com/multica-ai/multica/server/internal/util"
-	db "github.com/multica-ai/multica/server/pkg/db/generated"
-)
-
-func newTestCreditService(t *testing.T) (*aurora.CreditService, *pgxpool.Pool) {
+// creditTestReset empties the fixture user's credit wallet so each test starts
+// from a known-empty state, and empties it again on cleanup. credit_balance and
+// credit_ledger carry no foreign key to user, so the row fixture's own cleanup
+// would otherwise leave these rows behind.
+func creditTestReset(t *testing.T) {
 	t.Helper()
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://multica:multica@localhost:5432/multica?sslmode=disable"
+	reset := func() {
+		ctx := context.Background()
+		_, _ = testPool.Exec(ctx, `DELETE FROM credit_ledger WHERE user_id = $1`, testUserID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM credit_balance WHERE user_id = $1`, testUserID)
 	}
-	pool, err := pgxpool.New(context.Background(), dbURL)
-	if err != nil {
-		t.Skipf("no db: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return aurora.NewCreditService(db.New(pool), pool), pool
+	reset()
+	t.Cleanup(reset)
 }
 
-func newUUID(t *testing.T, pool *pgxpool.Pool) pgtype.UUID {
-	t.Helper()
-	var id string
-	if err := pool.QueryRow(context.Background(), `SELECT gen_random_uuid()::text`).Scan(&id); err != nil {
-		t.Fatal(err)
-	}
-	return util.MustParseUUID(id)
-}
+func TestAuroraCreditReserveAndRefundAreIdempotent(t *testing.T) {
+	creditTestReset(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
 
-func TestReserveAndRefundAreIdempotent(t *testing.T) {
-	svc, pool := newTestCreditService(t)
-	user := newUUID(t, pool)
-	ws := newUUID(t, pool)
-
-	if err := svc.Grant(context.Background(), user, ws, 1000, aurora.LedgerKindAdjustment, "seed"); err != nil {
+	if err := testHandler.Credit.Grant(ctx, user, ws, 1000, aurora.LedgerKindAdjustment, "seed"); err != nil {
 		t.Fatalf("Grant: %v", err)
 	}
-	if err := svc.Reserve(context.Background(), user, ws, 300, "gen-1"); err != nil {
+	if err := testHandler.Credit.Reserve(ctx, user, ws, 300, "gen-1"); err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
 	// 幂等：重复 reserve 同 reference 不应再扣。
-	if err := svc.Reserve(context.Background(), user, ws, 300, "gen-1"); err != nil {
+	if err := testHandler.Credit.Reserve(ctx, user, ws, 300, "gen-1"); err != nil {
 		t.Fatalf("Reserve retry: %v", err)
 	}
-	bal, _ := svc.Balance(context.Background(), user)
+	bal, err := testHandler.Credit.Balance(ctx, user)
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
 	if bal != 700 {
 		t.Fatalf("balance after idempotent reserve = %d, want 700", bal)
 	}
 
-	if err := svc.Refund(context.Background(), user, ws, 300, "gen-1"); err != nil {
+	if err := testHandler.Credit.Refund(ctx, user, ws, 300, "gen-1"); err != nil {
 		t.Fatalf("Refund: %v", err)
 	}
 	// 幂等：重复 refund 不应再加。
-	if err := svc.Refund(context.Background(), user, ws, 300, "gen-1"); err != nil {
+	if err := testHandler.Credit.Refund(ctx, user, ws, 300, "gen-1"); err != nil {
 		t.Fatalf("Refund retry: %v", err)
 	}
-	bal, _ = svc.Balance(context.Background(), user)
+	bal, err = testHandler.Credit.Balance(ctx, user)
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
 	if bal != 1000 {
 		t.Fatalf("balance after refund = %d, want 1000", bal)
 	}
 }
 
-func TestReserveFailsWhenInsufficient(t *testing.T) {
-	svc, pool := newTestCreditService(t)
-	user := newUUID(t, pool)
-	ws := newUUID(t, pool)
-	if err := svc.Reserve(context.Background(), user, ws, 100, "gen-x"); err != aurora.ErrInsufficientCredits {
+func TestAuroraCreditReserveFailsWhenInsufficient(t *testing.T) {
+	creditTestReset(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	if err := testHandler.Credit.Reserve(ctx, user, ws, 100, "gen-x"); err != aurora.ErrInsufficientCredits {
 		t.Fatalf("Reserve with empty balance: err = %v, want ErrInsufficientCredits", err)
 	}
 }
 
-func TestGrantRejectsInvalidKind(t *testing.T) {
-	svc, pool := newTestCreditService(t)
-	user := newUUID(t, pool)
-	ws := newUUID(t, pool)
-	if err := svc.Grant(context.Background(), user, ws, 100, "bogus", "seed"); err == nil {
+func TestAuroraCreditGrantRejectsInvalidKind(t *testing.T) {
+	creditTestReset(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	if err := testHandler.Credit.Grant(ctx, user, ws, 100, "bogus", "seed"); err == nil {
 		t.Fatal("Grant with invalid kind should fail")
+	}
+}
+
+func TestAuroraCreditBalanceIsZeroWithoutARow(t *testing.T) {
+	creditTestReset(t)
+	bal, err := testHandler.Credit.Balance(context.Background(), parseUUID(testUserID))
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if bal != 0 {
+		t.Fatalf("balance for a user with no wallet row = %d, want 0", bal)
 	}
 }
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd server && go test ./internal/aurora/ -run 'TestReserve|TestGrant'`
-Expected: 编译失败（`CreditService` 不存在）。
+Run: `cd server && go test ./internal/handler/ -run 'TestAuroraCredit'`
+Expected: 编译失败（`Handler.Credit` 字段不存在）。
 
-- [ ] **Step 3: 实现**
+- [ ] **Step 3: 实现 `credit.go` 并接入 `Handler`**
 
 `server/internal/aurora/credit.go`：
 
@@ -424,17 +424,17 @@ func (s *CreditService) adjust(ctx context.Context, userID, workspaceID pgtype.U
 
 > `DeductCreditBalanceParams` / `CreditCreditBalanceParams` 字段名（预期 `UserID`/`AmountMicro`）以 `make sqlc` 生成为准（Task 1 Step 4）。
 
+接着接入 `server/internal/handler/handler.go`：在 `Handler` 结构体加 `Credit *aurora.CreditService`，`New` 里加 `Credit: aurora.NewCreditService(queries, txStarter)`（`txStarter` 已实现 `Begin`，`handler.go:58-59`）。测试通过同包的 `testHandler.Credit` 访问该字段，**这一步必须在 Step 4 之前完成，否则 Step 1 的测试编译不过**。
+
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cd server && go test ./internal/aurora/ -run 'TestReserve|TestGrant'`
-Expected: 三个测试 PASS。
+Run: `cd server && go test ./internal/handler/ -run 'TestAuroraCredit'`
+Expected: 四个测试 PASS。
 
-- [ ] **Step 5: 接入 `Handler` 并 Commit**
-
-`server/internal/handler/handler.go`：在 `Handler` 结构体加 `Credit *aurora.CreditService`，`New` 里加 `Credit: aurora.NewCreditService(queries, txStarter)`（`txStarter` 已实现 `Begin`，`handler.go:58-59`）。
+- [ ] **Step 5: Commit**
 
 ```bash
-git add server/internal/aurora/credit.go server/internal/aurora/credit_test.go server/internal/handler/handler.go
+git add server/internal/aurora/credit.go server/internal/handler/aurora_test.go server/internal/handler/handler.go
 git commit -m "feat(aurora): idempotent credit ledger service"
 ```
 
@@ -587,3 +587,14 @@ Plan 2 完成。后续顺序：Plan 3（执行层）→ Plan 3.5（进度与作�
 | Task 2 | 修复三重缺陷：符号反转（`Reserve`/`Refund`/`Grant` 的 delta 传反）、幂等失效（余额先改、冲突被当错误）、`ON CONFLICT DO NOTHING` 的 `pgx.ErrNoRows` 语义（仓库先例 `CreateRetryTask`）；改为快速路径预查 + 冲突视为已处理；`ParseUUID` 包装移除（测试直接用 `util.MustParseUUID`）；`_ = svc.Grant` 忽略错误改为显式检查；补 `TestGrantRejectsInvalidKind` |
 | Task 3 | 流水响应加 `reference` 字段 |
 | Deferred | entitlement fail-open 与 `normalizePolicy` 双 gate 硬校验已核实并注明 |
+
+## 修订记录（2026-09-16 拆票前回写）
+
+| 处 | 修正 |
+|----|------|
+| Task 1 | 迁移序号 `453/454/455` → `481/482/483`。原因不是「序号顺延」而是**冲突**：现存 453/454/455 分别是 `drop_pending_issue_agent_unique`、`drop_comment_content_bigm_index`、`drop_comment_content_trgm_index`；仓库 head 为 480，下一个可用是 481。照原文实现会撞版本冲突 |
+| Task 2 | 测试接缝从 `server/internal/aurora/credit_test.go`（raw pgxpool + `DATABASE_URL` + `t.Skipf`）改为 **handler 层接缝**：测试写在 `server/internal/handler/aurora_test.go`，通过 `testHandler.Credit` 调 service，用 `parseUUID(testUserID)` / `parseUUID(testWorkspaceID)` 取夹具身份。理由：`internal/aurora` 目前是纯逻辑无 DB 包，不值得为测试引入 `DATABASE_URL` 依赖；且 handler 层基建（Plan 1）已就绪。Task 2 原有的「修复三重缺陷」条目仍然有效，本次只换测试位置，不改 `credit.go` 语义 |
+| Task 2 | 新增 `creditTestReset(t)` 辅助函数：`credit_balance` / `credit_ledger` 没有指向 `user` 的外键，row fixture 自带的 cleanup 不会删这两张表的行，必须在测试前后显式清空夹具用户的账本 |
+| Task 2 | Handler 接线从 Step 5 提前进 Step 3。原因：新测试直接读 `testHandler.Credit`，若接线仍留在最后一步，Step 4 的「确认通过」会编译失败 |
+| Task 2 | 测试函数加 `Aurora` 前缀（`TestAuroraCreditReserveAndRefundAreIdempotent` 等），避免与 handler 包内其他测试名撞车；补 `TestAuroraCreditBalanceIsZeroWithoutARow` 覆盖「无钱包行返回 0」 |
+| Task 2 | 因测试改到 handler 包，不再需要 `pgxpool`/`os`/`pgtype`/`util.MustParseUUID` 这些 import；该文件 import 块只需补 `"context"` 与 `internal/aurora` |
