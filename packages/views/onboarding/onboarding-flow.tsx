@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { useAuthStore } from "@multica/core/auth";
 import {
@@ -80,6 +80,15 @@ function mergeQuestionnaire(
 }
 
 /**
+ * Whether the About-you step has been answered — the trace that this user has
+ * started onboarding before. Read off the merged answers rather than the raw
+ * stored object so an earlier version's shape can't read as progress.
+ */
+function hasStartedOnboarding(answers: QuestionnaireAnswers): boolean {
+  return answers.role !== null || answers.use_case.length > 0;
+}
+
+/**
  * Shell's onComplete contract carries the workspace plus an optional
  * destination. Runtime-connected onboarding opens the real Mika conversation
  * started by the final step; other exits land on the workspace issue list.
@@ -154,25 +163,49 @@ function OnboardingStepFlow({
     isNewWorkspace ? "workspace" : "welcome",
   );
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
+  // Set once this run names its own workspace. A run that creates one keeps the
+  // workspace step in its list; every other run — one where the user already has
+  // a workspace, which after signup provisioning is all of them (#12) — drops
+  // it, because there is nothing to name and offering the create form beside an
+  // existing workspace is what handed new users a second one.
+  const [createdWorkspace, setCreatedWorkspace] = useState(false);
   // Raised by whichever step has a request in flight; locks Back and the
   // rail. Only the workspace step sets it today.
   const [stepBusy, setStepBusy] = useState(false);
-  const bootstrapMika = useBootstrapMika(workspace?.id ?? "");
 
-  // Fetched at Step 0 + Step 2. Step 2 uses it to detect a pre-existing
-  // workspace from an earlier abandoned onboarding (so StepWorkspace shows
-  // "Continue with {name}" instead of CreateWorkspaceForm — avoiding the
-  // slug conflict that creation would hit). Step 0 uses it to decide
-  // whether to render the "I've done this before" skip button — only
-  // shown when the user already has at least one workspace, otherwise
-  // skipping would land them in limbo.
+  // Fetched at Step 0 + Step 2. Step 2 offers the pre-existing workspace as an
+  // alternative to creating one (avoiding the slug conflict that creation would
+  // hit). A workspace already in hand is also what the whole run walks with.
   const { workspaces, ready: workspacesReady } = useWorkspaceList({
     enabled: step === "welcome" || step === "workspace",
   });
   const existingWorkspace = isNewWorkspace
     ? workspace
     : (workspace ?? workspaces[0] ?? null);
-  const canSkipWelcome = workspacesReady && workspaces.length > 0;
+  const bootstrapMika = useBootstrapMika(existingWorkspace?.id ?? "");
+  // "I've done this before" is for someone who already started onboarding in an
+  // earlier session and wants to land in what they have. A workspace no longer
+  // distinguishes them — every signup is provisioned one — so the trace of that
+  // start is an answered questionnaire, which only a run that got past About
+  // you has.
+  const canSkipWelcome =
+    workspacesReady &&
+    workspaces.length > 0 &&
+    hasStartedOnboarding(answers);
+
+  // The steps this run walks. Deriving the list in one place, rather than
+  // filtering at each navigation site, is what keeps forward, back and the rail
+  // agreeing — and it follows the workspaces the run currently knows about
+  // rather than being frozen when the run starts, so a workspace list that only
+  // resolves during About you still drops the step before the user can reach it.
+  const skipsWorkspaceStep = existingWorkspace != null && !createdWorkspace;
+  const steps = useMemo(
+    () =>
+      skipsWorkspaceStep
+        ? ONBOARDING_STEP_ORDER.filter((s) => s !== "workspace")
+        : ONBOARDING_STEP_ORDER,
+    [skipsWorkspaceStep],
+  );
 
   // The `runtimeInstructions` slot is only plumbed by the web shell
   // (desktop bundles a daemon, so a CLI install card would be noise
@@ -180,15 +213,18 @@ function OnboardingStepFlow({
   // introducing a redundant prop.
   const isWeb = !!runtimeInstructions;
 
-  // Derive "what comes after `from`" from ONBOARDING_STEP_ORDER so
+  // Derive "what comes after `from`" from this run's step list so
   // inserting/reordering a persisted step only requires editing the
-  // canonical array. Returns null if `from` is the last persisted step
-  // or not in the array (callers fall back to bespoke routing).
-  const nextStep = useCallback((from: OnboardingStep): OnboardingStep | null => {
-    const idx = ONBOARDING_STEP_ORDER.indexOf(from);
-    if (idx < 0 || idx >= ONBOARDING_STEP_ORDER.length - 1) return null;
-    return ONBOARDING_STEP_ORDER[idx + 1]!;
-  }, []);
+  // canonical array. Returns null if `from` is the last step of the run
+  // or not in it (callers fall back to bespoke routing).
+  const nextStep = useCallback(
+    (from: OnboardingStep): OnboardingStep | null => {
+      const idx = steps.indexOf(from);
+      if (idx < 0 || idx >= steps.length - 1) return null;
+      return steps[idx + 1]!;
+    },
+    [steps],
+  );
 
   const advanceFrom = useCallback(
     (from: OnboardingStep) => {
@@ -241,6 +277,7 @@ function OnboardingStepFlow({
   const handleWorkspaceCreated = useCallback(
     (ws: Workspace) => {
       setWorkspace(ws);
+      setCreatedWorkspace(true);
       // Deliberately NOT setCurrentWorkspace: that singleton is also written by
       // the desktop tab system, which reclaims it whenever the new workspace
       // has no tab group yet. Racing it sent the rest of this flow — Mika, the
@@ -254,7 +291,7 @@ function OnboardingStepFlow({
 
   const handleRuntimeNext = useCallback(
     async (rt: AgentRuntime | null, model?: string) => {
-      if (!workspace) return;
+      if (!existingWorkspace) return;
       // A connected runtime provisions only Mika and immediately opens the
       // real interactive onboarding conversation. Specialists are created
       // later, only when the member's actual workflow justifies them.
@@ -266,13 +303,13 @@ function OnboardingStepFlow({
           // reliable role/use-case context instead of racing the last PATCH.
           await saveQuestionnaire(answers);
           const result = await bootstrapMika.mutateAsync({
-            workspaceSlug: workspace.slug,
+            workspaceSlug: existingWorkspace.slug,
             runtimeId: rt.id,
             model,
             ...getMikaOnboarding(contentLang),
           });
-          await completeOnboarding("full", workspace.id);
-          onComplete(workspace, {
+          await completeOnboarding("full", existingWorkspace.id);
+          onComplete(existingWorkspace, {
             kind: "chat",
             sessionId: result.chatSession.id,
           });
@@ -287,7 +324,7 @@ function OnboardingStepFlow({
         return;
       }
       try {
-        await completeOnboarding("runtime_skipped", workspace.id);
+        await completeOnboarding("runtime_skipped", existingWorkspace.id);
       } catch (err) {
         toast.error(
           err instanceof Error ? err.message : t(($) => $.errors.skip_failed),
@@ -295,12 +332,12 @@ function OnboardingStepFlow({
         return;
       }
       useWelcomeStore.getState().set({
-        workspaceId: workspace.id,
+        workspaceId: existingWorkspace.id,
         choice: "skip",
       });
-      onComplete(workspace, undefined);
+      onComplete(existingWorkspace, undefined);
     },
-    [answers, bootstrapMika, i18n.language, workspace, onComplete, t],
+    [existingWorkspace, answers, bootstrapMika, i18n.language, onComplete, t],
   );
 
   const handleBack = useCallback((from: OnboardingStep) => {
@@ -313,15 +350,15 @@ function OnboardingStepFlow({
       onCancel?.();
       return;
     }
-    const idx = ONBOARDING_STEP_ORDER.indexOf(from);
+    const idx = steps.indexOf(from);
     if (idx <= 0) {
       // About you (the first persisted step) returns to Welcome.
       setStep("welcome");
       return;
     }
-    const prev = ONBOARDING_STEP_ORDER[idx - 1]!;
+    const prev = steps[idx - 1]!;
     setStep(prev);
-  }, [isNewWorkspace, onCancel]);
+  }, [isNewWorkspace, onCancel, steps]);
 
   // Once a workspace exists there is nothing left to cancel, so new-workspace
   // mode drops the back affordance on the runtime step. Walking back would
@@ -377,6 +414,7 @@ function OnboardingStepFlow({
   return (
     <StepShell
       currentStep={step}
+      steps={steps}
       onBack={stepBack}
       backDisabled={stepBusy}
       onStepChange={handleStepChange}
@@ -405,19 +443,19 @@ function OnboardingStepFlow({
             - Web offers Download / CLI / Cloud; under the CLI path it embeds
               the live probe, and Cloud is a soft exit via the waitlist. */}
       {step === "runtime" &&
-        workspace &&
+        existingWorkspace &&
         (!runtimeInstructions ? (
           <StepRuntimeConnect
-            wsId={workspace.id}
-            wsSlug={workspace.slug}
+            wsId={existingWorkspace.id}
+            wsSlug={existingWorkspace.slug}
             onNext={handleRuntimeNext}
             onRefresh={onRuntimeRefresh}
             runtimesPending={runtimesPending}
           />
         ) : (
           <StepPlatformFork
-            wsId={workspace.id}
-            wsSlug={workspace.slug}
+            wsId={existingWorkspace.id}
+            wsSlug={existingWorkspace.slug}
             onNext={handleRuntimeNext}
             cliInstructions={runtimeInstructions}
           />

@@ -2,10 +2,7 @@
 
 import type { CSSProperties, ReactNode } from "react";
 import { ArrowLeft, Check } from "lucide-react";
-import {
-  ONBOARDING_STEP_ORDER,
-  type OnboardingStep,
-} from "@multica/core/onboarding";
+import type { OnboardingStep } from "@multica/core/onboarding";
 import { cn } from "@multica/ui/lib/utils";
 import { Button } from "@multica/ui/components/ui/button";
 import { MulticaIcon } from "@multica/ui/components/common/multica-icon";
@@ -61,11 +58,14 @@ import { useT } from "../../i18n";
  */
 export function StepProgressBar({
   currentStep,
+  steps,
   onBack,
   backDisabled,
   footer,
 }: {
   currentStep: OnboardingStep;
+  /** The steps this run walks — see `StepShell`. */
+  steps: readonly OnboardingStep[];
   onBack?: () => void;
   backDisabled?: boolean;
   /** Same slot the rail's footer takes — the Log out escape hatch. It has to
@@ -74,11 +74,8 @@ export function StepProgressBar({
   footer?: ReactNode;
 }) {
   const { t } = useT("onboarding");
-  const currentIndex = Math.max(0, ONBOARDING_STEP_ORDER.indexOf(currentStep));
-  const key = ONBOARDING_STEP_ORDER[currentIndex] as Exclude<
-    OnboardingStep,
-    "welcome"
-  >;
+  const currentIndex = Math.max(0, steps.indexOf(currentStep));
+  const key = steps[currentIndex] as Exclude<OnboardingStep, "welcome">;
 
   return (
     <div className="mb-6 flex items-center gap-3 md:hidden">
@@ -100,7 +97,7 @@ export function StepProgressBar({
         aria-hidden
         className="flex flex-1 items-center gap-1.5"
       >
-        {ONBOARDING_STEP_ORDER.map((stepId, index) => (
+        {steps.map((stepId, index) => (
           <span
             key={stepId}
             className={cn(
@@ -120,12 +117,15 @@ export function StepProgressBar({
 
 export function StepSidebar({
   currentStep,
+  steps,
   onBack,
   backDisabled,
   onStepChange,
   footer,
 }: {
   currentStep: OnboardingStep;
+  /** The steps this run walks — see `StepShell`. */
+  steps: readonly OnboardingStep[];
   onBack?: () => void;
   /** Workspace step disables Back while its create request is in flight. */
   backDisabled?: boolean;
@@ -138,7 +138,7 @@ export function StepSidebar({
   footer?: ReactNode;
 }) {
   const { t } = useT("onboarding");
-  const currentIndex = Math.max(0, ONBOARDING_STEP_ORDER.indexOf(currentStep));
+  const currentIndex = Math.max(0, steps.indexOf(currentStep));
 
   return (
     // Hidden below `md`, where it does not fit: the panel never went under
@@ -194,10 +194,10 @@ export function StepSidebar({
               className="flex w-full flex-col items-start justify-center gap-0"
             >
               <StepperNav className="w-full">
-                {ONBOARDING_STEP_ORDER.map((stepId, index) => {
+                {steps.map((stepId, index) => {
                   const isDone = index < currentIndex;
                   const isCurrent = index === currentIndex;
-                  const isLast = index === ONBOARDING_STEP_ORDER.length - 1;
+                  const isLast = index === steps.length - 1;
                   const canReturn = isDone && !!onStepChange && !backDisabled;
                   const key = stepId as Exclude<OnboardingStep, "welcome">;
 

@@ -67,16 +67,34 @@ test("onboarding — structural blocks match the column width on every step", as
   await page.getByRole("checkbox", { name: /Ship code with AI agents/i }).click();
   await page.getByRole("button", { name: "Continue" }).click();
 
-  await page.getByRole("heading", { name: /Name your workspace/i }).waitFor();
-  await expectFullWidthBlocks(page, "workspace");
-
-  await page.getByRole("textbox").first().fill(`Width Guard ${Date.now()}`);
-  await page.getByRole("button", { name: /^Create /i }).click();
-
+  // Straight to the runtime step: signup already provisioned this user a
+  // workspace, so first-run onboarding has no workspace step to walk (#12).
   await page
     .getByRole("heading", { name: /Connect a computer/i })
     .waitFor({ timeout: 20000 });
   await expectFullWidthBlocks(page, "runtime");
+});
+
+// The workspace form is no longer part of first-run onboarding — the
+// provisioned workspace means there is nothing to name — so its width guard
+// has to run where that step still renders: the explicit "create another
+// workspace" entry point, which enters the flow at the workspace step.
+test("onboarding — the workspace step's blocks match the column width", async ({
+  page,
+}) => {
+  const api = new TestApiClient();
+  await api.login(`ws-widths-${Date.now()}@localhost`, "Workspace Width Guard");
+  const token = api.getToken();
+  // `/workspaces/new` is the already-onboarded entry point; the hard onboarding
+  // gate would otherwise send this fresh user back to /onboarding.
+  await api.markUserOnboarded();
+
+  await page.addInitScript((t) => localStorage.setItem("multica_token", t), token);
+  await page.goto("/workspaces/new", { waitUntil: "domcontentloaded" });
+  await page
+    .getByRole("heading", { name: /Name your workspace/i })
+    .waitFor({ timeout: 20000 });
+  await expectFullWidthBlocks(page, "workspace");
 });
 
 // The rail is meant to persist across steps. It did not: every step rendered
@@ -108,7 +126,9 @@ test("onboarding — the shell survives step changes instead of re-mounting", as
   await page.getByRole("radio", { name: /Engineer \/ developer/i }).click();
   await page.getByRole("checkbox", { name: /Ship code with AI agents/i }).click();
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByRole("heading", { name: /Name your workspace/i }).waitFor();
+  await page
+    .getByRole("heading", { name: /Connect a computer/i })
+    .waitFor({ timeout: 20000 });
 
   await expect(
     page.locator("aside[data-persist-probe]"),

@@ -4,7 +4,10 @@ import { useRef, type ReactNode } from "react";
 import { cn } from "@multica/ui/lib/utils";
 import { useScrollFade } from "@multica/ui/hooks/use-scroll-fade";
 import { DragStrip } from "@multica/views/platform";
-import type { OnboardingStep } from "@multica/core/onboarding";
+import {
+  ONBOARDING_STEP_ORDER,
+  type OnboardingStep,
+} from "@multica/core/onboarding";
 import { StepProgressBar, StepSidebar } from "./step-sidebar";
 
 /**
@@ -95,6 +98,7 @@ export function StepFooter({
  */
 export function StepShell({
   currentStep,
+  steps = ONBOARDING_STEP_ORDER,
   onBack,
   backDisabled,
   onStepChange,
@@ -102,6 +106,11 @@ export function StepShell({
   children,
 }: {
   currentStep: OnboardingStep;
+  /** The steps this run walks. A run that adopts an existing workspace has no
+   *  use for the workspace step, and the rail has to drop it too rather than
+   *  showing a step the user can never reach. Defaults to the canonical
+   *  order for callers with nothing to skip. */
+  steps?: readonly OnboardingStep[];
   onBack?: () => void;
   /** Workspace step disables Back while its create request is in flight. */
   backDisabled?: boolean;
@@ -129,6 +138,7 @@ export function StepShell({
       <div className="flex min-h-0 flex-1">
         <StepSidebar
           currentStep={currentStep}
+          steps={steps}
           onBack={onBack}
           backDisabled={backDisabled}
           onStepChange={onStepChange}
@@ -143,6 +153,7 @@ export function StepShell({
           <div className={STEP_COLUMN}>
             <StepProgressBar
               currentStep={currentStep}
+              steps={steps}
               onBack={onBack}
               backDisabled={backDisabled}
               footer={chromeFooter}
