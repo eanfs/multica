@@ -6,12 +6,16 @@
 -- id, or a Plan 5 grant key ("sub:<userID>:<YYYY-MM>", "signup:<userID>",
 -- "<userID>:<YYYY-MM>") — so the transactions UI can label each row; the
 -- UI falls back to kind-based labels for non-generation references.
+-- workspace_id is nullable, not NOT NULL: workspace teardown detaches ledger
+-- rows (workspace_id := NULL) instead of deleting them, so a user's credit
+-- history — and with it the idempotency keys that make retries safe — survives
+-- deleting the workspace it was attributed to.
 -- idempotency_key makes retries safe; the unique index enforcing it lives
 -- in its own migration file.
 CREATE TABLE IF NOT EXISTS credit_ledger (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL,
-    workspace_id UUID NOT NULL,
+    workspace_id UUID,
     kind TEXT NOT NULL,
     amount_micro BIGINT NOT NULL,
     balance_after_micro BIGINT NOT NULL,

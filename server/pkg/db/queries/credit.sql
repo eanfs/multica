@@ -7,13 +7,13 @@ ON CONFLICT (user_id) DO NOTHING;
 
 -- name: DeductCreditBalance :one
 UPDATE credit_balance
-SET available_micro = available_micro - $2, updated_at = now()
-WHERE user_id = $1 AND available_micro >= $2
+SET available_micro = available_micro - sqlc.arg('amount_micro'), updated_at = now()
+WHERE user_id = $1 AND available_micro >= sqlc.arg('amount_micro')
 RETURNING available_micro;
 
 -- name: CreditCreditBalance :one
 UPDATE credit_balance
-SET available_micro = available_micro + $2, updated_at = now()
+SET available_micro = available_micro + sqlc.arg('amount_micro'), updated_at = now()
 WHERE user_id = $1
 RETURNING available_micro;
 

@@ -19,12 +19,12 @@ RETURNING available_micro
 `
 
 type CreditCreditBalanceParams struct {
-	UserID         pgtype.UUID `json:"user_id"`
-	AvailableMicro int64       `json:"available_micro"`
+	UserID      pgtype.UUID `json:"user_id"`
+	AmountMicro int64       `json:"amount_micro"`
 }
 
 func (q *Queries) CreditCreditBalance(ctx context.Context, arg CreditCreditBalanceParams) (int64, error) {
-	row := q.db.QueryRow(ctx, creditCreditBalance, arg.UserID, arg.AvailableMicro)
+	row := q.db.QueryRow(ctx, creditCreditBalance, arg.UserID, arg.AmountMicro)
 	var available_micro int64
 	err := row.Scan(&available_micro)
 	return available_micro, err
@@ -38,12 +38,12 @@ RETURNING available_micro
 `
 
 type DeductCreditBalanceParams struct {
-	UserID         pgtype.UUID `json:"user_id"`
-	AvailableMicro int64       `json:"available_micro"`
+	UserID      pgtype.UUID `json:"user_id"`
+	AmountMicro int64       `json:"amount_micro"`
 }
 
 func (q *Queries) DeductCreditBalance(ctx context.Context, arg DeductCreditBalanceParams) (int64, error) {
-	row := q.db.QueryRow(ctx, deductCreditBalance, arg.UserID, arg.AvailableMicro)
+	row := q.db.QueryRow(ctx, deductCreditBalance, arg.UserID, arg.AmountMicro)
 	var available_micro int64
 	err := row.Scan(&available_micro)
 	return available_micro, err
