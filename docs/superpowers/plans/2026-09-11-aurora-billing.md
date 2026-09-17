@@ -73,12 +73,16 @@ DROP TABLE IF EXISTS credit_balance;
 -- id, or a Plan 5 grant key ("sub:<userID>:<YYYY-MM>", "signup:<userID>",
 -- "<userID>:<YYYY-MM>") — so the transactions UI can label each row; the
 -- UI falls back to kind-based labels for non-generation references.
+-- workspace_id is nullable, not NOT NULL: workspace teardown detaches ledger
+-- rows (workspace_id := NULL) instead of deleting them, so a user's credit
+-- history — and with it the idempotency keys that make retries safe — survives
+-- deleting the workspace it was attributed to.
 -- idempotency_key makes retries safe; the unique index enforcing it lives
 -- in its own migration file.
 CREATE TABLE IF NOT EXISTS credit_ledger (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL,
-    workspace_id UUID NOT NULL,
+    workspace_id UUID,
     kind TEXT NOT NULL,
     amount_micro BIGINT NOT NULL,
     balance_after_micro BIGINT NOT NULL,
@@ -566,6 +570,7 @@ git commit -m "feat(aurora): billing balance and transactions endpoints"
 - **权益门禁 enforcement**：self-host 下 `entitlement` 云 URL 未配置即 fail-open——`BaseURL` 为空 → `enabled=false`、Provider 为 nil、所有 gate 返回 `ActionOff`（`entitlement/client.go:48-50/95-100`，`router.go:459-463`）。另注意 `normalizePolicy` 目前**硬性要求两个 gate 都在**（`client.go:278-299`）：将来加 `GateAurora*` 时旧 policy 会整体被拒，需与 `normalizePolicy` 同 PR 修改（Plan 5/safety 处理）。
 - **`aurora_generation.credits_reserved/charged` 写入**：由 Plan 3（执行层）在入队时调 `h.Credit.Reserve` 并把预留金额写回 generation 行；失败/卡死退款也由 Plan 3 Task 4 接现有 sweeper 终态路径。
 - **两步冻结账本**：二期（spec §6.2）；`expire` 交易已由 Plan 5 Task 4 实现（`LedgerKindExpire` + `Expire` + 月结算循环）。
+- **`credit_ledger` 索引候选（Task 1 有意不建，按需再补）**：两条已确认走 `Seq Scan` 的路径。其一，teardown 的 detach 语句 `UPDATE credit_ledger SET workspace_id = NULL WHERE workspace_id = $1` 没有可用索引（`EXPLAIN` 确认全表扫）；最省的形式是**部分索引** `... (workspace_id) WHERE workspace_id IS NOT NULL`——已 detach 的行不需要进索引，先例 `211_client_usage_daily_workspace_index.up.sql`。其二，`ListCreditTransactions` 的 `WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2` 同样无支撑索引，随流水增长会退化为全表扫 + 排序（Task 1 的取舍是账本初期足够小）。补的时候按 Task 1 Step 2 的同一规则：独立 migration 文件 + `CREATE [UNIQUE] INDEX CONCURRENTLY` + 注册 `concurrentIndexCleanups`。
 
 ## Self-Review
 
@@ -598,3 +603,13 @@ Plan 2 完成。后续顺序：Plan 3（执行层）→ Plan 3.5（进度与作�
 | Task 2 | Handler 接线从 Step 5 提前进 Step 3。原因：新测试直接读 `testHandler.Credit`，若接线仍留在最后一步，Step 4 的「确认通过」会编译失败 |
 | Task 2 | 测试函数加 `Aurora` 前缀（`TestAuroraCreditReserveAndRefundAreIdempotent` 等），避免与 handler 包内其他测试名撞车；补 `TestAuroraCreditBalanceIsZeroWithoutARow` 覆盖「无钱包行返回 0」 |
 | Task 2 | 因测试改到 handler 包，不再需要 `pgxpool`/`os`/`pgtype`/`util.MustParseUUID` 这些 import；该文件 import 块只需补 `"context"` 与 `internal/aurora` |
+
+## 修订记录（2026-09-17 全分支评审回写）
+
+| 处 | 修正 |
+|----|------|
+| Task 1 | `credit_ledger.workspace_id` 由 `NOT NULL` 改为**可空**，manifest 分类同时定为 `workspaceDeleteDetach`（原实现取 `workspaceDelete`）。原因：按 `workspaceDelete` 删行会把该行里的幂等凭据一并删掉——`GetCreditLedgerByIdempotencyKey` 快速路径与 `idempotency_key` 唯一索引都长在这一行上；Stripe webhook 的 workspace 删除后重试（Stripe 会重试数天）两条守卫全部落空，会**重复入账**，直接违反 Global Constraints 的账本幂等约束。改为 detach（`UPDATE credit_ledger SET workspace_id = NULL WHERE workspace_id = $1`，与既有 `detached_feedback` / `detached_client_usage` 同形同命名）后，账本与幂等键随 workspace 删除而存续 |
+| Task 1 | `DeductCreditBalance` / `CreditCreditBalance` 的金额参数改用 `sqlc.arg('amount_micro')`，生成字段由 `AvailableMicro` 变为 `AmountMicro`。原因：该参数是**金额**不是可用余额，sqlc 从 `available_micro >= $2` 推导出的 `AvailableMicro` 会让 Task 2 的 `db.DeductCreditBalanceParams{UserID, AmountMicro}` 编译失败，且这个错名极易让调用方误传余额。SQL 语义不变（发射语句逐字一致，`$1`=user_id、`$2`=amount） |
+| Task 1 | 新增回归测试 `TestDeleteWorkspace_DetachesRatherThanDeletes`（`internal/handler/workspace_delete_detach_test.go`）：按 manifest 的 detach 集合驱动**真实 teardown**（HTTP `DELETE /api/workspaces/{id}`），断言行未被删除且 `workspace_id IS NULL`。原因：manifest 测试只比对 schema、不读删除图，删掉 `detached_credit_ledger` 臂仍能全绿，却会重新打开上面的重复入账路径。已实测：移除该臂 → 该测试失败 |
+| Task 1 | manifest 测试的 **detach** 分支增加可空性断言（`is_nullable = 'YES'`）：detach 靠 `SET workspace_id = NULL` 实现，`NOT NULL` 列承载不了该分类，这条断言把「改回 NOT NULL 让 detach 静默失效」变成 CI 可捕获的错误。**settle 不适用**：实测三张 settle 表（`channel_media_pending_object`、`seat_capacity_outbox`、`issue_source_context_object_intent`）的 `workspace_id` 全为 `NOT NULL` 且无外键。settle 的语义是**保留归属**并交给 reconciler（前者在删除图里只改 `state`/租约标记待删，后两者根本不在删除图内、由各自 reconciler 排空），清零 `workspace_id` 不是它的实现方式；把断言一并套到 settle 会迫使三张无关表改 schema。两处均已按实测分开处理 |
+| Deferred | 补两条 `credit_ledger` 索引候选：teardown detach 语句无索引（`EXPLAIN` 确认 `Seq Scan`，最省形式是 `WHERE workspace_id IS NOT NULL` 的部分索引，先例 `211_client_usage_daily_workspace_index.up.sql`）以及 `ListCreditTransactions` 无支撑索引 |

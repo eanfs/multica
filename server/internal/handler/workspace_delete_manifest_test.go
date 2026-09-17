@@ -18,6 +18,12 @@ const (
 // workspaceDeletionManifest is the schema coverage contract for workspace
 // teardown. Adding a table requires an explicit ownership decision here; the
 // handler deletion graph must then implement that decision before CI passes.
+//
+// Enforcement is split. This test checks the map against the live schema, and
+// TestDeleteWorkspace_DetachesRatherThanDeletes drives the real teardown to
+// prove the workspaceDeleteDetach entries are implemented. The workspaceDelete
+// and workspaceDeleteSettle entries have no equivalent graph check yet, so
+// those still depend on review.
 var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"activity_log":                       workspaceDelete,
 	"agent":                              workspaceDelete,
@@ -183,7 +189,7 @@ ORDER BY tablename
 	}
 
 	workspaceColumns, err := testPool.Query(context.Background(), `
-SELECT table_name
+SELECT table_name, is_nullable
 FROM information_schema.columns
 WHERE table_schema = 'public'
   AND column_name = 'workspace_id'
@@ -193,28 +199,44 @@ WHERE table_schema = 'public'
 	}
 	defer workspaceColumns.Close()
 
-	withWorkspaceID := make(map[string]struct{})
+	workspaceIDNullable := make(map[string]string)
 	for workspaceColumns.Next() {
-		var table string
-		if err := workspaceColumns.Scan(&table); err != nil {
+		var table, nullable string
+		if err := workspaceColumns.Scan(&table, &nullable); err != nil {
 			t.Fatalf("scan workspace_id table: %v", err)
 		}
-		withWorkspaceID[table] = struct{}{}
+		workspaceIDNullable[table] = nullable
 	}
 	if err := workspaceColumns.Err(); err != nil {
 		t.Fatalf("iterate workspace_id tables: %v", err)
 	}
 
 	for table, action := range workspaceDeletionManifest {
-		_, hasWorkspaceID := withWorkspaceID[table]
+		nullable, hasWorkspaceID := workspaceIDNullable[table]
 		switch action {
 		case workspaceDeleteKeep:
 			if hasWorkspaceID {
 				t.Errorf("KEEP table %s gained workspace_id; classify its teardown behavior", table)
 			}
-		case workspaceDeleteDetach, workspaceDeleteSettle:
+		case workspaceDeleteDetach:
+			// Detach is implemented by writing workspace_id = NULL, which a NOT
+			// NULL column rejects — the classification is only implementable
+			// while the column is nullable.
 			if !hasWorkspaceID {
-				t.Errorf("%s table %s lost workspace_id; update its teardown selector", action, table)
+				t.Errorf("detach table %s lost workspace_id; update its teardown selector", table)
+				continue
+			}
+			if nullable != "YES" {
+				t.Errorf("detach table %s has a NOT NULL workspace_id; detaching it requires a nullable column", table)
+			}
+		case workspaceDeleteSettle:
+			// Settle is not detach: the row keeps its attribution and is handed
+			// to a reconciler, which is why every settle table's workspace_id is
+			// NOT NULL (channel_media_pending_object is marked for deletion by
+			// state, and the two outbox tables are drained by their own
+			// reconcilers). Only the selector is checked here.
+			if !hasWorkspaceID {
+				t.Errorf("settle table %s lost workspace_id; update its teardown selector", table)
 			}
 		}
 	}
