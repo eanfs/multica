@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 )
 
@@ -21,18 +22,28 @@ type workspaceDetachCase struct {
 	insertSQL string
 }
 
-// workspaceDetachCases is the detach set from workspaceDeletionManifest. Driving
-// the assertion from this table rather than hardcoding one table is the point:
-// every detach classification has to keep working as the graph changes.
+// workspaceDetachCases is the detach set from workspaceDeletionManifest, kept
+// literal because seeding is per-table (each table needs its own columns and
+// marker). TestWorkspaceDetachCasesCoverTheManifest keeps it in lockstep with
+// the manifest, so a new workspaceDeleteDetach table fails that drift check
+// until a case is written for it.
 //
-// credit_ledger and client_usage_daily have no foreign key on workspace_id, so
-// their rows survive teardown only because DeleteWorkspaceAdministration
-// detaches them — those two cases fail if the detach arm is dropped, which is
-// the regression this test exists to catch (a deleted ledger row takes its
-// idempotency key with it, and a retried payment then credits the account
-// twice). feedback also carries the legacy FK `ON DELETE SET NULL`, so its case
-// passes even without the arm: it still pins the observable contract, but it is
-// not what guards the arm.
+// Which mechanism keeps each case green, and whether removing it fails the test:
+//   - credit_ledger: only the detached_credit_ledger arm in
+//     DeleteWorkspaceAdministration clears workspace_id — no FK, and the final
+//     DeleteWorkspace statement does not touch the table. This is the one case
+//     that actually guards its arm, and the one that matters: a deleted ledger
+//     row takes its idempotency key with it, and a retried payment then credits
+//     the account twice.
+//   - client_usage_daily: detached_client_usage clears it, but so does
+//     cleared_client_usage_workspace in the final DeleteWorkspace statement
+//     (workspace.sql), so removing only the arm leaves the case green.
+//   - feedback: detached_feedback clears it, but the legacy FK
+//     feedback_workspace_id_fkey ... ON DELETE SET NULL does too, so removing
+//     only the arm leaves the case green.
+//
+// The two masked cases still pin the observable contract, but they are not what
+// guards their arms.
 var workspaceDetachCases = []workspaceDetachCase{
 	{
 		table:        "credit_ledger",
@@ -131,5 +142,39 @@ FROM `+tc.table+` WHERE `+tc.markerColumn+` = $1
 		case detached != 1:
 			t.Errorf("%s: surviving row still points at the deleted workspace, want workspace_id IS NULL — teardown must detach it", tc.table)
 		}
+	}
+}
+
+// TestWorkspaceDetachCasesCoverTheManifest keeps the hand-written
+// workspaceDetachCases in exact lockstep with the manifest's
+// workspaceDeleteDetach entries. The case table is literal because seeding is
+// per-table — a purely derived set would break the moment a fourth detach table
+// appeared without seed logic. This drift check instead makes adding a detach
+// classification without writing its case fail here, and also catches a stale
+// case left behind when a table is reclassified away from detach.
+func TestWorkspaceDetachCasesCoverTheManifest(t *testing.T) {
+	covered := make(map[string]struct{}, len(workspaceDetachCases))
+	for _, tc := range workspaceDetachCases {
+		covered[tc.table] = struct{}{}
+	}
+
+	var unguarded, extra []string
+	for table, action := range workspaceDeletionManifest {
+		if action != workspaceDeleteDetach {
+			continue
+		}
+		if _, ok := covered[table]; !ok {
+			unguarded = append(unguarded, table)
+		}
+	}
+	for table := range covered {
+		if workspaceDeletionManifest[table] != workspaceDeleteDetach {
+			extra = append(extra, table)
+		}
+	}
+	sort.Strings(unguarded)
+	sort.Strings(extra)
+	if len(unguarded) > 0 || len(extra) > 0 {
+		t.Fatalf("workspaceDetachCases drift: detach tables without a case=%v, stale cases=%v", unguarded, extra)
 	}
 }
