@@ -89,6 +89,11 @@ detached_client_usage AS (
     SET workspace_id = NULL
     WHERE client_usage_daily.workspace_id = $1
 ),
+detached_credit_ledger AS (
+    UPDATE credit_ledger
+    SET workspace_id = NULL
+    WHERE credit_ledger.workspace_id = $1
+),
 deleted_share_links AS (
     DELETE FROM workspace_share_link
     WHERE workspace_share_link.workspace_id = $1
