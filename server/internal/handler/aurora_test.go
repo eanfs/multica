@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/testutil"
 )
 
@@ -149,4 +150,92 @@ func TestCreateAuroraGenerationRejectsMalformedBody(t *testing.T) {
 	req.Header.Set("X-User-ID", testUserID)
 	req.Header.Set("X-Workspace-ID", testWorkspaceID)
 	testutil.Call(t, testHandler.CreateAuroraGeneration, req).Want(http.StatusBadRequest)
+}
+
+// creditTestReset empties the fixture user's credit wallet so each test starts
+// from a known-empty state, and empties it again on cleanup. credit_balance and
+// credit_ledger carry no foreign key to user, so the row fixture's own cleanup
+// would otherwise leave these rows behind.
+func creditTestReset(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		ctx := context.Background()
+		_, _ = testPool.Exec(ctx, `DELETE FROM credit_ledger WHERE user_id = $1`, testUserID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM credit_balance WHERE user_id = $1`, testUserID)
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
+func TestAuroraCreditReserveAndRefundAreIdempotent(t *testing.T) {
+	creditTestReset(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	if err := testHandler.Credit.Grant(ctx, user, ws, 1000, aurora.LedgerKindAdjustment, "seed"); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	if err := testHandler.Credit.Reserve(ctx, user, ws, 300, "gen-1"); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	// 幂等：重复 reserve 同 reference 不应再扣。
+	if err := testHandler.Credit.Reserve(ctx, user, ws, 300, "gen-1"); err != nil {
+		t.Fatalf("Reserve retry: %v", err)
+	}
+	bal, err := testHandler.Credit.Balance(ctx, user)
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if bal != 700 {
+		t.Fatalf("balance after idempotent reserve = %d, want 700", bal)
+	}
+
+	if err := testHandler.Credit.Refund(ctx, user, ws, 300, "gen-1"); err != nil {
+		t.Fatalf("Refund: %v", err)
+	}
+	// 幂等：重复 refund 不应再加。
+	if err := testHandler.Credit.Refund(ctx, user, ws, 300, "gen-1"); err != nil {
+		t.Fatalf("Refund retry: %v", err)
+	}
+	bal, err = testHandler.Credit.Balance(ctx, user)
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if bal != 1000 {
+		t.Fatalf("balance after refund = %d, want 1000", bal)
+	}
+}
+
+func TestAuroraCreditReserveFailsWhenInsufficient(t *testing.T) {
+	creditTestReset(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	if err := testHandler.Credit.Reserve(ctx, user, ws, 100, "gen-x"); err != aurora.ErrInsufficientCredits {
+		t.Fatalf("Reserve with empty balance: err = %v, want ErrInsufficientCredits", err)
+	}
+}
+
+func TestAuroraCreditGrantRejectsInvalidKind(t *testing.T) {
+	creditTestReset(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	if err := testHandler.Credit.Grant(ctx, user, ws, 100, "bogus", "seed"); err == nil {
+		t.Fatal("Grant with invalid kind should fail")
+	}
+}
+
+func TestAuroraCreditBalanceIsZeroWithoutARow(t *testing.T) {
+	creditTestReset(t)
+	bal, err := testHandler.Credit.Balance(context.Background(), parseUUID(testUserID))
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if bal != 0 {
+		t.Fatalf("balance for a user with no wallet row = %d, want 0", bal)
+	}
 }
