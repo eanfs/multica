@@ -119,9 +119,12 @@ func (s *CreditService) adjust(ctx context.Context, userID, workspaceID pgtype.U
 			// lock — its deduction is what left too little for ours. The
 			// second is a success we must not report as a failure: Plan 3
 			// would reject the generation as unaffordable even though the
-			// credits are already spent. Re-read the key to tell them apart;
-			// it is only visible now because the winner has committed.
-			if _, lookupErr := s.queries.GetCreditLedgerByIdempotencyKey(ctx, idempotencyKey); lookupErr == nil {
+			// credits are already spent. Re-read the key to tell them apart.
+			// Read it through qtx, not the pool: the extra connection would
+			// be a second one held while this transaction is still open.
+			// Under READ COMMITTED each statement takes a fresh snapshot, so
+			// the winner's committed row is visible from in here too.
+			if _, lookupErr := qtx.GetCreditLedgerByIdempotencyKey(ctx, idempotencyKey); lookupErr == nil {
 				return nil
 			} else if !errors.Is(lookupErr, pgx.ErrNoRows) {
 				return lookupErr
