@@ -1881,6 +1881,18 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			// so it is human-only, like the billing routes above.
 			r.With(handler.RequireHumanActor).Post("/api/aurora/generations", h.CreateAuroraGeneration)
 
+			// Aurora credit reads. The wallet is the *user's*, not the
+			// workspace's — every workspace shows the same balance — so these
+			// read the caller's account and ignore X-Workspace-ID. They sit in
+			// the membership group because every Aurora user is provisioned a
+			// personal workspace at signup, and RequireHumanActor blocks the
+			// same lateral movement the cloud-billing routes above block: an
+			// agent holding a task token may spend its owner's credits
+			// server-side, but must not read or enumerate the account's
+			// balance.
+			r.With(handler.RequireHumanActor).Get("/api/aurora/billing/balance", h.GetAuroraBillingBalance)
+			r.With(handler.RequireHumanActor).Get("/api/aurora/billing/transactions", h.ListAuroraBillingTransactions)
+
 			// Assignee frequency
 			r.Get("/api/assignee-frequency", h.GetAssigneeFrequency)
 

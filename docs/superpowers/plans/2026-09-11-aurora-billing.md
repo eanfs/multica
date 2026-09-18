@@ -467,6 +467,9 @@ git commit -m "feat(aurora): idempotent credit ledger service"
 - Modify: `server/internal/handler/aurora.go`
 - Modify: `server/internal/handler/aurora_test.go`
 - Modify: `server/cmd/server/router.go`
+- Create: `server/cmd/server/aurora_billing_routes_test.go`（2026-09-18 实现时新增：路由级守卫测试）
+- Create: `server/migrations/484_credit_ledger_user_created_at_idx.up.sql` / `.down.sql`（2026-09-18 实现时新增：流水分页索引）
+- Modify: `server/cmd/migrate/main.go`（注册 484 的并发索引 cleanup 映射）
 
 **Interfaces:**
 - Consumes: `h.Credit`（Task 2）、`h.Queries.ListCreditTransactions`。
@@ -474,7 +477,7 @@ git commit -m "feat(aurora): idempotent credit ledger service"
   - `GET /api/aurora/billing/balance` → `200 {"availableMicro":<int64>}`。
   - `GET /api/aurora/billing/transactions?limit=50` → `200 {"transactions":[{id,kind,amountMicro,balanceAfterMicro,reference,createdAt}]}`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `server/internal/handler/aurora_test.go` 追加：
 
@@ -501,81 +504,124 @@ func TestAuroraBillingTransactions(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+> **实际实现与初稿的差异（2026-09-18，见文末「修订记录」）。** 上面的两个测试骨架只断言「有字段」和「是空列表」，三个最可能出错的地方都测不到：字段是否**存在**（值类型无法区分 `0` 与缺字段）、读的是不是**调用者自己的**钱包（账户级端点，单用户测试下写死任何余额都能过）、以及 `transactions` 空时是 `[]` 还是 `null`。实际写成 6 个测试：`TestAuroraBillingBalanceReportsTheCallersWallet`（无钱包行→0 且字段存在；第二个用户余额不同以区分账户；跟随账本）、`TestAuroraBillingBalanceRequiresAuthentication`、`TestAuroraBillingTransactionsListsTheCallersLedger`（行形状 + 倒序 + 只含调用者 + 空列表非 null）、`TestAuroraBillingTransactionsLimit`（表驱动，账本播种到 60 行以区分「生效/默认/拒绝」三种结果）、`TestAuroraBillingTransactionsRequiresAuthentication`、`TestAuroraBillingRejectsMalformedUserID`。以实际测试为准。
+
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd server && go test ./internal/handler/ -run TestAuroraBilling`
-Expected: 编译失败。
+Expected: 编译失败。**已实测**：`testHandler.GetAuroraBillingBalance undefined`。
 
-- [ ] **Step 3: 实现 handler + 路由**
+- [x] **Step 3: 实现 handler + 路由**
 
 `server/internal/handler/aurora.go` 追加：
 
 ```go
 import (
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-func (h *Handler) GetAuroraBillingBalance(w http.ResponseWriter, r *http.Request) {
+// Aurora transaction paging bounds.
+const (
+	defaultAuroraTransactionLimit = 50
+	maxAuroraTransactionLimit     = 200
+)
+
+// auroraBillingUser resolves the authenticated caller's UUID. Both endpoints
+// report the *caller's* wallet, so they deliberately do not consult
+// X-Workspace-ID.
+func auroraBillingUser(w http.ResponseWriter, r *http.Request) (pgtype.UUID, bool) {
 	userID, ok := requireUserID(w, r)
+	if !ok {
+		return pgtype.UUID{}, false
+	}
+	return parseUUIDOrBadRequest(w, userID, "user_id")
+}
+
+func (h *Handler) GetAuroraBillingBalance(w http.ResponseWriter, r *http.Request) {
+	userUUID, ok := auroraBillingUser(w, r)
 	if !ok {
 		return
 	}
-	bal, err := h.Credit.Balance(r.Context(), parseUUID(userID))
+	balance, err := h.Credit.Balance(r.Context(), userUUID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load balance")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"availableMicro": bal})
+	writeJSON(w, http.StatusOK, map[string]any{"availableMicro": balance})
+}
+
+type AuroraBillingTransactionResponse struct {
+	ID                string `json:"id"`
+	Kind              string `json:"kind"`
+	AmountMicro       int64  `json:"amountMicro"`
+	BalanceAfterMicro int64  `json:"balanceAfterMicro"`
+	Reference         string `json:"reference"`
+	CreatedAt         string `json:"createdAt"`
 }
 
 func (h *Handler) ListAuroraBillingTransactions(w http.ResponseWriter, r *http.Request) {
-	userID, ok := requireUserID(w, r)
+	userUUID, ok := auroraBillingUser(w, r)
 	if !ok {
 		return
 	}
-	limit := 50
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
-			limit = n
-		}
-	}
 	rows, err := h.Queries.ListCreditTransactions(r.Context(), db.ListCreditTransactionsParams{
-		UserID: parseUUID(userID), Limit: int32(limit),
+		UserID: userUUID,
+		Limit:  auroraTransactionLimit(r.URL.Query().Get("limit")),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load transactions")
 		return
 	}
-	out := make([]map[string]any, 0, len(rows))
+	// Non-nil even when empty: `null` would reach the client's zod `.default([])`
+	// as a present-but-null value, and the billing list would render against it.
+	transactions := make([]AuroraBillingTransactionResponse, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, map[string]any{
-			"id": uuidToString(row.ID), "kind": row.Kind,
-			"amountMicro": row.AmountMicro, "balanceAfterMicro": row.BalanceAfterMicro,
-			"reference": row.Reference, "createdAt": row.CreatedAt.Time,
+		transactions = append(transactions, AuroraBillingTransactionResponse{
+			ID:                uuidToString(row.ID),
+			Kind:              row.Kind,
+			AmountMicro:       row.AmountMicro,
+			BalanceAfterMicro: row.BalanceAfterMicro,
+			Reference:         row.Reference,
+			CreatedAt:         row.CreatedAt.Time.UTC().Format(time.RFC3339Nano),
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"transactions": out})
+	writeJSON(w, http.StatusOK, map[string]any{"transactions": transactions})
+}
+
+// auroraTransactionLimit falls back to the default for anything outside
+// 1..maxAuroraTransactionLimit, so a client bug cannot turn the billing screen
+// into a 400.
+func auroraTransactionLimit(raw string) int32 {
+	if raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= maxAuroraTransactionLimit {
+			return int32(n)
+		}
+	}
+	return defaultAuroraTransactionLimit
 }
 ```
+
+> **实际实现与初稿的三处差异（2026-09-18，见文末「修订记录」）**：`createdAt` 从 `row.CreatedAt.Time` 改为 `UTC().Format(time.RFC3339Nano)`；`parseUUID(userID)` 改为 `parseUUIDOrBadRequest(w, userID, "user_id")`；`limit` 的越界值从**忽略**（保持默认）明确为**回落默认**并抽成 `auroraTransactionLimit`。
 
 路由（Plan 1 的 workspace 分组内）：
 
 ```go
-r.Get("/api/aurora/billing/balance", h.GetAuroraBillingBalance)
-r.Get("/api/aurora/billing/transactions", h.ListAuroraBillingTransactions)
+r.With(handler.RequireHumanActor).Get("/api/aurora/billing/balance", h.GetAuroraBillingBalance)
+r.With(handler.RequireHumanActor).Get("/api/aurora/billing/transactions", h.ListAuroraBillingTransactions)
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd server && go test ./internal/handler/ -run TestAuroraBilling`
-Expected: PASS。
+Expected: PASS。**已实测**：6 个测试全绿。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
-git add server/internal/handler/aurora.go server/internal/handler/aurora_test.go server/cmd/server/router.go
+git add server/internal/handler/aurora.go server/internal/handler/aurora_test.go server/cmd/server/router.go server/cmd/server/aurora_billing_routes_test.go server/migrations/484_credit_ledger_user_created_at_idx.* server/cmd/migrate/main.go
 git commit -m "feat(aurora): billing balance and transactions endpoints"
 ```
 
@@ -629,7 +675,8 @@ Plan 2 完成。后续顺序：Plan 3（执行层）→ Plan 3.5（进度与作�
 | Task 1 | `DeductCreditBalance` / `CreditCreditBalance` 的金额参数改用 `sqlc.arg('amount_micro')`，生成字段由 `AvailableMicro` 变为 `AmountMicro`。原因：该参数是**金额**不是可用余额，sqlc 从 `available_micro >= $2` 推导出的 `AvailableMicro` 会让 Task 2 的 `db.DeductCreditBalanceParams{UserID, AmountMicro}` 编译失败，且这个错名极易让调用方误传余额。SQL 语义不变（发射语句逐字一致，`$1`=user_id、`$2`=amount） |
 | Task 1 | 新增回归测试 `TestDeleteWorkspace_DetachesRatherThanDeletes`（`internal/handler/workspace_delete_detach_test.go`）：按 manifest 的 detach 集合驱动**真实 teardown**（HTTP `DELETE /api/workspaces/{id}`），断言行未被删除且 `workspace_id IS NULL`。原因：manifest 测试只比对 schema、不读删除图，删掉 `detached_credit_ledger` 臂仍能全绿，却会重新打开上面的重复入账路径。已实测：移除该臂 → 该测试失败 |
 | Task 1 | manifest 测试的 **detach** 分支增加可空性断言（`is_nullable = 'YES'`）：detach 靠 `SET workspace_id = NULL` 实现，`NOT NULL` 列承载不了该分类，这条断言把「改回 NOT NULL 让 detach 静默失效」变成 CI 可捕获的错误。**settle 不适用**：实测三张 settle 表（`channel_media_pending_object`、`seat_capacity_outbox`、`issue_source_context_object_intent`）的 `workspace_id` 全为 `NOT NULL` 且无外键。settle 的语义是**保留归属**并交给 reconciler（前者在删除图里只改 `state`/租约标记待删，后两者根本不在删除图内、由各自 reconciler 排空），清零 `workspace_id` 不是它的实现方式；把断言一并套到 settle 会迫使三张无关表改 schema。两处均已按实测分开处理 |
-| Deferred | 补两条 `credit_ledger` 索引候选：teardown detach 语句无索引（`EXPLAIN` 确认 `Seq Scan`，最省形式是 `WHERE workspace_id IS NOT NULL` 的部分索引，先例 `211_client_usage_daily_workspace_index.up.sql`）以及 `ListCreditTransactions` 无支撑索引 |
+| Task 3 | **新增 migration `484_credit_ledger_user_created_at_idx`**（评审提出，本次一并落地）：`CREATE INDEX CONCURRENTLY credit_ledger (user_id, created_at DESC)`，并注册进 `concurrentIndexCleanups`。原因：`ListCreditTransactions` 的 `WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2` 此前**无任何支撑索引**（483 的唯一索引建在 `idempotency_key` 上，与查询无关），Task 3 是这条查询的第一个真实消费者。账本是追加式且永不裁剪（teardown 只 detach 不删行），所以每次打开账单页都是一次全表扫 + 排序，成本随流水无界增长。列序 `(user_id, created_at DESC)` 让索引同时供给过滤与排序，`LIMIT` 因而能提前停止扫描。已实测：`EXPLAIN` 显示 `Index Scan using credit_ledger_user_created_at_idx`，无 Sort 节点 |
+| Deferred | 补一条 `credit_ledger` 索引候选：teardown detach 语句无索引（`EXPLAIN` 确认 `Seq Scan`，最省形式是 `WHERE workspace_id IS NOT NULL` 的部分索引，先例 `211_client_usage_daily_workspace_index.up.sql`）。**另一条 `ListCreditTransactions` 已由 Task 3 的 484 落地，不在此列** |
 
 ## 修订记录（2026-09-18 Task 2 评审回写）
 
@@ -640,6 +687,19 @@ Plan 2 完成。后续顺序：Plan 3（执行层）→ Plan 3.5（进度与作�
 | Task 2 | `Reserve` / `Refund` / `Grant` 加正数守卫（`amountMicro <= 0` 报错）。原因：`Reserve` 对入参取负，负值会把扣款变成**入账**并写出 `amount_micro` 为正的 `deduction` 流水；`Grant` 镜像地把负值送上扣款路径，从名为 "Grant" 的函数返回 `ErrInsufficientCredits`。钱相关 API 的静默反向必须堵掉 |
 | Task 2 | 测试引用改为**按运行唯一**（`creditRef(base) = base + "-" + testUserID`，覆盖全部调用点与并发测试的绑定参数）。原因：幂等键全局唯一、快速路径只按键查，而测试原先用字面量键（`"seed"`/`"gen-1"`/`"gen-race"`），夹具清理只删 user 不删 credit 行（无外键，设计如此）。异常中断的跑法会留下挂在已删 user 上的孤儿行，下一轮夹具 user 换了 UUID，`creditTestReset` 的 `WHERE user_id = $1` 扫不到，全局键快速路径命中陈旧行 → `Grant` 静默 no-op，失败表现为误导性的 "insufficient credits"。**修复的要点不是改键名，而是让测试不再依赖清理来保证正确性** |
 | Task 2 | `creditTestReset` 的两个 DELETE 改为检查错误并 `t.Fatalf`；哨兵断言改用 `errors.Is`；`internal/aurora` 的包文档不再自称只有静态数据 |
+
+## 修订记录（2026-09-18 Task 3 实现回写）
+
+| 处 | 修正 |
+|----|------|
+| Task 3 | `createdAt` 由 `row.CreatedAt.Time` 改为 `row.CreatedAt.Time.UTC().Format(time.RFC3339Nano)`，响应改为具名结构体 `AuroraBillingTransactionResponse`。原因：`UTC()` 保证同一笔流水在任何时区的部署上序列化出**逐字节相同**的串，前端做排序、去重、快照比较时不必再归一化。**注**：本行初稿曾称 `time.Time` 直接序列化为「带空格的 Go 默认格式、非 ISO」，该说法**经实测为假**——`time.Time` 实现了 `json.Marshaler`，`json.Marshal` 输出的是 RFC3339Nano 带偏移量（`"2026-09-18T15:04:05.123456789+08:00"`），已是合法 ISO 且可解析。改动本身是改进（确定性），但理由不是「修 bug」。仓库先例 `chat_history.go:120`、`issue_table_rows.go:484` |
+| Task 3 | `parseUUID(userID)` 改为 `parseUUIDOrBadRequest(w, userID, "user_id")`。原因：`parseUUID` 是 AGENTS.md 里给「可信 sqlc / 夹具往返」用的 `MustParseUUID`，**畸形输入直接 panic**；`X-User-ID` 是请求边界字符串，按同一节规则必须走 `parseUUIDOrBadRequest`。实测把实现换回 `parseUUID` 并喂 `X-User-ID: not-a-uuid`，handler panic 而非返回 400——这是拒绝请求与打挂进程的差别。同一处理抽成 `auroraBillingUser`，两个端点共用 |
+| Task 3 | 两个路由加 `handler.RequireHumanActor` 守卫。原因：与同仓库 `/api/cloud-billing/*`（`router.go:1837-1848`）和 `POST /api/aurora/generations`（Plan 1 Task 3）同一政策——Auth 中间件会把 `mat_` 任务令牌正常转成 `X-User-ID`（这样 agent 才能以 owner 身份评论、认领 issue），不加守卫则持任务令牌的 agent 可以**读遍 owner 的余额与全部流水**。Plan 3 的 `Reserve` 是服务端调用，不受该守卫影响。守卫**逐路由**加而非包住 `/api/aurora` 前缀，`GET /api/aurora/skills` 保持可达——路由级测试专门断言了这一点，以证明守卫没有越界 |
+| Task 3 | **已知取舍（评审提出，未改）**：两条路由仍挂在 `RequireWorkspaceMember` 分组内，而响应完全忽略 `X-Workspace-ID`——账户级数据却要求可解析的 workspace 归属，与 `/api/cloud-billing/*` 刻意放在该分组**之外**的做法（`router.go:1825-1836` 有明确注释）不一致。影响面：`ensurePersonalWorkspace` 是 best-effort、失败只 `slog.Warn` 不阻断登录（`auth.go:236-240`），所以理论上存在「已登录但零 workspace 成员身份」的用户，此时读自己的余额会拿到 `400 workspace_id or workspace_slug is required`（`middleware/workspace.go:203-206`）。**不改的理由**：Plan 4 的前端整条路由树都在 `[workspaceSlug]` 之下（`apps/aurora/app/[workspaceSlug]/layout.tsx`）且客户端全局带 `X-Workspace-Slug`，零 workspace 的用户根本没有能展示余额的界面，该失败模式不可达；而计划正文（「路由（Plan 1 的 workspace 分组内）」）与 Plan 3 的既有路由都假定同一分组。若将来 Aurora 出现工作区无关的入口（如桌面端独立 billing 窗口），应把这两条路由移到 user-scoped 分组——`RequireHumanActor` 已经独立提供安全属性，成员校验在那时只剩这个失败模式 |
+| Task 3 | 新增 `server/cmd/server/aurora_billing_routes_test.go`。原因：`internal/handler` 的测试直接调 handler，**路由有没有挂上、守卫有没有生效，它们全都测不到**——把 `router.go` 里的两行删掉仍能全绿。该文件走真实 router：`TestAuroraBillingRoutesAreReachableByTheAccountHolder`（真 session 打通两条路由并读到自己的账本）与 `TestAuroraBillingRoutesRejectAgentTaskTokens`（真 `mat_` 令牌 → 403，同时断言 skills 路由不受影响）。已实测：摘掉 balance 路由的守卫 → 守卫测试失败 |
+| Task 3 | `?limit` 的越界语义明确为**回落默认值**并抽成 `auroraTransactionLimit`（`raw == ""`、解析失败、`n <= 0`、`n > 200` 一律返回默认 50）。原因：初稿写 `n > 0 && n <= 200` 才赋值，越界时保持初始值 50——语义正确但读起来像「忽略」，且默认值与上限是散落的字面量。**上限是回落不是截断**：`limit=1000` 返回 50 而非 200，与 `chat_history.go:149` 的 clamp 语义不同，是有意选择（超限请求更可能是客户端 bug 而非「给我尽量多」），测试逐条固定了这一点 |
+| Task 3 | 测试从初稿的 2 个扩到 6 个。原因：初稿只断言「有字段」「是空列表」，三个最可能出错处全测不到——字段是否存在（值类型分不出 `0` 与缺字段，故用指针断言）、读的是不是**调用者自己的**钱包（账户级端点，单用户测试下写死余额也能过，故建第二个用户且余额不同）、`transactions` 空时是 `[]` 还是 `null`（`null` 会让前端 `z.array().default([])` 不生效）。`TestAuroraBillingTransactionsLimit` 的账本播种到 60 行（大于默认 50），否则「生效 / 默认 / 拒绝」三种结果会返回同样的行数而证明不了任何事 |
+| Task 3 | `creditTestReset` 抽出 `creditTestResetUser(t, userID)`，前者成为它的薄封装。原因：账户级端点要区分「调用者的钱包」与「别人的钱包」，测试因此需要第二个钱包；原有调用点签名不变 |
 
 ## 跨任务不变量（Plan 5 必读）
 
