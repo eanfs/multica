@@ -399,6 +399,19 @@ func (s *CreditService) adjust(ctx context.Context, userID, workspaceID pgtype.U
 			UserID: userID, AmountMicro: -delta,
 		})
 		if errors.Is(err, pgx.ErrNoRows) {
+			// A conditional-deduct miss has two causes needing opposite
+			// answers. Re-read the key through qtx (not the pool: the extra
+			// connection would be a second one held while this transaction is
+			// still open). Under READ COMMITTED each statement takes a fresh
+			// snapshot, so a winner that committed while we waited on its row
+			// lock is visible here — that means our operation already
+			// succeeded, and reporting failure would make Plan 3 reject a
+			// generation as unaffordable while its credits are already spent.
+			if _, lookupErr := qtx.GetCreditLedgerByIdempotencyKey(ctx, idempotencyKey); lookupErr == nil {
+				return nil
+			} else if !errors.Is(lookupErr, pgx.ErrNoRows) {
+				return lookupErr
+			}
 			return ErrInsufficientCredits
 		}
 	} else {
@@ -425,6 +438,10 @@ func (s *CreditService) adjust(ctx context.Context, userID, workspaceID pgtype.U
 	return tx.Commit(ctx)
 }
 ```
+
+`Reserve` / `Refund` / `Grant` 各自在调用 `adjust` 之前加一条正数守卫（`amountMicro <= 0` 直接报错并返回）。原因：`Reserve` 对入参取负，负值会把「扣款」变成**入账**并写出一条 `amount_micro` 为正的 `deduction` 流水；`Grant` 则镜像地把负值送上扣款路径，从一个名为 "Grant" 的函数里返回 `ErrInsufficientCredits`。这是钱相关的 API，静默反向是必须堵掉的。
+
+> **上述 `adjust` 代码块已按实际实现（commit `9ebb1673c`）回写。** 两处与初稿不同，都是评审修复：deduct 未命中时的幂等键回读（`qtx`），以及三个入口的正数守卫。以本块为准；若要改动 `adjust` 的语义，请连同本块一起改，避免计划与代码再次漂移。
 
 > `DeductCreditBalanceParams` / `CreditCreditBalanceParams` 字段名（预期 `UserID`/`AmountMicro`）以 `make sqlc` 生成为准（Task 1 Step 4）。
 
@@ -613,3 +630,18 @@ Plan 2 完成。后续顺序：Plan 3（执行层）→ Plan 3.5（进度与作�
 | Task 1 | 新增回归测试 `TestDeleteWorkspace_DetachesRatherThanDeletes`（`internal/handler/workspace_delete_detach_test.go`）：按 manifest 的 detach 集合驱动**真实 teardown**（HTTP `DELETE /api/workspaces/{id}`），断言行未被删除且 `workspace_id IS NULL`。原因：manifest 测试只比对 schema、不读删除图，删掉 `detached_credit_ledger` 臂仍能全绿，却会重新打开上面的重复入账路径。已实测：移除该臂 → 该测试失败 |
 | Task 1 | manifest 测试的 **detach** 分支增加可空性断言（`is_nullable = 'YES'`）：detach 靠 `SET workspace_id = NULL` 实现，`NOT NULL` 列承载不了该分类，这条断言把「改回 NOT NULL 让 detach 静默失效」变成 CI 可捕获的错误。**settle 不适用**：实测三张 settle 表（`channel_media_pending_object`、`seat_capacity_outbox`、`issue_source_context_object_intent`）的 `workspace_id` 全为 `NOT NULL` 且无外键。settle 的语义是**保留归属**并交给 reconciler（前者在删除图里只改 `state`/租约标记待删，后两者根本不在删除图内、由各自 reconciler 排空），清零 `workspace_id` 不是它的实现方式；把断言一并套到 settle 会迫使三张无关表改 schema。两处均已按实测分开处理 |
 | Deferred | 补两条 `credit_ledger` 索引候选：teardown detach 语句无索引（`EXPLAIN` 确认 `Seq Scan`，最省形式是 `WHERE workspace_id IS NOT NULL` 的部分索引，先例 `211_client_usage_daily_workspace_index.up.sql`）以及 `ListCreditTransactions` 无支撑索引 |
+
+## 修订记录（2026-09-18 Task 2 评审回写）
+
+| 处 | 修正 |
+|----|------|
+| Task 2 | `adjust` 的 deduct 未命中路径改为**先回读幂等键再判定余额不足**，回读走 `qtx`。原因：条件扣款的 0 行结果有两个成因，答案相反——(a) 真的余额不足；(b) 并发的同键操作已成功。缺了回读，(b) 会返回 `ErrInsufficientCredits`：赢家持锁扣款提交后，输家的 `DeductCreditBalance` 解除阻塞、按新余额重算、无匹配，于是**在到达 insert 之前**就返回失败，「冲突即已处理」那条分支被绕过。操作实际成功却报失败，违反 Global Constraints 的账本幂等约束，对 Plan 3 是 wedge 风险（生成被判买不起，而钱已扣，能退款的正是那个在重试的 sweeper）。回读必须走 `qtx` 而非 `s.queries`：后者会在本事务仍持有一个连接时**再签出一个**，池饱和下 N 个并发失败者互等；READ COMMITTED 下每条语句取新快照，赢家已提交的行在事务内同样可见 |
+| Task 2 | 新增并发回归测试 `TestAuroraCreditConcurrentDuplicateReserveIsIdempotent`（两个子测试）。原因：上述「丢失竞态」分支是防重复扣款的**唯一**屏障，此前只有阅读证据；补上回读后又多了一条只在真并发下可达的分支，未测试面反而变大。测试必须**确定性排序**而非依赖时序：赢家事务持住 `credit_balance` 行锁，等 `pg_stat_activity` 报告另一后端在等待后才提交；超时 `t.Fatal`（不是 `Skip`）。两个子测试按种子余额互斥地覆盖两条分支（1000 → insert 冲突；300 → deduct 未命中），已逐条 revert 验证：移除回读只让 deduct-miss 子测试失败，移除 insert 冲突分支只让 ledger-insert 子测试失败 |
+| Task 2 | `Reserve` / `Refund` / `Grant` 加正数守卫（`amountMicro <= 0` 报错）。原因：`Reserve` 对入参取负，负值会把扣款变成**入账**并写出 `amount_micro` 为正的 `deduction` 流水；`Grant` 镜像地把负值送上扣款路径，从名为 "Grant" 的函数返回 `ErrInsufficientCredits`。钱相关 API 的静默反向必须堵掉 |
+| Task 2 | 测试引用改为**按运行唯一**（`creditRef(base) = base + "-" + testUserID`，覆盖全部调用点与并发测试的绑定参数）。原因：幂等键全局唯一、快速路径只按键查，而测试原先用字面量键（`"seed"`/`"gen-1"`/`"gen-race"`），夹具清理只删 user 不删 credit 行（无外键，设计如此）。异常中断的跑法会留下挂在已删 user 上的孤儿行，下一轮夹具 user 换了 UUID，`creditTestReset` 的 `WHERE user_id = $1` 扫不到，全局键快速路径命中陈旧行 → `Grant` 静默 no-op，失败表现为误导性的 "insufficient credits"。**修复的要点不是改键名，而是让测试不再依赖清理来保证正确性** |
+| Task 2 | `creditTestReset` 的两个 DELETE 改为检查错误并 `t.Fatalf`；哨兵断言改用 `errors.Is`；`internal/aurora` 的包文档不再自称只有静态数据 |
+
+## 跨任务不变量（Plan 5 必读）
+
+- **`credit_ledger.idempotency_key` 全局唯一，且快速路径只按键查询。** `483` 的唯一索引建在 `idempotency_key` 单列上，`GetCreditLedgerByIdempotencyKey` 也只按该列过滤——**键里必须自带用户维度**。当前所有调用点都满足：`Reserve`/`Refund` 的 `reference` 是 generation UUID；Plan 5 的发放键（`sub:<userID>:<YYYY-MM>`、`signup:<userID>`、`<userID>:<YYYY-MM>`）内嵌了 user id；Stripe 充值用全局唯一的事件 id。但**若将来有调用方跨用户复用裸 reference 字符串，第二个用户的操作会静默返回 `nil` 而不被扣费**——这是静默的资损，不是报错。新增发放/充值入口时请先确认这一点。
+- **`Refund` 是无条件入账，没有「这笔预留过吗」的守卫。** 它可以给一个从未预留过的 generation 发积分，等于凭空造币。这是调用方（Plan 3/4）的义务：sweeper 的终态退款路径必须只在 `credits_reserved > 0`（或该 generation 确实结算过）时才调 `Refund`。

@@ -2,13 +2,16 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/testutil"
 )
 
@@ -149,4 +152,293 @@ func TestCreateAuroraGenerationRejectsMalformedBody(t *testing.T) {
 	req.Header.Set("X-User-ID", testUserID)
 	req.Header.Set("X-Workspace-ID", testWorkspaceID)
 	testutil.Call(t, testHandler.CreateAuroraGeneration, req).Want(http.StatusBadRequest)
+}
+
+// creditTestReset empties the fixture user's credit wallet so each test starts
+// from a known-empty state, and empties it again on cleanup. credit_balance and
+// credit_ledger carry no foreign key to user, so the row fixture's own cleanup
+// would otherwise leave these rows behind.
+//
+// It clears by user_id, which is why every test's references carry testUserID:
+// the idempotency key is globally unique and the fast path looks it up by key
+// alone, so a row orphaned by an abnormally killed run (whose fixture user no
+// longer exists, and whose id no later run reuses) is invisible to this reset
+// and would silently satisfy a later run's fast path. Run-unique references
+// make these tests independent of cleanup having happened at all.
+func creditTestReset(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		ctx := context.Background()
+		if _, err := testPool.Exec(ctx, `DELETE FROM credit_ledger WHERE user_id = $1`, testUserID); err != nil {
+			t.Fatalf("reset credit_ledger: %v", err)
+		}
+		if _, err := testPool.Exec(ctx, `DELETE FROM credit_balance WHERE user_id = $1`, testUserID); err != nil {
+			t.Fatalf("reset credit_balance: %v", err)
+		}
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
+// creditRef namespaces a test reference with the fixture user's id, so the
+// idempotency key derived from it is unique to this run. The key is globally
+// unique and adjust's fast path looks it up by key alone, without a user
+// filter, so a row left by an abnormally killed run — whose fixture user no
+// longer exists and whose id no later run reuses — would otherwise satisfy a
+// later run's fast path and turn an operation into a silent no-op. Tying
+// references to testUserID makes the tests correct regardless of what a
+// previous run left behind.
+func creditRef(base string) string {
+	return base + "-" + testUserID
+}
+
+func TestAuroraCreditReserveAndRefundAreIdempotent(t *testing.T) {
+	creditTestReset(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+	gen := creditRef("gen-1")
+
+	if err := testHandler.Credit.Grant(ctx, user, ws, 1000, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	if err := testHandler.Credit.Reserve(ctx, user, ws, 300, gen); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	// Idempotency: re-reserving the same reference must not deduct again.
+	if err := testHandler.Credit.Reserve(ctx, user, ws, 300, gen); err != nil {
+		t.Fatalf("Reserve retry: %v", err)
+	}
+	bal, err := testHandler.Credit.Balance(ctx, user)
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if bal != 700 {
+		t.Fatalf("balance after idempotent reserve = %d, want 700", bal)
+	}
+
+	if err := testHandler.Credit.Refund(ctx, user, ws, 300, gen); err != nil {
+		t.Fatalf("Refund: %v", err)
+	}
+	// Idempotency: re-refunding the same reference must not credit again.
+	if err := testHandler.Credit.Refund(ctx, user, ws, 300, gen); err != nil {
+		t.Fatalf("Refund retry: %v", err)
+	}
+	bal, err = testHandler.Credit.Balance(ctx, user)
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if bal != 1000 {
+		t.Fatalf("balance after refund = %d, want 1000", bal)
+	}
+}
+
+func TestAuroraCreditReserveFailsWhenInsufficient(t *testing.T) {
+	creditTestReset(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	if err := testHandler.Credit.Reserve(ctx, user, ws, 100, creditRef("gen-x")); !errors.Is(err, aurora.ErrInsufficientCredits) {
+		t.Fatalf("Reserve with empty balance: err = %v, want ErrInsufficientCredits", err)
+	}
+}
+
+func TestAuroraCreditGrantRejectsInvalidKind(t *testing.T) {
+	creditTestReset(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	if err := testHandler.Credit.Grant(ctx, user, ws, 100, "bogus", creditRef("seed")); err == nil {
+		t.Fatal("Grant with invalid kind should fail")
+	}
+}
+
+func TestAuroraCreditBalanceIsZeroWithoutARow(t *testing.T) {
+	creditTestReset(t)
+	bal, err := testHandler.Credit.Balance(context.Background(), parseUUID(testUserID))
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if bal != 0 {
+		t.Fatalf("balance for a user with no wallet row = %d, want 0", bal)
+	}
+}
+
+// TestAuroraCreditRejectsNonPositiveAmounts guards the direction of every
+// wallet movement. Reserve negates its argument, so a negative amount would
+// credit the wallet while recording a "deduction" row; Grant passes its
+// argument straight through, so a negative amount would debit while recording
+// a "topup"/"adjustment" row. Both are silent and direction-inverting, and
+// neither would be caught by the balance assertions above.
+func TestAuroraCreditRejectsNonPositiveAmounts(t *testing.T) {
+	creditTestReset(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	calls := map[string]func() error{
+		"Reserve": func() error { return testHandler.Credit.Reserve(ctx, user, ws, -100, creditRef("gen-neg")) },
+		"Refund":  func() error { return testHandler.Credit.Refund(ctx, user, ws, -100, creditRef("gen-neg")) },
+		"Grant": func() error {
+			return testHandler.Credit.Grant(ctx, user, ws, -100, aurora.LedgerKindTopup, creditRef("gen-neg"))
+		},
+		"Reserve/zero": func() error { return testHandler.Credit.Reserve(ctx, user, ws, 0, creditRef("gen-zero")) },
+	}
+	for name, call := range calls {
+		if err := call(); err == nil {
+			t.Errorf("%s with a non-positive amount should fail", name)
+		}
+	}
+
+	// Nothing may have been written: no wallet row, no ledger row.
+	bal, err := testHandler.Credit.Balance(ctx, user)
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if bal != 0 {
+		t.Fatalf("balance after rejected calls = %d, want 0", bal)
+	}
+	var ledgerRows int
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*) FROM credit_ledger WHERE user_id = $1`, testUserID).Scan(&ledgerRows); err != nil {
+		t.Fatalf("count ledger rows: %v", err)
+	}
+	if ledgerRows != 0 {
+		t.Fatalf("ledger rows after rejected calls = %d, want 0", ledgerRows)
+	}
+}
+
+// TestAuroraCreditConcurrentDuplicateReserveIsIdempotent pins the two branches
+// of adjust that only a real race reaches. Both are the difference between
+// charging once and charging twice, and neither is reachable from the
+// single-goroutine tests above:
+//
+//   - enough balance for both: the duplicate's deduct succeeds, so it reaches
+//     the ledger insert and loses on the unique index — it must roll back the
+//     redundant balance change and report success.
+//   - enough balance for one only: the winner's deduction is what leaves too
+//     little for the duplicate, so the duplicate's conditional deduct matches
+//     no row — it must not report that as insufficient credits.
+//
+// In both cases the duplicate carries the same reference, hence the same
+// idempotency key. A distinct key would prove nothing here.
+//
+// The interleaving is sequenced, not timing-dependent: a transaction holds the
+// credit_balance row lock and the duplicate is only released once Postgres
+// reports it waiting, so the race is guaranteed rather than hoped for. The
+// winner is driven with raw SQL because its transaction has to stay open across
+// the duplicate's arrival, which the service API cannot express; those
+// statements mirror what adjust's winning transaction does. The behaviour under
+// test is the duplicate's.
+func TestAuroraCreditConcurrentDuplicateReserveIsIdempotent(t *testing.T) {
+	cases := []struct {
+		name      string
+		seedMicro int64
+	}{
+		{"duplicate reaches the ledger insert", 1000},
+		{"duplicate finds the balance already spent", 300},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			creditTestReset(t)
+			ctx := context.Background()
+			user := parseUUID(testUserID)
+			ws := parseUUID(testWorkspaceID)
+			// The winner's raw insert and the loser's Reserve must agree on the
+			// idempotency key, so both derive it from this one reference. The
+			// service computes "reserve:"+reference; the raw statement below
+			// spells out the same key.
+			raceRef := creditRef("gen-race")
+			raceKey := "reserve:" + raceRef
+
+			if err := testHandler.Credit.Grant(ctx, user, ws, tc.seedMicro, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
+				t.Fatalf("Grant: %v", err)
+			}
+
+			winner, err := testPool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin winner tx: %v", err)
+			}
+			defer winner.Rollback(ctx)
+			var winnerBalance int64
+			if err := winner.QueryRow(ctx, `
+				UPDATE credit_balance SET available_micro = available_micro - 300, updated_at = now()
+				WHERE user_id = $1 AND available_micro >= 300
+				RETURNING available_micro`, user).Scan(&winnerBalance); err != nil {
+				t.Fatalf("winner deduct: %v", err)
+			}
+			if _, err := winner.Exec(ctx, `
+				INSERT INTO credit_ledger
+					(user_id, workspace_id, kind, amount_micro, balance_after_micro, reference, idempotency_key)
+				VALUES ($1, $2, 'deduction', -300, $3, $4, $5)`,
+				user, ws, winnerBalance, raceRef, raceKey); err != nil {
+				t.Fatalf("winner ledger insert: %v", err)
+			}
+
+			dupErr := make(chan error, 1)
+			go func() {
+				dupErr <- testHandler.Credit.Reserve(ctx, user, ws, 300, raceRef)
+			}()
+
+			// The winner is still uncommitted, so the duplicate's pre-check
+			// missed and it is parked inside its own transaction. Releasing the
+			// winner only after observing that wait is what makes the ordering
+			// deterministic.
+			waitForCreditBalanceLock(t, ctx)
+
+			if err := winner.Commit(ctx); err != nil {
+				t.Fatalf("commit winner: %v", err)
+			}
+
+			if err := <-dupErr; err != nil {
+				t.Fatalf("duplicate Reserve = %v, want nil (the operation already succeeded)", err)
+			}
+
+			bal, err := testHandler.Credit.Balance(ctx, user)
+			if err != nil {
+				t.Fatalf("Balance: %v", err)
+			}
+			wantBal := tc.seedMicro - 300
+			if bal != wantBal {
+				t.Fatalf("balance after concurrent duplicate = %d, want %d (deducted exactly once)", bal, wantBal)
+			}
+			// Exactly one ledger row for the contested key: the winner's. The
+			// seed grant has its own key and is not part of this claim.
+			var ledgerRows int
+			if err := testPool.QueryRow(ctx,
+				`SELECT count(*) FROM credit_ledger WHERE idempotency_key = $1`, raceKey).Scan(&ledgerRows); err != nil {
+				t.Fatalf("count ledger rows: %v", err)
+			}
+			if ledgerRows != 1 {
+				t.Fatalf("ledger rows for %s = %d, want 1", raceKey, ledgerRows)
+			}
+		})
+	}
+}
+
+// waitForCreditBalanceLock blocks until a backend other than this one is
+// waiting on a lock while touching credit_balance, or fails the test after a
+// bounded wait so a regression surfaces as a failure rather than a hang.
+func waitForCreditBalanceLock(t *testing.T, ctx context.Context) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var blocked int
+		if err := testPool.QueryRow(ctx, `
+			SELECT count(*) FROM pg_stat_activity
+			WHERE pid <> pg_backend_pid()
+			  AND wait_event_type = 'Lock'
+			  AND query LIKE '%credit_balance%'`).Scan(&blocked); err != nil {
+			t.Fatalf("poll pg_stat_activity: %v", err)
+		}
+		if blocked > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("duplicate Reserve never blocked on the credit_balance row lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

@@ -1,4 +1,5 @@
-// Package aurora holds the Aurora content-creation domain's static data.
+// Package aurora holds the Aurora content-creation domain: the static skill
+// catalog, and the credit accounting that pays for generations.
 package aurora
 
 import "slices"
