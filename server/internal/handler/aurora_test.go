@@ -167,12 +167,20 @@ func TestCreateAuroraGenerationRejectsMalformedBody(t *testing.T) {
 // make these tests independent of cleanup having happened at all.
 func creditTestReset(t *testing.T) {
 	t.Helper()
+	creditTestResetUser(t, testUserID)
+}
+
+// creditTestResetUser is creditTestReset for a wallet other than the suite
+// fixture's — the billing endpoints are account-scoped, so a test that proves
+// they read the caller's wallet needs a second one.
+func creditTestResetUser(t *testing.T, userID string) {
+	t.Helper()
 	reset := func() {
 		ctx := context.Background()
-		if _, err := testPool.Exec(ctx, `DELETE FROM credit_ledger WHERE user_id = $1`, testUserID); err != nil {
+		if _, err := testPool.Exec(ctx, `DELETE FROM credit_ledger WHERE user_id = $1`, userID); err != nil {
 			t.Fatalf("reset credit_ledger: %v", err)
 		}
-		if _, err := testPool.Exec(ctx, `DELETE FROM credit_balance WHERE user_id = $1`, testUserID); err != nil {
+		if _, err := testPool.Exec(ctx, `DELETE FROM credit_balance WHERE user_id = $1`, userID); err != nil {
 			t.Fatalf("reset credit_balance: %v", err)
 		}
 	}
@@ -190,6 +198,16 @@ func creditTestReset(t *testing.T) {
 // previous run left behind.
 func creditRef(base string) string {
 	return base + "-" + testUserID
+}
+
+// creditRefFor is creditRef for a wallet other than the fixture user's. The
+// namespace has to be the *owning* user's id, not the caller's: a decoy wallet
+// funded with creditRef(base) would carry the same idempotency key as the
+// caller's own row with that base, so whichever test ran first would satisfy
+// the second one's fast path and the second wallet would silently never be
+// funded — the exact staleness creditRef exists to prevent.
+func creditRefFor(userID, base string) string {
+	return base + "-" + userID
 }
 
 func TestAuroraCreditReserveAndRefundAreIdempotent(t *testing.T) {
@@ -440,5 +458,212 @@ func waitForCreditBalanceLock(t *testing.T, ctx context.Context) {
 			t.Fatal("duplicate Reserve never blocked on the credit_balance row lock")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// auroraBillingResponse is the wire shape the two read-only billing endpoints
+// share. Both fields are pointers because the whole point of these tests is to
+// tell "the key is absent" from "the key is present and zero" — a value field
+// cannot.
+type auroraBillingResponse struct {
+	AvailableMicro *int64 `json:"availableMicro"`
+	Transactions   []struct {
+		ID                string `json:"id"`
+		Kind              string `json:"kind"`
+		AmountMicro       int64  `json:"amountMicro"`
+		BalanceAfterMicro int64  `json:"balanceAfterMicro"`
+		Reference         string `json:"reference"`
+		CreatedAt         string `json:"createdAt"`
+	} `json:"transactions"`
+}
+
+// TestAuroraBillingBalanceReportsTheCallersWallet pins three things a naive
+// implementation gets wrong: the field is present (a user with no wallet row
+// still gets a number, not a missing key), it is the *caller's* wallet (the
+// endpoints are account-scoped, so a shared or hardcoded balance would pass a
+// single-user test), and it follows the ledger rather than drifting from it.
+func TestAuroraBillingBalanceReportsTheCallersWallet(t *testing.T) {
+	creditTestReset(t)
+	ctx := context.Background()
+	ws := parseUUID(testWorkspaceID)
+
+	// A second wallet, deliberately funded differently, so a handler that read
+	// the wrong account — or any account but the caller's — is visible.
+	otherID := dbfx.User(t, "Aurora Billing Other", "aurora-billing-other@multica.test")
+	creditTestResetUser(t, otherID)
+	if err := testHandler.Credit.Grant(ctx, parseUUID(otherID), ws, 999, aurora.LedgerKindAdjustment, creditRefFor(otherID, "other-seed")); err != nil {
+		t.Fatalf("Grant for other user: %v", err)
+	}
+
+	// No wallet row at all: 0, present.
+	req := newRequest(http.MethodGet, "/api/aurora/billing/balance", nil)
+	out := testutil.Decode[auroraBillingResponse](t, testHandler.GetAuroraBillingBalance, req, http.StatusOK)
+	if out.AvailableMicro == nil {
+		t.Fatal("availableMicro is absent, want 0 for a user with no wallet row")
+	}
+	if *out.AvailableMicro != 0 {
+		t.Fatalf("availableMicro = %d for a fresh wallet, want 0", *out.AvailableMicro)
+	}
+
+	// Funded: the number tracks the ledger, and the other user's balance is
+	// not what comes back.
+	if err := testHandler.Credit.Grant(ctx, parseUUID(testUserID), ws, 2500, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	out = testutil.Decode[auroraBillingResponse](t, testHandler.GetAuroraBillingBalance, req, http.StatusOK)
+	if out.AvailableMicro == nil || *out.AvailableMicro != 2500 {
+		t.Fatalf("availableMicro = %v after a 2500 grant, want 2500 (the caller's wallet, not another user's)", out.AvailableMicro)
+	}
+}
+
+// TestAuroraBillingBalanceRequiresAuthentication covers the failure side of
+// requireUserID: without an authenticated user there is no wallet to read, and
+// defaulting to some other account's balance would leak it.
+func TestAuroraBillingBalanceRequiresAuthentication(t *testing.T) {
+	req := newRequest(http.MethodGet, "/api/aurora/billing/balance", nil)
+	req.Header.Del("X-User-ID")
+	testutil.Call(t, testHandler.GetAuroraBillingBalance, req).Want(http.StatusUnauthorized)
+}
+
+// TestAuroraBillingTransactionsListsTheCallersLedger checks the row shape the
+// frontend schema consumes (packages/core/aurora/schema.ts), that the newest
+// row comes first, and that the list is the caller's ledger only. The empty
+// case is asserted too: `transactions` must be `[]`, not `null`, or the zod
+// `.default([])` never fires and the UI renders against a null array.
+func TestAuroraBillingTransactionsListsTheCallersLedger(t *testing.T) {
+	creditTestReset(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	empty := testutil.Decode[auroraBillingResponse](t,
+		testHandler.ListAuroraBillingTransactions,
+		newRequest(http.MethodGet, "/api/aurora/billing/transactions?limit=50", nil),
+		http.StatusOK)
+	if empty.Transactions == nil {
+		t.Fatal("transactions is null for an empty ledger, want an empty array")
+	}
+	if len(empty.Transactions) != 0 {
+		t.Fatalf("transactions for an empty ledger = %d rows, want 0", len(empty.Transactions))
+	}
+
+	// Another user's row, which must not appear in the caller's list.
+	otherID := dbfx.User(t, "Aurora Ledger Other", "aurora-ledger-other@multica.test")
+	creditTestResetUser(t, otherID)
+	if err := testHandler.Credit.Grant(ctx, parseUUID(otherID), ws, 999, aurora.LedgerKindAdjustment, creditRefFor(otherID, "other-seed")); err != nil {
+		t.Fatalf("Grant for other user: %v", err)
+	}
+
+	gen := creditRef("gen-ledger")
+	if err := testHandler.Credit.Grant(ctx, user, ws, 1000, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	if err := testHandler.Credit.Reserve(ctx, user, ws, 300, gen); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if err := testHandler.Credit.Refund(ctx, user, ws, 300, gen); err != nil {
+		t.Fatalf("Refund: %v", err)
+	}
+
+	out := testutil.Decode[auroraBillingResponse](t,
+		testHandler.ListAuroraBillingTransactions,
+		newRequest(http.MethodGet, "/api/aurora/billing/transactions?limit=50", nil),
+		http.StatusOK)
+	if len(out.Transactions) != 3 {
+		t.Fatalf("transactions = %d rows, want 3 (grant, deduction, refund; not the other user's)", len(out.Transactions))
+	}
+	// Newest first: the refund was written last.
+	wantOrder := []struct {
+		kind      string
+		amount    int64
+		balance   int64
+		reference string
+	}{
+		{aurora.LedgerKindRefund, 300, 1000, gen},
+		{aurora.LedgerKindDeduction, -300, 700, gen},
+		{aurora.LedgerKindAdjustment, 1000, 1000, creditRef("seed")},
+	}
+	for i, want := range wantOrder {
+		got := out.Transactions[i]
+		if got.ID == "" {
+			t.Errorf("row %d: id is empty", i)
+		}
+		if got.Kind != want.kind || got.AmountMicro != want.amount || got.BalanceAfterMicro != want.balance || got.Reference != want.reference {
+			t.Errorf("row %d = %+v, want kind=%s amount=%d balanceAfter=%d reference=%s",
+				i, got, want.kind, want.amount, want.balance, want.reference)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, got.CreatedAt); err != nil {
+			t.Errorf("row %d: createdAt = %q, want RFC3339: %v", i, got.CreatedAt, err)
+		}
+	}
+}
+
+// TestAuroraBillingTransactionsLimit covers the ?limit contract. The ledger is
+// seeded past the endpoint's default and maximum so each case is told apart by
+// its row count — a smaller ledger would make "honoured", "defaulted" and
+// "rejected" all return the same number and prove nothing.
+func TestAuroraBillingTransactionsLimit(t *testing.T) {
+	creditTestReset(t)
+
+	// Seeded with raw SQL rather than the service: 60 wallet operations would
+	// each open a transaction to prove something only the read path decides.
+	dbfx.Exec(t, `
+		INSERT INTO credit_ledger (user_id, workspace_id, kind, amount_micro, balance_after_micro, reference, idempotency_key)
+		SELECT $1, $2, 'adjustment', 10, 10, 'seed-' || i, $3 || '-bulk-' || i
+		FROM generate_series(1, 60) AS i`, testUserID, testWorkspaceID, testUserID)
+
+	cases := []struct {
+		name  string
+		query string
+		want  int
+	}{
+		{"honours a limit inside the range", "?limit=2", 2},
+		{"honours the maximum", "?limit=200", 60},
+		{"defaults when absent", "", 50},
+		{"defaults on junk", "?limit=abc", 50},
+		{"defaults on zero", "?limit=0", 50},
+		{"defaults on a negative limit", "?limit=-5", 50},
+		{"defaults above the maximum", "?limit=201", 50},
+		{"defaults on an absurd limit", "?limit=100000", 50},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := testutil.Decode[auroraBillingResponse](t,
+				testHandler.ListAuroraBillingTransactions,
+				newRequest(http.MethodGet, "/api/aurora/billing/transactions"+tc.query, nil),
+				http.StatusOK)
+			if len(out.Transactions) != tc.want {
+				t.Fatalf("transactions with %q = %d rows, want %d", tc.query, len(out.Transactions), tc.want)
+			}
+		})
+	}
+}
+
+// TestAuroraBillingTransactionsRequiresAuthentication mirrors the balance
+// endpoint's failure side.
+func TestAuroraBillingTransactionsRequiresAuthentication(t *testing.T) {
+	req := newRequest(http.MethodGet, "/api/aurora/billing/transactions", nil)
+	req.Header.Del("X-User-ID")
+	testutil.Call(t, testHandler.ListAuroraBillingTransactions, req).Want(http.StatusUnauthorized)
+}
+
+// TestAuroraBillingRejectsMalformedUserID covers the second half of resolving
+// the caller. The auth middleware stamps X-User-ID from a validated token in
+// production, but the handlers are also reachable from tests and from any
+// future caller that sets the header itself, and the UUID rules in AGENTS.md
+// require a request-boundary string to go through parseUUIDOrBadRequest. The
+// trusted-input variant, parseUUID, panics on a malformed value — a 400 here
+// is the difference between a rejected request and a crashed process.
+func TestAuroraBillingRejectsMalformedUserID(t *testing.T) {
+	handlers := map[string]http.HandlerFunc{
+		"balance":      testHandler.GetAuroraBillingBalance,
+		"transactions": testHandler.ListAuroraBillingTransactions,
+	}
+	for name, handler := range handlers {
+		t.Run(name, func(t *testing.T) {
+			req := newRequest(http.MethodGet, "/api/aurora/billing/"+name, nil)
+			req.Header.Set("X-User-ID", "not-a-uuid")
+			testutil.Call(t, handler, req).Want(http.StatusBadRequest)
+		})
 	}
 }

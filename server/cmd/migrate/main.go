@@ -307,6 +307,7 @@ var concurrentIndexCleanups = map[string]string{
 	"472_agent_task_queue_chat_session_index":                   "idx_agent_task_queue_chat_session",
 	"474_dingtalk_bot_identity_workspace_index":                 "idx_dingtalk_bot_identity_workspace",
 	"483_credit_ledger_idempotency_key_idx":                     "credit_ledger_idempotency_key_idx",
+	"484_credit_ledger_user_created_at_idx":                     "credit_ledger_user_created_at_idx",
 }
 
 // concurrentDownIndexCleanups covers every migration whose down direction

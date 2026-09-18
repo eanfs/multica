@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS credit_ledger_user_created_at_idx;
