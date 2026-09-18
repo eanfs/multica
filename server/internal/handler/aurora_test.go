@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -157,15 +158,38 @@ func TestCreateAuroraGenerationRejectsMalformedBody(t *testing.T) {
 // from a known-empty state, and empties it again on cleanup. credit_balance and
 // credit_ledger carry no foreign key to user, so the row fixture's own cleanup
 // would otherwise leave these rows behind.
+//
+// It clears by user_id, which is why every test's references carry testUserID:
+// the idempotency key is globally unique and the fast path looks it up by key
+// alone, so a row orphaned by an abnormally killed run (whose fixture user no
+// longer exists, and whose id no later run reuses) is invisible to this reset
+// and would silently satisfy a later run's fast path. Run-unique references
+// make these tests independent of cleanup having happened at all.
 func creditTestReset(t *testing.T) {
 	t.Helper()
 	reset := func() {
 		ctx := context.Background()
-		_, _ = testPool.Exec(ctx, `DELETE FROM credit_ledger WHERE user_id = $1`, testUserID)
-		_, _ = testPool.Exec(ctx, `DELETE FROM credit_balance WHERE user_id = $1`, testUserID)
+		if _, err := testPool.Exec(ctx, `DELETE FROM credit_ledger WHERE user_id = $1`, testUserID); err != nil {
+			t.Fatalf("reset credit_ledger: %v", err)
+		}
+		if _, err := testPool.Exec(ctx, `DELETE FROM credit_balance WHERE user_id = $1`, testUserID); err != nil {
+			t.Fatalf("reset credit_balance: %v", err)
+		}
 	}
 	reset()
 	t.Cleanup(reset)
+}
+
+// creditRef namespaces a test reference with the fixture user's id, so the
+// idempotency key derived from it is unique to this run. The key is globally
+// unique and adjust's fast path looks it up by key alone, without a user
+// filter, so a row left by an abnormally killed run — whose fixture user no
+// longer exists and whose id no later run reuses — would otherwise satisfy a
+// later run's fast path and turn an operation into a silent no-op. Tying
+// references to testUserID makes the tests correct regardless of what a
+// previous run left behind.
+func creditRef(base string) string {
+	return base + "-" + testUserID
 }
 
 func TestAuroraCreditReserveAndRefundAreIdempotent(t *testing.T) {
@@ -173,15 +197,16 @@ func TestAuroraCreditReserveAndRefundAreIdempotent(t *testing.T) {
 	ctx := context.Background()
 	user := parseUUID(testUserID)
 	ws := parseUUID(testWorkspaceID)
+	gen := creditRef("gen-1")
 
-	if err := testHandler.Credit.Grant(ctx, user, ws, 1000, aurora.LedgerKindAdjustment, "seed"); err != nil {
+	if err := testHandler.Credit.Grant(ctx, user, ws, 1000, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
 		t.Fatalf("Grant: %v", err)
 	}
-	if err := testHandler.Credit.Reserve(ctx, user, ws, 300, "gen-1"); err != nil {
+	if err := testHandler.Credit.Reserve(ctx, user, ws, 300, gen); err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
 	// Idempotency: re-reserving the same reference must not deduct again.
-	if err := testHandler.Credit.Reserve(ctx, user, ws, 300, "gen-1"); err != nil {
+	if err := testHandler.Credit.Reserve(ctx, user, ws, 300, gen); err != nil {
 		t.Fatalf("Reserve retry: %v", err)
 	}
 	bal, err := testHandler.Credit.Balance(ctx, user)
@@ -192,11 +217,11 @@ func TestAuroraCreditReserveAndRefundAreIdempotent(t *testing.T) {
 		t.Fatalf("balance after idempotent reserve = %d, want 700", bal)
 	}
 
-	if err := testHandler.Credit.Refund(ctx, user, ws, 300, "gen-1"); err != nil {
+	if err := testHandler.Credit.Refund(ctx, user, ws, 300, gen); err != nil {
 		t.Fatalf("Refund: %v", err)
 	}
 	// Idempotency: re-refunding the same reference must not credit again.
-	if err := testHandler.Credit.Refund(ctx, user, ws, 300, "gen-1"); err != nil {
+	if err := testHandler.Credit.Refund(ctx, user, ws, 300, gen); err != nil {
 		t.Fatalf("Refund retry: %v", err)
 	}
 	bal, err = testHandler.Credit.Balance(ctx, user)
@@ -214,7 +239,7 @@ func TestAuroraCreditReserveFailsWhenInsufficient(t *testing.T) {
 	user := parseUUID(testUserID)
 	ws := parseUUID(testWorkspaceID)
 
-	if err := testHandler.Credit.Reserve(ctx, user, ws, 100, "gen-x"); err != aurora.ErrInsufficientCredits {
+	if err := testHandler.Credit.Reserve(ctx, user, ws, 100, creditRef("gen-x")); !errors.Is(err, aurora.ErrInsufficientCredits) {
 		t.Fatalf("Reserve with empty balance: err = %v, want ErrInsufficientCredits", err)
 	}
 }
@@ -225,7 +250,7 @@ func TestAuroraCreditGrantRejectsInvalidKind(t *testing.T) {
 	user := parseUUID(testUserID)
 	ws := parseUUID(testWorkspaceID)
 
-	if err := testHandler.Credit.Grant(ctx, user, ws, 100, "bogus", "seed"); err == nil {
+	if err := testHandler.Credit.Grant(ctx, user, ws, 100, "bogus", creditRef("seed")); err == nil {
 		t.Fatal("Grant with invalid kind should fail")
 	}
 }
@@ -254,12 +279,12 @@ func TestAuroraCreditRejectsNonPositiveAmounts(t *testing.T) {
 	ws := parseUUID(testWorkspaceID)
 
 	calls := map[string]func() error{
-		"Reserve": func() error { return testHandler.Credit.Reserve(ctx, user, ws, -100, "gen-neg") },
-		"Refund":  func() error { return testHandler.Credit.Refund(ctx, user, ws, -100, "gen-neg") },
+		"Reserve": func() error { return testHandler.Credit.Reserve(ctx, user, ws, -100, creditRef("gen-neg")) },
+		"Refund":  func() error { return testHandler.Credit.Refund(ctx, user, ws, -100, creditRef("gen-neg")) },
 		"Grant": func() error {
-			return testHandler.Credit.Grant(ctx, user, ws, -100, aurora.LedgerKindTopup, "gen-neg")
+			return testHandler.Credit.Grant(ctx, user, ws, -100, aurora.LedgerKindTopup, creditRef("gen-neg"))
 		},
-		"Reserve/zero": func() error { return testHandler.Credit.Reserve(ctx, user, ws, 0, "gen-zero") },
+		"Reserve/zero": func() error { return testHandler.Credit.Reserve(ctx, user, ws, 0, creditRef("gen-zero")) },
 	}
 	for name, call := range calls {
 		if err := call(); err == nil {
@@ -321,8 +346,14 @@ func TestAuroraCreditConcurrentDuplicateReserveIsIdempotent(t *testing.T) {
 			ctx := context.Background()
 			user := parseUUID(testUserID)
 			ws := parseUUID(testWorkspaceID)
+			// The winner's raw insert and the loser's Reserve must agree on the
+			// idempotency key, so both derive it from this one reference. The
+			// service computes "reserve:"+reference; the raw statement below
+			// spells out the same key.
+			raceRef := creditRef("gen-race")
+			raceKey := "reserve:" + raceRef
 
-			if err := testHandler.Credit.Grant(ctx, user, ws, tc.seedMicro, aurora.LedgerKindAdjustment, "seed"); err != nil {
+			if err := testHandler.Credit.Grant(ctx, user, ws, tc.seedMicro, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
 				t.Fatalf("Grant: %v", err)
 			}
 
@@ -341,14 +372,14 @@ func TestAuroraCreditConcurrentDuplicateReserveIsIdempotent(t *testing.T) {
 			if _, err := winner.Exec(ctx, `
 				INSERT INTO credit_ledger
 					(user_id, workspace_id, kind, amount_micro, balance_after_micro, reference, idempotency_key)
-				VALUES ($1, $2, 'deduction', -300, $3, 'gen-race', 'reserve:gen-race')`,
-				user, ws, winnerBalance); err != nil {
+				VALUES ($1, $2, 'deduction', -300, $3, $4, $5)`,
+				user, ws, winnerBalance, raceRef, raceKey); err != nil {
 				t.Fatalf("winner ledger insert: %v", err)
 			}
 
 			dupErr := make(chan error, 1)
 			go func() {
-				dupErr <- testHandler.Credit.Reserve(ctx, user, ws, 300, "gen-race")
+				dupErr <- testHandler.Credit.Reserve(ctx, user, ws, 300, raceRef)
 			}()
 
 			// The winner is still uncommitted, so the duplicate's pre-check
@@ -377,11 +408,11 @@ func TestAuroraCreditConcurrentDuplicateReserveIsIdempotent(t *testing.T) {
 			// seed grant has its own key and is not part of this claim.
 			var ledgerRows int
 			if err := testPool.QueryRow(ctx,
-				`SELECT count(*) FROM credit_ledger WHERE idempotency_key = 'reserve:gen-race'`).Scan(&ledgerRows); err != nil {
+				`SELECT count(*) FROM credit_ledger WHERE idempotency_key = $1`, raceKey).Scan(&ledgerRows); err != nil {
 				t.Fatalf("count ledger rows: %v", err)
 			}
 			if ledgerRows != 1 {
-				t.Fatalf("ledger rows for reserve:gen-race = %d, want 1", ledgerRows)
+				t.Fatalf("ledger rows for %s = %d, want 1", raceKey, ledgerRows)
 			}
 		})
 	}
