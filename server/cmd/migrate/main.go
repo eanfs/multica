@@ -317,6 +317,9 @@ var concurrentIndexCleanups = map[string]string{
 	"482_agent_task_queue_telemetry_started_index":              "idx_agent_task_queue_telemetry_started",
 	"504_credit_ledger_idempotency_key_idx":                     "credit_ledger_idempotency_key_idx",
 	"505_credit_ledger_user_created_at_idx":                     "credit_ledger_user_created_at_idx",
+	"506_aurora_generation_workspace_idx":                       "aurora_generation_workspace_idx",
+	"507_aurora_asset_generation_idx":                           "aurora_asset_generation_idx",
+	"508_aurora_asset_workspace_idx":                            "aurora_asset_workspace_idx",
 	"484_issue_triage_state_index":                              "idx_issue_triage_state",
 }
 
