@@ -22,6 +22,41 @@ func (q *Queries) CountWorkspacesForUser(ctx context.Context, userID pgtype.UUID
 	return count, err
 }
 
+const createAuroraAsset = `-- name: CreateAuroraAsset :one
+INSERT INTO aurora_asset (generation_id, workspace_id, kind, media_url, format)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, generation_id, workspace_id, kind, media_url, format, created_at
+`
+
+type CreateAuroraAssetParams struct {
+	GenerationID pgtype.UUID `json:"generation_id"`
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	Kind         string      `json:"kind"`
+	MediaUrl     pgtype.Text `json:"media_url"`
+	Format       pgtype.Text `json:"format"`
+}
+
+func (q *Queries) CreateAuroraAsset(ctx context.Context, arg CreateAuroraAssetParams) (AuroraAsset, error) {
+	row := q.db.QueryRow(ctx, createAuroraAsset,
+		arg.GenerationID,
+		arg.WorkspaceID,
+		arg.Kind,
+		arg.MediaUrl,
+		arg.Format,
+	)
+	var i AuroraAsset
+	err := row.Scan(
+		&i.ID,
+		&i.GenerationID,
+		&i.WorkspaceID,
+		&i.Kind,
+		&i.MediaUrl,
+		&i.Format,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const createAuroraGeneration = `-- name: CreateAuroraGeneration :one
 INSERT INTO aurora_generation (workspace_id, user_id, skill_id, prompt, status)
 VALUES ($1, $2, $3, $4, 'queued')
@@ -61,6 +96,50 @@ func (q *Queries) CreateAuroraGeneration(ctx context.Context, arg CreateAuroraGe
 	return i, err
 }
 
+const deleteAuroraAsset = `-- name: DeleteAuroraAsset :execrows
+DELETE FROM aurora_asset
+WHERE id = $1 AND workspace_id = $2
+`
+
+type DeleteAuroraAssetParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) DeleteAuroraAsset(ctx context.Context, arg DeleteAuroraAssetParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteAuroraAsset, arg.ID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const getAuroraAsset = `-- name: GetAuroraAsset :one
+SELECT id, generation_id, workspace_id, kind, media_url, format, created_at
+FROM aurora_asset
+WHERE id = $1 AND workspace_id = $2
+`
+
+type GetAuroraAssetParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) GetAuroraAsset(ctx context.Context, arg GetAuroraAssetParams) (AuroraAsset, error) {
+	row := q.db.QueryRow(ctx, getAuroraAsset, arg.ID, arg.WorkspaceID)
+	var i AuroraAsset
+	err := row.Scan(
+		&i.ID,
+		&i.GenerationID,
+		&i.WorkspaceID,
+		&i.Kind,
+		&i.MediaUrl,
+		&i.Format,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getAuroraGeneration = `-- name: GetAuroraGeneration :one
 SELECT id, workspace_id, user_id, skill_id, prompt, status, task_id,
        credits_reserved, credits_charged, error, created_at, updated_at
@@ -75,6 +154,212 @@ type GetAuroraGenerationParams struct {
 
 func (q *Queries) GetAuroraGeneration(ctx context.Context, arg GetAuroraGenerationParams) (AuroraGeneration, error) {
 	row := q.db.QueryRow(ctx, getAuroraGeneration, arg.ID, arg.WorkspaceID)
+	var i AuroraGeneration
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.UserID,
+		&i.SkillID,
+		&i.Prompt,
+		&i.Status,
+		&i.TaskID,
+		&i.CreditsReserved,
+		&i.CreditsCharged,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getAuroraGenerationByTaskID = `-- name: GetAuroraGenerationByTaskID :one
+SELECT id, workspace_id, user_id, skill_id, prompt, status, task_id,
+       credits_reserved, credits_charged, error, created_at, updated_at
+FROM aurora_generation
+WHERE task_id = $1
+`
+
+func (q *Queries) GetAuroraGenerationByTaskID(ctx context.Context, taskID pgtype.UUID) (AuroraGeneration, error) {
+	row := q.db.QueryRow(ctx, getAuroraGenerationByTaskID, taskID)
+	var i AuroraGeneration
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.UserID,
+		&i.SkillID,
+		&i.Prompt,
+		&i.Status,
+		&i.TaskID,
+		&i.CreditsReserved,
+		&i.CreditsCharged,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const listAuroraAssets = `-- name: ListAuroraAssets :many
+SELECT id, generation_id, workspace_id, kind, media_url, format, created_at
+FROM aurora_asset
+WHERE ($1::uuid IS NULL OR generation_id = $1::uuid)
+  AND ($2::uuid IS NULL OR workspace_id = $2::uuid)
+ORDER BY created_at DESC
+LIMIT $4::int OFFSET $3::int
+`
+
+type ListAuroraAssetsParams struct {
+	GenerationID pgtype.UUID `json:"generation_id"`
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	Offset       int32       `json:"offset"`
+	Limit        int32       `json:"limit"`
+}
+
+func (q *Queries) ListAuroraAssets(ctx context.Context, arg ListAuroraAssetsParams) ([]AuroraAsset, error) {
+	rows, err := q.db.Query(ctx, listAuroraAssets,
+		arg.GenerationID,
+		arg.WorkspaceID,
+		arg.Offset,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AuroraAsset{}
+	for rows.Next() {
+		var i AuroraAsset
+		if err := rows.Scan(
+			&i.ID,
+			&i.GenerationID,
+			&i.WorkspaceID,
+			&i.Kind,
+			&i.MediaUrl,
+			&i.Format,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAuroraGenerations = `-- name: ListAuroraGenerations :many
+SELECT id, workspace_id, user_id, skill_id, prompt, status, task_id,
+       credits_reserved, credits_charged, error, created_at, updated_at
+FROM aurora_generation
+WHERE workspace_id = $1
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3
+`
+
+type ListAuroraGenerationsParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Limit       int32       `json:"limit"`
+	Offset      int32       `json:"offset"`
+}
+
+func (q *Queries) ListAuroraGenerations(ctx context.Context, arg ListAuroraGenerationsParams) ([]AuroraGeneration, error) {
+	rows, err := q.db.Query(ctx, listAuroraGenerations, arg.WorkspaceID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AuroraGeneration{}
+	for rows.Next() {
+		var i AuroraGeneration
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.UserID,
+			&i.SkillID,
+			&i.Prompt,
+			&i.Status,
+			&i.TaskID,
+			&i.CreditsReserved,
+			&i.CreditsCharged,
+			&i.Error,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updateAuroraGenerationTask = `-- name: UpdateAuroraGenerationTask :one
+UPDATE aurora_generation
+SET task_id = $2, credits_reserved = $3, updated_at = now()
+WHERE id = $1 AND workspace_id = $4
+RETURNING id, workspace_id, user_id, skill_id, prompt, status, task_id,
+          credits_reserved, credits_charged, error, created_at, updated_at
+`
+
+type UpdateAuroraGenerationTaskParams struct {
+	ID              pgtype.UUID `json:"id"`
+	TaskID          pgtype.UUID `json:"task_id"`
+	CreditsReserved int64       `json:"credits_reserved"`
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) UpdateAuroraGenerationTask(ctx context.Context, arg UpdateAuroraGenerationTaskParams) (AuroraGeneration, error) {
+	row := q.db.QueryRow(ctx, updateAuroraGenerationTask,
+		arg.ID,
+		arg.TaskID,
+		arg.CreditsReserved,
+		arg.WorkspaceID,
+	)
+	var i AuroraGeneration
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.UserID,
+		&i.SkillID,
+		&i.Prompt,
+		&i.Status,
+		&i.TaskID,
+		&i.CreditsReserved,
+		&i.CreditsCharged,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateAuroraGenerationTerminal = `-- name: UpdateAuroraGenerationTerminal :one
+UPDATE aurora_generation
+SET status = $2, error = $3, credits_charged = $4, updated_at = now()
+WHERE id = $1 AND workspace_id = $5
+RETURNING id, workspace_id, user_id, skill_id, prompt, status, task_id,
+          credits_reserved, credits_charged, error, created_at, updated_at
+`
+
+type UpdateAuroraGenerationTerminalParams struct {
+	ID             pgtype.UUID `json:"id"`
+	Status         string      `json:"status"`
+	Error          pgtype.Text `json:"error"`
+	CreditsCharged int64       `json:"credits_charged"`
+	WorkspaceID    pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) UpdateAuroraGenerationTerminal(ctx context.Context, arg UpdateAuroraGenerationTerminalParams) (AuroraGeneration, error) {
+	row := q.db.QueryRow(ctx, updateAuroraGenerationTerminal,
+		arg.ID,
+		arg.Status,
+		arg.Error,
+		arg.CreditsCharged,
+		arg.WorkspaceID,
+	)
 	var i AuroraGeneration
 	err := row.Scan(
 		&i.ID,
