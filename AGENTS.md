@@ -127,3 +127,15 @@ Workspace-scoped queries filter by `workspace_id`; membership gates access and `
 - New global pre-workspace routes use a single word or `/{noun}/{verb}`, not hyphenated root names. Update `server/internal/handler/reserved_slugs.json`, run `pnpm generate:reserved-slugs`, and commit `packages/core/paths/reserved-slugs.ts` when changing reserved slugs.
 - Use atomic conventional commits and the repository PR template. For releases, follow [.github/RELEASING.md](.github/RELEASING.md); default to a patch bump unless specified otherwise.
 - Open pull requests and issues against the `eanfs/multica` fork (https://github.com/eanfs/multica), not the upstream `multica-ai/multica` org; use `gh pr create --repo eanfs/multica`.
+
+## Aurora Roadmap
+
+Aurora (内容创作应用) is a new domain in this repo, built incrementally from plans under `docs/superpowers/plans/` (specs under `docs/superpowers/specs/`). The plans are the source of truth; scrum stories and tickets are tracked on the `eanfs/multica` fork.
+
+- Implemented: Plan 1 (领域骨架, story #3), Plan 2 (积分账本, story #16).
+- Split into story + tickets, pending implementation, in this order:
+  1. Plan 3.5 Task 1 (#32) — sqlc queries + index migrations
+  2. Plan 3 (#24–30) — execution layer (enqueue → managed agent → asset writeback + credit settlement)
+  3. Plan 3.5 rest (#33/#34) — generations/assets read endpoints
+  4. Plan 4 (#36–38) — frontend `apps/aurora`
+- Not yet split: Plan safety (内容审核 + 权益门禁), Plan 5 (订阅 + Stripe).
