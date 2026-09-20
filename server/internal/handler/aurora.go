@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,6 +19,12 @@ import (
 // A content prompt is small; the cap keeps an unbounded write from bloating
 // the TEXT column.
 const maxAuroraGenerationBodyBytes = 256 * 1024
+
+// microCreditsPerCredit converts a catalog credit into the ledger's
+// micro-credit unit (1 credit = 1e6 micro). Reservation and refund both move
+// the amount derived with this same constant, so one write reverses the other
+// exactly.
+const microCreditsPerCredit = 1_000_000
 
 // ListAuroraSkills returns the full catalog, including unavailable phase-2 skills.
 // The router requires authentication and workspace membership.
@@ -33,11 +41,12 @@ type AuroraGenerationResponse struct {
 	CreditsReserved int64  `json:"creditsReserved"`
 }
 
-// CreateAuroraGeneration creates a queued generation row for the current user
-// in the resolved workspace. Execution is wired in Plan 3; credits reservation
-// lands in Plan 2. The router guards this route with RequireHumanActor and
-// RequireWorkspaceMember: machine credentials cannot create generations, and
-// workspace membership is re-validated on every request.
+// CreateAuroraGeneration validates the skill, lazily seeds the workspace's
+// Aurora system agents, inserts a queued generation row, reserves its credits,
+// and enqueues the execution task. The router guards this route with
+// RequireHumanActor and RequireWorkspaceMember: machine credentials cannot
+// create generations, and workspace membership is re-validated on every
+// request.
 func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := parseUUIDOrBadRequest(w, h.resolveWorkspaceID(r), "workspace_id")
 	if !ok {
@@ -80,6 +89,15 @@ func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Lazy seed so the enqueue below always has an execution carrier. owner_id
+	// references "user", and the caller is a real member, so the caller's id
+	// satisfies the FK (in the personal-space MVP it is the workspace owner,
+	// mirroring the Mika system-agent precedent).
+	if err := h.ensureAuroraSystemAgents(r.Context(), workspaceID, userUUID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to prepare workspace agents")
+		return
+	}
+
 	row, err := h.Queries.CreateAuroraGeneration(r.Context(), db.CreateAuroraGenerationParams{
 		WorkspaceID: workspaceID,
 		UserID:      userUUID,
@@ -91,13 +109,107 @@ func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	amountMicro := int64(entry.Credits) * microCreditsPerCredit
+	reference := uuidToString(row.ID)
+
+	// Reserve before enqueue: a short wallet must never leave behind a queued
+	// task for work no one was charged for.
+	if err := h.Credit.Reserve(r.Context(), userUUID, workspaceID, amountMicro, reference); err != nil {
+		if errors.Is(err, aurora.ErrInsufficientCredits) {
+			h.markGenerationFailed(r.Context(), workspaceID, row.ID, "insufficient credits")
+			writeError(w, http.StatusPaymentRequired, "insufficient credits")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to reserve credits")
+		return
+	}
+
+	// Enqueue on the skill's system agent, then write the task id and reserved
+	// amount back onto the row. Any failure after the reservation refunds it, so
+	// the user is never charged for work that never started.
+	agent, err := h.Queries.GetAgentBySystemKey(r.Context(), db.GetAgentBySystemKeyParams{
+		WorkspaceID: workspaceID,
+		SystemKey:   pgtype.Text{String: "aurora:" + entry.ID, Valid: true},
+	})
+	if err != nil {
+		h.failGenerationAndRefund(r.Context(), userUUID, workspaceID, row.ID, amountMicro, "system agent unavailable")
+		writeError(w, http.StatusInternalServerError, "failed to enqueue generation")
+		return
+	}
+
+	task, err := h.TaskService.EnqueueQuickCreateTask(r.Context(), workspaceID, userUUID, agent.ID, pgtype.UUID{}, req.Prompt, "high", "", pgtype.UUID{}, pgtype.UUID{}, nil)
+	if err != nil {
+		h.failGenerationAndRefund(r.Context(), userUUID, workspaceID, row.ID, amountMicro, "enqueue failed")
+		writeError(w, http.StatusInternalServerError, "failed to enqueue generation")
+		return
+	}
+
+	updated, err := h.Queries.UpdateAuroraGenerationTask(r.Context(), db.UpdateAuroraGenerationTaskParams{
+		ID:              row.ID,
+		TaskID:          task.ID,
+		CreditsReserved: amountMicro,
+		WorkspaceID:     workspaceID,
+	})
+	if err != nil {
+		h.failGenerationAndRefund(r.Context(), userUUID, workspaceID, row.ID, amountMicro, "failed to record task")
+		writeError(w, http.StatusInternalServerError, "failed to record generation task")
+		return
+	}
+
 	writeJSON(w, http.StatusCreated, map[string]any{"generation": AuroraGenerationResponse{
-		ID:              uuidToString(row.ID),
-		SkillID:         row.SkillID,
-		Prompt:          row.Prompt,
-		Status:          row.Status,
-		CreditsReserved: row.CreditsReserved,
+		ID:              uuidToString(updated.ID),
+		SkillID:         updated.SkillID,
+		Prompt:          updated.Prompt,
+		Status:          updated.Status,
+		CreditsReserved: updated.CreditsReserved,
 	}})
+}
+
+// ensureAuroraSystemAgents serialises the idempotent system-agent seed behind a
+// per-workspace advisory lock. The managed-runtime lookup-then-insert inside
+// aurora.EnsureSystemAgents has no ON CONFLICT arbiter (its NULL daemon_id sits
+// outside migration 121's partial unique index), so this lock — not the queries
+// — is what makes two concurrent first seeds produce one runtime row.
+func (h *Handler) ensureAuroraSystemAgents(ctx context.Context, workspaceID, ownerID pgtype.UUID) error {
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "aurora:"+uuidToString(workspaceID)); err != nil {
+		return err
+	}
+	if err := aurora.EnsureSystemAgents(ctx, h.Queries.WithTx(tx), workspaceID, ownerID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// markGenerationFailed moves a generation to the terminal failed state with a
+// reason and no credits charged. Used when the request aborts before any
+// credits changed hands (an insufficient wallet).
+func (h *Handler) markGenerationFailed(ctx context.Context, workspaceID, generationID pgtype.UUID, reason string) {
+	if _, err := h.Queries.UpdateAuroraGenerationTerminal(ctx, db.UpdateAuroraGenerationTerminalParams{
+		ID:             generationID,
+		Status:         "failed",
+		Error:          pgtype.Text{String: reason, Valid: true},
+		CreditsCharged: 0,
+		WorkspaceID:    workspaceID,
+	}); err != nil {
+		slog.Warn("aurora generation mark-failed error", "generation_id", uuidToString(generationID), "error", err)
+	}
+}
+
+// failGenerationAndRefund rolls a post-reservation failure back: refund the
+// reserved micro-credits (idempotent via the generation-id reference) and mark
+// the generation failed. Both writes are best-effort — the request path is
+// already returning an error — but a failed refund is logged so a customer is
+// never silently left charged for work that never started.
+func (h *Handler) failGenerationAndRefund(ctx context.Context, userID, workspaceID, generationID pgtype.UUID, amountMicro int64, reason string) {
+	if err := h.Credit.Refund(ctx, userID, workspaceID, amountMicro, uuidToString(generationID)); err != nil {
+		slog.Warn("aurora generation refund failed", "generation_id", uuidToString(generationID), "error", err)
+	}
+	h.markGenerationFailed(ctx, workspaceID, generationID, reason)
 }
 
 // Aurora transaction paging bounds. The ledger is the user's own history, so
