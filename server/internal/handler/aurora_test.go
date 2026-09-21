@@ -62,8 +62,40 @@ func TestListAuroraSkills(t *testing.T) {
 	}
 }
 
+// cleanupAuroraSystemAgents removes the workspace's lazily seeded Aurora system
+// agents, skills and managed runtime at teardown. Generation creation seeds
+// these on first use and they would otherwise persist into every later handler
+// test, whose `agent ... LIMIT 1` agent-runtime heuristics assume the workspace
+// holds only user-visible agents (kind='system' is excluded by
+// GetAgentInWorkspace but not by an unfiltered LIMIT 1). Agents go first so
+// their agent_skill rows cascade; skills and the runtime follow once the agents
+// no longer reference them.
+func cleanupAuroraSystemAgents(t *testing.T) {
+	t.Helper()
+	names := make([]string, 0, len(aurora.Catalog()))
+	for _, e := range aurora.Catalog() {
+		names = append(names, e.Name)
+	}
+	t.Cleanup(func() {
+		ctx := context.Background()
+		if _, err := testPool.Exec(ctx,
+			`DELETE FROM agent WHERE workspace_id = $1 AND system_key LIKE 'aurora:%'`, testWorkspaceID); err != nil {
+			t.Errorf("cleanup aurora agents: %v", err)
+		}
+		if _, err := testPool.Exec(ctx,
+			`DELETE FROM skill WHERE workspace_id = $1 AND name = ANY($2::text[])`, testWorkspaceID, names); err != nil {
+			t.Errorf("cleanup aurora skills: %v", err)
+		}
+		if _, err := testPool.Exec(ctx,
+			`DELETE FROM agent_runtime WHERE workspace_id = $1 AND daemon_id IS NULL AND provider = 'aurora_managed'`, testWorkspaceID); err != nil {
+			t.Errorf("cleanup aurora runtime: %v", err)
+		}
+	})
+}
+
 func TestCreateAuroraGenerationReservesAndEnqueues(t *testing.T) {
 	creditTestReset(t)
+	cleanupAuroraSystemAgents(t)
 	ctx := context.Background()
 	user := parseUUID(testUserID)
 	ws := parseUUID(testWorkspaceID)
@@ -149,6 +181,7 @@ func TestCreateAuroraGenerationReservesAndEnqueues(t *testing.T) {
 
 func TestCreateAuroraGenerationRejectsInsufficientCredits(t *testing.T) {
 	creditTestReset(t)
+	cleanupAuroraSystemAgents(t)
 
 	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
 		"skillId": "xhs-image",
