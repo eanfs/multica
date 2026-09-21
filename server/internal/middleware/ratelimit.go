@@ -87,12 +87,15 @@ func RateLimit(rdb redis.UniversalClient, limit int, window time.Duration, trust
 }
 
 // RateLimitByUser returns a per-user fixed-window rate limiter backed by Redis.
-// It keys on the authenticated user id (the X-User-ID header the auth
-// middleware stamps) rather than the client IP, so the budget follows the
-// account across workspaces and clients. It must be mounted inside an
-// authenticated route group: a request that reaches it without X-User-ID
-// passes through, because the auth/workspace middleware upstream has already
-// rejected anonymous callers.
+// It keys on the workspace middleware's resolved member (RequireWorkspaceMember
+// injects a db.Member into the request context after validating the caller's
+// session and workspace membership), rather than the client IP or the raw
+// X-User-ID header, so the budget follows the verified account across
+// workspaces and clients.
+//
+// It must be mounted inside a RequireWorkspaceMember-protected route group:
+// when no member is present in the context the middleware fails closed rather
+// than rate-limiting against an unverified identity.
 //
 // Like RateLimit, a nil rdb makes the middleware a no-op (fail-open).
 func RateLimitByUser(rdb redis.UniversalClient, limit int, window time.Duration) func(http.Handler) http.Handler {
@@ -101,11 +104,15 @@ func RateLimitByUser(rdb redis.UniversalClient, limit int, window time.Duration)
 			return next
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			userID := r.Header.Get("X-User-ID")
-			if userID == "" {
-				next.ServeHTTP(w, r)
+			member, ok := MemberFromContext(r.Context())
+			if !ok {
+				// The workspace middleware did not resolve a member, so there
+				// is no verified identity to key on. Fail closed rather than
+				// admit an unidentified caller.
+				writeError(w, http.StatusInternalServerError, "rate limiter unavailable")
 				return
 			}
+			userID := uuidToString(member.UserID)
 			key := rateLimitUserKey(r.URL.Path, userID)
 			ctx := r.Context()
 

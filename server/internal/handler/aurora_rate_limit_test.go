@@ -7,22 +7,29 @@ import (
 	"time"
 
 	"github.com/multica-ai/multica/server/internal/middleware"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 // The Aurora generation creation endpoint is guarded by
 // middleware.RateLimitByUser (wired in cmd/server/router.go), a per-user
-// fixed-window gate keyed on X-User-ID. The handler tests cannot reach the
-// router without an import cycle, so these tests drive the middleware directly
-// with the same shape the route mounts it — the next handler stands in for
-// CreateAuroraGeneration, whose 201 marks a request that passed the gate.
+// fixed-window gate keyed on the workspace middleware's resolved member. The
+// handler tests cannot reach the router without an import cycle, so these
+// tests drive the middleware directly with the same shape the route mounts it
+// — the next handler stands in for CreateAuroraGeneration, whose 201 marks a
+// request that passed the gate.
 
 var auroraRateLimitNext = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 })
 
+// auroraRateLimitRequest builds a request whose context already carries a
+// resolved workspace member, matching what RequireWorkspaceMember injects
+// before the route-level gate runs.
 func auroraRateLimitRequest(userID string) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/api/aurora/generations", nil)
-	req.Header.Set("X-User-ID", userID)
+	req = req.WithContext(middleware.SetMemberContext(req.Context(), testWorkspaceID, db.Member{
+		UserID: parseUUID(userID),
+	}))
 	return req
 }
 
@@ -113,14 +120,19 @@ func TestAuroraRateLimit_RecoversAfterWindow(t *testing.T) {
 	}
 }
 
-func TestAuroraRateLimit_NoUserPassesThrough(t *testing.T) {
+// TestAuroraRateLimit_MissingMemberFailsClosed pins the security contract:
+// RateLimitByUser must not rate-limit (and thereby admit) a request whose
+// context carries no resolved member, because there is no verified identity to
+// key on. In the real router this branch is unreachable — the route sits behind
+// RequireWorkspaceMember — but a mis-mounted gate must fail closed, not open.
+func TestAuroraRateLimit_MissingMemberFailsClosed(t *testing.T) {
 	gate := middleware.RateLimitByUser(newRedisTestClient(t), 1, time.Minute)
 	h := gate(auroraRateLimitNext)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/aurora/generations", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected 201 (pass-through for unauthenticated), got %d", rec.Code)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 (fail closed without a member), got %d", rec.Code)
 	}
 }
