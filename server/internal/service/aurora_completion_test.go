@@ -156,9 +156,7 @@ func TestAuroraCompletionFailureRefunds(t *testing.T) {
 }
 
 func TestAuroraCompletionNoOpForNonAuroraTask(t *testing.T) {
-	svc, pool, workspaceID, userID, agentID := newAuroraCompletionService(t)
-	_ = workspaceID
-	_ = userID
+	svc, pool, _, _, agentID := newAuroraCompletionService(t)
 	ctx := context.Background()
 
 	// A task with no generation must settle to a silent no-op.

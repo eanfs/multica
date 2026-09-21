@@ -37,21 +37,29 @@ func auroraTerminal(status string) bool {
 	return status == auroraStatusCompleted || status == auroraStatusFailed
 }
 
+// settleableAuroraGeneration loads the generation a task backs and reports
+// whether it is still eligible to settle: present (the task is an Aurora task)
+// and non-terminal. A lookup failure settles as a no-op — never a second
+// charge or refund — so a transient DB error is logged, not acted on.
+func (s *TaskService) settleableAuroraGeneration(ctx context.Context, taskID pgtype.UUID) (db.AuroraGeneration, bool) {
+	gen, err := s.Queries.GetAuroraGenerationByTaskID(ctx, taskID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("aurora settlement: load generation failed",
+				"task_id", util.UUIDToString(taskID), "error", err)
+		}
+		return db.AuroraGeneration{}, false
+	}
+	return gen, !auroraTerminal(gen.Status)
+}
+
 // settleAuroraOnCompleted settles a generation whose backing task completed.
 // It is a best-effort, idempotent post-commit side effect: the credits were
 // already deducted at reservation, so a failure here leaves the wallet correct
 // and only the row status stale (re-armed by a daemon replay).
 func (s *TaskService) settleAuroraOnCompleted(ctx context.Context, task db.AgentTaskQueue) {
-	gen, err := s.Queries.GetAuroraGenerationByTaskID(ctx, task.ID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return // not an Aurora task
-		}
-		slog.Warn("aurora completion: load generation failed",
-			"task_id", util.UUIDToString(task.ID), "error", err)
-		return
-	}
-	if auroraTerminal(gen.Status) {
+	gen, ok := s.settleableAuroraGeneration(ctx, task.ID)
+	if !ok {
 		return
 	}
 	if _, err := s.Queries.UpdateAuroraGenerationTerminal(ctx, db.UpdateAuroraGenerationTerminalParams{
@@ -61,7 +69,7 @@ func (s *TaskService) settleAuroraOnCompleted(ctx context.Context, task db.Agent
 		CreditsCharged: gen.CreditsReserved,
 		WorkspaceID:    gen.WorkspaceID,
 	}); err != nil {
-		slog.Warn("aurora completion: mark completed failed",
+		slog.Warn("aurora settlement: mark completed failed",
 			"generation_id", util.UUIDToString(gen.ID), "error", err)
 	}
 }
@@ -71,24 +79,13 @@ func (s *TaskService) settleAuroraOnCompleted(ctx context.Context, task db.Agent
 // records the reason. The refund is attempted first so a failed refund leaves
 // the generation non-terminal for a later retry.
 func (s *TaskService) settleAuroraOnFailed(ctx context.Context, task db.AgentTaskQueue, reason string) {
-	gen, err := s.Queries.GetAuroraGenerationByTaskID(ctx, task.ID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return // not an Aurora task
-		}
-		slog.Warn("aurora completion: load generation failed",
-			"task_id", util.UUIDToString(task.ID), "error", err)
+	gen, ok := s.settleableAuroraGeneration(ctx, task.ID)
+	if !ok {
 		return
-	}
-	if auroraTerminal(gen.Status) {
-		return
-	}
-	if reason == "" {
-		reason = auroraStatusFailed
 	}
 	if s.Credit != nil && gen.CreditsReserved > 0 {
 		if err := s.Credit.Refund(ctx, gen.UserID, gen.WorkspaceID, gen.CreditsReserved, util.UUIDToString(gen.ID)); err != nil {
-			slog.Warn("aurora completion: refund failed",
+			slog.Warn("aurora settlement: refund failed",
 				"generation_id", util.UUIDToString(gen.ID), "error", err)
 			return
 		}
@@ -100,7 +97,7 @@ func (s *TaskService) settleAuroraOnFailed(ctx context.Context, task db.AgentTas
 		CreditsCharged: 0,
 		WorkspaceID:    gen.WorkspaceID,
 	}); err != nil {
-		slog.Warn("aurora completion: mark failed failed",
+		slog.Warn("aurora settlement: mark failed failed",
 			"generation_id", util.UUIDToString(gen.ID), "error", err)
 	}
 }
