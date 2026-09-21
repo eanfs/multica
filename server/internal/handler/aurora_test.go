@@ -62,7 +62,51 @@ func TestListAuroraSkills(t *testing.T) {
 	}
 }
 
-func TestCreateAuroraGeneration(t *testing.T) {
+// cleanupAuroraSystemAgents removes the workspace's lazily seeded Aurora system
+// agents, skills and managed runtime at teardown. Generation creation seeds
+// these on first use and they would otherwise persist into every later handler
+// test, whose `agent ... LIMIT 1` agent-runtime heuristics assume the workspace
+// holds only user-visible agents (kind='system' is excluded by
+// GetAgentInWorkspace but not by an unfiltered LIMIT 1). Agents go first so
+// their agent_skill rows cascade; skills and the runtime follow once the agents
+// no longer reference them.
+func cleanupAuroraSystemAgents(t *testing.T) {
+	t.Helper()
+	names := make([]string, 0, len(aurora.Catalog()))
+	for _, e := range aurora.Catalog() {
+		names = append(names, e.Name)
+	}
+	t.Cleanup(func() {
+		ctx := context.Background()
+		if _, err := testPool.Exec(ctx,
+			`DELETE FROM agent WHERE workspace_id = $1 AND system_key LIKE 'aurora:%'`, testWorkspaceID); err != nil {
+			t.Errorf("cleanup aurora agents: %v", err)
+		}
+		if _, err := testPool.Exec(ctx,
+			`DELETE FROM skill WHERE workspace_id = $1 AND name = ANY($2::text[])`, testWorkspaceID, names); err != nil {
+			t.Errorf("cleanup aurora skills: %v", err)
+		}
+		if _, err := testPool.Exec(ctx,
+			`DELETE FROM agent_runtime WHERE workspace_id = $1 AND daemon_id IS NULL AND provider = 'aurora_managed'`, testWorkspaceID); err != nil {
+			t.Errorf("cleanup aurora runtime: %v", err)
+		}
+	})
+}
+
+func TestCreateAuroraGenerationReservesAndEnqueues(t *testing.T) {
+	creditTestReset(t)
+	cleanupAuroraSystemAgents(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	// Fund the caller so the reservation can succeed. The grant needs no
+	// particular size — 1000 credits covers xhs-image's 620 with room to spare
+	// and leaves the post-reservation balance easy to assert.
+	if err := testHandler.Credit.Grant(ctx, user, ws, 1_000_000_000, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
 	prompt := "生成一张新加坡亲子游封面"
 	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
 		"skillId": "xhs-image",
@@ -79,6 +123,7 @@ func TestCreateAuroraGeneration(t *testing.T) {
 	}](t, testHandler.CreateAuroraGeneration, req, http.StatusCreated)
 
 	gen := out.Generation
+	const wantReserved = 620_000_000 // xhs-image: 620 credits × 1e6 micro
 	if gen.ID == "" {
 		t.Fatalf("expected non-empty id, got %q", gen.ID)
 	}
@@ -91,11 +136,37 @@ func TestCreateAuroraGeneration(t *testing.T) {
 	if gen.Prompt != prompt {
 		t.Fatalf("expected prompt %q, got %q", prompt, gen.Prompt)
 	}
-	if gen.CreditsReserved != 0 {
-		t.Fatalf("expected creditsReserved 0, got %d", gen.CreditsReserved)
+	if gen.CreditsReserved != wantReserved {
+		t.Fatalf("expected creditsReserved %d, got %d", wantReserved, gen.CreditsReserved)
 	}
 
-	// The row must be scoped to the workspace and user resolved from the
+	// The handler must have written the task's id and the reserved micro-credits
+	// back onto the row, and the wallet must reflect the reservation.
+	var taskID pgtype.UUID
+	var reserved int64
+	dbfx.QueryRow(t, `SELECT task_id, credits_reserved FROM aurora_generation WHERE id = $1`, gen.ID).Scan(&taskID, &reserved)
+	if !taskID.Valid {
+		t.Fatal("expected a non-null task_id on the generation row")
+	}
+	if reserved != wantReserved {
+		t.Fatalf("row credits_reserved = %d, want %d", reserved, wantReserved)
+	}
+	t.Cleanup(func() {
+		if taskID.Valid {
+			testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
+		}
+		testPool.Exec(context.Background(), `DELETE FROM aurora_generation WHERE id = $1`, gen.ID)
+	})
+
+	bal, err := testHandler.Credit.Balance(ctx, user)
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if want := int64(1_000_000_000 - wantReserved); bal != want {
+		t.Fatalf("balance after reserve = %d, want %d", bal, want)
+	}
+
+	// The row must still be scoped to the workspace and user resolved from the
 	// request headers, not zero UUIDs (the historical #1661 bug class).
 	var wsID, userID pgtype.UUID
 	if err := testPool.QueryRow(context.Background(),
@@ -106,12 +177,42 @@ func TestCreateAuroraGeneration(t *testing.T) {
 	if wsID.String() != testWorkspaceID || userID.String() != testUserID {
 		t.Fatalf("row scoped to workspace/user %s/%s, want %s/%s", wsID.String(), userID.String(), testWorkspaceID, testUserID)
 	}
+}
 
-	t.Cleanup(func() {
-		if _, err := testPool.Exec(context.Background(), `DELETE FROM aurora_generation WHERE id = $1`, gen.ID); err != nil {
-			t.Errorf("cleanup generation row: %v", err)
-		}
+func TestCreateAuroraGenerationRejectsInsufficientCredits(t *testing.T) {
+	creditTestReset(t)
+	cleanupAuroraSystemAgents(t)
+
+	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
+		"skillId": "xhs-image",
+		"prompt":  "余额不足的生成请求",
 	})
+	testutil.Call(t, testHandler.CreateAuroraGeneration, req).Want(http.StatusPaymentRequired)
+
+	// The aborted generation must be terminal with the documented reason...
+	var status string
+	var genErr pgtype.Text
+	dbfx.QueryRow(t, `
+		SELECT status, error FROM aurora_generation
+		WHERE workspace_id = $1 AND skill_id = 'xhs-image'
+		ORDER BY created_at DESC LIMIT 1`,
+		testWorkspaceID).Scan(&status, &genErr)
+	if status != "failed" {
+		t.Fatalf("generation status = %q, want failed", status)
+	}
+	if !genErr.Valid || genErr.String != "insufficient credits" {
+		t.Fatalf("generation error = %q, want 'insufficient credits'", genErr.String)
+	}
+
+	// ...and nothing may have been enqueued onto any Aurora system agent.
+	taskCount := dbfx.Count(t, `
+		SELECT count(*) FROM agent_task_queue atq
+		JOIN agent a ON a.id = atq.agent_id
+		WHERE a.workspace_id = $1 AND a.system_key LIKE 'aurora:%'`,
+		testWorkspaceID)
+	if taskCount != 0 {
+		t.Fatalf("enqueued %d tasks onto Aurora system agents, want 0", taskCount)
+	}
 }
 
 func TestCreateAuroraGenerationRejectsUnknownSkill(t *testing.T) {
