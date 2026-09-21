@@ -11,20 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/middleware"
-	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
-
-// managedRuntimeResponse is the response envelope for a managed (server-hosted)
-// runtime registration. The id is what the sandbox daemon adds to its
-// machine-level claim set so it can pick up the workspace's Aurora system-agent
-// tasks (Plan 3 Task 3).
-type managedRuntimeResponse struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Provider    string `json:"provider"`
-	RuntimeMode string `json:"runtime_mode"`
-	Status      string `json:"status"`
-}
 
 // ManagedRuntimeRegister activates a workspace's server-hosted Aurora runtime on
 // behalf of a sandbox daemon and returns the runtime id that daemon should claim.
@@ -65,10 +52,7 @@ func (h *Handler) ManagedRuntimeRegister(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	rt, err := h.Queries.GetAuroraManagedRuntime(r.Context(), db.GetAuroraManagedRuntimeParams{
-		WorkspaceID: workspaceID,
-		Provider:    aurora.ManagedRuntimeProvider,
-	})
+	runtimeID, err := aurora.ManagedRuntimeID(r.Context(), h.Queries, workspaceID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Seeding (EnsureSystemAgents) runs lazily on generation creation, so an
 		// unseeded workspace has no managed runtime to serve yet. The sandbox
@@ -81,7 +65,7 @@ func (h *Handler) ManagedRuntimeRegister(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	online, err := h.Queries.MarkAgentRuntimeOnline(r.Context(), rt.ID)
+	online, err := h.Queries.MarkAgentRuntimeOnline(r.Context(), runtimeID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to register managed runtime")
 		return
@@ -91,13 +75,7 @@ func (h *Handler) ManagedRuntimeRegister(w http.ResponseWriter, r *http.Request)
 		"workspace_id", uuidToString(workspaceID),
 		"runtime_id", uuidToString(online.ID))
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"runtime": managedRuntimeResponse{
-			ID:          uuidToString(online.ID),
-			Name:        online.Name,
-			Provider:    online.Provider,
-			RuntimeMode: online.RuntimeMode,
-			Status:      online.Status,
-		},
-	})
+	// The same runtime projection DaemonRegister returns, so the sandbox daemon
+	// parses one shape everywhere it sees a runtime.
+	writeJSON(w, http.StatusOK, map[string]any{"runtime": runtimeToResponse(online)})
 }

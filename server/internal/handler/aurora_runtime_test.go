@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/testutil"
 )
 
@@ -19,6 +18,18 @@ func setTestSandboxToken(t *testing.T, token string) {
 	prev := testHandler.cfg.AuroraSandboxToken
 	testHandler.cfg.AuroraSandboxToken = token
 	t.Cleanup(func() { testHandler.cfg.AuroraSandboxToken = prev })
+}
+
+// managedRegisterRequest builds a register call for workspaceID; an empty
+// token sends no Authorization header.
+func managedRegisterRequest(token, workspaceID string) *http.Request {
+	req := newRequest(http.MethodPost, "/api/daemon/managed/register", map[string]string{
+		"workspace_id": workspaceID,
+	})
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return req
 }
 
 // TestManagedRuntimeClaimsUnboundCloudRuntime pins the claim-path tolerance the
@@ -62,13 +73,8 @@ func TestManagedRuntimeRegisterRejectsWrongToken(t *testing.T) {
 	setTestSandboxToken(t, "correct-sandbox-token")
 
 	for _, presented := range []string{"", "wrong-sandbox-token"} {
-		req := newRequest(http.MethodPost, "/api/daemon/managed/register", map[string]string{
-			"workspace_id": testWorkspaceID,
-		})
-		if presented != "" {
-			req.Header.Set("Authorization", "Bearer "+presented)
-		}
-		testutil.Call(t, testHandler.ManagedRuntimeRegister, req).Want(http.StatusUnauthorized)
+		testutil.Call(t, testHandler.ManagedRuntimeRegister,
+			managedRegisterRequest(presented, testWorkspaceID)).Want(http.StatusUnauthorized)
 	}
 }
 
@@ -78,11 +84,8 @@ func TestManagedRuntimeRegisterRejectsWhenUnconfigured(t *testing.T) {
 	}
 	setTestSandboxToken(t, "")
 
-	req := newRequest(http.MethodPost, "/api/daemon/managed/register", map[string]string{
-		"workspace_id": testWorkspaceID,
-	})
-	req.Header.Set("Authorization", "Bearer anything")
-	testutil.Call(t, testHandler.ManagedRuntimeRegister, req).Want(http.StatusForbidden)
+	testutil.Call(t, testHandler.ManagedRuntimeRegister,
+		managedRegisterRequest("anything", testWorkspaceID)).Want(http.StatusForbidden)
 }
 
 func TestManagedRuntimeRegisterRejectsMalformedBody(t *testing.T) {
@@ -103,11 +106,8 @@ func TestManagedRuntimeRegisterRejectsMalformedWorkspaceID(t *testing.T) {
 	}
 	setTestSandboxToken(t, "correct-sandbox-token")
 
-	req := newRequest(http.MethodPost, "/api/daemon/managed/register", map[string]string{
-		"workspace_id": "not-a-uuid",
-	})
-	req.Header.Set("Authorization", "Bearer correct-sandbox-token")
-	testutil.Call(t, testHandler.ManagedRuntimeRegister, req).Want(http.StatusBadRequest)
+	testutil.Call(t, testHandler.ManagedRuntimeRegister,
+		managedRegisterRequest("correct-sandbox-token", "not-a-uuid")).Want(http.StatusBadRequest)
 }
 
 func TestManagedRuntimeRegisterMarksManagedRuntimeOnline(t *testing.T) {
@@ -120,29 +120,24 @@ func TestManagedRuntimeRegisterMarksManagedRuntimeOnline(t *testing.T) {
 	// leaves it in, so the test proves registration performs the online+fresh
 	// transition the claim admission gates require.
 	runtimeID := dbfx.Runtime(t, "Aurora managed runtime", testutil.Cols{
-		"provider":     aurora.ManagedRuntimeProvider,
+		"provider":     "aurora_managed",
 		"status":       "offline",
 		"last_seen_at": nil,
 	})
 
-	req := newRequest(http.MethodPost, "/api/daemon/managed/register", map[string]string{
-		"workspace_id": testWorkspaceID,
-	})
-	req.Header.Set("Authorization", "Bearer correct-sandbox-token")
-
 	out := testutil.Decode[struct {
 		Runtime struct {
-			ID          string `json:"id"`
-			RuntimeMode string `json:"runtime_mode"`
-			Status      string `json:"status"`
+			ID     string `json:"id"`
+			Status string `json:"status"`
 		} `json:"runtime"`
-	}](t, testHandler.ManagedRuntimeRegister, req, http.StatusOK)
+	}](t, testHandler.ManagedRuntimeRegister,
+		managedRegisterRequest("correct-sandbox-token", testWorkspaceID), http.StatusOK)
 
 	if out.Runtime.ID != runtimeID {
 		t.Fatalf("response runtime id = %q, want %q", out.Runtime.ID, runtimeID)
 	}
-	if out.Runtime.Status != "online" || out.Runtime.RuntimeMode != "cloud" {
-		t.Fatalf("response runtime = %+v, want cloud/online", out.Runtime)
+	if out.Runtime.Status != "online" {
+		t.Fatalf("response runtime status = %q, want online", out.Runtime.Status)
 	}
 
 	// The registration's persistent mark: status flipped offline→online and

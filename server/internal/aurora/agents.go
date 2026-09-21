@@ -46,13 +46,26 @@ func systemAgentDef(e SkillCatalogEntry) SystemAgentDef {
 // runtimes; nothing else keys off the value yet, task routing will read the
 // agent's provider at claim time (Plan 3 Task 3).
 const (
-	// ManagedRuntimeProvider identifies the workspace's server-hosted Aurora
-	// runtime. The managed-registration handler (Plan 3 Task 3) uses it to look
-	// up the row a sandbox daemon should claim. provider distinguishes the
-	// managed runtime from user daemon-registered runtimes.
-	ManagedRuntimeProvider = "aurora_managed"
+	managedRuntimeProvider = "aurora_managed"
 	managedRuntimeName     = "Aurora Managed Runtime"
 )
+
+// ManagedRuntimeID returns the workspace's managed (server-hosted) runtime —
+// the execution carrier for its system agents, and the id a sandbox daemon
+// adds to its claim set on managed registration (Plan 3 Task 3). It returns
+// pgx.ErrNoRows when the workspace has not seeded yet: EnsureSystemAgents
+// runs lazily on generation creation, so an unseeded workspace has no managed
+// runtime to serve.
+func ManagedRuntimeID(ctx context.Context, q *db.Queries, workspaceID pgtype.UUID) (pgtype.UUID, error) {
+	rt, err := q.GetAuroraManagedRuntime(ctx, db.GetAuroraManagedRuntimeParams{
+		WorkspaceID: workspaceID,
+		Provider:    managedRuntimeProvider,
+	})
+	if err != nil {
+		return pgtype.UUID{}, err
+	}
+	return rt.ID, nil
+}
 
 // EnsureSystemAgents lazily materialises Aurora's 16 workspace-level system
 // agents: one managed runtime row, and per catalog skill one kind='system'
@@ -109,12 +122,9 @@ func EnsureSystemAgents(ctx context.Context, q *db.Queries, workspaceID, ownerID
 // could mint a second row; the call site serialises on a per-workspace lock
 // (Plan 3 Task 2), which is where that guarantee belongs.
 func ensureManagedRuntime(ctx context.Context, q *db.Queries, workspaceID, ownerID pgtype.UUID) (pgtype.UUID, error) {
-	rt, err := q.GetAuroraManagedRuntime(ctx, db.GetAuroraManagedRuntimeParams{
-		WorkspaceID: workspaceID,
-		Provider:    ManagedRuntimeProvider,
-	})
+	runtimeID, err := ManagedRuntimeID(ctx, q, workspaceID)
 	if err == nil {
-		return rt.ID, nil
+		return runtimeID, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return pgtype.UUID{}, err
@@ -122,7 +132,7 @@ func ensureManagedRuntime(ctx context.Context, q *db.Queries, workspaceID, owner
 	created, err := q.CreateAuroraManagedRuntime(ctx, db.CreateAuroraManagedRuntimeParams{
 		WorkspaceID: workspaceID,
 		Name:        managedRuntimeName,
-		Provider:    ManagedRuntimeProvider,
+		Provider:    managedRuntimeProvider,
 		OwnerID:     ownerID,
 	})
 	if err != nil {
