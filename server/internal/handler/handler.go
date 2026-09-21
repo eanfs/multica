@@ -150,6 +150,11 @@ type Config struct {
 	// Surfaced through /api/config so self-hosted operators can confirm which
 	// server build is deployed. Empty in dev builds.
 	ServerVersion string
+	// AuroraSandboxToken is the shared secret a sandbox daemon presents to
+	// POST /api/daemon/managed/register (Plan 3 Task 3). The endpoint compares
+	// it in constant time; a wrong or missing token is a 401. Empty disables
+	// the endpoint. Populated from AURORA_SANDBOX_TOKEN.
+	AuroraSandboxToken string
 }
 
 type cloudRuntimeProxy interface {
