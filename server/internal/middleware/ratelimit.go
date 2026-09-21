@@ -86,6 +86,48 @@ func RateLimit(rdb redis.UniversalClient, limit int, window time.Duration, trust
 	}
 }
 
+// RateLimitByUser returns a per-user fixed-window rate limiter backed by Redis.
+// It keys on the authenticated user id (the X-User-ID header the auth
+// middleware stamps) rather than the client IP, so the budget follows the
+// account across workspaces and clients. It must be mounted inside an
+// authenticated route group: a request that reaches it without X-User-ID
+// passes through, because the auth/workspace middleware upstream has already
+// rejected anonymous callers.
+//
+// Like RateLimit, a nil rdb makes the middleware a no-op (fail-open).
+func RateLimitByUser(rdb redis.UniversalClient, limit int, window time.Duration) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		if rdb == nil {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			userID := r.Header.Get("X-User-ID")
+			if userID == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			key := rateLimitUserKey(r.URL.Path, userID)
+			ctx := r.Context()
+
+			count, err := rateLimitScript.Run(ctx, rdb, []string{key}, int(window.Seconds())).Int64()
+			if err != nil {
+				slog.Warn("ratelimit: redis error; allowing request", "error", err, "user_id", userID)
+				next.ServeHTTP(w, r)
+				return
+			}
+			if count > int64(limit) {
+				w.Header().Set("Retry-After", fmt.Sprintf("%d", int(window.Seconds())))
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				json.NewEncoder(w).Encode(map[string]string{"error": "too many requests"})
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // extractIP determines the client IP for rate limiting purposes.
 // It only honors X-Forwarded-For when RemoteAddr is from a trusted proxy.
 func extractIP(r *http.Request, trustedProxies []*net.IPNet) string {
@@ -131,4 +173,10 @@ func rateLimitKey(path, ip string) string {
 	sanitized := strings.TrimPrefix(path, "/")
 	sanitized = strings.ReplaceAll(sanitized, "/", ":")
 	return fmt.Sprintf("mul:ratelimit:%s:%s", sanitized, ip)
+}
+
+func rateLimitUserKey(path, userID string) string {
+	sanitized := strings.TrimPrefix(path, "/")
+	sanitized = strings.ReplaceAll(sanitized, "/", ":")
+	return fmt.Sprintf("mul:ratelimit:user:%s:%s", sanitized, userID)
 }
