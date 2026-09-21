@@ -3,8 +3,6 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/aurorafleet"
@@ -51,24 +49,11 @@ func TestAuroraFleetProvisionToClaim(t *testing.T) {
 		ServerURL:    "http://multica.internal",
 		SandboxToken: token,
 	})
-	srv := httptest.NewServer(ctrl.Handler())
-	defer srv.Close()
 
-	create, err := http.Post(srv.URL+"/api/v1/nodes", "application/json",
-		strings.NewReader(`{"name":"sandbox-0"}`))
-	if err != nil {
-		t.Fatalf("provision: %v", err)
-	}
-	defer create.Body.Close()
-	if create.StatusCode != http.StatusCreated {
-		t.Fatalf("provision status = %d, want 201", create.StatusCode)
-	}
-	var node struct {
+	node := testutil.Decode[struct {
 		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(create.Body).Decode(&node); err != nil {
-		t.Fatalf("decode provisioned node: %v", err)
-	}
+	}](t, ctrl.Handler().ServeHTTP,
+		testutil.JSONRequest(http.MethodPost, "/api/v1/nodes", map[string]string{"name": "sandbox-0"}), http.StatusCreated)
 	if node.ID == "" {
 		t.Fatal("provisioned node has no id")
 	}

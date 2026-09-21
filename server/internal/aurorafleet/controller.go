@@ -40,6 +40,9 @@ type Config struct {
 // /readyz.
 type Controller struct {
 	cfg Config
+	// env is the bootstrap environment injected into every provisioned node,
+	// built once from the immutable config instead of per request.
+	env map[string]string
 }
 
 // NewController returns a Controller. A nil Backend defaults to an in-memory
@@ -48,7 +51,7 @@ func NewController(cfg Config) *Controller {
 	if cfg.Backend == nil {
 		cfg.Backend = NewMemoryBackend()
 	}
-	return &Controller{cfg: cfg}
+	return &Controller{cfg: cfg, env: bootstrapEnv(cfg)}
 }
 
 // Handler returns the controller's HTTP routes.
@@ -124,7 +127,7 @@ func (c *Controller) createNode(w http.ResponseWriter, r *http.Request) {
 	node, err := c.cfg.Backend.Create(r.Context(), CreateRequest{
 		Name:   req.Name,
 		Image:  firstNonEmpty(req.Image, c.cfg.SandboxImage),
-		Env:    c.bootstrapEnv(),
+		Env:    c.env,
 		Labels: req.Labels,
 	})
 	if err != nil {
@@ -144,15 +147,11 @@ func (c *Controller) listNodes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Controller) deleteNode(w http.ResponseWriter, r *http.Request) {
-	var req nodeActionRequest
-	if !decodeJSON(w, r, &req) {
+	id, ok := c.nodeID(w, r)
+	if !ok {
 		return
 	}
-	if req.ID == "" {
-		writeError(w, http.StatusBadRequest, "id is required")
-		return
-	}
-	if err := c.cfg.Backend.Terminate(r.Context(), req.ID); err != nil {
+	if err := c.cfg.Backend.Terminate(r.Context(), id); err != nil {
 		writeBackendError(w, err)
 		return
 	}
@@ -171,22 +170,32 @@ func (c *Controller) rebootNode(w http.ResponseWriter, r *http.Request) {
 	c.applyNodeAction(w, r, c.cfg.Backend.Reboot)
 }
 
-// applyNodeAction runs a mutating backend operation addressed by id, then
-// returns the node's post-operation state.
-func (c *Controller) applyNodeAction(w http.ResponseWriter, r *http.Request, op func(ctx context.Context, id string) error) {
+// nodeID decodes an id-addressed action body and returns the node id, writing a
+// 400 when the body is malformed or the id is missing.
+func (c *Controller) nodeID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var req nodeActionRequest
 	if !decodeJSON(w, r, &req) {
-		return
+		return "", false
 	}
 	if req.ID == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
+		return "", false
+	}
+	return req.ID, true
+}
+
+// applyNodeAction runs a mutating backend operation addressed by id, then
+// returns the node's post-operation state.
+func (c *Controller) applyNodeAction(w http.ResponseWriter, r *http.Request, op func(ctx context.Context, id string) error) {
+	id, ok := c.nodeID(w, r)
+	if !ok {
 		return
 	}
-	if err := op(r.Context(), req.ID); err != nil {
+	if err := op(r.Context(), id); err != nil {
 		writeBackendError(w, err)
 		return
 	}
-	node, err := c.cfg.Backend.Status(r.Context(), req.ID)
+	node, err := c.cfg.Backend.Status(r.Context(), id)
 	if err != nil {
 		writeBackendError(w, err)
 		return
@@ -195,15 +204,11 @@ func (c *Controller) applyNodeAction(w http.ResponseWriter, r *http.Request, op 
 }
 
 func (c *Controller) statusNode(w http.ResponseWriter, r *http.Request) {
-	var req nodeActionRequest
-	if !decodeJSON(w, r, &req) {
+	id, ok := c.nodeID(w, r)
+	if !ok {
 		return
 	}
-	if req.ID == "" {
-		writeError(w, http.StatusBadRequest, "id is required")
-		return
-	}
-	node, err := c.cfg.Backend.Status(r.Context(), req.ID)
+	node, err := c.cfg.Backend.Status(r.Context(), id)
 	if err != nil {
 		writeBackendError(w, err)
 		return
@@ -238,13 +243,13 @@ func (c *Controller) execNode(w http.ResponseWriter, r *http.Request) {
 
 // bootstrapEnv is the environment injected into every provisioned node. It is
 // the controller's secret: it never appears in a response body.
-func (c *Controller) bootstrapEnv() map[string]string {
+func bootstrapEnv(cfg Config) map[string]string {
 	env := make(map[string]string, 2)
-	if c.cfg.ServerURL != "" {
-		env[EnvServerURL] = c.cfg.ServerURL
+	if cfg.ServerURL != "" {
+		env[EnvServerURL] = cfg.ServerURL
 	}
-	if c.cfg.SandboxToken != "" {
-		env[EnvSandboxToken] = c.cfg.SandboxToken
+	if cfg.SandboxToken != "" {
+		env[EnvSandboxToken] = cfg.SandboxToken
 	}
 	return env
 }

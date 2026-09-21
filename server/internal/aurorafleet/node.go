@@ -2,6 +2,12 @@ package aurorafleet
 
 import "time"
 
+// now returns the current UTC time truncated to microsecond precision, the
+// granularity node timestamps are stored and compared at.
+func now() time.Time {
+	return time.Now().UTC().Truncate(time.Microsecond)
+}
+
 // Status is a node lifecycle state. The vocabulary matches the cloud-runtime
 // statuses the frontend already keys off, scoped to what a self-host container
 // fleet can actually report (no EC2 launch/pending semantics).

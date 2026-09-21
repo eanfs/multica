@@ -6,7 +6,6 @@ import (
 	"maps"
 	"sort"
 	"sync"
-	"time"
 )
 
 // MemoryBackend is an in-process Backend used by tests and as a zero-dependency
@@ -34,15 +33,15 @@ func (m *MemoryBackend) Create(_ context.Context, req CreateRequest) (Node, erro
 
 	m.seq++
 	id := fmt.Sprintf("node-%d", m.seq)
-	now := time.Now().UTC().Truncate(time.Microsecond)
+	created := now()
 	n := &Node{
 		ID:        id,
 		Name:      req.Name,
 		Image:     req.Image,
 		Status:    StatusRunning,
 		Labels:    maps.Clone(req.Labels),
-		CreatedAt: now,
-		UpdatedAt: now,
+		CreatedAt: created,
+		UpdatedAt: created,
 	}
 	m.nodes[id] = n
 	m.env[id] = maps.Clone(req.Env)
@@ -83,7 +82,7 @@ func (m *MemoryBackend) transition(id string, from, to Status) error {
 		return fmt.Errorf("node %s: cannot move %s -> %s from %s", id, from, to, n.Status)
 	}
 	n.Status = to
-	n.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
+	n.UpdatedAt = now()
 	return nil
 }
 

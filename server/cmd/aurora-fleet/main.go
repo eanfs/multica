@@ -29,18 +29,21 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
 	addr := envOr("AURORA_FLEET_ADDR", ":8081")
-	backend := aurorafleet.NewController(aurorafleet.Config{
+	ctrl := aurorafleet.NewController(aurorafleet.Config{
 		Backend:      backendFromEnv(),
 		SandboxImage: os.Getenv("AURORA_SANDBOX_IMAGE"),
-		ServerURL:    os.Getenv("MULTICA_SERVER_URL"),
-		SandboxToken: os.Getenv("AURORA_SANDBOX_TOKEN"),
+		ServerURL:    os.Getenv(aurorafleet.EnvServerURL),
+		SandboxToken: os.Getenv(aurorafleet.EnvSandboxToken),
 	})
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           backend.Handler(),
+		Handler:           ctrl.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	go func() {
 		slog.Info("aurora-fleet listening", "addr", addr)
@@ -50,13 +53,11 @@ func main() {
 		}
 	}()
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	<-ctx.Done()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("aurora-fleet shutdown failed", "error", err)
 	}
 	slog.Info("aurora-fleet stopped")
@@ -66,12 +67,10 @@ func main() {
 // in-process backend for development and tests; "docker" (the default) shells
 // out to the docker CLI.
 func backendFromEnv() aurorafleet.Backend {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("AURORA_FLEET_BACKEND"))) {
-	case "memory":
+	if strings.ToLower(strings.TrimSpace(os.Getenv("AURORA_FLEET_BACKEND"))) == "memory" {
 		return aurorafleet.NewMemoryBackend()
-	default:
-		return aurorafleet.NewDockerBackend(os.Getenv("AURORA_SANDBOX_IMAGE"), nil)
 	}
+	return aurorafleet.NewDockerBackend()
 }
 
 func envOr(key, fallback string) string {
