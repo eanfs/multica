@@ -312,6 +312,20 @@ type TaskResult struct {
 	// precisely when the abandoned id would otherwise stay selectable.
 	RetiredSessionID string           `json:"-"`
 	Usage            []TaskUsageEntry `json:"usage,omitempty"` // per-model token usage
+	// Artifacts are the content assets a completed Aurora task produced, already
+	// uploaded to storage by the runner (media generation is wired in Plan 3 Task
+	// 6). Populated only on completed runs; empty for every non-Aurora task. The
+	// daemon reports them out-of-band before the terminal callback so the server
+	// can write aurora_asset rows — the artifact is the deliverable, so a failed
+	// report fails the task.
+	Artifacts []TaskArtifact `json:"-"`
+}
+
+// TaskArtifact is one uploaded content asset a completed task produced.
+type TaskArtifact struct {
+	Name     string `json:"name"`
+	MediaURL string `json:"media_url"`
+	Format   string `json:"format,omitempty"`
 }
 
 // PluginHookTool is one agent-trigger plugin hook, as the agent will see it.

@@ -6235,6 +6235,17 @@ func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Tas
 // the next chat turn to resume there rather than start over and "forget"
 // the conversation.
 func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result TaskResult, taskLog *slog.Logger) {
+	// Report Aurora artifacts before the terminal callback. The artifact is the
+	// deliverable, so a failed report demotes the run to a failure: silently
+	// completing would settle a generation the user cannot use. Empty for every
+	// non-Aurora task, so the common path is untouched.
+	if result.Status == "completed" && len(result.Artifacts) > 0 {
+		if err := d.client.ReportTaskArtifacts(ctx, taskID, result.Artifacts); err != nil {
+			taskLog.Error("report task artifacts failed; failing task", "error", err)
+			result.Status = "blocked"
+			result.Comment = "artifact report failed: " + err.Error()
+		}
+	}
 	switch result.Status {
 	case "completed":
 		taskLog.Info("task completed", "status", result.Status)

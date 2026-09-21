@@ -567,6 +567,19 @@ func (c *Client) ReportTaskUsage(ctx context.Context, taskID string, usage []Tas
 	}, nil)
 }
 
+// ReportTaskArtifacts reports the uploaded content assets a completed Aurora
+// task produced. Like ReportTaskUsage it is an out-of-band channel, distinct
+// from the complete callback because the terminal report carries no file
+// metadata. Empty (every non-Aurora task) is a no-op.
+func (c *Client) ReportTaskArtifacts(ctx context.Context, taskID string, artifacts []TaskArtifact) error {
+	if len(artifacts) == 0 {
+		return nil
+	}
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/artifacts", taskID), map[string]any{
+		"artifacts": artifacts,
+	}, nil)
+}
+
 func (c *Client) FailTask(ctx context.Context, taskID, errMsg, sessionID, workDir, branchName, failureReason string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string) error {
 	return c.failTaskWithRetrySchedule(ctx, taskID, errMsg, sessionID, workDir, branchName, failureReason, sessionRolloutMissing, retiredSessionID, durableWorkDir, defaultTerminalRetrySchedule)
 }
