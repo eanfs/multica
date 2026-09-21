@@ -437,6 +437,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		LLMDefaultModel:          strings.TrimSpace(os.Getenv("MULTICA_LLM_DEFAULT_MODEL")),
 		LLMMaxRetries:            opts.LLMMaxRetries,
 		ServerVersion:            normalizeServerVersion(version),
+		AuroraSandboxToken:       strings.TrimSpace(os.Getenv("AURORA_SANDBOX_TOKEN")),
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
 	invitationRateLimits := handler.DefaultInvitationRateLimits()
@@ -1446,6 +1447,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// Auth group made a missing cookie a hard 401, breaking the flow for exactly
 	// the browsers above; the other four composio endpoints stay session-gated.
 	r.Get("/api/integrations/composio/callback", h.ComposioCallback)
+
+	// Managed (server-hosted) runtime registration for Aurora sandbox daemons.
+	// Registered on the parent router rather than under the /api/daemon group so
+	// it is not gated by DaemonAuth: the request authenticates via the shared
+	// AURORA_SANDBOX_TOKEN instead of a per-daemon token (Plan 3 Task 3).
+	r.Post("/api/daemon/managed/register", h.ManagedRuntimeRegister)
 
 	// Daemon API routes (require daemon token or valid user token)
 	r.Route("/api/daemon", func(r chi.Router) {

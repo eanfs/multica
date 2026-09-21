@@ -46,7 +46,11 @@ func systemAgentDef(e SkillCatalogEntry) SystemAgentDef {
 // runtimes; nothing else keys off the value yet, task routing will read the
 // agent's provider at claim time (Plan 3 Task 3).
 const (
-	managedRuntimeProvider = "aurora_managed"
+	// ManagedRuntimeProvider identifies the workspace's server-hosted Aurora
+	// runtime. The managed-registration handler (Plan 3 Task 3) uses it to look
+	// up the row a sandbox daemon should claim. provider distinguishes the
+	// managed runtime from user daemon-registered runtimes.
+	ManagedRuntimeProvider = "aurora_managed"
 	managedRuntimeName     = "Aurora Managed Runtime"
 )
 
@@ -107,7 +111,7 @@ func EnsureSystemAgents(ctx context.Context, q *db.Queries, workspaceID, ownerID
 func ensureManagedRuntime(ctx context.Context, q *db.Queries, workspaceID, ownerID pgtype.UUID) (pgtype.UUID, error) {
 	rt, err := q.GetAuroraManagedRuntime(ctx, db.GetAuroraManagedRuntimeParams{
 		WorkspaceID: workspaceID,
-		Provider:    managedRuntimeProvider,
+		Provider:    ManagedRuntimeProvider,
 	})
 	if err == nil {
 		return rt.ID, nil
@@ -118,7 +122,7 @@ func ensureManagedRuntime(ctx context.Context, q *db.Queries, workspaceID, owner
 	created, err := q.CreateAuroraManagedRuntime(ctx, db.CreateAuroraManagedRuntimeParams{
 		WorkspaceID: workspaceID,
 		Name:        managedRuntimeName,
-		Provider:    managedRuntimeProvider,
+		Provider:    ManagedRuntimeProvider,
 		OwnerID:     ownerID,
 	})
 	if err != nil {
