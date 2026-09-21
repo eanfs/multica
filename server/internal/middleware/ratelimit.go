@@ -63,25 +63,7 @@ func RateLimit(rdb redis.UniversalClient, limit int, window time.Duration, trust
 			return next
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := extractIP(r, trustedProxies)
-			key := rateLimitKey(r.URL.Path, ip)
-			ctx := r.Context()
-
-			count, err := rateLimitScript.Run(ctx, rdb, []string{key}, int(window.Seconds())).Int64()
-			if err != nil {
-				slog.Warn("ratelimit: redis error; allowing request", "error", err, "ip", ip)
-				next.ServeHTTP(w, r)
-				return
-			}
-			if count > int64(limit) {
-				w.Header().Set("Retry-After", fmt.Sprintf("%d", int(window.Seconds())))
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusTooManyRequests)
-				json.NewEncoder(w).Encode(map[string]string{"error": "too many requests"})
-				return
-			}
-
-			next.ServeHTTP(w, r)
+			fixedWindowRateLimit(w, r, rdb, rateLimitKey(r.URL.Path, extractIP(r, trustedProxies)), limit, window, next)
 		})
 	}
 }
@@ -106,33 +88,38 @@ func RateLimitByUser(rdb redis.UniversalClient, limit int, window time.Duration)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			member, ok := MemberFromContext(r.Context())
 			if !ok {
-				// The workspace middleware did not resolve a member, so there
-				// is no verified identity to key on. Fail closed rather than
-				// admit an unidentified caller.
 				writeError(w, http.StatusInternalServerError, "rate limiter unavailable")
 				return
 			}
-			userID := uuidToString(member.UserID)
-			key := rateLimitUserKey(r.URL.Path, userID)
-			ctx := r.Context()
-
-			count, err := rateLimitScript.Run(ctx, rdb, []string{key}, int(window.Seconds())).Int64()
-			if err != nil {
-				slog.Warn("ratelimit: redis error; allowing request", "error", err, "user_id", userID)
-				next.ServeHTTP(w, r)
-				return
-			}
-			if count > int64(limit) {
-				w.Header().Set("Retry-After", fmt.Sprintf("%d", int(window.Seconds())))
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusTooManyRequests)
-				json.NewEncoder(w).Encode(map[string]string{"error": "too many requests"})
-				return
-			}
-
-			next.ServeHTTP(w, r)
+			fixedWindowRateLimit(w, r, rdb, rateLimitUserKey(r.URL.Path, uuidToString(member.UserID)), limit, window, next)
 		})
 	}
+}
+
+// fixedWindowRateLimit runs the fixed-window increment against key and either
+// forwards to next — under the limit, or on a Redis error, where the limiter
+// fails open — or writes a 429. The key already encodes the path and subject
+// (IP or user id), so a Redis-error log carries both.
+func fixedWindowRateLimit(w http.ResponseWriter, r *http.Request, rdb redis.UniversalClient, key string, limit int, window time.Duration, next http.Handler) {
+	count, err := rateLimitScript.Run(r.Context(), rdb, []string{key}, int(window.Seconds())).Int64()
+	if err != nil {
+		slog.Warn("ratelimit: redis error; allowing request", "error", err, "key", key)
+		next.ServeHTTP(w, r)
+		return
+	}
+	if count > int64(limit) {
+		writeRateLimited(w, window)
+		return
+	}
+	next.ServeHTTP(w, r)
+}
+
+// writeRateLimited writes the shared 429 response (Retry-After + JSON body).
+func writeRateLimited(w http.ResponseWriter, window time.Duration) {
+	w.Header().Set("Retry-After", fmt.Sprintf("%d", int(window.Seconds())))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusTooManyRequests)
+	json.NewEncoder(w).Encode(map[string]string{"error": "too many requests"})
 }
 
 // extractIP determines the client IP for rate limiting purposes.
@@ -176,14 +163,17 @@ func isTrustedProxy(ip net.IP, cidrs []*net.IPNet) bool {
 	return false
 }
 
+// rateLimitPathSegment flattens a request path into a single key segment:
+// leading slash dropped, inner slashes replaced with colons.
+func rateLimitPathSegment(path string) string {
+	segment := strings.TrimPrefix(path, "/")
+	return strings.ReplaceAll(segment, "/", ":")
+}
+
 func rateLimitKey(path, ip string) string {
-	sanitized := strings.TrimPrefix(path, "/")
-	sanitized = strings.ReplaceAll(sanitized, "/", ":")
-	return fmt.Sprintf("mul:ratelimit:%s:%s", sanitized, ip)
+	return fmt.Sprintf("mul:ratelimit:%s:%s", rateLimitPathSegment(path), ip)
 }
 
 func rateLimitUserKey(path, userID string) string {
-	sanitized := strings.TrimPrefix(path, "/")
-	sanitized = strings.ReplaceAll(sanitized, "/", ":")
-	return fmt.Sprintf("mul:ratelimit:user:%s:%s", sanitized, userID)
+	return fmt.Sprintf("mul:ratelimit:user:%s:%s", rateLimitPathSegment(path), userID)
 }
