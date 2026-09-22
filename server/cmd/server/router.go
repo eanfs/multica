@@ -1889,8 +1889,13 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			// Aurora skill catalog
 			r.Get("/api/aurora/skills", h.ListAuroraSkills)
 			// Creating a generation reserves owner credits once Plan 2 lands,
-			// so it is human-only, like the billing routes above.
-			r.With(handler.RequireHumanActor).Post("/api/aurora/generations", h.CreateAuroraGeneration)
+			// so it is human-only, like the billing routes above. It is also
+			// the execution entry point, so a per-user frequency gate caps how
+			// fast one account can mint generations (spec §10).
+			r.With(
+				handler.RequireHumanActor,
+				middleware.RateLimitByUser(rdb, envPositiveInt("RATE_LIMIT_AURORA_GENERATIONS", 20), time.Minute),
+			).Post("/api/aurora/generations", h.CreateAuroraGeneration)
 
 			// Aurora credit reads. The wallet is the *user's*, not the
 			// workspace's — every workspace shows the same balance — so these
