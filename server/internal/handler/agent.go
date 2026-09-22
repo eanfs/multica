@@ -758,6 +758,11 @@ type TaskAgentData struct {
 	ID                    string                      `json:"id"`
 	Name                  string                      `json:"name"`
 	Instructions          string                      `json:"instructions"`
+	// SystemKey is the agent's stable product identity (e.g. "mika" for the
+	// built-in Chief of Staff, "aurora:<skillID>" for Aurora system agents).
+	// Forwarded to the daemon so it can apply system-agent execution policy
+	// (sandbox tool-surface narrowing). Empty for ordinary user agents.
+	SystemKey string `json:"system_key,omitempty"`
 	Skills                []service.AgentSkillData    `json:"skills,omitempty"`
 	SkillRefs             []service.AgentSkillRefData `json:"skill_refs,omitempty"`
 	CustomEnv             map[string]string           `json:"custom_env,omitempty"`

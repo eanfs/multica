@@ -209,6 +209,11 @@ type AgentData struct {
 	ID                    string                     `json:"id"`
 	Name                  string                     `json:"name"`
 	Instructions          string                     `json:"instructions"`
+	// SystemKey is the agent's stable product identity: "mika" for the built-in
+	// Chief of Staff, "aurora:<skillID>" for Aurora's workspace system agents.
+	// The daemon reads it to apply system-agent execution policy (e.g. the
+	// sandbox tool-surface narrowing). Empty for ordinary user agents.
+	SystemKey string `json:"system_key,omitempty"`
 	Skills                []SkillData                `json:"skills,omitempty"`
 	SkillRefs             []SkillRefData             `json:"skill_refs,omitempty"`
 	CustomEnv             map[string]string          `json:"custom_env,omitempty"`

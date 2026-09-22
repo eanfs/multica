@@ -727,20 +727,44 @@ var claudeBlockedArgs = map[string]blockedArgMode{
 	"--effort": blockedWithValue,
 }
 
+// claudePermissionMode returns the --permission-mode value for a run. An empty
+// override preserves the historical autonomous default (bypassPermissions); a
+// sandboxed system agent sets a restricted mode to opt out of bypass so the
+// narrowed deny list actually binds.
+func claudePermissionMode(override string) string {
+	if override != "" {
+		return override
+	}
+	return "bypassPermissions"
+}
+
+// claudeDisallowedTools merges the built-in deny list with the caller's
+// per-execution narrowing. AskUserQuestion is always denied (see buildClaudeArgs);
+// the sandbox path appends host-touching tools such as Bash.
+func claudeDisallowedTools(extra []string) []string {
+	if len(extra) == 0 {
+		return []string{"AskUserQuestion"}
+	}
+	out := make([]string, 0, 1+len(extra))
+	out = append(out, "AskUserQuestion")
+	out = append(out, extra...)
+	return out
+}
+
 func buildClaudeArgs(opts ExecOptions, logger *slog.Logger) []string {
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--verbose",
-		"--permission-mode", "bypassPermissions",
+		"--permission-mode", claudePermissionMode(opts.PermissionMode),
 		// AskUserQuestion is Claude Code's built-in interactive question tool.
 		// The daemon runs Claude in non-interactive stream-json mode and has
 		// no UI for the prompt to render in, so a call returns an empty
 		// answer and the agent ends up "inferring" silently — the user
 		// never sees the question (see GitHub #2588). User-facing
 		// clarification belongs in an issue comment instead.
-		"--disallowedTools", "AskUserQuestion",
+		"--disallowedTools", strings.Join(claudeDisallowedTools(opts.DisallowedTools), ","),
 	}
 	if hasManagedMcpConfig(opts.McpConfig) {
 		// A saved agent-level config is authoritative, including an explicitly

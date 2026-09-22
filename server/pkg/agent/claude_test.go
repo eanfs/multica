@@ -349,6 +349,37 @@ func TestBuildClaudeArgsUsesStrictMCPForManagedConfig(t *testing.T) {
 	}
 }
 
+// A narrowed surface turns off bypass and appends the host-touching tools to
+// the built-in deny list, comma-joined into a single --disallowedTools value.
+// TestBuildClaudeArgsInheritsMCPByDefault above locks the additive default:
+// empty overrides keep the autonomous surface byte-identical.
+func TestBuildClaudeArgsNarrowsToolSurface(t *testing.T) {
+	t.Parallel()
+
+	args := buildClaudeArgs(ExecOptions{
+		PermissionMode:  "default",
+		DisallowedTools: []string{"Bash", "WebFetch"},
+	}, slog.Default())
+
+	if !slices.Contains(args, "--permission-mode") {
+		t.Fatalf("expected --permission-mode in args: %v", args)
+	}
+	permIdx := slices.Index(args, "--permission-mode")
+	if permIdx < 0 || permIdx+1 >= len(args) || args[permIdx+1] != "default" {
+		t.Fatalf("expected --permission-mode default, got %v", args)
+	}
+	disIdx := slices.Index(args, "--disallowedTools")
+	if disIdx < 0 || disIdx+1 >= len(args) {
+		t.Fatalf("expected --disallowedTools in args: %v", args)
+	}
+	joined := args[disIdx+1]
+	for _, want := range []string{"AskUserQuestion", "Bash", "WebFetch"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected %q in --disallowedTools %q", want, joined)
+		}
+	}
+}
+
 // Claude Code reads the per-task CLAUDE.md the daemon writes into the workdir,
 // so the daemon never populates SystemPrompt for it (see
 // providerNeedsInlineSystemPrompt). Forwarding it as --append-system-prompt
@@ -1097,6 +1128,76 @@ func TestClaudeExecuteSurfacesStderrWhenChildExitsEarly(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("timeout waiting for result")
+	}
+}
+
+// The narrowed sandbox surface must reach the spawned claude argv end-to-end,
+// not just buildClaudeArgs: a fake claude records its argv and then emits a
+// minimal success result. This is the fake-CLI argument assertion the plan's
+// acceptance calls for — no real agent binary is resolved or executed.
+func TestClaudeExecuteNarrowsToolSurface(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+
+	dir := t.TempDir()
+	argvFile := filepath.Join(dir, "argv.txt")
+	fakePath := filepath.Join(dir, "claude")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$@\" > " + argvFile + "\n" +
+		"IFS= read -r _\n" +
+		`echo '{"type":"result","subtype":"success","result":"ok","session_id":"sess"}'` + "\n"
+	writeTestExecutable(t, fakePath, []byte(script))
+
+	backend, err := New("claude", Config{
+		ExecutablePath: fakePath,
+		Env:            map[string]string{"IS_SANDBOX": "1"},
+		Logger:         slog.Default(),
+	})
+	if err != nil {
+		t.Fatalf("new claude backend: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session, err := backend.Execute(ctx, "prompt-ignored", ExecOptions{
+		Timeout:         5 * time.Second,
+		PermissionMode:  "default",
+		DisallowedTools: []string{"Bash"},
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	go func() {
+		for range session.Messages {
+		}
+	}()
+	select {
+	case _, ok := <-session.Result:
+		if !ok {
+			t.Fatal("result channel closed without a value")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for result")
+	}
+
+	raw, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("read argv file: %v", err)
+	}
+	args := strings.Fields(string(raw))
+	permIdx := slices.Index(args, "--permission-mode")
+	if permIdx < 0 || permIdx+1 >= len(args) || args[permIdx+1] != "default" {
+		t.Fatalf("expected --permission-mode default in spawned argv: %v", args)
+	}
+	disIdx := slices.Index(args, "--disallowedTools")
+	if disIdx < 0 || disIdx+1 >= len(args) {
+		t.Fatalf("expected --disallowedTools in spawned argv: %v", args)
+	}
+	joined := args[disIdx+1]
+	if !strings.Contains(joined, "AskUserQuestion") || !strings.Contains(joined, "Bash") {
+		t.Fatalf("expected AskUserQuestion and Bash in --disallowedTools %q", joined)
 	}
 }
 

@@ -8661,6 +8661,22 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		ClaudeSettingsPath:     env.ClaudeSettingsPath,
 		QwenpawWorkspace:       env.QwenpawWorkspace,
 	}
+	// Aurora system agents run untrusted prompts on a server-hosted sandbox
+	// node, so they are executed under a narrowed tool surface and a turn cap.
+	// This is additive: ordinary user agents (empty SystemKey) keep the default
+	// autonomous surface, and the MaxTurns field stays zero for them.
+	if isAuroraTask(task) {
+		execOpts.MaxTurns = auroraMaxTurns
+		if mode, tools := auroraToolSurface(provider); mode != "" || len(tools) > 0 {
+			execOpts.PermissionMode = mode
+			execOpts.DisallowedTools = tools
+		}
+		taskLog.Info("aurora sandbox policy applied",
+			"max_turns", execOpts.MaxTurns,
+			"permission_mode", execOpts.PermissionMode,
+			"disallowed_tools", execOpts.DisallowedTools,
+		)
+	}
 	// Some providers do not reliably load the per-task runtime config files we
 	// write into the task workdir:
 	//   - openclaw is pinned to the task workdir via the per-task config we
