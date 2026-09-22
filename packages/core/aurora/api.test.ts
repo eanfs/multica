@@ -59,6 +59,16 @@ describe("parseAuroraSkills", () => {
     expect(parseAuroraSkills({ skills: "not-an-array" })).toEqual([]);
     expect(parseAuroraSkills(null)).toEqual([]);
   });
+
+  it("degrades an entry missing a required field to an empty directory", () => {
+    // schema.test.ts owns why zod rejects the whole entry; this is the half the
+    // directory screen depends on.
+    expect(
+      parseAuroraSkills({
+        skills: [{ id: "poster", name: "海报制作", category: "image" }],
+      }),
+    ).toEqual([]);
+  });
 });
 
 describe("parseAuroraGenerations", () => {

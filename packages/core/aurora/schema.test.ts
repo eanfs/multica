@@ -1,6 +1,5 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { parseWithFallback } from "../api/schema";
 import {
   auroraAssetSchema,
   auroraBalanceSchema,
@@ -41,30 +40,17 @@ describe("auroraSkillsSchema", () => {
     expect(res.skills[0]?.nameEn).toBe("Poster");
   });
 
-  it("falls back to an empty list on a non-array body", () => {
-    const res = parseWithFallback(
-      { skills: "not-an-array" },
-      auroraSkillsSchema,
-      { skills: [] },
-      { endpoint: "GET /api/aurora/skills" },
-    );
-
-    expect(res.skills).toEqual([]);
-  });
-
-  it("falls back to an empty list when a required field is missing", () => {
-    // `credits` is required — the composer prices a run from it, so a entry
+  it("rejects an entry that is missing a required field", () => {
+    // `credits` is required — the composer prices a run from it, so an entry
     // without one is not usable. zod rejects the whole array rather than the
-    // entry, which is the documented trade-off: one drifted row degrades the
-    // directory to empty rather than rendering a skill that cannot be priced.
-    const res = parseWithFallback(
-      { skills: [{ id: "poster", name: "海报制作", category: "image" }] },
-      auroraSkillsSchema,
-      { skills: [] },
-      { endpoint: "GET /api/aurora/skills" },
-    );
+    // single entry, which is the documented trade-off: one drifted row degrades
+    // the directory to empty rather than rendering a skill that cannot be
+    // priced. api.test.ts owns the other half — that the caller sees [].
+    const res = auroraSkillsSchema.safeParse({
+      skills: [{ id: "poster", name: "海报制作", category: "image" }],
+    });
 
-    expect(res.skills).toEqual([]);
+    expect(res.success).toBe(false);
   });
 });
 
@@ -139,31 +125,9 @@ describe("auroraBalanceSchema", () => {
   it("defaults a missing balance to zero", () => {
     expect(auroraBalanceSchema.parse({}).availableMicro).toBe(0);
   });
-
-  it("falls back to a zero balance when the body is a string", () => {
-    const res = parseWithFallback(
-      "not-an-object",
-      auroraBalanceSchema,
-      { availableMicro: 0 },
-      { endpoint: "GET /api/aurora/billing/balance" },
-    );
-
-    expect(res.availableMicro).toBe(0);
-  });
 });
 
 describe("auroraTransactionsSchema", () => {
-  it("falls back to an empty ledger on a non-array body", () => {
-    const res = parseWithFallback(
-      { transactions: null },
-      auroraTransactionsSchema,
-      { transactions: [] },
-      { endpoint: "GET /api/aurora/billing/transactions" },
-    );
-
-    expect(res.transactions).toEqual([]);
-  });
-
   it("defaults the optional ledger columns", () => {
     const res = auroraTransactionsSchema.parse({
       transactions: [{ id: "tx-1", kind: "deduction", amountMicro: -760 }],

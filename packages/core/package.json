@@ -162,11 +162,8 @@
     "./skills/stores": "./skills/stores/index.ts",
     "./autopilots/stores": "./autopilots/stores/index.ts",
     "./aurora": "./aurora/index.ts",
-    "./aurora/api": "./aurora/api.ts",
     "./aurora/mutations": "./aurora/mutations.ts",
-    "./aurora/queries": "./aurora/queries.ts",
-    "./aurora/schema": "./aurora/schema.ts",
-    "./aurora/types": "./aurora/types.ts"
+    "./aurora/queries": "./aurora/queries.ts"
   },
   "dependencies": {
     "@formatjs/intl-localematcher": "catalog:",

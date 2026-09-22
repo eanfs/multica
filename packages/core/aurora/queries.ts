@@ -35,6 +35,8 @@ export const auroraKeys = {
   generation: (wsId: string, id: string) =>
     [...auroraKeys.generations(wsId), id] as const,
   assets: (wsId: string) => [...auroraKeys.all(wsId), "assets"] as const,
+  // No "list" segment here: assets has no id-keyed sibling to collide with, so
+  // the params object is the only thing that can occupy this position.
   assetList: (wsId: string, params?: AuroraAssetsParams) =>
     [...auroraKeys.assets(wsId), params ?? {}] as const,
 };
@@ -55,15 +57,20 @@ export const auroraWalletKeys = {
   transactions: () => [...auroraWalletKeys.all(), "transactions"] as const,
 };
 
+// The cache default is `staleTime: Infinity` (packages/core/query-client.ts),
+// which suits data only this client moves. Aurora's reads are not all like
+// that: a generation's status and its assets change server-side while the user
+// is on another screen, and with an infinite stale-time the mount-time and
+// reconnect refetches never fire, leaving only the mutation invalidations. The
+// queries below that can drift on their own therefore set a stale-time; the
+// catalog, which is a server-side constant (`aurora/catalog.go`), keeps the
+// default.
+
 export function auroraSkillsOptions(wsId: string) {
   return queryOptions({
     queryKey: auroraKeys.skills(wsId),
     queryFn: () => listAuroraSkills(),
     enabled: wsId.length > 0,
-    // The catalog is a server-side constant (`aurora/catalog.go`): it only
-    // changes when the server is redeployed, so it is held far longer than
-    // user data and refreshed on the next mount after a deploy.
-    staleTime: 30 * 60 * 1000,
   });
 }
 
@@ -75,6 +82,7 @@ export function auroraGenerationsOptions(
     queryKey: auroraKeys.generationList(wsId, params),
     queryFn: () => listAuroraGenerations(params),
     enabled: wsId.length > 0,
+    staleTime: 30 * 1000,
   });
 }
 
@@ -84,10 +92,18 @@ export function auroraGenerationDetailOptions(wsId: string, id: string) {
     queryFn: () => getAuroraGeneration(id),
     enabled: wsId.length > 0 && id.length > 0,
     // MVP progress: poll while the generation can still change, stop once it
-    // cannot. An unreadable body parses to null, which is not terminal, so it
-    // keeps polling rather than parking the screen on an empty result — the
-    // next tick is what recovers it.
+    // cannot. A malformed-but-successful body parses to null, which is not
+    // terminal, so it keeps polling rather than parking the screen on an empty
+    // result — the next tick is what recovers it.
+    //
+    // A *failed* read stops instead. `refetchInterval` ignores query status
+    // (QueryObserver re-arms the timer unconditionally), so without this an
+    // id that 404s — deleted, or belonging to another workspace — would be
+    // re-requested every 3s for as long as the screen is open, and with the
+    // cache's `retry: 1` each tick costs two round-trips. The query is in a
+    // terminal error state by then, so polling it again buys nothing.
     refetchInterval: (query) =>
+      query.state.status === "error" ||
       isAuroraGenerationTerminal(query.state.data?.status)
         ? false
         : AURORA_GENERATION_POLL_MS,
@@ -99,6 +115,7 @@ export function auroraAssetsOptions(wsId: string, params?: AuroraAssetsParams) {
     queryKey: auroraKeys.assetList(wsId, params),
     queryFn: () => listAuroraAssets(params),
     enabled: wsId.length > 0,
+    staleTime: 30 * 1000,
   });
 }
 
@@ -121,11 +138,11 @@ export function auroraTransactionsOptions() {
   });
 }
 
-// The hooks below read the workspace from context instead of taking it: every
+// The hooks below resolve the workspace themselves instead of taking it: every
 // Aurora surface renders inside the `[workspaceSlug]` layout, which is what
-// establishes the workspace, so there is no case in which the caller has an id
-// the provider does not. The `*Options` functions above stay wsId-first for
-// callers that do hold one (prefetch, tests).
+// establishes the current workspace, so there is no case in which a caller has
+// an id that `useWorkspaceId` cannot. The `*Options` functions above stay
+// wsId-first for callers that already hold one (prefetch, tests).
 
 /** The catalog, including the phase-2 skills that cannot be run yet. */
 export function useAuroraSkills() {

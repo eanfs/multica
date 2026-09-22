@@ -4,35 +4,51 @@ import { auroraGenerationDetailOptions, auroraKeys, auroraWalletKeys } from "./q
 import { AURORA_GENERATION_POLL_MS } from "./types";
 
 /**
- * Pulls the polling decision out of the options object so the contract can be
+ * Pulls the polling decision out of the options object so the wiring can be
  * pinned without fake timers. A `false` answer is what stops the poll; a number
  * is the next tick.
+ *
+ * Only the wiring is asserted here. Which *statuses* are final is
+ * `isAuroraGenerationTerminal`'s contract, and types.test.ts owns that matrix —
+ * re-listing it would mean two files to edit when the server's vocabulary
+ * grows.
  */
-function pollInterval(status: string | undefined): number | false {
+function pollInterval(query: {
+  status: string;
+  data: { status: string } | null;
+}): number | false {
   const options = auroraGenerationDetailOptions("ws-1", "gen-1");
   const refetchInterval = options.refetchInterval as unknown as (query: {
-    state: { data: { status: string } | null };
+    state: { status: string; data: { status: string } | null };
   }) => number | false;
-  return refetchInterval({
-    state: { data: status === undefined ? null : { status } },
-  });
+  return refetchInterval({ state: query });
 }
 
 describe("auroraGenerationDetailOptions", () => {
   it("polls a generation that is still in flight", () => {
-    expect(pollInterval("queued")).toBe(AURORA_GENERATION_POLL_MS);
-    expect(pollInterval("running")).toBe(AURORA_GENERATION_POLL_MS);
-  });
-
-  it("stops polling once the generation is final", () => {
-    expect(pollInterval("completed")).toBe(false);
-    expect(pollInterval("failed")).toBe(false);
+    expect(
+      pollInterval({ status: "success", data: { status: "running" } }),
+    ).toBe(AURORA_GENERATION_POLL_MS);
   });
 
   it("keeps polling when the detail body could not be read", () => {
     // null is what parseAuroraGenerationDetail falls back to; it is not a
     // finished generation, so the screen keeps trying rather than parking.
-    expect(pollInterval(undefined)).toBe(AURORA_GENERATION_POLL_MS);
+    expect(pollInterval({ status: "success", data: null })).toBe(
+      AURORA_GENERATION_POLL_MS,
+    );
+  });
+
+  it("stops polling once the generation is final", () => {
+    expect(
+      pollInterval({ status: "success", data: { status: "completed" } }),
+    ).toBe(false);
+  });
+
+  it("stops polling a failed read instead of retrying it forever", () => {
+    // `refetchInterval` ignores query status, so without this an id that 404s
+    // would be re-requested every 3s for as long as the screen is open.
+    expect(pollInterval({ status: "error", data: null })).toBe(false);
   });
 });
 

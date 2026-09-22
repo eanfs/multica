@@ -18,25 +18,23 @@ import { z } from "zod";
  * directory, the composer's credit price, and whether a skill can run.
  *
  * The wire names the English label `name_en` (`aurora/catalog.go`) while the
- * rest of the API is camelCase; this schema maps it to `nameEn` so consumers
+ * rest of the API is camelCase; the transform maps it to `nameEn` so consumers
  * see one naming convention.
  */
-const auroraSkillWireSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  name_en: z.string().default(""),
-  category: z.string(),
-  credits: z.number(),
-  input: z.array(z.string()).default([]),
-  output: z.array(z.string()).default([]),
-  featured: z.boolean().default(false),
-  /** false = a phase-2 skill: listed, but not yet runnable. */
-  available: z.boolean().default(true),
-});
-
-export const auroraSkillSchema = auroraSkillWireSchema.transform(
-  ({ name_en, ...skill }) => ({ ...skill, nameEn: name_en }),
-);
+export const auroraSkillSchema = z
+  .object({
+    id: z.string(),
+    name: z.string(),
+    name_en: z.string().default(""),
+    category: z.string(),
+    credits: z.number(),
+    input: z.array(z.string()).default([]),
+    output: z.array(z.string()).default([]),
+    featured: z.boolean().default(false),
+    /** false = a phase-2 skill: listed, but not yet runnable. */
+    available: z.boolean().default(true),
+  })
+  .transform(({ name_en, ...skill }) => ({ ...skill, nameEn: name_en }));
 export type AuroraSkill = z.infer<typeof auroraSkillSchema>;
 
 export const auroraSkillsSchema = z.object({

@@ -46,17 +46,18 @@ const AURORA_TRANSACTIONS_PATH = "/api/aurora/billing/transactions";
 // a value, so a log line groups every generation read instead of one per id.
 const SKILLS_ENDPOINT = `GET ${AURORA_SKILLS_PATH}`;
 const GENERATIONS_ENDPOINT = `GET ${AURORA_GENERATIONS_PATH}`;
-const GENERATION_ENDPOINT = "GET /api/aurora/generations/{id}";
+const GENERATION_ENDPOINT = `GET ${AURORA_GENERATIONS_PATH}/{id}`;
 const CREATE_GENERATION_ENDPOINT = `POST ${AURORA_GENERATIONS_PATH}`;
 const ASSETS_ENDPOINT = `GET ${AURORA_ASSETS_PATH}`;
 const BALANCE_ENDPOINT = `GET ${AURORA_BALANCE_PATH}`;
 const TRANSACTIONS_ENDPOINT = `GET ${AURORA_TRANSACTIONS_PATH}`;
 
 /**
- * Serialises the list params the server understands, skipping the absent ones
- * so a request carries only the filters the caller actually set.
+ * Renders the list params the server understands as a URL suffix — `""` when
+ * there are none, otherwise a leading `?`. Absent params are skipped, so a
+ * request carries only the filters the caller actually set.
  */
-function queryString(
+function querySuffix(
   params?: Record<string, string | number | undefined>,
 ): string {
   const search = new URLSearchParams();
@@ -71,21 +72,19 @@ function queryString(
 // Parsing
 // ---------------------------------------------------------------------------
 
-const EMPTY_SKILLS: { skills: AuroraSkill[] } = { skills: [] };
-const EMPTY_GENERATIONS: { generations: AuroraGeneration[] } = {
-  generations: [],
-};
-const EMPTY_ASSETS: { assets: AuroraAsset[] } = { assets: [] };
-const EMPTY_TRANSACTIONS: { transactions: AuroraTransaction[] } = {
-  transactions: [],
-};
-const EMPTY_BALANCE: AuroraBalance = { availableMicro: 0 };
+// Each fallback is built at the call site rather than shared as a module
+// constant: `parseWithFallback` returns the fallback by reference, so one
+// shared array would be aliased by every degraded cache entry — and a single
+// in-place mutation of any of them would corrupt all the others.
 
 /** The skill catalog, or an empty directory when the body is unreadable. */
 export function parseAuroraSkills(data: unknown): AuroraSkill[] {
-  return parseWithFallback(data, auroraSkillsSchema, EMPTY_SKILLS, {
-    endpoint: SKILLS_ENDPOINT,
-  }).skills;
+  return parseWithFallback<{ skills: AuroraSkill[] }>(
+    data,
+    auroraSkillsSchema,
+    { skills: [] },
+    { endpoint: SKILLS_ENDPOINT },
+  ).skills;
 }
 
 /**
@@ -111,9 +110,12 @@ export function parseAuroraGeneration(
 
 /** One page of the workspace's generations, or an empty list. */
 export function parseAuroraGenerations(data: unknown): AuroraGeneration[] {
-  return parseWithFallback(data, auroraGenerationsSchema, EMPTY_GENERATIONS, {
-    endpoint: GENERATIONS_ENDPOINT,
-  }).generations;
+  return parseWithFallback<{ generations: AuroraGeneration[] }>(
+    data,
+    auroraGenerationsSchema,
+    { generations: [] },
+    { endpoint: GENERATIONS_ENDPOINT },
+  ).generations;
 }
 
 /** One generation with its assets, or null when the body is unreadable. */
@@ -132,23 +134,32 @@ export function parseAuroraGenerationDetail(
 
 /** The workspace's asset library, or an empty library. */
 export function parseAuroraAssets(data: unknown): AuroraAsset[] {
-  return parseWithFallback(data, auroraAssetsSchema, EMPTY_ASSETS, {
-    endpoint: ASSETS_ENDPOINT,
-  }).assets;
+  return parseWithFallback<{ assets: AuroraAsset[] }>(
+    data,
+    auroraAssetsSchema,
+    { assets: [] },
+    { endpoint: ASSETS_ENDPOINT },
+  ).assets;
 }
 
 /** The caller's wallet, or a zero balance the next refetch will correct. */
 export function parseAuroraBalance(data: unknown): AuroraBalance {
-  return parseWithFallback(data, auroraBalanceSchema, EMPTY_BALANCE, {
-    endpoint: BALANCE_ENDPOINT,
-  });
+  return parseWithFallback<AuroraBalance>(
+    data,
+    auroraBalanceSchema,
+    { availableMicro: 0 },
+    { endpoint: BALANCE_ENDPOINT },
+  );
 }
 
 /** The caller's ledger, newest first, or an empty ledger. */
 export function parseAuroraTransactions(data: unknown): AuroraTransaction[] {
-  return parseWithFallback(data, auroraTransactionsSchema, EMPTY_TRANSACTIONS, {
-    endpoint: TRANSACTIONS_ENDPOINT,
-  }).transactions;
+  return parseWithFallback<{ transactions: AuroraTransaction[] }>(
+    data,
+    auroraTransactionsSchema,
+    { transactions: [] },
+    { endpoint: TRANSACTIONS_ENDPOINT },
+  ).transactions;
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +194,7 @@ export async function listAuroraGenerations(
   params?: AuroraListParams,
 ): Promise<AuroraGeneration[]> {
   const raw = await api.requestJson(
-    `${AURORA_GENERATIONS_PATH}${queryString(params)}`,
+    `${AURORA_GENERATIONS_PATH}${querySuffix(params)}`,
   );
   return parseAuroraGenerations(raw);
 }
@@ -203,7 +214,7 @@ export async function listAuroraAssets(
   params?: AuroraAssetsParams,
 ): Promise<AuroraAsset[]> {
   const raw = await api.requestJson(
-    `${AURORA_ASSETS_PATH}${queryString(params)}`,
+    `${AURORA_ASSETS_PATH}${querySuffix(params)}`,
   );
   return parseAuroraAssets(raw);
 }
