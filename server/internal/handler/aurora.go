@@ -537,11 +537,11 @@ func (h *Handler) ListAuroraAssets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"assets": assets})
 }
 
-// loadAuroraAsset resolves one asset by path id inside the caller's workspace.
-// Workspace membership is validated by the route's middleware; the query
-// re-scopes by workspace_id so another workspace's asset id resolves to the
-// same 404 a nonexistent one does.
-func (h *Handler) loadAuroraAsset(w http.ResponseWriter, r *http.Request) (db.AuroraAsset, bool) {
+// loadAuroraAssetInWorkspace resolves one asset by path id inside the caller's
+// workspace. Workspace membership is validated by the route's middleware; the
+// query re-scopes by workspace_id so another workspace's asset id resolves to
+// the same 404 a nonexistent one does.
+func (h *Handler) loadAuroraAssetInWorkspace(w http.ResponseWriter, r *http.Request) (db.AuroraAsset, bool) {
 	workspaceID, ok := parseUUIDOrBadRequest(w, h.resolveWorkspaceID(r), "workspace_id")
 	if !ok {
 		return db.AuroraAsset{}, false
@@ -565,6 +565,16 @@ func (h *Handler) loadAuroraAsset(w http.ResponseWriter, r *http.Request) (db.Au
 	return asset, true
 }
 
+// auroraAssetObjectURL returns the URL of the object backing one asset, or ""
+// when the row has none. media_url is nullable, and an empty one is no more
+// usable than a missing one, so both read as "nothing to serve".
+func auroraAssetObjectURL(asset db.AuroraAsset) string {
+	if !asset.MediaUrl.Valid {
+		return ""
+	}
+	return asset.MediaUrl.String
+}
+
 // DownloadAuroraAsset hands back one asset's file. It follows the attachment
 // download contract: a CloudFront or presign deployment gets a short-lived
 // signed URL to follow, and a deployment with no signable URL (local disk,
@@ -572,14 +582,15 @@ func (h *Handler) loadAuroraAsset(w http.ResponseWriter, r *http.Request) (db.Au
 // asset is resolved inside the caller's workspace first, so another
 // workspace's asset id is a 404 rather than a redirect.
 func (h *Handler) DownloadAuroraAsset(w http.ResponseWriter, r *http.Request) {
-	asset, ok := h.loadAuroraAsset(w, r)
+	asset, ok := h.loadAuroraAssetInWorkspace(w, r)
 	if !ok {
 		return
 	}
 	// media_url is the only pointer to the stored object. A generation
 	// completes with assets that always carry one, but a row without it has
 	// nothing to serve and nothing to guess at.
-	if !asset.MediaUrl.Valid || asset.MediaUrl.String == "" {
+	mediaURL := auroraAssetObjectURL(asset)
+	if mediaURL == "" {
 		writeError(w, http.StatusNotFound, "asset has no file")
 		return
 	}
@@ -588,7 +599,6 @@ func (h *Handler) DownloadAuroraAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mediaURL := asset.MediaUrl.String
 	key := h.Storage.KeyFromURL(mediaURL)
 	// Every mode names the file the same way, so it is resolved once here and
 	// handed to whichever branch serves it.
@@ -634,9 +644,12 @@ func (h *Handler) DownloadAuroraAsset(w http.ResponseWriter, r *http.Request) {
 }
 
 // proxyAuroraAssetDownload streams an asset through the API for deployments
-// with no signable storage URL, the same fallback DownloadAttachment takes in
-// that mode. The caller resolves the download name; aurora_asset records no
-// content type of its own, so that is derived from the recorded format.
+// with no signable storage URL — the branch DownloadAttachment falls into for
+// the same reason. It is deliberately simpler than that handler's proxy path:
+// aurora_asset records no size, so there is nothing to range over and a
+// forward-only reader is served whole, without the Accept-Ranges/206/416
+// handling the attachment stream implements. The caller resolves the download
+// name; the content type is derived from the recorded format.
 func (h *Handler) proxyAuroraAssetDownload(w http.ResponseWriter, r *http.Request, asset db.AuroraAsset, key, filename string) {
 	reader, err := h.Storage.GetReader(r.Context(), key)
 	if err != nil {
@@ -695,17 +708,20 @@ func auroraAssetFilename(key string, format pgtype.Text) string {
 // hold is a 404 either way, so the endpoint is no existence oracle for other
 // workspaces' assets.
 func (h *Handler) DeleteAuroraAsset(w http.ResponseWriter, r *http.Request) {
-	asset, ok := h.loadAuroraAsset(w, r)
+	asset, ok := h.loadAuroraAssetInWorkspace(w, r)
 	if !ok {
 		return
 	}
 
-	// No storage backend means no object to reclaim; the row still goes.
-	if h.Storage != nil && asset.MediaUrl.Valid && asset.MediaUrl.String != "" {
-		if err := h.Storage.DeleteObject(r.Context(), h.Storage.KeyFromURL(asset.MediaUrl.String)); err != nil {
-			slog.Error("failed to delete aurora asset object", "asset_id", uuidToString(asset.ID), "error", err)
-			writeError(w, http.StatusInternalServerError, "failed to delete asset file")
-			return
+	// No storage backend, or no object on the row, means nothing to reclaim;
+	// the row still goes.
+	if h.Storage != nil {
+		if mediaURL := auroraAssetObjectURL(asset); mediaURL != "" {
+			if err := h.Storage.DeleteObject(r.Context(), h.Storage.KeyFromURL(mediaURL)); err != nil {
+				slog.Error("failed to delete aurora asset object", "asset_id", uuidToString(asset.ID), "error", err)
+				writeError(w, http.StatusInternalServerError, "failed to delete asset file")
+				return
+			}
 		}
 	}
 

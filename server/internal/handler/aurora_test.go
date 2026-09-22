@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/storage"
@@ -1004,10 +1005,13 @@ func insertAsset(t *testing.T, generationID string, over ...testutil.Cols) strin
 
 // insertAssetInOtherWorkspace writes an asset belonging to a workspace the
 // caller is not a member of, with its own generation row. Both are invisible
-// to the asset endpoints, which is what the cross-workspace cases assert.
+// to the asset endpoints, which is what the cross-workspace cases assert. The
+// slug carries a random suffix because workspace slugs are unique: a run that
+// aborts before teardown leaves its workspace behind, and a fixed slug would
+// make every later run fail on the insert rather than on its own assertion.
 func insertAssetInOtherWorkspace(t *testing.T, slug string) string {
 	t.Helper()
-	otherWS := dbfx.Workspace(t, "Aurora asset workspace "+slug, slug)
+	otherWS := dbfx.Workspace(t, "Aurora asset workspace "+slug, slug+"-"+uuid.NewString())
 	genID := dbfx.Insert(t, "aurora_generation", testutil.Cols{
 		"workspace_id": otherWS,
 		"user_id":      testUserID,
@@ -1056,7 +1060,7 @@ func listAuroraAssets(t *testing.T, path string, want int) []auroraAssetBody {
 	return testutil.Decode[auroraAssetListBody](t, testHandler.ListAuroraAssets, newRequest(http.MethodGet, path, nil), want).Assets
 }
 
-func TestListAuroraAssetsFiltersByGeneration(t *testing.T) {
+func TestAuroraAssetListFiltersByGeneration(t *testing.T) {
 	resetAuroraGenerations(t)
 
 	genA := insertGeneration(t, "assets A")
@@ -1219,7 +1223,7 @@ func TestAuroraAssetDownloadStreamsWhenThereIsNoSignedURL(t *testing.T) {
 	testutil.Call(t, testHandler.DownloadAuroraAsset, req).Want(http.StatusNotFound)
 }
 
-func TestDeleteAuroraAssetRemovesRowAndObject(t *testing.T) {
+func TestAuroraAssetDeleteRemovesRowAndObject(t *testing.T) {
 	resetAuroraGenerations(t)
 	store := &mockStorage{files: map[string][]byte{"aurora/doomed.png": []byte("bytes")}}
 	withAuroraAssetStorage(t, store)
@@ -1248,7 +1252,7 @@ func TestDeleteAuroraAssetRemovesRowAndObject(t *testing.T) {
 	testutil.Call(t, testHandler.DeleteAuroraAsset, req).Want(http.StatusBadRequest)
 }
 
-func TestDeleteAuroraAssetLeavesOtherWorkspacesAlone(t *testing.T) {
+func TestAuroraAssetDeleteLeavesOtherWorkspacesAlone(t *testing.T) {
 	resetAuroraGenerations(t)
 	withAuroraAssetStorage(t, &mockStorage{})
 
@@ -1261,10 +1265,10 @@ func TestDeleteAuroraAssetLeavesOtherWorkspacesAlone(t *testing.T) {
 	}
 }
 
-// TestDeleteAuroraAssetWithoutStorage covers a deployment whose storage is not
+// TestAuroraAssetDeleteWithoutStorage covers a deployment whose storage is not
 // wired up: there is no object to reclaim, but the row still goes, so the
 // library is not permanently stuck with an asset nobody can remove.
-func TestDeleteAuroraAssetWithoutStorage(t *testing.T) {
+func TestAuroraAssetDeleteWithoutStorage(t *testing.T) {
 	resetAuroraGenerations(t)
 
 	genID := insertGeneration(t, "delete without storage")
@@ -1278,11 +1282,11 @@ func TestDeleteAuroraAssetWithoutStorage(t *testing.T) {
 	}
 }
 
-// TestDeleteAuroraAssetKeepsRowWhenObjectDeleteFails pins the failure order:
+// TestAuroraAssetDeleteKeepsRowWhenObjectDeleteFails pins the failure order:
 // the row is the only record that the object exists, so an object delete that
 // cannot be completed must fail the request and leave the row for a retry
 // rather than deleting the row and stranding the file.
-func TestDeleteAuroraAssetKeepsRowWhenObjectDeleteFails(t *testing.T) {
+func TestAuroraAssetDeleteKeepsRowWhenObjectDeleteFails(t *testing.T) {
 	resetAuroraGenerations(t)
 	withAuroraAssetStorage(t, &deleteFailingStorage{})
 
