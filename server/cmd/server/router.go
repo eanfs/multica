@@ -1903,6 +1903,15 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			r.Get("/api/aurora/generations", h.ListAuroraGenerations)
 			r.Get("/api/aurora/generations/{id}", h.GetAuroraGeneration)
 
+			// Aurora content library. Assets belong to a generation but are
+			// addressable on their own: the library screen lists the whole
+			// workspace's output, and the download redirects to a signed
+			// storage URL (or streams it where no URL can be signed) using
+			// the same storage mode resolution attachments use.
+			r.Get("/api/aurora/assets", h.ListAuroraAssets)
+			r.Get("/api/aurora/assets/{id}/download", h.DownloadAuroraAsset)
+			r.Delete("/api/aurora/assets/{id}", h.DeleteAuroraAsset)
+
 			// Aurora credit reads. The wallet is the *user's*, not the
 			// workspace's — every workspace shows the same balance — so these
 			// read the caller's account and ignore X-Workspace-ID. They sit in

@@ -1,11 +1,13 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/aurora"
+	"github.com/multica-ai/multica/server/internal/storage"
 	"github.com/multica-ai/multica/server/internal/testutil"
 )
 
@@ -962,4 +965,311 @@ func TestGetAuroraGenerationNotFound(t *testing.T) {
 	})
 	req = withURLParam(newRequest(http.MethodGet, "/api/aurora/generations/{id}", nil), "id", genID)
 	testutil.Call(t, testHandler.GetAuroraGeneration, req).Want(http.StatusNotFound)
+}
+
+// ---------------------------------------------------------------------------
+// Assets — GET /api/aurora/assets, its download, and DELETE
+// ---------------------------------------------------------------------------
+
+// auroraAssetBody is the wire shape of one asset, shared by the library list
+// and the generation detail endpoint.
+type auroraAssetBody struct {
+	ID           string  `json:"id"`
+	GenerationID string  `json:"generationId"`
+	Kind         string  `json:"kind"`
+	MediaURL     *string `json:"mediaUrl"`
+	Format       *string `json:"format"`
+	CreatedAt    string  `json:"createdAt"`
+}
+
+type auroraAssetListBody struct {
+	Assets []auroraAssetBody `json:"assets"`
+}
+
+// insertAsset writes an aurora_asset row and returns its id.
+func insertAsset(t *testing.T, generationID string, over ...testutil.Cols) string {
+	t.Helper()
+	cols := testutil.Cols{
+		"generation_id": generationID,
+		"workspace_id":  testWorkspaceID,
+		"kind":          "image",
+		"media_url":     "https://cdn.example.com/aurora/out.png",
+		"format":        "png",
+	}
+	for _, o := range over {
+		maps.Copy(cols, o)
+	}
+	return dbfx.Insert(t, "aurora_asset", cols)
+}
+
+// insertAssetInOtherWorkspace writes an asset belonging to a workspace the
+// caller is not a member of, with its own generation row. Both are invisible
+// to the asset endpoints, which is what the cross-workspace cases assert.
+func insertAssetInOtherWorkspace(t *testing.T, slug string) string {
+	t.Helper()
+	otherWS := dbfx.Workspace(t, "Aurora asset workspace "+slug, slug)
+	genID := dbfx.Insert(t, "aurora_generation", testutil.Cols{
+		"workspace_id": otherWS,
+		"user_id":      testUserID,
+		"skill_id":     "xhs-image",
+		"prompt":       "other workspace asset",
+		"status":       "completed",
+	})
+	return dbfx.Insert(t, "aurora_asset", testutil.Cols{
+		"generation_id": genID,
+		"workspace_id":  otherWS,
+		"kind":          "image",
+		"media_url":     "https://cdn.example.com/aurora/secret.png",
+		"format":        "png",
+	})
+}
+
+// withAuroraAssetStorage points the shared handler at an in-memory storage
+// backend and restores the previous wiring at cleanup. The shared test handler
+// is built without storage, and only the asset download and delete paths reach
+// for h.Storage.
+func withAuroraAssetStorage(t *testing.T, store storage.Storage) {
+	t.Helper()
+	origStorage := testHandler.Storage
+	origCfg := testHandler.cfg
+	origSigner := testHandler.CFSigner
+	testHandler.Storage = store
+	testHandler.cfg.AttachmentDownloadMode = ""
+	testHandler.CFSigner = nil
+	t.Cleanup(func() {
+		testHandler.Storage = origStorage
+		testHandler.cfg = origCfg
+		testHandler.CFSigner = origSigner
+	})
+}
+
+// deleteFailingStorage refuses every object delete, standing in for a storage
+// backend that is unreachable at the moment an asset row would be removed.
+type deleteFailingStorage struct{ mockStorage }
+
+func (s *deleteFailingStorage) DeleteObject(context.Context, string) error {
+	return errors.New("storage unavailable")
+}
+
+func listAuroraAssets(t *testing.T, path string, want int) []auroraAssetBody {
+	t.Helper()
+	return testutil.Decode[auroraAssetListBody](t, testHandler.ListAuroraAssets, newRequest(http.MethodGet, path, nil), want).Assets
+}
+
+func TestListAuroraAssetsFiltersByGeneration(t *testing.T) {
+	resetAuroraGenerations(t)
+
+	genA := insertGeneration(t, "assets A")
+	genB := insertGeneration(t, "assets B")
+	older := insertAsset(t, genA, testutil.Cols{
+		"created_at": testutil.Raw("now() - interval '2 hours'"),
+		"kind":       "image",
+		"media_url":  "https://cdn.example.com/aurora/older.png",
+		"format":     "png",
+	})
+	newer := insertAsset(t, genA, testutil.Cols{
+		"created_at": testutil.Raw("now() - interval '1 hour'"),
+		"kind":       "video",
+		"media_url":  "https://cdn.example.com/aurora/newer.mp4",
+		"format":     "mp4",
+	})
+	other := insertAsset(t, genB, testutil.Cols{
+		"kind":      "document",
+		"media_url": "https://cdn.example.com/aurora/other.pdf",
+		"format":    "pdf",
+	})
+
+	// The unfiltered list is the whole workspace's library, newest first.
+	all := listAuroraAssets(t, "/api/aurora/assets?limit=50&offset=0", http.StatusOK)
+	if len(all) != 3 || all[0].ID != other || all[1].ID != newer || all[2].ID != older {
+		t.Fatalf("workspace order = %v, want [%s %s %s]", assetIDs(all), other, newer, older)
+	}
+
+	// generationId narrows the list to one generation's output.
+	genAPage := listAuroraAssets(t, "/api/aurora/assets?generationId="+genA+"&limit=50", http.StatusOK)
+	if len(genAPage) != 2 || genAPage[0].ID != newer || genAPage[1].ID != older {
+		t.Fatalf("generation %s page = %v, want [%s %s]", genA, assetIDs(genAPage), newer, older)
+	}
+	a := genAPage[0]
+	if a.GenerationID != genA || a.Kind != "video" ||
+		a.MediaURL == nil || *a.MediaURL != "https://cdn.example.com/aurora/newer.mp4" ||
+		a.Format == nil || *a.Format != "mp4" || a.CreatedAt == "" {
+		t.Fatalf("unexpected asset: %#v", a)
+	}
+
+	genBPage := listAuroraAssets(t, "/api/aurora/assets?generationId="+genB, http.StatusOK)
+	if len(genBPage) != 1 || genBPage[0].ID != other {
+		t.Fatalf("generation %s page = %v, want [%s]", genB, assetIDs(genBPage), other)
+	}
+
+	// Junk and out-of-range paging falls back to the default page rather than
+	// erroring, the same contract the generation list holds.
+	if len(listAuroraAssets(t, "/api/aurora/assets?limit=not-a-number&offset=-1", http.StatusOK)) != 3 {
+		t.Fatal("junk limit did not fall back to the default page")
+	}
+
+	// A malformed generation id is a client bug, not an empty library.
+	listAuroraAssets(t, "/api/aurora/assets?generationId=not-a-uuid", http.StatusBadRequest)
+
+	// Another workspace's assets stay invisible even when its generation id is
+	// named explicitly: the filter is ANDed with the caller's workspace.
+	foreignAsset := insertAssetInOtherWorkspace(t, "aurora-asset-list-other-ws")
+	if got := listAuroraAssets(t, "/api/aurora/assets?generationId="+foreignAsset, http.StatusOK); len(got) != 0 {
+		t.Fatalf("cross-workspace generation filter returned %v, want none", assetIDs(got))
+	}
+}
+
+func assetIDs(assets []auroraAssetBody) []string {
+	ids := make([]string, 0, len(assets))
+	for _, a := range assets {
+		ids = append(ids, a.ID)
+	}
+	return ids
+}
+
+func TestAuroraAssetDownloadRedirectsToSignedURL(t *testing.T) {
+	resetAuroraGenerations(t)
+	withAuroraAssetStorage(t, &mockStorage{})
+
+	genID := insertGeneration(t, "download")
+	assetID := insertAsset(t, genID, testutil.Cols{"media_url": "https://cdn.example.com/aurora/out.png"})
+
+	req := withURLParam(newRequest(http.MethodGet, "/api/aurora/assets/{id}/download", nil), "id", assetID)
+	w := testutil.Call(t, testHandler.DownloadAuroraAsset, req).Want(http.StatusFound)
+
+	loc, err := url.Parse(w.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if loc.Query().Get("X-Amz-Signature") == "" {
+		t.Fatalf("Location = %q, want a signed storage URL", loc.String())
+	}
+	// Only the object's key is signed — signing the stored URL would hand a
+	// hosted-object URL back to the client verbatim.
+	if loc.Path != "/aurora/out.png" {
+		t.Fatalf("signed path = %q, want /aurora/out.png", loc.Path)
+	}
+	// A download saves the file rather than previewing it.
+	if disposition := loc.Query().Get("response-content-disposition"); !strings.HasPrefix(disposition, "attachment") || !strings.Contains(disposition, "out.png") {
+		t.Fatalf("response-content-disposition = %q, want a forced attachment for out.png", disposition)
+	}
+}
+
+func TestAuroraAssetDownloadNotFound(t *testing.T) {
+	resetAuroraGenerations(t)
+	withAuroraAssetStorage(t, &mockStorage{})
+
+	// Malformed id → 400, not a crash.
+	req := withURLParam(newRequest(http.MethodGet, "/api/aurora/assets/{id}/download", nil), "id", "not-a-uuid")
+	testutil.Call(t, testHandler.DownloadAuroraAsset, req).Want(http.StatusBadRequest)
+
+	// Well-formed but absent → 404.
+	req = withURLParam(newRequest(http.MethodGet, "/api/aurora/assets/{id}/download", nil), "id", parseUUID(testUserID).String())
+	testutil.Call(t, testHandler.DownloadAuroraAsset, req).Want(http.StatusNotFound)
+
+	// An asset whose row never got a media_url has no object to serve.
+	genID := insertGeneration(t, "download without media")
+	emptyURL := insertAsset(t, genID, testutil.Cols{"media_url": ""})
+	req = withURLParam(newRequest(http.MethodGet, "/api/aurora/assets/{id}/download", nil), "id", emptyURL)
+	testutil.Call(t, testHandler.DownloadAuroraAsset, req).Want(http.StatusNotFound)
+
+	// Another workspace's asset is invisible: the lookup is scoped by
+	// workspace_id, so its id is not an existence oracle.
+	foreignAsset := insertAssetInOtherWorkspace(t, "aurora-asset-download-other-ws")
+	req = withURLParam(newRequest(http.MethodGet, "/api/aurora/assets/{id}/download", nil), "id", foreignAsset)
+	testutil.Call(t, testHandler.DownloadAuroraAsset, req).Want(http.StatusNotFound)
+}
+
+// TestAuroraAssetDownloadStreamsWhenThereIsNoSignedURL covers the deployment
+// shape with no signable URL to redirect to (local disk, private object host):
+// the object is streamed through the API instead, with the same forced-
+// attachment disposition the redirect path ends up with.
+func TestAuroraAssetDownloadStreamsWhenThereIsNoSignedURL(t *testing.T) {
+	resetAuroraGenerations(t)
+	store := &mockStorage{files: map[string][]byte{"aurora/report.csv": []byte("id,total\n1,42\n")}}
+	withAuroraAssetStorage(t, store)
+	testHandler.cfg.AttachmentDownloadMode = "proxy"
+
+	genID := insertGeneration(t, "stream download")
+	assetID := insertAsset(t, genID, testutil.Cols{
+		"kind":      "document",
+		"media_url": "https://cdn.example.com/aurora/report.csv",
+		"format":    "csv",
+	})
+
+	req := withURLParam(newRequest(http.MethodGet, "/api/aurora/assets/{id}/download", nil), "id", assetID)
+	w := testutil.Call(t, testHandler.DownloadAuroraAsset, req).Want(http.StatusOK)
+	if !bytes.Equal(w.Body.Bytes(), []byte("id,total\n1,42\n")) {
+		t.Fatalf("body = %q, want the stored object", w.Body.String())
+	}
+	if disposition := w.Header().Get("Content-Disposition"); !strings.HasPrefix(disposition, "attachment") {
+		t.Fatalf("Content-Disposition = %q, want a forced attachment", disposition)
+	}
+
+	// The row points at an object the backend no longer has: 404, not an empty
+	// 200 file the user would save as garbage.
+	missing := insertAsset(t, genID, testutil.Cols{"media_url": "https://cdn.example.com/aurora/gone.png"})
+	req = withURLParam(newRequest(http.MethodGet, "/api/aurora/assets/{id}/download", nil), "id", missing)
+	testutil.Call(t, testHandler.DownloadAuroraAsset, req).Want(http.StatusNotFound)
+}
+
+func TestDeleteAuroraAssetRemovesRowAndObject(t *testing.T) {
+	resetAuroraGenerations(t)
+	store := &mockStorage{files: map[string][]byte{"aurora/doomed.png": []byte("bytes")}}
+	withAuroraAssetStorage(t, store)
+
+	genID := insertGeneration(t, "delete me")
+	assetID := insertAsset(t, genID, testutil.Cols{"media_url": "https://cdn.example.com/aurora/doomed.png"})
+
+	req := withURLParam(newRequest(http.MethodDelete, "/api/aurora/assets/{id}", nil), "id", assetID)
+	testutil.Call(t, testHandler.DeleteAuroraAsset, req).Want(http.StatusNoContent)
+
+	// The row is gone from the generation's asset list...
+	if got := listAuroraAssets(t, "/api/aurora/assets?generationId="+genID, http.StatusOK); len(got) != 0 {
+		t.Fatalf("assets after delete = %v, want none", assetIDs(got))
+	}
+	// ...and so is the stored object: no cascade exists between them, so
+	// leaving the file behind would strand it with nothing pointing at it.
+	if _, ok := store.files["aurora/doomed.png"]; ok {
+		t.Fatal("stored object survived the asset delete")
+	}
+
+	// Deleting again is a 404: the asset is already gone.
+	testutil.Call(t, testHandler.DeleteAuroraAsset, req).Want(http.StatusNotFound)
+
+	// Malformed id → 400.
+	req = withURLParam(newRequest(http.MethodDelete, "/api/aurora/assets/{id}", nil), "id", "not-a-uuid")
+	testutil.Call(t, testHandler.DeleteAuroraAsset, req).Want(http.StatusBadRequest)
+}
+
+func TestDeleteAuroraAssetLeavesOtherWorkspacesAlone(t *testing.T) {
+	resetAuroraGenerations(t)
+	withAuroraAssetStorage(t, &mockStorage{})
+
+	foreignAsset := insertAssetInOtherWorkspace(t, "aurora-asset-delete-other-ws")
+	req := withURLParam(newRequest(http.MethodDelete, "/api/aurora/assets/{id}", nil), "id", foreignAsset)
+	testutil.Call(t, testHandler.DeleteAuroraAsset, req).Want(http.StatusNotFound)
+
+	if n := dbfx.Count(t, `SELECT count(*) FROM aurora_asset WHERE id = $1`, foreignAsset); n != 1 {
+		t.Fatalf("cross-workspace delete removed the row (count = %d, want 1)", n)
+	}
+}
+
+// TestDeleteAuroraAssetKeepsRowWhenObjectDeleteFails pins the failure order:
+// the row is the only record that the object exists, so an object delete that
+// cannot be completed must fail the request and leave the row for a retry
+// rather than deleting the row and stranding the file.
+func TestDeleteAuroraAssetKeepsRowWhenObjectDeleteFails(t *testing.T) {
+	resetAuroraGenerations(t)
+	withAuroraAssetStorage(t, &deleteFailingStorage{})
+
+	genID := insertGeneration(t, "delete failure")
+	assetID := insertAsset(t, genID)
+
+	req := withURLParam(newRequest(http.MethodDelete, "/api/aurora/assets/{id}", nil), "id", assetID)
+	testutil.Call(t, testHandler.DeleteAuroraAsset, req).Want(http.StatusInternalServerError)
+
+	if n := dbfx.Count(t, `SELECT count(*) FROM aurora_asset WHERE id = $1`, assetID); n != 1 {
+		t.Fatalf("row removed despite the storage failure (count = %d, want 1)", n)
+	}
 }
