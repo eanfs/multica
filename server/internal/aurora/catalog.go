@@ -2,7 +2,10 @@
 // catalog, and the credit accounting that pays for generations.
 package aurora
 
-import "slices"
+import (
+	"slices"
+	"strings"
+)
 
 // SkillCatalogEntry is one consumer-facing skill in the directory.
 type SkillCatalogEntry struct {
@@ -64,6 +67,25 @@ func Exists(id string) bool {
 		}
 	}
 	return false
+}
+
+// AssetKind maps a reported artifact onto the aurora_asset.kind category. The
+// daemon reports a file format; the catalog's Output names the category the
+// skill produces (image, video, text, …). An exact format match among the
+// skill's outputs wins — it disambiguates multi-output skills (resume →
+// pdf|text) — otherwise the primary output is the kind.
+func AssetKind(entry SkillCatalogEntry, format string) string {
+	if format != "" {
+		for _, out := range entry.Output {
+			if strings.EqualFold(out, format) {
+				return out
+			}
+		}
+	}
+	if len(entry.Output) > 0 {
+		return entry.Output[0]
+	}
+	return entry.Category
 }
 
 func cloneEntry(entry SkillCatalogEntry) SkillCatalogEntry {

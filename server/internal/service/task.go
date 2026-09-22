@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/attribution"
+	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/chattitle"
 	"github.com/multica-ai/multica/server/internal/entitlement"
 	"github.com/multica-ai/multica/server/internal/events"
@@ -47,6 +48,11 @@ type TaskService struct {
 	// Entitlements supplies Cloud's workspace-scoped issue-count instruction.
 	// Nil keeps self-hosted and isolated test services unlimited.
 	Entitlements entitlement.Provider
+	// Credit owns Aurora credit accounting. Nil disables settlement (isolated
+	// tests and services that never handle Aurora generations); the terminal
+	// paths still resolve generations and flip their status, only the refund on
+	// failure is skipped.
+	Credit *aurora.CreditService
 	// SourceContextStorage is used only by the bounded 30-day cleanup pass for
 	// terminal quick-create captures. Nil disables it where storage is absent.
 	SourceContextStorage SourceContextObjectStore
@@ -4440,6 +4446,11 @@ func (s *TaskService) CompleteTaskWithTransition(ctx context.Context, taskID pgt
 	slog.Info("task completed", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID))
 	s.captureTaskCompleted(ctx, task)
 
+	// Aurora generations settle on the terminal event: charge the amount already
+	// reserved at creation and mark the generation completed. Idempotent via the
+	// generation-status check, so a durable complete callback replay is a no-op.
+	s.settleAuroraOnCompleted(ctx, task)
+
 	// Invariant: every completed issue task must have at least one agent
 	// comment on the issue, so the user always sees something when a run
 	// ends. If the agent posted a comment during execution (result, progress
@@ -5068,6 +5079,10 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 
 	slog.Warn("task failed", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID), "error", errMsg, "failure_reason", failureReason)
 	s.captureTaskFailed(ctx, task)
+
+	// Aurora generations settle on the terminal event: refund the reservation
+	// and mark the generation failed. Idempotent via the generation-status check.
+	s.settleAuroraOnFailed(ctx, task, failureReason)
 
 	// The auto-retry child (if any) was created inside the transaction above so
 	// no newer chat task could jump ahead of it. Surface it now: broadcast
@@ -5987,6 +6002,12 @@ func (s *TaskService) HandleFailedTasks(ctx context.Context, tasks []db.AgentTas
 			failureReason = t.FailureReason.String
 		}
 		s.captureTaskFailed(ctx, t)
+
+		// Aurora generations settle on the terminal event. This is the single
+		// funnel every sweeper failure path (stale, offline, queued-expiry,
+		// orphan-recovery) feeds, so a generation whose task was swept into a
+		// terminal failed state is refunded and marked failed here.
+		s.settleAuroraOnFailed(ctx, t, failureReason)
 
 		workspaceID := ""
 		if t.IssueID.Valid {
