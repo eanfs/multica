@@ -214,12 +214,11 @@ func (h *Handler) failGenerationAndRefund(ctx context.Context, userID, workspace
 	h.markGenerationFailed(ctx, workspaceID, generationID, reason)
 }
 
-// Aurora transaction paging bounds. The ledger is the user's own history, so
-// the page is bounded by what a billing screen can show, not by what one
-// query can carry.
+// Aurora list paging bounds. The ledger and generation lists are bounded by
+// what a screen can show, not by what one query can carry.
 const (
-	defaultAuroraTransactionLimit = 50
-	maxAuroraTransactionLimit     = 200
+	defaultAuroraListLimit = 50
+	maxAuroraListLimit     = 200
 )
 
 // auroraBillingUser resolves the authenticated caller's UUID for the two
@@ -278,7 +277,7 @@ func (h *Handler) ListAuroraBillingTransactions(w http.ResponseWriter, r *http.R
 	}
 	rows, err := h.Queries.ListCreditTransactions(r.Context(), db.ListCreditTransactionsParams{
 		UserID: userUUID,
-		Limit:  auroraTransactionLimit(r.URL.Query().Get("limit")),
+		Limit:  auroraListLimit(r.URL.Query().Get("limit")),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load transactions")
@@ -301,39 +300,20 @@ func (h *Handler) ListAuroraBillingTransactions(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, map[string]any{"transactions": transactions})
 }
 
-// auroraTransactionLimit reads the ?limit query param, falling back to the
-// default for anything outside 1..maxAuroraTransactionLimit.
-func auroraTransactionLimit(raw string) int32 {
+// auroraListLimit reads a ?limit query param, falling back to the default for
+// anything missing, unparseable, or outside 1..maxAuroraListLimit.
+func auroraListLimit(raw string) int32 {
 	if raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= maxAuroraTransactionLimit {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= maxAuroraListLimit {
 			return int32(n)
 		}
 	}
-	return defaultAuroraTransactionLimit
+	return defaultAuroraListLimit
 }
 
-// Aurora generation read paging bounds. The list is the workspace's own
-// history, so the page is bounded by what a progress screen can show, not by
-// what one query can carry.
-const (
-	defaultAuroraGenerationLimit = 50
-	maxAuroraGenerationLimit     = 200
-)
-
-// auroraGenerationLimit reads the ?limit query param, falling back to the
-// default for anything outside 1..maxAuroraGenerationLimit.
-func auroraGenerationLimit(raw string) int32 {
-	if raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= maxAuroraGenerationLimit {
-			return int32(n)
-		}
-	}
-	return defaultAuroraGenerationLimit
-}
-
-// auroraGenerationOffset reads the ?offset query param, falling back to 0 for
-// anything unparseable or negative.
-func auroraGenerationOffset(raw string) int32 {
+// auroraListOffset reads a ?offset query param, falling back to 0 for anything
+// unparseable or negative.
+func auroraListOffset(raw string) int32 {
 	if raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
 			return int32(n)
@@ -402,8 +382,8 @@ func (h *Handler) ListAuroraGenerations(w http.ResponseWriter, r *http.Request) 
 	}
 	rows, err := h.Queries.ListAuroraGenerations(r.Context(), db.ListAuroraGenerationsParams{
 		WorkspaceID: workspaceID,
-		Limit:       auroraGenerationLimit(r.URL.Query().Get("limit")),
-		Offset:      auroraGenerationOffset(r.URL.Query().Get("offset")),
+		Limit:       auroraListLimit(r.URL.Query().Get("limit")),
+		Offset:      auroraListOffset(r.URL.Query().Get("offset")),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list generations")
@@ -450,7 +430,7 @@ func (h *Handler) GetAuroraGeneration(w http.ResponseWriter, r *http.Request) {
 	assets, err := h.Queries.ListAuroraAssets(r.Context(), db.ListAuroraAssetsParams{
 		GenerationID: generationID,
 		WorkspaceID:  workspaceID,
-		Limit:        maxAuroraGenerationLimit,
+		Limit:        maxAuroraListLimit,
 		Offset:       0,
 	})
 	if err != nil {
