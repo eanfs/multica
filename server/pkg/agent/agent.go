@@ -130,6 +130,24 @@ type ExecOptions struct {
 	// through Claude Code's --settings flag. It currently carries restrictive
 	// runtime-skill overrides only; other providers ignore it.
 	ClaudeSettingsPath string
+	// PermissionMode overrides a backend's default autonomous permission mode.
+	// Empty preserves the historical default — for Claude and its equivalents
+	// that is bypassPermissions, so ordinary user agents are unchanged. A
+	// sandboxed system agent sets a restricted mode (e.g. "default") to opt out
+	// of bypass, which is what makes the narrowed DisallowedTools surface below
+	// actually bind instead of being overridden by a blanket bypass.
+	//
+	// Like ExtraArgs/ThinkingLevel this is opt-in per backend: backends that do
+	// not read it ignore the field and keep their default mode rather than fail.
+	PermissionMode string
+	// DisallowedTools adds tool names the agent must not call, merged into the
+	// backend's built-in deny list (Claude Code's --disallowedTools). Empty
+	// preserves the current surface. A sandboxed system agent lists the
+	// host-touching tools its provider exposes — Bash, filesystem search, and
+	// the like — so an untrusted prompt cannot escape the sandbox through the
+	// agent's own toolset. Honoured by the claude backend today; other backends
+	// add their provider's equivalent deny flag as they are onboarded.
+	DisallowedTools []string
 }
 
 // runContext derives the execution context for an agent subprocess from the

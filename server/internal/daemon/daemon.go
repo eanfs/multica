@@ -7665,6 +7665,19 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		return TaskResult{}, fmt.Errorf("refusing to spawn agent: task has no workspace_id (task_id=%s)", task.ID)
 	}
 
+	// Aurora system agents run untrusted prompts on a server-hosted sandbox node
+	// and must execute under a reviewed narrow surface. Fail closed before any
+	// workdir preparation: a provider with no reviewed surface (only claude
+	// today) must not fall back to the default autonomous (bypass) mode.
+	var auroraSandbox *auroraSurface
+	if isAuroraTask(task) {
+		surface, ok := auroraToolSurface(provider)
+		if !ok {
+			return TaskResult{}, fmt.Errorf("%w: %s", errAuroraSurfaceNotOnboarded, provider)
+		}
+		auroraSandbox = &surface
+	}
+
 	prepareTimeout := d.effectiveTaskPrepareTimeout()
 	prepareCtx, cancelPrepare := context.WithTimeoutCause(ctx, prepareTimeout, errTaskPrepareTimeout)
 	prepareComplete := false
@@ -8671,6 +8684,19 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		OpenclawMode:           openclawMode,
 		ClaudeSettingsPath:     env.ClaudeSettingsPath,
 		QwenpawWorkspace:       env.QwenpawWorkspace,
+	}
+	// Apply the Aurora sandbox policy resolved up front: the turn cap and the
+	// narrowed surface. Non-Aurora tasks leave auroraSandbox nil, so this keeps
+	// the default autonomous surface and a zero MaxTurns for them.
+	if auroraSandbox != nil {
+		execOpts.MaxTurns = auroraMaxTurns
+		execOpts.PermissionMode = auroraSandbox.permissionMode
+		execOpts.DisallowedTools = auroraSandbox.disallowed
+		taskLog.Info("aurora sandbox policy applied",
+			"max_turns", execOpts.MaxTurns,
+			"permission_mode", execOpts.PermissionMode,
+			"disallowed_tools", execOpts.DisallowedTools,
+		)
 	}
 	// Some providers do not reliably load the per-task runtime config files we
 	// write into the task workdir:
