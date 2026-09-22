@@ -1897,6 +1897,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				handler.RequireHumanActor,
 				middleware.RateLimitByUser(rdb, envPositiveInt("RATE_LIMIT_AURORA_GENERATIONS", 20), time.Minute),
 			).Post("/api/aurora/generations", h.CreateAuroraGeneration)
+			// Generation reads are membership-gated like the catalog: the list
+			// is the progress screen's polling source, and the detail derives
+			// in-flight status from the enqueued task.
+			r.Get("/api/aurora/generations", h.ListAuroraGenerations)
+			r.Get("/api/aurora/generations/{id}", h.GetAuroraGeneration)
 
 			// Aurora credit reads. The wallet is the *user's*, not the
 			// workspace's — every workspace shows the same balance — so these

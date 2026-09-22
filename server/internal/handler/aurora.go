@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/aurora"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -212,12 +214,11 @@ func (h *Handler) failGenerationAndRefund(ctx context.Context, userID, workspace
 	h.markGenerationFailed(ctx, workspaceID, generationID, reason)
 }
 
-// Aurora transaction paging bounds. The ledger is the user's own history, so
-// the page is bounded by what a billing screen can show, not by what one
-// query can carry.
+// Aurora list paging bounds. The ledger and generation lists are bounded by
+// what a screen can show, not by what one query can carry.
 const (
-	defaultAuroraTransactionLimit = 50
-	maxAuroraTransactionLimit     = 200
+	defaultAuroraListLimit = 50
+	maxAuroraListLimit     = 200
 )
 
 // auroraBillingUser resolves the authenticated caller's UUID for the two
@@ -276,7 +277,7 @@ func (h *Handler) ListAuroraBillingTransactions(w http.ResponseWriter, r *http.R
 	}
 	rows, err := h.Queries.ListCreditTransactions(r.Context(), db.ListCreditTransactionsParams{
 		UserID: userUUID,
-		Limit:  auroraTransactionLimit(r.URL.Query().Get("limit")),
+		Limit:  auroraListLimit(r.URL.Query().Get("limit")),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load transactions")
@@ -299,13 +300,185 @@ func (h *Handler) ListAuroraBillingTransactions(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, map[string]any{"transactions": transactions})
 }
 
-// auroraTransactionLimit reads the ?limit query param, falling back to the
-// default for anything outside 1..maxAuroraTransactionLimit.
-func auroraTransactionLimit(raw string) int32 {
+// auroraListLimit reads a ?limit query param, falling back to the default for
+// anything missing, unparseable, or outside 1..maxAuroraListLimit.
+func auroraListLimit(raw string) int32 {
 	if raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= maxAuroraTransactionLimit {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= maxAuroraListLimit {
 			return int32(n)
 		}
 	}
-	return defaultAuroraTransactionLimit
+	return defaultAuroraListLimit
+}
+
+// auroraListOffset reads a ?offset query param, falling back to 0 for anything
+// unparseable or negative.
+func auroraListOffset(raw string) int32 {
+	if raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			return int32(n)
+		}
+	}
+	return 0
+}
+
+// AuroraGenerationSummaryResponse is the consumer-facing shape of a generation
+// row in the list and detail endpoints. It extends the create response with the
+// fields the progress screen reads: charged credits, an optional error, and the
+// creation timestamp.
+type AuroraGenerationSummaryResponse struct {
+	ID              string  `json:"id"`
+	SkillID         string  `json:"skillId"`
+	Prompt          string  `json:"prompt"`
+	Status          string  `json:"status"`
+	CreditsReserved int64   `json:"creditsReserved"`
+	CreditsCharged  int64   `json:"creditsCharged"`
+	Error           *string `json:"error"`
+	CreatedAt       string  `json:"createdAt"`
+}
+
+// AuroraGenerationAssetResponse is one content asset a generation produced.
+type AuroraGenerationAssetResponse struct {
+	ID           string  `json:"id"`
+	GenerationID string  `json:"generationId"`
+	Kind         string  `json:"kind"`
+	MediaURL     *string `json:"mediaUrl"`
+	Format       *string `json:"format"`
+	CreatedAt    string  `json:"createdAt"`
+}
+
+// AuroraGenerationDetailResponse wraps the summary with the generation's assets.
+type AuroraGenerationDetailResponse struct {
+	AuroraGenerationSummaryResponse
+	Assets []AuroraGenerationAssetResponse `json:"assets"`
+}
+
+// generationSummary projects a generation row into its consumer shape. The
+// status is the row's stored value; the detail endpoint replaces it with the
+// task-derived status for in-flight generations.
+func generationSummary(row db.AuroraGeneration) AuroraGenerationSummaryResponse {
+	return AuroraGenerationSummaryResponse{
+		ID:              uuidToString(row.ID),
+		SkillID:         row.SkillID,
+		Prompt:          row.Prompt,
+		Status:          row.Status,
+		CreditsReserved: row.CreditsReserved,
+		CreditsCharged:  row.CreditsCharged,
+		Error:           textToPtr(row.Error),
+		CreatedAt:       row.CreatedAt.Time.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+// ListAuroraGenerations returns the workspace's generations, newest first.
+// `limit` and `offset` are optional and junk-tolerant so a client bug cannot
+// turn the progress screen into a 400. Status here is the row's stored value —
+// in-flight generations stay "queued" until the execution layer writes the
+// terminal state back; live progress reads the detail endpoint, which derives
+// the status from the enqueued task.
+func (h *Handler) ListAuroraGenerations(w http.ResponseWriter, r *http.Request) {
+	workspaceID, ok := parseUUIDOrBadRequest(w, h.resolveWorkspaceID(r), "workspace_id")
+	if !ok {
+		return
+	}
+	rows, err := h.Queries.ListAuroraGenerations(r.Context(), db.ListAuroraGenerationsParams{
+		WorkspaceID: workspaceID,
+		Limit:       auroraListLimit(r.URL.Query().Get("limit")),
+		Offset:      auroraListOffset(r.URL.Query().Get("offset")),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list generations")
+		return
+	}
+	generations := make([]AuroraGenerationSummaryResponse, 0, len(rows))
+	for _, row := range rows {
+		generations = append(generations, generationSummary(row))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"generations": generations})
+}
+
+// GetAuroraGeneration returns one generation with its assets. A generation
+// still on the queue has its status derived from the enqueued agent task so the
+// progress screen reflects in-flight work without a separate status sync
+// pipeline — the terminal state is written back to the row by the execution
+// layer.
+func (h *Handler) GetAuroraGeneration(w http.ResponseWriter, r *http.Request) {
+	workspaceID, ok := parseUUIDOrBadRequest(w, h.resolveWorkspaceID(r), "workspace_id")
+	if !ok {
+		return
+	}
+	generationID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "generation id")
+	if !ok {
+		return
+	}
+
+	row, err := h.Queries.GetAuroraGeneration(r.Context(), db.GetAuroraGenerationParams{
+		ID:          generationID,
+		WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "generation not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to load generation")
+		return
+	}
+
+	summary := generationSummary(row)
+	summary.Status = h.deriveGenerationStatus(r.Context(), row)
+
+	assets, err := h.Queries.ListAuroraAssets(r.Context(), db.ListAuroraAssetsParams{
+		GenerationID: generationID,
+		WorkspaceID:  workspaceID,
+		Limit:        maxAuroraListLimit,
+		Offset:       0,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load assets")
+		return
+	}
+	assetResponses := make([]AuroraGenerationAssetResponse, 0, len(assets))
+	for _, a := range assets {
+		assetResponses = append(assetResponses, AuroraGenerationAssetResponse{
+			ID:           uuidToString(a.ID),
+			GenerationID: uuidToString(a.GenerationID),
+			Kind:         a.Kind,
+			MediaURL:     textToPtr(a.MediaUrl),
+			Format:       textToPtr(a.Format),
+			CreatedAt:    a.CreatedAt.Time.UTC().Format(time.RFC3339Nano),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"generation": AuroraGenerationDetailResponse{
+		AuroraGenerationSummaryResponse: summary,
+		Assets:                          assetResponses,
+	}})
+}
+
+// deriveGenerationStatus returns the generation's effective status. Terminal
+// states are stored on the row; a queued row's status is derived from its
+// enqueued agent task so the progress screen can show in-flight work. A missing
+// task row or a transient read failure leaves the stored status untouched —
+// derivation is best-effort and read-side only.
+func (h *Handler) deriveGenerationStatus(ctx context.Context, row db.AuroraGeneration) string {
+	if row.Status != "queued" || !row.TaskID.Valid {
+		return row.Status
+	}
+	task, err := h.Queries.GetAgentTaskStatus(ctx, row.TaskID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("aurora generation status derive failed", "generation_id", uuidToString(row.ID), "error", err)
+		}
+		return row.Status
+	}
+	switch task.Status {
+	case "completed":
+		return "completed"
+	case "failed", "cancelled":
+		return "failed"
+	case "queued":
+		return "queued"
+	default: // dispatched, running, waiting_local_directory, deferred
+		return "running"
+	}
 }
