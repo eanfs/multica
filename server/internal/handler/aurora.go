@@ -590,6 +590,11 @@ func (h *Handler) DownloadAuroraAsset(w http.ResponseWriter, r *http.Request) {
 
 	mediaURL := asset.MediaUrl.String
 	key := h.Storage.KeyFromURL(mediaURL)
+	// Every mode names the file the same way, so it is resolved once here and
+	// handed to whichever branch serves it.
+	filename := auroraAssetFilename(key, asset.Format)
+	disposition := storage.AttachmentContentDisposition(filename)
+
 	switch h.resolveAttachmentDownloadMode(mediaURL) {
 	case attachmentDownloadModeCloudFront:
 		if h.CFSigner == nil {
@@ -599,7 +604,7 @@ func (h *Handler) DownloadAuroraAsset(w http.ResponseWriter, r *http.Request) {
 		h.setAttachmentPreviewSecurityHeaders(w)
 		http.Redirect(w, r, h.CFSigner.SignedURLWithContentDisposition(
 			mediaURL,
-			storage.AttachmentContentDisposition(auroraAssetFilename(key, asset.Format)),
+			disposition,
 			time.Now().Add(h.attachmentDownloadURLTTL()),
 		), http.StatusFound)
 	case attachmentDownloadModePresign:
@@ -612,7 +617,7 @@ func (h *Handler) DownloadAuroraAsset(w http.ResponseWriter, r *http.Request) {
 			r.Context(),
 			key,
 			h.attachmentDownloadURLTTL(),
-			storage.AttachmentContentDisposition(auroraAssetFilename(key, asset.Format)),
+			disposition,
 		)
 		if err != nil {
 			slog.Error("failed to presign aurora asset download", "asset_id", uuidToString(asset.ID), "key", key, "error", err)
@@ -622,7 +627,7 @@ func (h *Handler) DownloadAuroraAsset(w http.ResponseWriter, r *http.Request) {
 		h.setAttachmentPreviewSecurityHeaders(w)
 		http.Redirect(w, r, signedURL, http.StatusFound)
 	case attachmentDownloadModeProxy:
-		h.proxyAuroraAssetDownload(w, r, asset, key)
+		h.proxyAuroraAssetDownload(w, r, asset, key, filename)
 	default:
 		writeError(w, http.StatusInternalServerError, "invalid asset download mode")
 	}
@@ -630,9 +635,9 @@ func (h *Handler) DownloadAuroraAsset(w http.ResponseWriter, r *http.Request) {
 
 // proxyAuroraAssetDownload streams an asset through the API for deployments
 // with no signable storage URL, the same fallback DownloadAttachment takes in
-// that mode. aurora_asset stores no filename or content type of its own, so
-// both are derived from the object key and the recorded format.
-func (h *Handler) proxyAuroraAssetDownload(w http.ResponseWriter, r *http.Request, asset db.AuroraAsset, key string) {
+// that mode. The caller resolves the download name; aurora_asset records no
+// content type of its own, so that is derived from the recorded format.
+func (h *Handler) proxyAuroraAssetDownload(w http.ResponseWriter, r *http.Request, asset db.AuroraAsset, key, filename string) {
 	reader, err := h.Storage.GetReader(r.Context(), key)
 	if err != nil {
 		slog.Warn("aurora asset object missing", "asset_id", uuidToString(asset.ID), "key", key, "error", err)
@@ -641,7 +646,6 @@ func (h *Handler) proxyAuroraAssetDownload(w http.ResponseWriter, r *http.Reques
 	}
 	defer reader.Close()
 
-	filename := auroraAssetFilename(key, asset.Format)
 	contentType := "application/octet-stream"
 	if asset.Format.Valid && asset.Format.String != "" {
 		if resolved := mime.TypeByExtension("." + strings.ToLower(asset.Format.String)); resolved != "" {
@@ -669,9 +673,10 @@ func (h *Handler) proxyAuroraAssetDownload(w http.ResponseWriter, r *http.Reques
 
 // auroraAssetFilename names the file a download saves. The object key's
 // basename is the best name available; the recorded format is the fallback for
-// a key that carries none.
+// a key that carries none. path.Base reports a key with no basename as "." or
+// "..", and a bare slash as "/", so those three are what "carries none" means.
 func auroraAssetFilename(key string, format pgtype.Text) string {
-	if base := path.Base(key); base != "" && base != "." && base != "/" && base != ".." {
+	if base := path.Base(key); base != "." && base != ".." && base != "/" {
 		return base
 	}
 	if format.Valid && format.String != "" {

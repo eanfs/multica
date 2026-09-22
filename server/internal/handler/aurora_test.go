@@ -1191,7 +1191,8 @@ func TestAuroraAssetDownloadNotFound(t *testing.T) {
 // attachment disposition the redirect path ends up with.
 func TestAuroraAssetDownloadStreamsWhenThereIsNoSignedURL(t *testing.T) {
 	resetAuroraGenerations(t)
-	store := &mockStorage{files: map[string][]byte{"aurora/report.csv": []byte("id,total\n1,42\n")}}
+	body := []byte("id,total\n1,42\n")
+	store := &mockStorage{files: map[string][]byte{"aurora/report.csv": body}}
 	withAuroraAssetStorage(t, store)
 	testHandler.cfg.AttachmentDownloadMode = "proxy"
 
@@ -1204,7 +1205,7 @@ func TestAuroraAssetDownloadStreamsWhenThereIsNoSignedURL(t *testing.T) {
 
 	req := withURLParam(newRequest(http.MethodGet, "/api/aurora/assets/{id}/download", nil), "id", assetID)
 	w := testutil.Call(t, testHandler.DownloadAuroraAsset, req).Want(http.StatusOK)
-	if !bytes.Equal(w.Body.Bytes(), []byte("id,total\n1,42\n")) {
+	if !bytes.Equal(w.Body.Bytes(), body) {
 		t.Fatalf("body = %q, want the stored object", w.Body.String())
 	}
 	if disposition := w.Header().Get("Content-Disposition"); !strings.HasPrefix(disposition, "attachment") {
