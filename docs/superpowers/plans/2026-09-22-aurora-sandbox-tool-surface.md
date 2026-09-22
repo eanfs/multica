@@ -36,14 +36,18 @@ onboarded onto the sandbox node.
   `ExecOptions.MaxTurns = 30` (MVP turn bound) and applies
   `auroraToolSurface(provider)`. For claude that is permission mode `"default"`
   plus deny-list `Bash`, `WebFetch`, `WebSearch`.
+- The gating **fails closed**: a provider with no reviewed surface (anything but
+  claude today) makes the daemon refuse the task before spawning the agent,
+  rather than silently running under `bypassPermissions`.
 
 ### Tests
 
-- `pkg/agent`: `TestBuildClaudeArgsNarrowsToolSurface`,
-  `TestBuildClaudeArgsKeepsDefaultSurfaceWhenNotNarrowed`, and the fake-CLI
-  end-to-end `TestClaudeExecuteNarrowsToolSurface` (a fake `claude` records its
-  argv; no real agent binary is resolved or executed).
-- `internal/daemon`: `TestIsAuroraTask`, `TestAuroraToolSurface`.
+- `pkg/agent`: `TestBuildClaudeArgsNarrowsToolSurface` (the unchanged default is
+  locked by the pre-existing `TestBuildClaudeArgsInheritsMCPByDefault`) and the
+  fake-CLI end-to-end `TestClaudeExecuteNarrowsToolSurface` (a fake `claude`
+  records its argv; no real agent binary is resolved or executed).
+- `internal/daemon`: `TestIsAuroraTask`, `TestAuroraToolSurface` (asserts claude
+  returns a reviewed surface and codex returns `ok=false`).
 
 ## Pending external capability (NOT in this repository)
 
@@ -71,12 +75,10 @@ sandbox host and image, which this repository does not build or verify.
 Until the image exists, the code-side narrowing is the only in-repo control. The
 external build must, at minimum:
 
-- Install **only** providers whose narrowing is defined (`claude` for the MVP).
-  A provider that `auroraToolSurface` does not narrow must not be installed on
-  the sandbox node, because an un-narrowed surface still runs with
-  `bypassPermissions`.
-- Run the daemon as non-root or set `IS_SANDBOX=1`, matching the existing
-  Claude root/sudo preflight.
+- Install the coding agent CLI whose surface is defined (`claude` for the MVP).
+  The daemon refuses to run an Aurora task on any other provider, so installing
+  one would only make such tasks fail — never run un-narrowed.
+- Run the daemon as non-root (the sandbox's isolation boundary).
 - Set `MULTICA_AGENT_TIMEOUT` to the first timeout gate.
 
 ## Deferred

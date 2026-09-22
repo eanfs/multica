@@ -1,12 +1,21 @@
 package daemon
 
-import "strings"
+import (
+	"errors"
+	"strings"
+)
+
+// errAuroraSurfaceNotOnboarded is returned by runTask when an Aurora task is
+// dispatched to a provider with no reviewed sandbox surface. The task must fail
+// (and refund via the completion path) rather than run under the default
+// autonomous surface.
+var errAuroraSurfaceNotOnboarded = errors.New("aurora provider has no reviewed sandbox surface")
 
 // auroraSystemKeyPrefix marks Aurora's workspace-level system agents. Their
 // stable identity is "aurora:<skillID>" (see server/internal/aurora), which the
-// claim endpoint now forwards to the daemon as AgentData.SystemKey. The daemon
-// reads that prefix to apply the sandbox execution policy below only to Aurora
-// tasks — ordinary user agents keep their default autonomous surface.
+// claim endpoint forwards to the daemon as AgentData.SystemKey. The daemon reads
+// that prefix to apply the sandbox execution policy below only to Aurora tasks —
+// ordinary user agents keep their default autonomous surface.
 const auroraSystemKeyPrefix = "aurora:"
 
 // auroraMaxTurns caps how many agent turns a single Aurora generation may take.
@@ -21,24 +30,28 @@ func isAuroraTask(task Task) bool {
 	return task.Agent != nil && strings.HasPrefix(task.Agent.SystemKey, auroraSystemKeyPrefix)
 }
 
-// auroraToolSurface returns the narrowed tool surface for an Aurora system
-// agent, keyed by provider. The narrowing has two parts: turning off bypass so
-// the deny list actually binds, and denying the host-touching tools that
-// provider exposes. The empty permission mode means "keep the backend default",
-// and an empty deny list means "no additional narrowing".
+// auroraSurface is the narrowed tool surface an Aurora system agent runs under:
+// a restricted permission mode (no bypass) plus the host-touching tools to deny.
+type auroraSurface struct {
+	permissionMode string
+	disallowed     []string
+}
+
+// auroraToolSurface returns the narrowed surface for an Aurora system agent on
+// provider, and whether that provider has a reviewed surface. The narrowing has
+// two parts: turn off bypass (so the deny list binds) and deny the host-touching
+// tools the provider exposes.
 //
-// Only the claude surface is defined for the MVP: it is the coding agent the
-// sandbox node is validated against. The allowlist is a deny-list first pass —
-// the per-skill allow/deny composition and the equivalents for codex and the
-// other providers are refined as each is onboarded onto the sandbox image
-// (Plan 3 follow-up). A provider that returns no narrowing here is assumed not
-// to be installed on the sandbox node (see the sandbox image docs), so leaving
-// it un-narrowed must not be read as "safe on the host".
-func auroraToolSurface(provider string) (permissionMode string, disallowed []string) {
+// It fails closed: only claude has a reviewed surface for the MVP, so any other
+// provider reports ok=false and the caller must refuse the task rather than fall
+// back to the default autonomous (bypassPermissions) surface. The per-skill
+// allow/deny composition and codex/other-provider equivalents are refined as
+// each is onboarded onto the sandbox image (Plan 3 follow-up).
+func auroraToolSurface(provider string) (auroraSurface, bool) {
 	switch provider {
 	case "claude":
-		return "default", []string{"Bash", "WebFetch", "WebSearch"}
+		return auroraSurface{permissionMode: "default", disallowed: []string{"Bash", "WebFetch", "WebSearch"}}, true
 	default:
-		return "", nil
+		return auroraSurface{}, false
 	}
 }

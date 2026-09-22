@@ -742,13 +742,7 @@ func claudePermissionMode(override string) string {
 // per-execution narrowing. AskUserQuestion is always denied (see buildClaudeArgs);
 // the sandbox path appends host-touching tools such as Bash.
 func claudeDisallowedTools(extra []string) []string {
-	if len(extra) == 0 {
-		return []string{"AskUserQuestion"}
-	}
-	out := make([]string, 0, 1+len(extra))
-	out = append(out, "AskUserQuestion")
-	out = append(out, extra...)
-	return out
+	return append([]string{"AskUserQuestion"}, extra...)
 }
 
 func buildClaudeArgs(opts ExecOptions, logger *slog.Logger) []string {

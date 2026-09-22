@@ -1,6 +1,9 @@
 package daemon
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"slices"
 	"testing"
 )
@@ -34,20 +37,40 @@ func TestIsAuroraTask(t *testing.T) {
 func TestAuroraToolSurface(t *testing.T) {
 	t.Parallel()
 
-	mode, tools := auroraToolSurface("claude")
-	if mode != "default" {
-		t.Fatalf("claude permission mode = %q, want %q", mode, "default")
+	surface, ok := auroraToolSurface("claude")
+	if !ok {
+		t.Fatal("claude must have a reviewed surface")
+	}
+	if surface.permissionMode != "default" {
+		t.Fatalf("claude permission mode = %q, want %q", surface.permissionMode, "default")
 	}
 	for _, want := range []string{"Bash", "WebFetch", "WebSearch"} {
-		if !slices.Contains(tools, want) {
-			t.Fatalf("claude disallowed tools %v missing %q", tools, want)
+		if !slices.Contains(surface.disallowed, want) {
+			t.Fatalf("claude disallowed tools %v missing %q", surface.disallowed, want)
 		}
 	}
 
-	// Providers not yet onboarded onto the sandbox image keep no narrowing; the
-	// sandbox image build (external pending capability) must not install them.
-	mode, tools = auroraToolSurface("codex")
-	if mode != "" || tools != nil {
-		t.Fatalf("codex surface = (%q, %v), want empty (un-narrowed)", mode, tools)
+	// Un-onboarded providers fail closed so runTask refuses the task instead of
+	// falling back to the default autonomous (bypass) surface.
+	if _, ok := auroraToolSurface("codex"); ok {
+		t.Fatal("codex must not yet have a reviewed surface")
+	}
+}
+
+// Mirrors TestRunTaskRejectsMismatchedAgentIdentityBeforePreparation: the
+// fail-closed gate sits before workdir preparation, so a bare Daemon plus a
+// matching identity is enough to reach it.
+func TestRunTaskRejectsAuroraWithoutReviewedSurface(t *testing.T) {
+	t.Parallel()
+
+	d := &Daemon{}
+	_, err := d.runTask(context.Background(), Task{
+		ID:          "task-aurora-codex",
+		WorkspaceID: "workspace-a",
+		AgentID:     "agent-a",
+		Agent:       &AgentData{ID: "agent-a", SystemKey: "aurora:image"},
+	}, "codex", 0, slog.Default())
+	if !errors.Is(err, errAuroraSurfaceNotOnboarded) {
+		t.Fatalf("runTask error = %v, want aurora surface not onboarded", err)
 	}
 }
