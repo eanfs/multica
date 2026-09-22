@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -767,4 +768,198 @@ func TestAuroraBillingRejectsMalformedUserID(t *testing.T) {
 			testutil.Call(t, handler, req).Want(http.StatusBadRequest)
 		})
 	}
+}
+
+// resetAuroraGenerations empties the workspace's generation and asset rows so a
+// test starts from a known-empty state. Rows are test data only: the fixture
+// deletes what it inserts, but a previous test may have aborted mid-run and
+// left rows behind.
+func resetAuroraGenerations(t *testing.T) {
+	t.Helper()
+	dbfx.Exec(t, `DELETE FROM aurora_generation WHERE workspace_id = $1`, testWorkspaceID)
+	dbfx.Exec(t, `DELETE FROM aurora_asset WHERE workspace_id = $1`, testWorkspaceID)
+}
+
+// insertGeneration writes a queued generation row and returns its id.
+func insertGeneration(t *testing.T, prompt string, over ...testutil.Cols) string {
+	t.Helper()
+	cols := testutil.Cols{
+		"workspace_id": testWorkspaceID,
+		"user_id":      testUserID,
+		"skill_id":     "xhs-image",
+		"prompt":       prompt,
+		"status":       "queued",
+	}
+	for _, o := range over {
+		maps.Copy(cols, o)
+	}
+	return dbfx.Insert(t, "aurora_generation", cols)
+}
+
+func TestListAuroraGenerationsOrdersAndPages(t *testing.T) {
+	resetAuroraGenerations(t)
+
+	oldest := insertGeneration(t, "oldest", testutil.Cols{"created_at": testutil.Raw("now() - interval '3 hours'")})
+	middle := insertGeneration(t, "middle", testutil.Cols{"created_at": testutil.Raw("now() - interval '2 hours'")})
+	newest := insertGeneration(t, "newest", testutil.Cols{"created_at": testutil.Raw("now() - interval '1 hour'")})
+
+	list := func(path string) []string {
+		out := testutil.Decode[struct {
+			Generations []struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"generations"`
+		}](t, testHandler.ListAuroraGenerations, newRequest(http.MethodGet, path, nil), http.StatusOK)
+		ids := make([]string, 0, len(out.Generations))
+		for _, g := range out.Generations {
+			if g.Status != "queued" {
+				t.Fatalf("list status = %q, want queued", g.Status)
+			}
+			ids = append(ids, g.ID)
+		}
+		return ids
+	}
+
+	// Newest first.
+	all := list("/api/aurora/generations?limit=50&offset=0")
+	if len(all) != 3 || all[0] != newest || all[1] != middle || all[2] != oldest {
+		t.Fatalf("order = %v, want [newest middle oldest]", all)
+	}
+
+	// Pagination boundary: limit caps the page, offset skips into it.
+	page1 := list("/api/aurora/generations?limit=2&offset=0")
+	if len(page1) != 2 || page1[0] != newest || page1[1] != middle {
+		t.Fatalf("first page = %v, want [newest middle]", page1)
+	}
+	page2 := list("/api/aurora/generations?limit=2&offset=2")
+	if len(page2) != 1 || page2[0] != oldest {
+		t.Fatalf("second page = %v, want [oldest]", page2)
+	}
+
+	// Junk and out-of-range limits fall back to the default instead of erroring.
+	list("/api/aurora/generations?limit=not-a-number&offset=0")
+	list("/api/aurora/generations?limit=0&offset=0")
+	list("/api/aurora/generations?limit=9999&offset=-5")
+}
+
+func TestGetAuroraGenerationIncludesAssets(t *testing.T) {
+	resetAuroraGenerations(t)
+
+	genID := insertGeneration(t, "detail prompt", testutil.Cols{
+		"status":           "completed",
+		"credits_reserved": 620_000_000,
+		"credits_charged":  620_000_000,
+	})
+	dbfx.Insert(t, "aurora_asset", testutil.Cols{
+		"generation_id": genID,
+		"workspace_id":  testWorkspaceID,
+		"kind":          "image",
+		"media_url":     "https://cdn.example/out.png",
+		"format":        "png",
+	})
+
+	req := withURLParam(newRequest(http.MethodGet, "/api/aurora/generations/{id}", nil), "id", genID)
+	out := testutil.Decode[struct {
+		Generation struct {
+			ID              string  `json:"id"`
+			SkillID         string  `json:"skillId"`
+			Prompt          string  `json:"prompt"`
+			Status          string  `json:"status"`
+			CreditsReserved int64   `json:"creditsReserved"`
+			CreditsCharged  int64   `json:"creditsCharged"`
+			Error           *string `json:"error"`
+			CreatedAt       string  `json:"createdAt"`
+			Assets          []struct {
+				ID           string  `json:"id"`
+				GenerationID string  `json:"generationId"`
+				Kind         string  `json:"kind"`
+				MediaURL     *string `json:"mediaUrl"`
+				Format       *string `json:"format"`
+				CreatedAt    string  `json:"createdAt"`
+			} `json:"assets"`
+		} `json:"generation"`
+	}](t, testHandler.GetAuroraGeneration, req, http.StatusOK)
+
+	g := out.Generation
+	if g.ID != genID || g.SkillID != "xhs-image" || g.Prompt != "detail prompt" {
+		t.Fatalf("unexpected generation: %#v", g)
+	}
+	if g.Status != "completed" {
+		t.Fatalf("status = %q, want completed", g.Status)
+	}
+	if g.CreditsReserved != 620_000_000 || g.CreditsCharged != 620_000_000 {
+		t.Fatalf("credits = %d reserved / %d charged, want 620000000", g.CreditsReserved, g.CreditsCharged)
+	}
+	if g.Error != nil {
+		t.Fatalf("error = %q, want null", *g.Error)
+	}
+	if g.CreatedAt == "" {
+		t.Fatal("createdAt empty")
+	}
+	if len(g.Assets) != 1 {
+		t.Fatalf("assets = %d, want 1", len(g.Assets))
+	}
+	a := g.Assets[0]
+	if a.GenerationID != genID || a.Kind != "image" ||
+		a.MediaURL == nil || *a.MediaURL != "https://cdn.example/out.png" ||
+		a.Format == nil || *a.Format != "png" || a.CreatedAt == "" {
+		t.Fatalf("unexpected asset: %#v", a)
+	}
+}
+
+func TestGetAuroraGenerationDerivesStatusFromTask(t *testing.T) {
+	cases := []struct {
+		taskStatus string
+		want       string
+	}{
+		{"queued", "queued"},
+		{"dispatched", "running"},
+		{"running", "running"},
+		{"waiting_local_directory", "running"},
+		{"deferred", "running"},
+		{"completed", "completed"},
+		{"failed", "failed"},
+		{"cancelled", "failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.taskStatus, func(t *testing.T) {
+			agentID := dbfx.Agent(t, "Aurora derive "+tc.taskStatus, testRuntimeID)
+			taskID := dbfx.Task(t, agentID, testutil.Cols{"status": tc.taskStatus, "runtime_id": testRuntimeID})
+			genID := insertGeneration(t, "derive "+tc.taskStatus, testutil.Cols{"task_id": taskID})
+
+			req := withURLParam(newRequest(http.MethodGet, "/api/aurora/generations/{id}", nil), "id", genID)
+			out := testutil.Decode[struct {
+				Generation struct {
+					Status string `json:"status"`
+				} `json:"generation"`
+			}](t, testHandler.GetAuroraGeneration, req, http.StatusOK)
+
+			if out.Generation.Status != tc.want {
+				t.Fatalf("status for task %q = %q, want %q", tc.taskStatus, out.Generation.Status, tc.want)
+			}
+		})
+	}
+}
+
+func TestGetAuroraGenerationNotFound(t *testing.T) {
+	// Malformed id → 400, not a crash.
+	req := withURLParam(newRequest(http.MethodGet, "/api/aurora/generations/{id}", nil), "id", "not-a-uuid")
+	testutil.Call(t, testHandler.GetAuroraGeneration, req).Want(http.StatusBadRequest)
+
+	// Well-formed but absent → 404.
+	req = withURLParam(newRequest(http.MethodGet, "/api/aurora/generations/{id}", nil), "id", parseUUID(testUserID).String())
+	testutil.Call(t, testHandler.GetAuroraGeneration, req).Want(http.StatusNotFound)
+
+	// A generation in another workspace is invisible: the query is scoped by
+	// workspace_id, not just id.
+	otherWS := dbfx.Workspace(t, "Aurora other workspace", "aurora-gen-other-ws")
+	genID := dbfx.Insert(t, "aurora_generation", testutil.Cols{
+		"workspace_id": otherWS,
+		"user_id":      testUserID,
+		"skill_id":     "xhs-image",
+		"prompt":       "other workspace",
+		"status":       "queued",
+	})
+	req = withURLParam(newRequest(http.MethodGet, "/api/aurora/generations/{id}", nil), "id", genID)
+	testutil.Call(t, testHandler.GetAuroraGeneration, req).Want(http.StatusNotFound)
 }
