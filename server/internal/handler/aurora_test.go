@@ -1111,11 +1111,16 @@ func TestListAuroraAssetsFiltersByGeneration(t *testing.T) {
 	// A malformed generation id is a client bug, not an empty library.
 	listAuroraAssets(t, "/api/aurora/assets?generationId=not-a-uuid", http.StatusBadRequest)
 
-	// Another workspace's assets stay invisible even when its generation id is
-	// named explicitly: the filter is ANDed with the caller's workspace.
+	// Another workspace's assets stay invisible both with and without a
+	// generation filter: the workspace predicate is bound on every path, so
+	// naming a foreign generation narrows the caller's list to nothing rather
+	// than widening it to that generation's output.
 	foreignAsset := insertAssetInOtherWorkspace(t, "aurora-asset-list-other-ws")
 	if got := listAuroraAssets(t, "/api/aurora/assets?generationId="+foreignAsset, http.StatusOK); len(got) != 0 {
 		t.Fatalf("cross-workspace generation filter returned %v, want none", assetIDs(got))
+	}
+	if got := listAuroraAssets(t, "/api/aurora/assets?limit=50", http.StatusOK); len(got) != 3 {
+		t.Fatalf("unfiltered list = %v, want only this workspace's three assets", assetIDs(got))
 	}
 }
 
@@ -1252,6 +1257,23 @@ func TestDeleteAuroraAssetLeavesOtherWorkspacesAlone(t *testing.T) {
 
 	if n := dbfx.Count(t, `SELECT count(*) FROM aurora_asset WHERE id = $1`, foreignAsset); n != 1 {
 		t.Fatalf("cross-workspace delete removed the row (count = %d, want 1)", n)
+	}
+}
+
+// TestDeleteAuroraAssetWithoutStorage covers a deployment whose storage is not
+// wired up: there is no object to reclaim, but the row still goes, so the
+// library is not permanently stuck with an asset nobody can remove.
+func TestDeleteAuroraAssetWithoutStorage(t *testing.T) {
+	resetAuroraGenerations(t)
+
+	genID := insertGeneration(t, "delete without storage")
+	assetID := insertAsset(t, genID)
+
+	req := withURLParam(newRequest(http.MethodDelete, "/api/aurora/assets/{id}", nil), "id", assetID)
+	testutil.Call(t, testHandler.DeleteAuroraAsset, req).Want(http.StatusNoContent)
+
+	if n := dbfx.Count(t, `SELECT count(*) FROM aurora_asset WHERE id = $1`, assetID); n != 0 {
+		t.Fatalf("row survived a delete with no storage configured (count = %d, want 0)", n)
 	}
 }
 

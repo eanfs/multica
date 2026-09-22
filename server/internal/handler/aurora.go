@@ -681,11 +681,14 @@ func auroraAssetFilename(key string, format pgtype.Text) string {
 }
 
 // DeleteAuroraAsset removes one asset from the workspace's library. The stored
-// object goes first, then the row: aurora_asset has no cascade and the row is
-// the only record that the object exists, so a storage failure fails the
-// request and leaves the row in place for a retry — deleting the row first
-// would strand the object with nothing left pointing at it. Both orderings
-// 404 for an asset the caller's workspace does not hold.
+// object goes first, then the row. There is no cascade between the two, and the
+// failure orders are not symmetric: an object delete is idempotent, so a row
+// that briefly outlives its object is repaired by simply retrying this request,
+// while a row deleted before its object strands a file that nothing points at
+// and nothing can find again. A storage failure therefore fails the request and
+// leaves the row in place. Removing an asset the caller's workspace does not
+// hold is a 404 either way, so the endpoint is no existence oracle for other
+// workspaces' assets.
 func (h *Handler) DeleteAuroraAsset(w http.ResponseWriter, r *http.Request) {
 	asset, ok := h.loadAuroraAsset(w, r)
 	if !ok {
