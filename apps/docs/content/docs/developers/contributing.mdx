@@ -96,6 +96,7 @@ environments are collected best-effort on the next `make up` after their TTL.
 ```bash
 pnpm install
 pnpm dev:web
+pnpm dev:aurora
 pnpm dev:desktop
 pnpm build
 pnpm typecheck
@@ -104,6 +105,20 @@ pnpm test
 ```
 
 Root commands exclude Mobile by default. Mobile has separate scripts and CI; read `apps/mobile/AGENTS.md` before changing it.
+
+`pnpm dev:aurora` serves `apps/aurora` on `AURORA_PORT` (default `3001`) against
+the same backend as the Web app. It is not in `make up`'s component list yet, so
+start the backend as usual and run it separately; which backend it talks to
+follows the same `NEXT_PUBLIC_API_URL` / `REMOTE_API_URL` rules as the Web app,
+and with neither set, `next dev` proxies the backend through the app's own
+origin. The app forwards the backend surface — `/api`, `/v1`, `/ws`, `/health`
+and `/uploads` — and exempts it from its reserved-slug redirect;
+`isBackendSurfacePath` in `apps/aurora/config/runtime-urls.ts` is the single
+list of those paths, read by both the rewrites and the redirect. Realtime needs
+the backend to accept the app's origin: the WebSocket handshake is rejected with
+403 unless the origin is in `ALLOWED_ORIGINS`, which falls back to
+`CORS_ALLOWED_ORIGINS` and then to `FRONTEND_ORIGIN` — add `AURORA_PORT`'s
+origin there to keep the socket connected.
 
 ### Backend
 
