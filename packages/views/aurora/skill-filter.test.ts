@@ -1,0 +1,75 @@
+// @vitest-environment node
+import { describe, expect, it } from "vitest";
+import type { AuroraSkill } from "@multica/core/aurora";
+import { AURORA_CATEGORY_ALL, filterAuroraSkills } from "./skill-filter";
+
+function skill(overrides: Partial<AuroraSkill> = {}): AuroraSkill {
+  return {
+    id: "poster",
+    name: "海报制作",
+    nameEn: "Poster",
+    category: "image",
+    credits: 760,
+    input: ["text"],
+    output: ["image"],
+    featured: false,
+    available: true,
+    ...overrides,
+  };
+}
+
+const CATALOG: AuroraSkill[] = [
+  skill(),
+  skill({ id: "xhs-copy", name: "小红书文案", nameEn: "Xiaohongshu Copy", category: "content" }),
+  skill({ id: "ppt", name: "PPT 制作", nameEn: "PPT", category: "office", available: false }),
+];
+
+describe("filterAuroraSkills", () => {
+  it("returns the whole catalog with no query and the all category", () => {
+    expect(filterAuroraSkills(CATALOG, "", AURORA_CATEGORY_ALL)).toEqual(
+      CATALOG,
+    );
+  });
+
+  it("narrows to one category and keeps the unavailable ones listed", () => {
+    // An unavailable skill still belongs in its category tab — it is the
+    // "coming soon" half of the directory, not a hidden row.
+    const office = filterAuroraSkills(CATALOG, "", "office");
+    expect(office.map((s) => s.id)).toEqual(["ppt"]);
+  });
+
+  it("matches the English name for a reader who is looking at the English one", () => {
+    expect(
+      filterAuroraSkills(CATALOG, "poster", AURORA_CATEGORY_ALL).map(
+        (s) => s.id,
+      ),
+    ).toEqual(["poster"]);
+  });
+
+  it("matches the Chinese name too, so a search is not language-bound", () => {
+    expect(
+      filterAuroraSkills(CATALOG, "海报", AURORA_CATEGORY_ALL).map(
+        (s) => s.id,
+      ),
+    ).toEqual(["poster"]);
+  });
+
+  it("ignores case and surrounding space", () => {
+    expect(
+      filterAuroraSkills(CATALOG, "  pOsTeR ", AURORA_CATEGORY_ALL).map(
+        (s) => s.id,
+      ),
+    ).toEqual(["poster"]);
+  });
+
+  it("applies the category and the query together", () => {
+    expect(filterAuroraSkills(CATALOG, "文案", "image")).toEqual([]);
+    expect(
+      filterAuroraSkills(CATALOG, "文案", "content").map((s) => s.id),
+    ).toEqual(["xhs-copy"]);
+  });
+
+  it("returns nothing rather than everything when nothing matches", () => {
+    expect(filterAuroraSkills(CATALOG, "nothing like this", AURORA_CATEGORY_ALL)).toEqual([]);
+  });
+});

@@ -1,0 +1,82 @@
+{
+  "retry": "Try again",
+  "cancel": "Cancel",
+  "credits": "{{credits}} credits",
+  "directory": {
+    "title": "Create",
+    "search_placeholder": "Search skills",
+    "load_failed_title": "Could not load the skill directory",
+    "load_failed_description": "The catalog is temporarily unavailable.",
+    "empty_title": "No matching skills",
+    "empty_description": "Try another keyword or category.",
+    "unavailable": "Coming soon",
+    "categories": {
+      "all": "All",
+      "image": "Image",
+      "video": "Video",
+      "content": "Content",
+      "office": "Office",
+      "other": "Other"
+    }
+  },
+  "composer": {
+    "cost": "{{credits}} credits per generation",
+    "prompt_label": "What should it make?",
+    "prompt_placeholder": "Describe the content you want",
+    "submit": "Generate",
+    "submitting": "Starting…",
+    "unavailable_title": "Not available yet",
+    "unavailable_description": "This skill is still being built. It opens here when it launches.",
+    "insufficient_title": "Not enough credits",
+    "insufficient_description": "This skill costs {{cost}} credits and you have {{balance}}.",
+    "insufficient_cost_only": "This skill costs {{cost}} credits.",
+    "rate_limited_title": "Limit reached",
+    "rate_limited_description": "You have used this month's generations, or have too many still running. Try again later.",
+    "create_failed": "Could not start the generation. Try again.",
+    "create_unreadable": "The generation may already have started, but its response could not be read. Check My works before starting another.",
+    "progress_description": "This can take a few minutes. You can close this panel and check the library later.",
+    "failed_description": "No credits were charged. Try again or change the prompt.",
+    "result_title": "Result",
+    "result_empty": "No files were produced.",
+    "open_library": "Open library",
+    "status": {
+      "queued": "Queued",
+      "running": "Generating",
+      "completed": "Done",
+      "failed": "Failed",
+      "unknown": "Unknown"
+    },
+    "progress_unreadable": "Could not read this generation's progress."
+  },
+  "works": {
+    "title": "My works",
+    "generations_title": "Generations",
+    "generations_empty_title": "No generations yet",
+    "generations_empty_description": "Pick a skill in Create to make your first one.",
+    "assets_title": "Library",
+    "assets_empty_title": "No content yet",
+    "assets_empty_description": "Finished generations put their files here.",
+    "load_failed_title": "Could not load your works",
+    "download": "Download",
+    "delete": "Delete",
+    "delete_failed": "Could not delete the file. Try again.",
+    "delete_title": "Delete this file?",
+    "delete_description": "The file is removed from storage and cannot be recovered.",
+    "delete_confirm": "Delete file",
+    "no_prompt": "No prompt",
+    "skill_unknown": "Unknown skill"
+  },
+  "billing": {
+    "title": "Credits",
+    "balance_title": "Available credits",
+    "top_up": "Top up",
+    "top_up_placeholder": "Buying credits arrives with subscriptions.",
+    "transactions_title": "Activity",
+    "transactions_empty_title": "No activity yet",
+    "transactions_empty_description": "Credit changes appear here.",
+    "load_failed_title": "Could not load your credits",
+    "amount_positive": "+{{amount}}",
+    "amount_negative": "−{{amount}}",
+    "balance_after": "Balance after: {{amount}}"
+  }
+}

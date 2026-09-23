@@ -253,5 +253,15 @@
     "workspace_missing_description": "你已从 Stripe 返回，但该工作区对你已不可用——可能已被删除，或你的访问权限发生了变化。请到你预期的那个工作区的账单页确认当前状态。",
     "retry": "重试",
     "go_to_app": "前往 Multica"
+  },
+  "transaction": {
+    "kind": {
+      "topup": "充值",
+      "deduction": "消耗",
+      "refund": "退款",
+      "adjustment": "调整",
+      "expire": "已过期",
+      "unknown": "其他"
+    }
   }
 }
