@@ -57,7 +57,6 @@
     "assets_empty_title": "作品がありません",
     "assets_empty_description": "生成が完了するとファイルがここに並びます。",
     "load_failed_title": "作品を読み込めませんでした",
-    "load_failed_description": "再試行して生成履歴とファイルを表示してください。",
     "download": "ダウンロード",
     "delete": "削除",
     "delete_failed": "ファイルを削除できませんでした。再試行してください。",
@@ -76,7 +75,6 @@
     "transactions_empty_title": "履歴がありません",
     "transactions_empty_description": "クレジットの増減がここに表示されます。",
     "load_failed_title": "クレジットを読み込めませんでした",
-    "load_failed_description": "再試行して残高と履歴を表示してください。",
     "amount_positive": "+{{amount}}",
     "amount_negative": "−{{amount}}",
     "balance_after": "変動後の残高：{{amount}}"

@@ -91,6 +91,23 @@ export function skillDisplayName(skill: AuroraSkill, locale: string): string {
   return skill.nameEn || skill.name;
 }
 
+/**
+ * The catalog as a `skillId -> display name` lookup, for the screens that hold
+ * an id rather than the skill it names.
+ *
+ * Both the library and the ledger resolve a skill this way, so building the map
+ * lives here rather than being spelled out twice with the two copies free to
+ * disagree about the language.
+ */
+export function skillDisplayNamesById(
+  skills: AuroraSkill[],
+  locale: string,
+): Map<string, string> {
+  return new Map(
+    skills.map((skill) => [skill.id, skillDisplayName(skill, locale)]),
+  );
+}
+
 /** A directory category tab, as `aurora.directory.categories.*`. */
 export type AuroraCategoryLabel =
   | "image"

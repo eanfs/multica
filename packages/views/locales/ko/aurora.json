@@ -57,7 +57,6 @@
     "assets_empty_title": "작품이 없습니다",
     "assets_empty_description": "생성이 끝나면 파일이 여기에 표시됩니다.",
     "load_failed_title": "작품을 불러오지 못했습니다",
-    "load_failed_description": "다시 시도하여 생성 기록과 파일을 확인하세요.",
     "download": "다운로드",
     "delete": "삭제",
     "delete_failed": "파일을 삭제하지 못했습니다. 다시 시도하세요.",
@@ -76,7 +75,6 @@
     "transactions_empty_title": "내역이 없습니다",
     "transactions_empty_description": "크레딧 변동이 여기에 표시됩니다.",
     "load_failed_title": "크레딧을 불러오지 못했습니다",
-    "load_failed_description": "다시 시도하여 잔액과 내역을 확인하세요.",
     "amount_positive": "+{{amount}}",
     "amount_negative": "−{{amount}}",
     "balance_after": "변동 후 잔액: {{amount}}"

@@ -25,10 +25,18 @@ export function microToCredits(micro: number): number {
 /**
  * A credit count grouped for the reader's locale, e.g. `"1,234"`.
  *
- * The locale comes in rather than defaulting to the runtime's, so a Chinese UI
- * in an English-language browser groups the way the text around it reads — the
- * same reason `useLocale()` exists.
+ * The locale is required rather than defaulting to the runtime's, so a Chinese
+ * UI in an English-language browser groups the way the text around it reads —
+ * the same reason `useLocale()` exists and every caller passes it.
  */
-export function formatCredits(credits: number, locale?: string): string {
+export function formatCredits(credits: number, locale: string): string {
   return new Intl.NumberFormat(locale).format(credits);
+}
+
+/**
+ * A micro-credit amount as grouped whole credits — the conversion and the
+ * grouping together, so a screen cannot apply one without the other.
+ */
+export function formatMicroCredits(micro: number, locale: string): string {
+  return formatCredits(microToCredits(micro), locale);
 }

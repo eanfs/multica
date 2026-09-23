@@ -57,7 +57,6 @@
     "assets_empty_title": "还没有作品",
     "assets_empty_description": "生成完成后，文件会出现在这里。",
     "load_failed_title": "无法加载作品",
-    "load_failed_description": "请重试以查看生成记录和文件。",
     "download": "下载",
     "delete": "删除",
     "delete_failed": "无法删除文件，请重试。",
@@ -76,7 +75,6 @@
     "transactions_empty_title": "暂无记录",
     "transactions_empty_description": "积分变动会显示在这里。",
     "load_failed_title": "无法加载积分",
-    "load_failed_description": "请重试以查看余额和明细。",
     "amount_positive": "+{{amount}}",
     "amount_negative": "−{{amount}}",
     "balance_after": "变动后余额：{{amount}}"

@@ -57,7 +57,6 @@
     "assets_empty_title": "Aucun contenu",
     "assets_empty_description": "Les fichiers des générations terminées apparaissent ici.",
     "load_failed_title": "Impossible de charger vos œuvres",
-    "load_failed_description": "Réessayez pour voir vos générations et vos fichiers.",
     "download": "Télécharger",
     "delete": "Supprimer",
     "delete_failed": "Impossible de supprimer le fichier. Réessayez.",
@@ -76,7 +75,6 @@
     "transactions_empty_title": "Aucune activité",
     "transactions_empty_description": "Les mouvements de crédits apparaissent ici.",
     "load_failed_title": "Impossible de charger vos crédits",
-    "load_failed_description": "Réessayez pour voir votre solde et votre activité.",
     "amount_positive": "+{{amount}}",
     "amount_negative": "−{{amount}}",
     "balance_after": "Solde après : {{amount}}"

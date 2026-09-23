@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { CircleAlert, Download, Frown, Library } from "lucide-react";
+import { CircleAlert, Download, Library } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -32,12 +32,9 @@ import {
   CollectionPageState,
 } from "../layout/collection-page";
 import { useLocale, useT } from "../i18n";
-import { formatCredits, microToCredits } from "./format";
-import {
-  generationStatusLabel,
-  skillDisplayName,
-  type AuroraGenerationStatusLabel as GenerationStatusLabel,
-} from "./labels";
+import { formatMicroCredits } from "./format";
+import { generationStatusLabel, skillDisplayNamesById } from "./labels";
+import { AuroraLoadFailed } from "./load-failed";
 
 /**
  * The library: what has been generated, and the files those generations
@@ -64,13 +61,10 @@ export function WorksList() {
   // The catalog is the only place a generation's `skillId` becomes a name. It
   // is the same query the directory reads, so it is already in the cache when
   // the user arrives here.
-  const skillNames = useMemo(() => {
-    const names = new Map<string, string>();
-    for (const skill of skillsQuery.data ?? []) {
-      names.set(skill.id, skillDisplayName(skill, locale));
-    }
-    return names;
-  }, [skillsQuery.data, locale]);
+  const skillNames = useMemo(
+    () => skillDisplayNamesById(skillsQuery.data ?? [], locale),
+    [skillsQuery.data, locale],
+  );
 
   // Whether an unresolved `skillId` means "the catalog dropped this entry" or
   // "the catalog never loaded". Without the distinction a failed catalog request
@@ -116,25 +110,12 @@ export function WorksList() {
         {isLoading ? (
           <WorksSkeleton />
         ) : loadFailed ? (
-          <CollectionPageState
-            icon={Frown}
-            tone="destructive"
-            role="alert"
+          <AuroraLoadFailed
             title={t(($) => $.works.load_failed_title)}
-            description={t(($) => $.works.load_failed_description)}
-            actions={
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  void generationsQuery.refetch();
-                  void assetsQuery.refetch();
-                }}
-              >
-                {t(($) => $.retry)}
-              </Button>
-            }
+            onRetry={() => {
+              void generationsQuery.refetch();
+              void assetsQuery.refetch();
+            }}
           />
         ) : (
           <div className="flex flex-col gap-6">
@@ -169,10 +150,18 @@ export function WorksList() {
                           ? t(($) => $.works.skill_unknown)
                           : null)
                       }
-                      credits={formatCredits(
-                        microToCredits(generation.creditsReserved),
-                        locale,
-                      )}
+                      credits={
+                        // A failed generation is refunded in full, so the
+                        // amount it reserved is not a cost and printing it as
+                        // one claims a spend the client never read. Null is
+                        // "nothing was charged", not "we do not know".
+                        generationStatusLabel(generation.status) === "failed"
+                          ? null
+                          : formatMicroCredits(
+                              generation.creditsReserved,
+                              locale,
+                            )
+                      }
                       noPrompt={t(($) => $.works.no_prompt)}
                     />
                   ))}
@@ -249,7 +238,8 @@ function GenerationRow({
   generation: AuroraGeneration;
   /** Null when the catalog could not name the skill — nothing to say, not a fact. */
   skillName: string | null;
-  credits: string;
+  /** Null when nothing was charged for it — a failed generation is refunded. */
+  credits: string | null;
   noPrompt: string;
 }) {
   const { t } = useT("aurora");
@@ -266,14 +256,18 @@ function GenerationRow({
           </span>
         ) : null}
       </div>
-      <span className="shrink-0 font-mono text-caption tabular-nums text-muted-foreground">
-        {t(($) => $.credits, { credits })}
-      </span>
+      {credits ? (
+        <span className="shrink-0 font-mono text-caption tabular-nums text-muted-foreground">
+          {t(($) => $.credits, { credits })}
+        </span>
+      ) : null}
       <Badge
-        variant={isAuroraGenerationTerminal(generation.status) ? "outline" : "secondary"}
+        variant={
+          isAuroraGenerationTerminal(generation.status) ? "outline" : "secondary"
+        }
         className="shrink-0"
       >
-        {t(($) => $.composer.status[status as GenerationStatusLabel])}
+        {t(($) => $.composer.status[status])}
       </Badge>
     </li>
   );
@@ -294,14 +288,18 @@ function AssetRow({
   onRequestDelete: () => void;
 }) {
   const { t } = useT("aurora");
-  const label = asset.format ?? asset.kind;
+  // A row that carries no format falls back to its kind, and then has nothing
+  // else to say — the second line is only there to add something.
+  const detail = asset.format ? asset.kind : null;
   return (
     <li className="flex items-center gap-3 border-b border-surface-border px-3 py-2 last:border-b-0">
       <div className="flex min-w-0 flex-1 flex-col">
-        <span className="truncate text-body">{label}</span>
-        <span className="truncate text-caption text-muted-foreground">
-          {asset.kind}
-        </span>
+        <span className="truncate text-body">{asset.format ?? asset.kind}</span>
+        {detail ? (
+          <span className="truncate text-caption text-muted-foreground">
+            {detail}
+          </span>
+        ) : null}
       </div>
       <a
         href={auroraAssetDownloadPath(asset.id)}

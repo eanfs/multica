@@ -95,6 +95,21 @@ describe("WorksList", () => {
     expect(screen.getByText("760 credits")).toBeInTheDocument();
   });
 
+  it("does not price a generation that was refunded", () => {
+    // A failed generation is refunded in full (aurora.go's completion path
+    // writes creditsCharged 0), so the amount it reserved is not a cost —
+    // printing it under "credits" claims a spend that never happened.
+    mocks.generations.mockReturnValue({
+      data: [generation({ status: "failed" })],
+      isPending: false,
+    });
+
+    renderWorks();
+
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(screen.queryByText("760 credits")).not.toBeInTheDocument();
+  });
+
   it("names the skill as unknown rather than blank when the catalog has dropped it", () => {
     // A generation outlives the catalog entry that made it, so the row has to
     // say something the reader can act on instead of rendering nothing.
@@ -126,6 +141,17 @@ describe("WorksList", () => {
       "href",
       "/api/aurora/assets/asset-2/download",
     );
+  });
+
+  it("does not repeat an asset's kind when it has no format to show above it", () => {
+    mocks.assets.mockReturnValue({
+      data: [asset({ format: null })],
+      isPending: false,
+    });
+
+    renderWorks();
+
+    expect(screen.getAllByText("image")).toHaveLength(1);
   });
 
   it("deletes an asset only once the confirmation is accepted", async () => {

@@ -1,9 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Frown, Sparkles } from "lucide-react";
+import { Sparkles } from "lucide-react";
 import { Badge } from "@multica/ui/components/ui/badge";
-import { Button } from "@multica/ui/components/ui/button";
 import { Input } from "@multica/ui/components/ui/input";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import {
@@ -22,11 +21,8 @@ import { PAGE_TOOLBAR } from "../layout/page-header";
 import { useLocale, useT } from "../i18n";
 import { GenerationComposer } from "./generation-composer";
 import { formatCredits } from "./format";
-import {
-  auroraCategoryLabel,
-  skillDisplayName,
-  type AuroraCategoryLabel,
-} from "./labels";
+import { auroraCategoryLabel, skillDisplayName } from "./labels";
+import { AuroraLoadFailed } from "./load-failed";
 import { AURORA_CATEGORY_ALL, filterAuroraSkills } from "./skill-filter";
 
 /**
@@ -37,13 +33,19 @@ import { AURORA_CATEGORY_ALL, filterAuroraSkills } from "./skill-filter";
  * would make a half-written prompt survive a refresh as a linkable address,
  * which is not what a consumer picking a skill out of a grid expects — so it
  * stays component state, and picking a skill is a click rather than a
- * navigation. `worksHref` is forwarded to the drawer's result so the app keeps
- * owning the library route.
+ * navigation. `worksHref` and `topUpHref` are forwarded to the drawer so the
+ * app keeps owning the library and checkout routes.
  */
 export interface SkillDirectoryProps {
   /** The app's library route, offered on a finished generation. */
   worksHref?: string;
+  /** The app's checkout route, offered when a skill costs more than the wallet holds. */
+  topUpHref?: string;
 }
+
+// The grid's own geometry, shared by the cards and the skeleton so the page
+// does not jump when the catalog resolves.
+const GRID_CLASS = "grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-3";
 
 // A stable reference for "the catalog has not loaded yet". `data ?? []` would
 // hand the memos below a fresh array on every render while the query is
@@ -52,7 +54,10 @@ export interface SkillDirectoryProps {
 // `dashboard/components/dashboard-page.tsx`.
 const EMPTY_SKILLS: AuroraSkill[] = [];
 
-export function SkillDirectory({ worksHref }: SkillDirectoryProps = {}) {
+export function SkillDirectory({
+  worksHref,
+  topUpHref,
+}: SkillDirectoryProps = {}) {
   const { t } = useT("aurora");
   const locale = useLocale();
   const skillsQuery = useAuroraSkills();
@@ -107,12 +112,7 @@ export function SkillDirectory({ worksHref }: SkillDirectoryProps = {}) {
             </TabsTrigger>
             {categories.map((value) => (
               <TabsTrigger key={value} value={value}>
-                {t(
-                  ($) =>
-                    $.directory.categories[
-                      auroraCategoryLabel(value) as AuroraCategoryLabel
-                    ],
-                )}
+                {t(($) => $.directory.categories[auroraCategoryLabel(value)])}
               </TabsTrigger>
             ))}
           </TabsList>
@@ -125,22 +125,9 @@ export function SkillDirectory({ worksHref }: SkillDirectoryProps = {}) {
           {skillsQuery.isPending ? (
             <DirectorySkeleton />
           ) : skillsQuery.isError && !hasCatalog ? (
-            <CollectionPageState
-              icon={Frown}
-              tone="destructive"
-              role="alert"
+            <AuroraLoadFailed
               title={t(($) => $.directory.load_failed_title)}
-              description={t(($) => $.directory.load_failed_description)}
-              actions={
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => void skillsQuery.refetch()}
-                >
-                  {t(($) => $.retry)}
-                </Button>
-              }
+              onRetry={() => void skillsQuery.refetch()}
             />
           ) : visible.length === 0 ? (
             <CollectionPageState
@@ -149,14 +136,13 @@ export function SkillDirectory({ worksHref }: SkillDirectoryProps = {}) {
               description={t(($) => $.directory.empty_description)}
             />
           ) : (
-            <ul className="grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-3">
+            <ul className={GRID_CLASS}>
               {visible.map((skill) => (
                 <li key={skill.id}>
                   <SkillCard
                     skill={skill}
                     displayName={skillDisplayName(skill, locale)}
                     credits={formatCredits(skill.credits, locale)}
-                    unavailableLabel={t(($) => $.directory.unavailable)}
                     onSelect={() => setSelected(skill)}
                   />
                 </li>
@@ -173,6 +159,7 @@ export function SkillDirectory({ worksHref }: SkillDirectoryProps = {}) {
           if (!open) setSelected(null);
         }}
         worksHref={worksHref}
+        topUpHref={topUpHref}
       />
     </div>
   );
@@ -191,13 +178,11 @@ function SkillCard({
   skill,
   displayName,
   credits,
-  unavailableLabel,
   onSelect,
 }: {
   skill: AuroraSkill;
   displayName: string;
   credits: string;
-  unavailableLabel: string;
   onSelect: () => void;
 }) {
   const { t } = useT("aurora");
@@ -216,7 +201,7 @@ function SkillCard({
         <span className="text-body font-medium">{displayName}</span>
         {!skill.available ? (
           <Badge variant="outline" className="shrink-0">
-            {unavailableLabel}
+            {t(($) => $.directory.unavailable)}
           </Badge>
         ) : null}
       </span>
@@ -230,7 +215,7 @@ function SkillCard({
 /** Placeholder cards at the grid's own geometry, so the page does not jump. */
 function DirectorySkeleton() {
   return (
-    <ul className="grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-3">
+    <ul className={GRID_CLASS}>
       {Array.from({ length: 8 }, (_, index) => (
         <li key={index}>
           <Skeleton className="h-20 w-full rounded-lg" />

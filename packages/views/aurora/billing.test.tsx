@@ -194,4 +194,23 @@ describe("AuroraBilling", () => {
     await user.click(screen.getByRole("button", { name: "Try again" }));
     expect(refetch).toHaveBeenCalled();
   });
+
+  it("keeps the ledger it already read when a refetch fails", () => {
+    // The same rule the library follows: a failed read is only fatal when it
+    // left nothing behind. Replacing a readable balance and ledger with an
+    // error card because one background refetch dropped is the worse trade.
+    mocks.transactions.mockReturnValue({
+      data: [transaction()],
+      isPending: false,
+      isError: true,
+      refetch: vi.fn(),
+    });
+
+    renderBilling();
+
+    expect(screen.getByText("Usage")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Could not load your credits"),
+    ).not.toBeInTheDocument();
+  });
 });

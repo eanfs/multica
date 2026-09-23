@@ -263,6 +263,23 @@ describe("GenerationComposer", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("spends the submit button when the create response could not be read", async () => {
+    // The copy sends the user to the library before starting another, so the
+    // button has to agree with it: a second POST here reserves the skill's
+    // credits again for a generation the first one may well have started.
+    mocks.create.mockResolvedValue(null);
+
+    const user = userEvent.setup();
+    renderComposer({});
+    await submitPrompt();
+
+    const submit = await screen.findByRole("button", { name: "Generate" });
+    await user.type(screen.getByLabelText("What should it make?"), "again");
+
+    expect(submit).toBeDisabled();
+    expect(mocks.create).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps reporting the run when the progress read fails, and can retry it", async () => {
     // The poll gives up on a failed read, so this screen is the only way back —
     // and rendering nothing here is what let the drawer look like a submit that
@@ -287,6 +304,27 @@ describe("GenerationComposer", () => {
     expect(mocks.detailRefetch).toHaveBeenCalled();
   });
 
+  it("keeps the last status it read when a progress read fails", async () => {
+    // React Query keeps the data a failed refetch could not replace, so one
+    // dropped poll tick reports the error *beside* the last known status
+    // instead of replacing a status that was read successfully a moment ago.
+    mocks.create.mockResolvedValue(detail());
+    mocks.detail.mockReturnValue({
+      data: detail({ status: "running" }),
+      isPending: false,
+      isError: true,
+      refetch: mocks.detailRefetch,
+    });
+
+    renderComposer({});
+    await submitPrompt();
+
+    expect(await screen.findByText("Generating")).toBeInTheDocument();
+    expect(
+      screen.getByText("Could not read this generation's progress."),
+    ).toBeInTheDocument();
+  });
+
   it("does not state a balance it could not read", async () => {
     // Quoting "you have 0" off an unloaded wallet sends the user to top up
     // against a number the client invented.
@@ -302,5 +340,36 @@ describe("GenerationComposer", () => {
     expect(
       screen.getByText("This skill costs 760 credits."),
     ).toBeInTheDocument();
+  });
+
+  it("offers the app's checkout route when a skill costs more than the wallet holds", async () => {
+    // The shortfall is the one refusal the user can act on, and the drawer is
+    // where they hit it — so the way to fix it belongs here too, when the host
+    // app has a route to send them to.
+    mocks.create.mockRejectedValue(
+      new ApiError("insufficient credits", 402, "Payment Required"),
+    );
+
+    renderComposer({ topUpHref: "/checkout" });
+    await submitPrompt();
+
+    expect(await screen.findByRole("link", { name: "Top up" })).toHaveAttribute(
+      "href",
+      "/checkout",
+    );
+  });
+
+  it("offers no checkout link when the host app supplies no route", async () => {
+    mocks.create.mockRejectedValue(
+      new ApiError("insufficient credits", 402, "Payment Required"),
+    );
+
+    renderComposer({});
+    await submitPrompt();
+
+    expect(await screen.findByText("Not enough credits")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Top up" }),
+    ).not.toBeInTheDocument();
   });
 });

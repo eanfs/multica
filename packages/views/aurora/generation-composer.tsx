@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { CircleAlert, Sparkles } from "lucide-react";
+import { CircleAlert, CreditCard, Sparkles } from "lucide-react";
 import {
   Alert,
   AlertAction,
@@ -32,12 +32,8 @@ import {
 } from "@multica/core/aurora";
 import { AppLink } from "../navigation";
 import { useLocale, useT } from "../i18n";
-import { formatCredits, microToCredits } from "./format";
-import {
-  generationStatusLabel,
-  skillDisplayName,
-  type AuroraGenerationStatusLabel,
-} from "./labels";
+import { formatCredits, formatMicroCredits } from "./format";
+import { generationStatusLabel, skillDisplayName } from "./labels";
 
 /**
  * The task drawer: turn one skill into one generation and follow it to its
@@ -56,6 +52,8 @@ export interface GenerationComposerProps {
   onOpenChange: (open: boolean) => void;
   /** The app's library route. Omitted, the result offers no link. */
   worksHref?: string;
+  /** The app's checkout route. Omitted, the shortfall offers no way to top up. */
+  topUpHref?: string;
 }
 
 export function GenerationComposer({
@@ -63,6 +61,7 @@ export function GenerationComposer({
   open,
   onOpenChange,
   worksHref,
+  topUpHref,
 }: GenerationComposerProps) {
   if (!skill) return null;
   return (
@@ -71,7 +70,12 @@ export function GenerationComposer({
         {/* Keyed on the skill so switching skills remounts the body: the draft,
             the in-flight generation and any failure all belong to the skill
             that was open, and none of them should survive into another's. */}
-        <ComposerBody key={skill.id} skill={skill} worksHref={worksHref} />
+        <ComposerBody
+          key={skill.id}
+          skill={skill}
+          worksHref={worksHref}
+          topUpHref={topUpHref}
+        />
       </SheetContent>
     </Sheet>
   );
@@ -93,16 +97,19 @@ type SubmitOutcome =
    * server may well have enqueued the generation and reserved its credits. It
    * is not a failure — there is simply no id to follow — which is why it is not
    * the generic `failed`: telling the user to retry here is how a double charge
-   * happens, and the copy says so instead.
+   * happens. The copy sends them to the library instead, and the submit button
+   * is spent with it, so the drawer cannot say one thing and do another.
    */
   | { kind: "unreadable" };
 
 function ComposerBody({
   skill,
   worksHref,
+  topUpHref,
 }: {
   skill: AuroraSkill;
   worksHref?: string;
+  topUpHref?: string;
 }) {
   const { t } = useT("aurora");
   const locale = useLocale();
@@ -118,12 +125,15 @@ function ComposerBody({
   // One submission per drawer. A second POST reserves the skill's credits a
   // second time, and the drawer is only showing one generation's progress — so
   // the button is spent once the server has accepted the first one. A *failed*
-  // submit stays live, because retrying that costs nothing.
+  // submit stays live, because retrying that costs nothing; an *unreadable* one
+  // does not, because the server may have accepted it (see SubmitOutcome) and
+  // the copy sends the user to the library before the next attempt.
   const canSubmit =
     skill.available &&
     trimmedPrompt.length > 0 &&
     !create.isPending &&
-    outcome.kind !== "started";
+    outcome.kind !== "started" &&
+    outcome.kind !== "unreadable";
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -180,7 +190,11 @@ function ComposerBody({
       ) : null}
 
       {outcome.kind === "failed" ? (
-        <SubmitFailure error={outcome.error} skill={skill} />
+        <SubmitFailure
+          error={outcome.error}
+          skill={skill}
+          topUpHref={topUpHref}
+        />
       ) : null}
 
       <form className="flex flex-col gap-2" onSubmit={handleSubmit}>
@@ -218,59 +232,65 @@ function ComposerBody({
           read can be in flight, and it can fail — the poll stops on a failed
           read (../core/aurora/queries.ts) — and in both cases the drawer used to
           render nothing at all, which reads as "the submit did nothing" and
-          invites a second one. */}
+          invites a second one.
+
+          A *failed* read is reported next to the last status rather than
+          instead of it: React Query keeps the data a failed refetch could not
+          replace, so one dropped poll tick says "here is where it was, and I
+          cannot see it now" instead of throwing away a status that was read
+          successfully a moment ago. */}
       {outcome.kind === "started" ? (
-        detail.isError ? (
-          <Alert variant="destructive">
-            <CircleAlert aria-hidden="true" />
-            <AlertDescription>
-              {t(($) => $.composer.progress_unreadable)}
-            </AlertDescription>
-            <AlertAction>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => void detail.refetch()}
-              >
-                {t(($) => $.retry)}
-              </Button>
-            </AlertAction>
-          </Alert>
-        ) : generation ? (
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center gap-2">
-              <Badge variant="outline" role="status">
-                {t(
-                  ($) =>
-                    $.composer.status[
-                      generationStatusLabel(
-                        generation.status,
-                      ) as AuroraGenerationStatusLabel
-                    ],
-                )}
-              </Badge>
-              {!isTerminal ? <Spinner aria-hidden="true" /> : null}
+        <>
+          {generation ? (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <Badge variant="outline" role="status">
+                  {t(
+                    ($) =>
+                      $.composer.status[generationStatusLabel(generation.status)],
+                  )}
+                </Badge>
+                {!isTerminal ? <Spinner aria-hidden="true" /> : null}
+              </div>
+              {generationStatusLabel(generation.status) === "failed" ? (
+                <p className="text-caption text-muted-foreground">
+                  {t(($) => $.composer.failed_description)}
+                </p>
+              ) : null}
+              {!isTerminal ? (
+                <p className="text-caption text-muted-foreground">
+                  {t(($) => $.composer.progress_description)}
+                </p>
+              ) : null}
             </div>
-            {generationStatusLabel(generation.status) === "failed" ? (
-              <p className="text-caption text-muted-foreground">
-                {t(($) => $.composer.failed_description)}
-              </p>
-            ) : null}
-            {!isTerminal ? (
+          ) : detail.isError ? null : (
+            <div className="flex items-center gap-2">
+              <Spinner aria-hidden="true" />
               <p className="text-caption text-muted-foreground">
                 {t(($) => $.composer.progress_description)}
               </p>
-            ) : null}
-          </div>
-        ) : (
-          <div className="flex items-center gap-2">
-            <Spinner aria-hidden="true" />
-            <p className="text-caption text-muted-foreground">
-              {t(($) => $.composer.progress_description)}
-            </p>
-          </div>
-        )
+            </div>
+          )}
+
+          {detail.isError ? (
+            <Alert variant="destructive">
+              <CircleAlert aria-hidden="true" />
+              <AlertDescription>
+                {t(($) => $.composer.progress_unreadable)}
+              </AlertDescription>
+              <AlertAction>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void detail.refetch()}
+                >
+                  {t(($) => $.retry)}
+                </Button>
+              </AlertAction>
+            </Alert>
+          ) : null}
+        </>
       ) : null}
 
       {showResult ? (
@@ -320,14 +340,17 @@ function ComposerBody({
  * all three of its gates — the monthly quota, the concurrency cap and the
  * frequency limit. The three 429s differ only in a server message that is not a
  * contract, so they share one line rather than guessing which fired; the 402 is
- * the one worth separating, because it names a number the user can change.
+ * the one worth separating, because it names a number the user can change and
+ * the one the drawer can point at the way to change it.
  */
 function SubmitFailure({
   error,
   skill,
+  topUpHref,
 }: {
   error: unknown;
   skill: AuroraSkill;
+  topUpHref?: string;
 }) {
   const { t } = useT("aurora");
   const locale = useLocale();
@@ -349,12 +372,22 @@ function SubmitFailure({
             ? t(($) => $.composer.insufficient_cost_only, { cost })
             : t(($) => $.composer.insufficient_description, {
                 cost,
-                balance: formatCredits(
-                  microToCredits(balance.availableMicro),
-                  locale,
-                ),
+                balance: formatMicroCredits(balance.availableMicro, locale),
               })}
         </AlertDescription>
+        {/* The one refusal the user can do something about, so it carries the
+            way to do it — when the app has a checkout route to offer. */}
+        {topUpHref ? (
+          <AlertAction>
+            <AppLink
+              href={topUpHref}
+              className="inline-flex items-center gap-1 text-body underline decoration-muted-foreground/30 underline-offset-4 transition-colors hover:text-foreground"
+            >
+              <CreditCard aria-hidden="true" className="size-3.5" />
+              {t(($) => $.billing.top_up)}
+            </AppLink>
+          </AlertAction>
+        ) : null}
       </Alert>
     );
   }

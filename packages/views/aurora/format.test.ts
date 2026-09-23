@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   MICRO_CREDITS_PER_CREDIT,
   formatCredits,
+  formatMicroCredits,
   microToCredits,
 } from "./format";
 
@@ -35,5 +36,14 @@ describe("formatCredits", () => {
 
   it("leaves a small amount unseparated", () => {
     expect(formatCredits(760, "en")).toBe("760");
+  });
+});
+
+describe("formatMicroCredits", () => {
+  it("converts and groups together, so a screen cannot apply only one", () => {
+    expect(formatMicroCredits(760 * MICRO_CREDITS_PER_CREDIT, "en")).toBe("760");
+    expect(formatMicroCredits(1234 * MICRO_CREDITS_PER_CREDIT, "en")).toBe(
+      "1,234",
+    );
   });
 });

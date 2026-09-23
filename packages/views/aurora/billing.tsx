@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { CreditCard, Frown, Wallet } from "lucide-react";
+import { CreditCard, Wallet } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import {
@@ -17,12 +17,9 @@ import {
 } from "../layout/collection-page";
 import { AppLink } from "../navigation";
 import { useLocale, useT } from "../i18n";
-import { formatCredits, microToCredits } from "./format";
-import {
-  ledgerKindLabel,
-  skillDisplayName,
-  type AuroraLedgerKindLabel,
-} from "./labels";
+import { formatMicroCredits } from "./format";
+import { ledgerKindLabel, skillDisplayNamesById } from "./labels";
+import { AuroraLoadFailed } from "./load-failed";
 
 /**
  * The wallet: what is left, how it moved, and the way to add more.
@@ -60,11 +57,10 @@ export function AuroraBilling({ topUpHref }: AuroraBillingProps = {}) {
     for (const generation of generationsQuery.data ?? []) {
       skillIdByGeneration.set(generation.id, generation.skillId);
     }
-    const skillNameById = new Map<string, string>();
-    for (const skill of skillsQuery.data ?? []) {
-      skillNameById.set(skill.id, skillDisplayName(skill, locale));
-    }
-    return { skillIdByGeneration, skillNameById };
+    return {
+      skillIdByGeneration,
+      skillNameById: skillDisplayNamesById(skillsQuery.data ?? [], locale),
+    };
   }, [generationsQuery.data, skillsQuery.data, locale]);
 
   function referenceSkillName(transaction: AuroraTransaction): string | null {
@@ -74,12 +70,16 @@ export function AuroraBilling({ topUpHref }: AuroraBillingProps = {}) {
   }
 
   const isLoading = balanceQuery.isPending || transactionsQuery.isPending;
+  // A failed read is only fatal when it left nothing behind: a background
+  // refetch that failed over rows already in cache is a stale ledger, and
+  // replacing a readable balance and ledger with an error card is the worse
+  // trade. Same rule as the library.
   const loadFailed =
-    transactionsQuery.isError ||
+    (transactionsQuery.isError && transactions.length === 0) ||
     (balanceQuery.isError && balanceQuery.data === undefined);
 
-  const balance = formatCredits(
-    microToCredits(balanceQuery.data?.availableMicro ?? 0),
+  const balance = formatMicroCredits(
+    balanceQuery.data?.availableMicro ?? 0,
     locale,
   );
 
@@ -94,25 +94,12 @@ export function AuroraBilling({ topUpHref }: AuroraBillingProps = {}) {
         {isLoading ? (
           <BillingSkeleton />
         ) : loadFailed ? (
-          <CollectionPageState
-            icon={Frown}
-            tone="destructive"
-            role="alert"
+          <AuroraLoadFailed
             title={t(($) => $.billing.load_failed_title)}
-            description={t(($) => $.billing.load_failed_description)}
-            actions={
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  void balanceQuery.refetch();
-                  void transactionsQuery.refetch();
-                }}
-              >
-                {t(($) => $.retry)}
-              </Button>
-            }
+            onRetry={() => {
+              void balanceQuery.refetch();
+              void transactionsQuery.refetch();
+            }}
           />
         ) : (
           <div className="flex flex-col gap-6">
@@ -120,7 +107,9 @@ export function AuroraBilling({ topUpHref }: AuroraBillingProps = {}) {
               <span className="text-caption text-muted-foreground">
                 {t(($) => $.billing.balance_title)}
               </span>
-              <span className="font-mono text-2xl tabular-nums">{balance}</span>
+              <span className="font-mono text-display-sm tabular-nums">
+                {balance}
+              </span>
               {topUpHref ? (
                 <AppLink
                   href={topUpHref}
@@ -166,9 +155,7 @@ export function AuroraBilling({ topUpHref }: AuroraBillingProps = {}) {
                       kindLabel={tBilling(
                         ($) =>
                           $.transaction.kind[
-                            ledgerKindLabel(
-                              transaction.kind,
-                            ) as AuroraLedgerKindLabel
+                            ledgerKindLabel(transaction.kind)
                           ],
                       )}
                     />
@@ -194,14 +181,13 @@ function TransactionRow({
 }) {
   const { t } = useT("aurora");
   const locale = useLocale();
-  const credits = microToCredits(transaction.amountMicro);
   const amount =
-    credits < 0
+    transaction.amountMicro < 0
       ? t(($) => $.billing.amount_negative, {
-          amount: formatCredits(Math.abs(credits), locale),
+          amount: formatMicroCredits(-transaction.amountMicro, locale),
         })
       : t(($) => $.billing.amount_positive, {
-          amount: formatCredits(credits, locale),
+          amount: formatMicroCredits(transaction.amountMicro, locale),
         });
 
   return (
@@ -218,10 +204,7 @@ function TransactionRow({
         <span className="font-mono text-body tabular-nums">{amount}</span>
         <span className="font-mono text-caption tabular-nums text-muted-foreground">
           {t(($) => $.billing.balance_after, {
-            amount: formatCredits(
-              microToCredits(transaction.balanceAfterMicro),
-              locale,
-            ),
+            amount: formatMicroCredits(transaction.balanceAfterMicro, locale),
           })}
         </span>
       </div>
