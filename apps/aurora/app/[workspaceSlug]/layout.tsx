@@ -8,6 +8,7 @@ import { workspaceBySlugOptions } from "@multica/core/workspace";
 import { setCurrentWorkspace } from "@multica/core/platform";
 import { useAuthStore } from "@multica/core/auth";
 import { useT } from "@multica/views/i18n";
+import { useWorkspaceSeen } from "@multica/views/workspace/use-workspace-seen";
 import { Sparkles } from "lucide-react";
 import { workspaceSlugFromPathname } from "@/lib/workspace-slug-from-pathname";
 import { AuroraShell } from "@/components/aurora-shell";
@@ -83,6 +84,14 @@ export default function WorkspaceLayout({
     document.cookie = `last_workspace_slug=${encodeURIComponent(workspaceSlug)}; path=/; max-age=${oneYear}; SameSite=Lax${secure}`;
   }, [workspace, workspaceSlug]);
 
+  // Remember whether this slug has resolved before. A workspace that disappears
+  // from under us — deleted elsewhere, or the user removed from it — is a
+  // relocate, not a dead end: shared core answers it with a full-page navigation
+  // to the next workspace (packages/core/realtime/use-realtime-sync.ts), and
+  // that fetch is still in flight when the list stops containing this slug.
+  // Without this the dead end below flashes for the length of that round-trip.
+  const hasBeenSeen = useWorkspaceSeen(workspaceSlug, !!workspace);
+
   const loadingIndicator = (
     <div
       role="status"
@@ -99,7 +108,12 @@ export default function WorkspaceLayout({
   // The selector returns undefined until the list resolves, including after a
   // failed request; null means an authoritative list does not contain this slug.
   if (workspace === undefined) return loadingIndicator;
-  if (workspace === null) return <WorkspaceUnavailable />;
+  if (workspace === null) {
+    // Just removed: hold the screen empty rather than announcing a dead end the
+    // relocation below is already leaving.
+    if (hasBeenSeen) return null;
+    return <WorkspaceUnavailable />;
+  }
 
   return (
     <WorkspaceSlugProvider slug={workspaceSlug}>

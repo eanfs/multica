@@ -5,7 +5,10 @@ import {
   MULTICA_LOCALE_HEADER,
   resolveLocaleFromSignals,
 } from "./lib/locale-routing";
-import { runtimeRewriteDestination } from "./config/runtime-urls";
+import {
+  isBackendSurfacePath,
+  runtimeRewriteDestination,
+} from "./config/runtime-urls";
 
 /**
  * Route segments this app owns at the root. Every other reserved slug names a
@@ -62,7 +65,16 @@ export function proxy(req: NextRequest) {
   }
 
   const firstSegment = pathname.split("/")[1] ?? "";
-  if (isReservedSlug(firstSegment) && !APP_ROOT_SEGMENTS.has(firstSegment)) {
+  // Backend paths are exempt: `api`, `v1`, `ws`, `health` and `uploads` are
+  // reserved slugs, so a rule that only saw the first segment would answer the
+  // API, uploads and the realtime handshake with a 307 to the app root. They
+  // fall through to the rewrites that own them — this proxy's own when an
+  // origin is configured, next.config.ts's dev fallback when none is.
+  if (
+    !isBackendSurfacePath(pathname) &&
+    isReservedSlug(firstSegment) &&
+    !APP_ROOT_SEGMENTS.has(firstSegment)
+  ) {
     const url = req.nextUrl.clone();
     url.pathname = "/";
     url.search = "";

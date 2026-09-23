@@ -27,7 +27,6 @@ export function isWorkspaceSlug(value: string | null | undefined): value is stri
 export function auroraRoutes(slug: string) {
   const ws = `/${encode(slug)}`;
   return {
-    root: () => `${ws}/skills`,
     skills: () => `${ws}/skills`,
     works: () => `${ws}/works`,
     billing: () => `${ws}/billing`,

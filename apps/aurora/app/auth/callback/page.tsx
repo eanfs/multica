@@ -54,10 +54,10 @@ function CallbackContent() {
     // time it returns: anything salvaged from it is sanitized before use.
     //
     // Known debt, inherited from apps/web's identical flow and deliberately not
-    // diverged here: this `state` is a carrier, not a CSRF nonce. It is chosen
-    // by the login page (see the `googleState` builder there) and never
-    // compared against a value the browser kept, so nothing ties the code being
-    // exchanged to the browser that started the flow — the shape of a login-CSRF
+    // diverged here: this `state` is a carrier, not a CSRF nonce. It is whatever
+    // the login page put in `state` and is never compared against a value the
+    // browser kept, so nothing ties the code being exchanged to the browser that
+    // started the flow — the shape of a login-CSRF
     // where a victim's browser is walked through someone else's authorization
     // code. The `sanitizeNextUrl` below bounds where the result can be sent, not
     // who it belongs to.

@@ -1,7 +1,7 @@
 "use client";
 
 import { useT } from "@multica/views/i18n";
-import { WorkspaceRecovery } from "@/components/workspace-recovery";
+import { DeadEndScreen } from "@/components/dead-end-screen";
 
 /**
  * Any URL this app does not serve.
@@ -20,16 +20,9 @@ export default function NotFound() {
   const { t } = useT("common");
 
   return (
-    <div className="flex min-h-svh flex-col items-center justify-center gap-6 px-6 text-center">
-      <div className="space-y-2">
-        <h1 className="text-display-sm font-semibold tracking-tight">
-          {t(($) => $.not_found.title)}
-        </h1>
-        <p className="max-w-md text-muted-foreground">
-          {t(($) => $.not_found.description)}
-        </p>
-      </div>
-      <WorkspaceRecovery />
-    </div>
+    <DeadEndScreen
+      title={t(($) => $.not_found.title)}
+      description={t(($) => $.not_found.description)}
+    />
   );
 }

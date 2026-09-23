@@ -106,6 +106,33 @@ export function resolveBrowserWsUrl(env: RuntimeEnv): string | undefined {
   return apiUrl ? tryDeriveWsUrl(apiUrl) : undefined;
 }
 
+// Paths the backend serves as a tree: anything beneath them belongs to it too.
+const BACKEND_PATH_TREES = ["/v1", "/api", "/uploads"];
+// Endpoints it serves at exactly one path — `/ws` for the realtime handshake,
+// `/health` for `multica setup self-host`, which probes `{server-url}/health`
+// and treats any non-200 as "Server not reachable". The backend serves it, but a
+// same-origin reverse proxy that forwards everything here would leave the probe
+// 404ing at the Next.js router, so the exact path is proxied like /ws.
+const BACKEND_EXACT_PATHS = ["/ws", "/health"];
+
+/**
+ * Whether this path belongs to the backend surface rather than to this app.
+ *
+ * One list, because two callers depend on the same answer and disagreeing about
+ * it is a bug in both directions: `runtimeRewriteDestination` sends these paths
+ * upstream, and `proxy.ts` must not let its reserved-slug redirect claim them —
+ * `api`, `v1`, `ws`, `health` and `uploads` are all reserved slugs, so a
+ * redirect that only looked at the first segment would answer the API, uploads
+ * and the realtime handshake with a 307 to the app root.
+ */
+export function isBackendSurfacePath(pathname: string): boolean {
+  if (isBackendAuthPath(pathname)) return true;
+  if (BACKEND_EXACT_PATHS.includes(pathname)) return true;
+  return BACKEND_PATH_TREES.some(
+    (root) => pathname === root || pathname.startsWith(`${root}/`),
+  );
+}
+
 /**
  * The upstream origin for a same-origin path the Next.js server should proxy
  * at request time (production). Returns undefined when nothing is configured
@@ -117,31 +144,9 @@ export function runtimeRewriteDestination(
 ): string | undefined {
   const remoteApiUrl = resolveRemoteApiUrl(env);
   if (!remoteApiUrl) return undefined;
+  if (!isBackendSurfacePath(pathname)) return undefined;
 
-  if (pathname === "/v1" || pathname.startsWith("/v1/")) {
-    return appendPath(remoteApiUrl, pathname);
-  }
-  if (pathname === "/api" || pathname.startsWith("/api/")) {
-    return appendPath(remoteApiUrl, pathname);
-  }
-  if (pathname === "/uploads" || pathname.startsWith("/uploads/")) {
-    return appendPath(remoteApiUrl, pathname);
-  }
-  if (pathname === "/ws") {
-    return appendPath(remoteApiUrl, "/ws");
-  }
-  // `multica setup self-host` probes `{server-url}/health` and treats any
-  // non-200 as "Server not reachable". The backend serves it, but a same-origin
-  // reverse proxy that forwards everything here would leave the probe 404ing at
-  // the Next.js router, so the exact path is proxied like /ws.
-  if (pathname === "/health") {
-    return appendPath(remoteApiUrl, "/health");
-  }
-  if (isBackendAuthPath(pathname)) {
-    return appendPath(remoteApiUrl, pathname);
-  }
-
-  return undefined;
+  return appendPath(remoteApiUrl, pathname);
 }
 
 // `/auth/callback` is this app's own OAuth landing page — the browser has to

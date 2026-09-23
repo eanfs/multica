@@ -15,7 +15,6 @@ const workspace = (slug: string) => ({ slug }) as Workspace;
 describe("auroraRoutes", () => {
   it("builds this app's three destinations under the workspace slug", () => {
     const routes = auroraRoutes("acme");
-    expect(routes.root()).toBe("/acme/skills");
     expect(routes.skills()).toBe("/acme/skills");
     expect(routes.works()).toBe("/acme/works");
     expect(routes.billing()).toBe("/acme/billing");

@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { useT } from "@multica/views/i18n";
-import { WorkspaceRecovery } from "@/components/workspace-recovery";
+import { DeadEndScreen } from "@/components/dead-end-screen";
 
 /**
  * Rendered when the slug in the URL does not name a workspace this user can
@@ -26,16 +26,9 @@ export function WorkspaceUnavailable() {
   }, []);
 
   return (
-    <div className="flex h-svh flex-col items-center justify-center gap-6 px-6 text-center">
-      <div className="space-y-2">
-        <h1 className="text-display-sm font-semibold tracking-tight">
-          {t(($) => $.workspace.unavailable_title)}
-        </h1>
-        <p className="max-w-md text-muted-foreground">
-          {t(($) => $.workspace.unavailable_description)}
-        </p>
-      </div>
-      <WorkspaceRecovery />
-    </div>
+    <DeadEndScreen
+      title={t(($) => $.workspace.unavailable_title)}
+      description={t(($) => $.workspace.unavailable_description)}
+    />
   );
 }

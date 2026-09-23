@@ -102,6 +102,26 @@ describe("proxy reserved-slug redirects", () => {
     expect(proxy(makeRequest("/acme/skills")).headers.get("location")).toBeNull();
     expect(proxy(makeRequest("/acme/billing")).headers.get("location")).toBeNull();
   });
+
+  it("leaves backend paths to the rewrites", () => {
+    // `api`, `v1`, `ws`, `health` and `uploads` are reserved slugs as well, but
+    // they are the backend's surface rather than a global Multica route, so
+    // neither branch of this proxy may claim them: with no runtime origin
+    // configured they fall through to next.config.ts's dev rewrites.
+    withoutRuntimeUpstream(() => {
+      for (const path of [
+        "/api/aurora/skills",
+        "/v1/models",
+        "/uploads/asset.png",
+        "/ws",
+        "/health",
+      ]) {
+        const response = proxy(makeRequest(path));
+        expect(response.headers.get("location")).toBeNull();
+        expect(response.headers.get("x-middleware-rewrite")).toBeNull();
+      }
+    });
+  });
 });
 
 describe("proxy locale header", () => {
