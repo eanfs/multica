@@ -78,6 +78,32 @@ describe("proxy runtime rewrites", () => {
   });
 });
 
+describe("proxy reserved-slug redirects", () => {
+  it("sends global Multica routes this app does not serve to the root", () => {
+    // Shared core relocates a lost workspace to exactly these paths.
+    expect(proxy(makeRequest("/onboarding")).headers.get("location")).toBe(
+      "https://aurora.test/",
+    );
+    expect(proxy(makeRequest("/workspaces/new")).headers.get("location")).toBe(
+      "https://aurora.test/",
+    );
+  });
+
+  it("leaves this app's own root routes alone", () => {
+    expect(proxy(makeRequest("/login")).headers.get("location")).toBeNull();
+    expect(
+      proxy(makeRequest("/auth/callback?code=abc")).headers.get("location"),
+    ).toBeNull();
+  });
+
+  it("treats the same segment as an ordinary slug below the root", () => {
+    // A reserved word is only reserved in the first position: /acme/skills is a
+    // workspace route, /skills is not.
+    expect(proxy(makeRequest("/acme/skills")).headers.get("location")).toBeNull();
+    expect(proxy(makeRequest("/acme/billing")).headers.get("location")).toBeNull();
+  });
+});
+
 describe("proxy locale header", () => {
   it("forwards the cookie's locale to the rendered request", () => {
     const response = proxy(makeRequest("/login", { [LOCALE_COOKIE]: "ja" }));

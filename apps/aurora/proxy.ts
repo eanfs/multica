@@ -1,10 +1,27 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { LOCALE_COOKIE } from "@multica/core/i18n";
+import { isReservedSlug } from "@multica/core/paths";
 import {
   MULTICA_LOCALE_HEADER,
   resolveLocaleFromSignals,
 } from "./lib/locale-routing";
 import { runtimeRewriteDestination } from "./config/runtime-urls";
+
+/**
+ * Route segments this app owns at the root. Every other reserved slug names a
+ * global Multica route — `/onboarding`, `/workspaces/new` — and a workspace can
+ * never be named one (creation rejects reserved slugs).
+ *
+ * Redirecting them matters beyond stray URLs. Shared core relocates away from a
+ * lost workspace with a full-page `window.location.assign` to one of those
+ * paths (`resolvePostAuthDestination` in `packages/core/paths/resolve.ts`,
+ * called from `realtime/use-realtime-sync.ts` when the current workspace is
+ * deleted elsewhere or the user is removed from it). Aurora serves none of
+ * them, and an Aurora-only account has `onboarded_at == null` — the
+ * questionnaire is a Multica-web flow — so the `/onboarding` branch is the
+ * common one. The root resolves to the workspace the user still has.
+ */
+const APP_ROOT_SEGMENTS = new Set(["login", "auth"]);
 
 /**
  * Two jobs, both of which have to happen before a route renders.
@@ -42,6 +59,14 @@ export function proxy(req: NextRequest) {
     const url = new URL(runtimeDestination);
     url.search = req.nextUrl.search;
     return NextResponse.rewrite(url);
+  }
+
+  const firstSegment = pathname.split("/")[1] ?? "";
+  if (isReservedSlug(firstSegment) && !APP_ROOT_SEGMENTS.has(firstSegment)) {
+    const url = req.nextUrl.clone();
+    url.pathname = "/";
+    url.search = "";
+    return NextResponse.redirect(url);
   }
 
   return nextWithLocale(req);

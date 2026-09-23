@@ -52,6 +52,20 @@ function CallbackContent() {
 
     // `state` round-trips through Google, so it is attacker-controlled by the
     // time it returns: anything salvaged from it is sanitized before use.
+    //
+    // Known debt, inherited from apps/web's identical flow and deliberately not
+    // diverged here: this `state` is a carrier, not a CSRF nonce. It is chosen
+    // by the login page (see the `googleState` builder there) and never
+    // compared against a value the browser kept, so nothing ties the code being
+    // exchanged to the browser that started the flow — the shape of a login-CSRF
+    // where a victim's browser is walked through someone else's authorization
+    // code. The `sanitizeNextUrl` below bounds where the result can be sent, not
+    // who it belongs to.
+    //
+    // The fix is to issue the nonce when the flow starts and require it back
+    // before exchanging the code, which touches all three clients plus the
+    // backend that owns the callback contract — a change for its own issue, not
+    // for the app wiring that added this second copy of the flow.
     const stateParts = (searchParams.get("state") ?? "").split(",");
     const nextPart = stateParts.find((p) => p.startsWith("next:"));
     const nextUrl = sanitizeNextUrl(nextPart ? nextPart.slice(5) : null);
