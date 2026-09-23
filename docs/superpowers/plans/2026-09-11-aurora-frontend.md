@@ -231,3 +231,43 @@ git commit -m "feat(aurora): Next.js app wiring for skill directory, works and b
 | Task 2 | 目录置灰 `available=false`；composer 禁用 + 402 引导；works 用真实端点；i18n 改四语（en/zh-Hans/ko/ja + parity 测试） |
 | Task 3 | 删除不存在的 `WorkspaceIdProvider`；补 `[workspaceSlug]` layout、OAuth callback 壳、`auth-cookie.ts`、`proxy.ts`、CI paths filter、`dev:aurora` 脚本；注明 pnpm-workspace/turbo 自动覆盖、`make up` 留二阶段 |
 | Deferred | asset 占位移除（Plan 3.5 承担）；补实时化与 make up 边界 |
+
+---
+
+## 完成记录 / Completion record（2026-09-23 回填）
+
+**Status: complete.** Story #35 CLOSED. The full path works end to end: sign in → skill directory →
+submit a generation → poll progress → works library → balance and ledger.
+
+| Task | Ticket | PR | Outcome |
+| --- | --- | --- | --- |
+| Task 1 — `packages/core/aurora` | #36 | #49 | merged |
+| Task 2 — `packages/views/aurora` | #37 | #51 | merged |
+| Task 3 — `apps/aurora` (Next.js App Router) | #38 | #52 | merged |
+
+### Defects found by review (each fixed with a regression test)
+
+These are the reason the review stage exists; every one of them would otherwise have reached `main`.
+
+| Where | Defect |
+| --- | --- |
+| `packages/views/aurora` | **Two separate duplicate-charge paths** — the submit button stayed enabled when a create succeeded but its response was unreadable, and again when the progress read failed, inviting a second credit reservation |
+| `packages/core/aurora` | `staleTime: Infinity` meant the generations and assets lists never refetched on mount or reconnect |
+| `packages/core/aurora` | TanStack v5's `refetchInterval` never consults query status, so a generation id that 404s polled every 3s forever |
+| `packages/views/aurora` | A delete failure was reported inside the modal it left open, making the error `aria-hidden` to screen readers |
+| `packages/views/aurora` | The works list priced a refunded generation |
+| `packages/views/aurora` | Billing's load-failure state discarded cached rows; the 402 prompt had no top-up entry point |
+| `apps/aurora` | The proxy's reserved-slug redirect 307'd `/api`, `/v1`, `/ws`, `/health` and `/uploads` to `/`, so `pnpm dev:aurora` had API, uploads and realtime all broken by default — the very flow acceptance criterion 2 requires. Fixed via a shared `isBackendSurfacePath` |
+
+### Deviations from the plan
+
+| Where | Deviation | Reason |
+| --- | --- | --- |
+| Task 2 | i18n is **five** locales (en/zh-Hans/ko/ja/**fr**) | `parity.test.ts` requires every registered locale; the plan said four |
+| Task 3 | `resolvePostAuthDestination` is not overridable | Shared core hard-codes Multica-only routes and offers no injection point — see #56 |
+
+### Known follow-ups (tracked, not fixed here)
+
+Degraded-vs-empty responses are indistinguishable (#55); the OAuth flow has no CSRF nonce (#53);
+nine near-identical modules are duplicated with `apps/web` (#54). The Plan 4 scope items left out
+(desktop/mobile, WebSocket realtime progress, `make up C=aurora`) remain deferred as planned.

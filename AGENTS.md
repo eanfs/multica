@@ -132,10 +132,8 @@ Workspace-scoped queries filter by `workspace_id`; membership gates access and `
 
 Aurora (内容创作应用) is a new domain in this repo, built incrementally from plans under `docs/superpowers/plans/` (specs under `docs/superpowers/specs/`). The plans are the source of truth; scrum stories and tickets are tracked on the `eanfs/multica` fork.
 
-- Implemented: Plan 1 (领域骨架, story #3), Plan 2 (积分账本, story #16).
-- Split into story + tickets, pending implementation, in this order:
-  1. Plan 3.5 Task 1 (#32) — sqlc queries + index migrations
-  2. Plan 3 (#24–30) — execution layer (enqueue → managed agent → asset writeback + credit settlement)
-  3. Plan 3.5 rest (#33/#34) — generations/assets read endpoints
-  4. Plan 4 (#36–38) — frontend `apps/aurora`
-- Not yet split: Plan safety (内容审核 + 权益门禁), Plan 5 (订阅 + Stripe).
+- Implemented: Plan 1 (领域骨架, story #3), Plan 2 (积分账本, story #16), Plan 3.5 (进度与作品库 API, story #31), Plan 4 (前端 `apps/aurora`, story #35), and Plan 3 (执行层, story #23) except its Task 6.
+- The technical MVP is end-to-end: create generation → enqueue + reserve credits → managed agent executes → asset writeback + credit settlement/refund → readable and actionable from `apps/aurora`.
+- **Plan 3 Task 6 (#29) is partial.** Its repository-side portion (per-agent launch narrowing, `MaxTurns`, fail-closed provider gating) is merged; the sandbox image, container isolation, egress allowlist, resource caps and the HyperFrames text-to-video smoke are external infrastructure and remain pending. See `docs/superpowers/plans/2026-09-22-aurora-sandbox-tool-surface.md` for the ownership boundary.
+- Not started, not yet split into scrum tickets: Plan safety (内容审核 + 权益门禁) and Plan 5 (订阅 + Stripe). Both are required for the spec's "sellable" milestone. Before implementing either, renumber their migrations — Plan safety assumes `459` but the repository is past `509`.
+- Known defects found while building Plan 4 are tracked as separate issues rather than fixed inside the Aurora PRs: OAuth login-CSRF (#53), duplicated modules between `apps/web` and `apps/aurora` (#54), `parseWithFallback` hiding degraded responses (#55), core's workspace-loss relocation (#56), and the e2e baseline (#57, #58).

@@ -84,3 +84,27 @@ git commit -m "feat(aurora): wire moderation into generation create and completi
 ## 执行交接
 
 完成顺序：Plan 3.5 → Plan 4 → 本计划（可在 Plan 4 之后、上线前完成；Task 1 可随时先行）→ Plan 5（订阅 + Stripe + 权益门禁 enforcement，`2026-09-13-aurora-subscriptions-payments.md`，已编写）。
+
+---
+
+## 实现状态 / Implementation status（2026-09-23 记录）
+
+**Not started. No code, migration, or dependency from this plan exists in the repository yet.**
+
+Verified by searching the tree at `aeb31e1e9`:
+
+- Plan safety — zero hits for `moderation`, `Moderator`, `blocked_terms`, `ScreenPrompt`, `ScreenAsset`
+  under `server/`. Neither Task 1 nor Task 2 has begun.
+- Plan 5 — zero hits for `aurora_subscription`, `PaymentProvider`, `TierCatalog`, `LimitsForUser`,
+  `tiers.go`; `server/go.mod` has no Stripe dependency. All seven tasks are outstanding. The one
+  adjacent artifact, `LedgerKindExpire` in `server/internal/aurora/credit.go`, is a **reservation**
+  made by Plan 2 for this plan's Task 4 — not an implementation.
+
+**Before implementing, renumber the migrations.** This plan's file numbers were chosen against a
+much earlier repository state (Plan safety assumes `459`); `server/migrations/` is now past `509`.
+Follow the same rules as Plan 2 — `CREATE [UNIQUE] INDEX CONCURRENTLY`, one index per migration file,
+and register each in `cmd/migrate/main.go`'s `concurrentIndexCleanups`.
+
+**Why it matters.** These two plans are what stand between the current technical MVP and the spec's
+"sellable" milestone: Plan 5 provides the paid tiers and Stripe, and Plan safety provides the content
+moderation and entitlement gates that bound them.
