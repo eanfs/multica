@@ -253,5 +253,15 @@
     "workspace_missing_description": "Stripe에서 돌아왔지만 이 워크스페이스를 사용할 수 없습니다. 삭제되었거나 접근 권한이 변경되었을 수 있습니다. 원하는 워크스페이스의 결제 페이지에서 현재 상태를 확인해 주세요.",
     "retry": "다시 시도",
     "go_to_app": "Multica로 이동"
+  },
+  "transaction": {
+    "kind": {
+      "topup": "충전",
+      "deduction": "사용",
+      "refund": "환불",
+      "adjustment": "조정",
+      "expire": "만료됨",
+      "unknown": "기타"
+    }
   }
 }
