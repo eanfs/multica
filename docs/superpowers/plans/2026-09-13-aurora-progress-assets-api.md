@@ -130,3 +130,28 @@ MVP 用轮询（Plan 4 `useAuroraGenerationDetail` refetchInterval 3s）。二�
 ## 执行交接
 
 完成顺序：本计划 Task 1 → Plan 3 → 本计划 Task 2/3 → Plan 4 → Plan safety。实现后 `make test` + `pnpm typecheck` 全绿再进 Plan 4。
+
+---
+
+## 完成记录 / Completion record（2026-09-23 回填）
+
+**Status: complete.** Story #31 CLOSED.
+
+| Task | Ticket | PR | Outcome |
+| --- | --- | --- | --- |
+| Task 1 — sqlc queries + index migrations | #32 | #39 | merged |
+| Task 2 — `GET /api/aurora/generations` + `/{id}` | #33 | #46 | merged |
+| Task 3 — asset list / download / delete | #34 | #48 | merged |
+| Task 4 — realtime design note | — | — | not implemented by design |
+
+**Deviations from the plan (all confirmed necessary):**
+
+| Where | Deviation | Reason |
+| --- | --- | --- |
+| Task 1 | Migration numbers `506`–`508` (plan assumed `456`–`458`) | The Aurora migration range was renumbered to `500+` |
+| Task 1 | `DeleteAuroraAsset` uses `:execrows`, not `:exec` | The plan's "return row count to detect existence" needs a row count |
+| Task 1 | Both `ListAuroraAssets` filters are `sqlc.narg` | Callers must always pass `workspace_id`; the handler does |
+| Task 3 | Download streams the object where no storage URL is signable, instead of always 302-ing | Deployments without a signable CloudFront/presign URL still need the endpoint to work |
+| Task 3 | The download route cannot be a bare `<img src>` | It needs workspace headers or `?workspace_slug=` — recorded on PR #48 for Plan 4 |
+
+**Acceptance.** All boxes ticked; issue #34 CLOSED with `S4-Done`.

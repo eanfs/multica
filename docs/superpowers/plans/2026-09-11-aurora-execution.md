@@ -269,3 +269,34 @@ Plan 3 完成。后续顺序：Plan 3.5（进度与作品库 API）→ Plan 4（
 | Task 5 | 契约对齐实际路径（`cloud_runtime.go:41-97` 的 `/api/v1/nodes` 面），删去 provision/terminate/gateway 表述 |
 | Task 6 | 工具面收窄改为待建能力：additive per-agent 启动配置（默认不动用户 agent）+ aurora 任务 `MaxTurns` + `MULTICA_AGENT_TIMEOUT`；guard 二期 |
 | Task 7（新增） | 创建端点 per-user 频率闸门（spec §10 落点；「匿名」表述修正为「新用户」） |
+
+---
+
+## 完成记录 / Completion record（2026-09-23 回填）
+
+**Status: complete except Task 6, which is split between this repository and external infrastructure.**
+
+| Task | Ticket | PR | Outcome |
+| --- | --- | --- | --- |
+| Task 1 — seed 16 workspace-scoped system agents | #24 | #40 | merged |
+| Task 2 — enqueue + reserve credits (with failure compensation) | #25 | #41 | merged |
+| Task 3 — managed runtime registration | #26 | #42 | merged |
+| Task 4 — completion writeback → asset + settlement/refund | #27 | #45 | merged |
+| Task 5 (infra) — self-host fleet controller | #28 | #43 | merged |
+| Task 6 (infra) — sandbox image + tool-surface narrowing | #29 | #47 (code side only) | **partial** |
+| Task 7 — creation-endpoint rate gate | #30 | #44 | merged |
+
+**Task 6 boundary.** The repository-side portion is merged: additive per-agent launch narrowing
+(`PermissionMode` / `DisallowedTools`, defaulting to existing behaviour), `MaxTurns = 30` for Aurora
+system agents, and fail-closed refusal to run an Aurora task on an un-onboarded provider. Still
+pending and **not** implemented here: the sandbox image build, container/VM isolation, egress
+allowlist, resource caps, `MULTICA_AGENT_TIMEOUT` as the daemon-level first gate, and the HyperFrames
+text-to-video smoke. This split is documented in
+[`2026-09-22-aurora-sandbox-tool-surface.md`](2026-09-22-aurora-sandbox-tool-surface.md).
+
+**Acceptance.** The fake-CLI argument-assertion criterion is met. The HyperFrames smoke criterion is
+not — it requires the sandbox image. Issue #29 stays open.
+
+**Post-completion findings** (found while building Plan 4, tracked as separate issues, not fixed here):
+OAuth login-CSRF #53, core workspace-loss relocation #56, duplicated modules between `apps/web` and
+`apps/aurora` #54, `parseWithFallback` hiding degraded responses #55, e2e baseline #57 / #58.

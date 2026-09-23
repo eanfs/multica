@@ -1372,3 +1372,27 @@ Plan 5 完成后，spec §9.1 的「可对外销售」里程碑即可交付（�
 | 15 | Plan 2 的「expire 二期」表述更新为「由 Plan 5 Task 4 实现」（同步修改） |
 | 16 | 各文档「后续 Plan 5/尚未编写」陈旧措辞同步为已编写（同步修改） |
 | 17 | 并发索引只注册 `concurrentIndexCleanups`（down 仅 DROP，注册 down-map 挂测试）；`make sqlc`/`make test` 改仓库根执行（无 server/Makefile）（Plan 1/2/3.5 同步修改） |
+
+---
+
+## 实现状态 / Implementation status（2026-09-23 记录）
+
+**Not started. No code, migration, or dependency from this plan exists in the repository yet.**
+
+Verified by searching the tree at `aeb31e1e9`:
+
+- Plan safety — zero hits for `moderation`, `Moderator`, `blocked_terms`, `ScreenPrompt`, `ScreenAsset`
+  under `server/`. Neither Task 1 nor Task 2 has begun.
+- Plan 5 — zero hits for `aurora_subscription`, `PaymentProvider`, `TierCatalog`, `LimitsForUser`,
+  `tiers.go`; `server/go.mod` has no Stripe dependency. All seven tasks are outstanding. The one
+  adjacent artifact, `LedgerKindExpire` in `server/internal/aurora/credit.go`, is a **reservation**
+  made by Plan 2 for this plan's Task 4 — not an implementation.
+
+**Before implementing, renumber the migrations.** This plan's file numbers were chosen against a
+much earlier repository state (Plan safety assumes `459`); `server/migrations/` is now past `509`.
+Follow the same rules as Plan 2 — `CREATE [UNIQUE] INDEX CONCURRENTLY`, one index per migration file,
+and register each in `cmd/migrate/main.go`'s `concurrentIndexCleanups`.
+
+**Why it matters.** These two plans are what stand between the current technical MVP and the spec's
+"sellable" milestone: Plan 5 provides the paid tiers and Stripe, and Plan safety provides the content
+moderation and entitlement gates that bound them.
