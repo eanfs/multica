@@ -31,6 +31,14 @@
       "ignoreDependencies": ["postcss-load-config"]
     },
 
+    "apps/aurora": {
+      "entry": ["eslint.config.mjs"],
+      // Referenced only by the `@type {import('postcss-load-config').Config}`
+      // JSDoc annotation in postcss.config.mjs. Declaring it would add a
+      // runtime dependency to satisfy a type comment.
+      "ignoreDependencies": ["postcss-load-config"]
+    },
+
     "apps/desktop": {
       // window-state.node-test.mjs is run by hand (`node --test`, see its
       // header) rather than by a package script, so nothing imports it.

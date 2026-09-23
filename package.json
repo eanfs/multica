@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev:web": "turbo dev --filter=@multica/web",
+    "dev:aurora": "turbo dev --filter=@multica/aurora",
     "dev:docs": "turbo dev --filter=@multica/docs",
     "dev:desktop": "turbo dev --filter=@multica/desktop",
     "dev:desktop:staging": "turbo dev:staging --filter=@multica/desktop",

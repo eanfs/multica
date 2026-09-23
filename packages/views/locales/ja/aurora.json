@@ -78,5 +78,12 @@
     "amount_positive": "+{{amount}}",
     "amount_negative": "−{{amount}}",
     "balance_after": "変動後の残高：{{amount}}"
+  },
+  "workspace": {
+    "unavailable_title": "このワークスペースを開けません",
+    "unavailable_description": "削除されたか、アクセス権がない可能性があります。",
+    "open_workspace": "自分のワークスペースを開く",
+    "missing_title": "ワークスペースがありません",
+    "missing_description": "もう一度ログインすると作成が完了します。"
   }
 }

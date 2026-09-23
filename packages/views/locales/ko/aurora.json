@@ -78,5 +78,12 @@
     "amount_positive": "+{{amount}}",
     "amount_negative": "−{{amount}}",
     "balance_after": "변동 후 잔액: {{amount}}"
+  },
+  "workspace": {
+    "unavailable_title": "이 워크스페이스를 열 수 없습니다",
+    "unavailable_description": "삭제되었거나 접근 권한이 없을 수 있습니다.",
+    "open_workspace": "내 워크스페이스 열기",
+    "missing_title": "아직 워크스페이스가 없습니다",
+    "missing_description": "다시 로그인하면 생성이 완료됩니다."
   }
 }

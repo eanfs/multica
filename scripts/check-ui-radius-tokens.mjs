@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const roots = ["apps/web", "apps/desktop", "apps/mobile", "packages/ui", "packages/views"];
+const roots = ["apps/web", "apps/aurora", "apps/desktop", "apps/mobile", "packages/ui", "packages/views"];
 const extensions = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".mdx"]);
 const skippedDirectories = new Set(["node_modules", ".next", ".turbo", "dist", "build", "out"]);
 const radiusNames = ["xs", "sm", "md", "lg", "xl", "2xl", "3xl", "4xl"];
