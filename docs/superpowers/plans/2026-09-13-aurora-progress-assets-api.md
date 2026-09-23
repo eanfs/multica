@@ -133,25 +133,25 @@ MVP 用轮询（Plan 4 `useAuroraGenerationDetail` refetchInterval 3s）。二�
 
 ---
 
-## 完成记录 / Completion record（2026-09-23 回填）
+## 完成记录（2026-09-23 回填）
 
-**Status: complete.** Story #31 CLOSED.
+**状态：全部完成。** story #31 已 CLOSED。
 
-| Task | Ticket | PR | Outcome |
+| Task | Ticket | PR | 结果 |
 | --- | --- | --- | --- |
-| Task 1 — sqlc queries + index migrations | #32 | #39 | merged |
-| Task 2 — `GET /api/aurora/generations` + `/{id}` | #33 | #46 | merged |
-| Task 3 — asset list / download / delete | #34 | #48 | merged |
-| Task 4 — realtime design note | — | — | not implemented by design |
+| Task 1 — sqlc 查询 + 索引迁移 | #32 | #39 | 已合并 |
+| Task 2 — `GET /api/aurora/generations` + `/{id}` | #33 | #46 | 已合并 |
+| Task 3 — asset 列表 / 下载 / 删除 | #34 | #48 | 已合并 |
+| Task 4 — 实时化设计注记 | — | — | 按计划不实现 |
 
-**Deviations from the plan (all confirmed necessary):**
+**与原计划的偏离（均核实为必要）：**
 
-| Where | Deviation | Reason |
+| 处 | 偏离 | 原因 |
 | --- | --- | --- |
-| Task 1 | Migration numbers `506`–`508` (plan assumed `456`–`458`) | The Aurora migration range was renumbered to `500+` |
-| Task 1 | `DeleteAuroraAsset` uses `:execrows`, not `:exec` | The plan's "return row count to detect existence" needs a row count |
-| Task 1 | Both `ListAuroraAssets` filters are `sqlc.narg` | Callers must always pass `workspace_id`; the handler does |
-| Task 3 | Download streams the object where no storage URL is signable, instead of always 302-ing | Deployments without a signable CloudFront/presign URL still need the endpoint to work |
-| Task 3 | The download route cannot be a bare `<img src>` | It needs workspace headers or `?workspace_slug=` — recorded on PR #48 for Plan 4 |
+| Task 1 | 迁移序号取 `506`–`508`（计划假设 `456`–`458`） | Aurora 迁移区间已整体重编号到 `500+` |
+| Task 1 | `DeleteAuroraAsset` 用 `:execrows` 而非 `:exec` | 计划要求「返回行数判断存在性」，`:exec` 不返回行数 |
+| Task 1 | `ListAuroraAssets` 两个过滤都是 `sqlc.narg` | 调用方必须始终传 `workspace_id`；handler 已如此 |
+| Task 3 | 无可签名存储 URL 时改为流式下载，而非固定 302 | 未配 CloudFront/presign 的部署仍需该端点可用 |
+| Task 3 | 下载路由不能用作裸 `<img src>` | 它需要 workspace 头或 `?workspace_slug=`，已在 PR #48 记录给 Plan 4 |
 
-**Acceptance.** All boxes ticked; issue #34 CLOSED with `S4-Done`.
+**验收。** 全部勾选；issue #34 已 CLOSED 并置 `S4-Done`。
