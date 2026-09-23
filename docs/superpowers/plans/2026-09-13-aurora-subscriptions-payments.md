@@ -1375,24 +1375,15 @@ Plan 5 完成后，spec §9.1 的「可对外销售」里程碑即可交付（�
 
 ---
 
-## 实现状态 / Implementation status（2026-09-23 记录）
+## 实现状态（2026-09-23 记录）
 
-**Not started. No code, migration, or dependency from this plan exists in the repository yet.**
+**尚未开始。本计划的任何代码、迁移或依赖在仓库中都不存在。**
 
-Verified by searching the tree at `aeb31e1e9`:
+在 `aeb31e1e9` 上检索仓库核实：
 
-- Plan safety — zero hits for `moderation`, `Moderator`, `blocked_terms`, `ScreenPrompt`, `ScreenAsset`
-  under `server/`. Neither Task 1 nor Task 2 has begun.
-- Plan 5 — zero hits for `aurora_subscription`, `PaymentProvider`, `TierCatalog`, `LimitsForUser`,
-  `tiers.go`; `server/go.mod` has no Stripe dependency. All seven tasks are outstanding. The one
-  adjacent artifact, `LedgerKindExpire` in `server/internal/aurora/credit.go`, is a **reservation**
-  made by Plan 2 for this plan's Task 4 — not an implementation.
+- Plan safety —— `server/` 下 `moderation`、`Moderator`、`blocked_terms`、`ScreenPrompt`、`ScreenAsset` **零命中**。Task 1 与 Task 2 均未开始。
+- Plan 5 —— `aurora_subscription`、`PaymentProvider`、`TierCatalog`、`LimitsForUser`、`tiers.go` **零命中**；`server/go.mod` 无 Stripe 依赖。七个 Task 全部未做。唯一沾边的产物 `server/internal/aurora/credit.go` 里的 `LedgerKindExpire`，是 Plan 2 为**本计划 Task 4 预留**的，不是实现。
 
-**Before implementing, renumber the migrations.** This plan's file numbers were chosen against a
-much earlier repository state (Plan safety assumes `459`); `server/migrations/` is now past `509`.
-Follow the same rules as Plan 2 — `CREATE [UNIQUE] INDEX CONCURRENTLY`, one index per migration file,
-and register each in `cmd/migrate/main.go`'s `concurrentIndexCleanups`.
+**动手前必须先重排迁移序号。** 本计划的文件序号是对着远早于当前的仓库状态定的（Plan safety 假设从 `459` 起），而 `server/migrations/` 现在已过 `509`。规则同 Plan 2——`CREATE [UNIQUE] INDEX CONCURRENTLY`、每个索引单独一个迁移文件、并逐个注册进 `cmd/migrate/main.go` 的 `concurrentIndexCleanups`。
 
-**Why it matters.** These two plans are what stand between the current technical MVP and the spec's
-"sellable" milestone: Plan 5 provides the paid tiers and Stripe, and Plan safety provides the content
-moderation and entitlement gates that bound them.
+**为什么重要。** 这两个计划是当前技术 MVP 与 spec「可对外销售」里程碑之间的最后两块：Plan 5 提供付费档位与 Stripe，Plan safety 提供界定它们的**内容审核**与**权益门禁**。

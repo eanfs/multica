@@ -272,31 +272,22 @@ Plan 3 完成。后续顺序：Plan 3.5（进度与作品库 API）→ Plan 4（
 
 ---
 
-## 完成记录 / Completion record（2026-09-23 回填）
+## 完成记录（2026-09-23 回填）
 
-**Status: complete except Task 6, which is split between this repository and external infrastructure.**
+**状态：除 Task 6 外全部完成；Task 6 拆分为「本仓库内」与「外部基础设施」两部分。**
 
-| Task | Ticket | PR | Outcome |
+| Task | Ticket | PR | 结果 |
 | --- | --- | --- | --- |
-| Task 1 — seed 16 workspace-scoped system agents | #24 | #40 | merged |
-| Task 2 — enqueue + reserve credits (with failure compensation) | #25 | #41 | merged |
-| Task 3 — managed runtime registration | #26 | #42 | merged |
-| Task 4 — completion writeback → asset + settlement/refund | #27 | #45 | merged |
-| Task 5 (infra) — self-host fleet controller | #28 | #43 | merged |
-| Task 6 (infra) — sandbox image + tool-surface narrowing | #29 | #47 (code side only) | **partial** |
-| Task 7 — creation-endpoint rate gate | #30 | #44 | merged |
+| Task 1 — 种子 16 个 workspace 级系统 Agent | #24 | #40 | 已合并 |
+| Task 2 — 入队 + 预留积分（含失败补偿） | #25 | #41 | 已合并 |
+| Task 3 — managed runtime 注册 | #26 | #42 | 已合并 |
+| Task 4 — 完成回写 → asset + 结算/退款 | #27 | #45 | 已合并 |
+| Task 5（infra）— self-host fleet controller | #28 | #43 | 已合并 |
+| Task 6（infra）— 沙箱镜像 + 工具面收窄 | #29 | #47（仅代码侧） | **部分完成** |
+| Task 7 — 创建端点频率闸门 | #30 | #44 | 已合并 |
 
-**Task 6 boundary.** The repository-side portion is merged: additive per-agent launch narrowing
-(`PermissionMode` / `DisallowedTools`, defaulting to existing behaviour), `MaxTurns = 30` for Aurora
-system agents, and fail-closed refusal to run an Aurora task on an un-onboarded provider. Still
-pending and **not** implemented here: the sandbox image build, container/VM isolation, egress
-allowlist, resource caps, `MULTICA_AGENT_TIMEOUT` as the daemon-level first gate, and the HyperFrames
-text-to-video smoke. This split is documented in
-[`2026-09-22-aurora-sandbox-tool-surface.md`](2026-09-22-aurora-sandbox-tool-surface.md).
+**Task 6 的边界。** 仓库内部分已合并：`pkg/agent` 的 additive per-agent 启动收窄（`PermissionMode` / `DisallowedTools`，默认不改变现有用户 agent 行为）、Aurora 系统 agent 的 `MaxTurns = 30`、以及在未 onboard 的 provider 上**拒绝执行 Aurora 任务（fail-closed）**，而不是静默回退到 `bypassPermissions`。仍未做且**不在本仓库实现**：沙箱镜像构建、容器/VM 隔离、出网白名单、资源上限、作为 daemon 级第一道闸的 `MULTICA_AGENT_TIMEOUT`，以及 HyperFrames 文生视频冒烟。该拆分记录在 [`2026-09-22-aurora-sandbox-tool-surface.md`](2026-09-22-aurora-sandbox-tool-surface.md)。
 
-**Acceptance.** The fake-CLI argument-assertion criterion is met. The HyperFrames smoke criterion is
-not — it requires the sandbox image. Issue #29 stays open.
+**验收。** fake-CLI 参数断言那条已满足；HyperFrames 冒烟那条**未满足**——它需要沙箱镜像。issue #29 保持 open。
 
-**Post-completion findings** (found while building Plan 4, tracked as separate issues, not fixed here):
-OAuth login-CSRF #53, core workspace-loss relocation #56, duplicated modules between `apps/web` and
-`apps/aurora` #54, `parseWithFallback` hiding degraded responses #55, e2e baseline #57 / #58.
+**完成后的新发现**（在 Plan 4 期间发现，已单开 issue，不在此修复）：OAuth login-CSRF #53、core 的 workspace-loss 重定向 #56、`apps/web` 与 `apps/aurora` 的重复模块 #54、`parseWithFallback` 掩盖降级响应 #55、e2e 基线 #57 / #58。
