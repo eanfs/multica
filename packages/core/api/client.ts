@@ -924,6 +924,25 @@ export class ApiClient {
     return res.json() as Promise<T>;
   }
 
+  /**
+   * Sends a request over the shared transport (auth + CSRF headers, the CSRF
+   * retry, 401 handling, structured `ApiError`) and returns the decoded body
+   * without validating it. `undefined` means the server answered 204.
+   *
+   * Use this only for a domain that keeps its *whole* contract in its own
+   * package — routes, schemas and parsing together — as `packages/core/aurora`
+   * does. An endpoint added to this class instead decodes with a schema from
+   * `api/schemas.ts` beside its type in `types/`; reaching for `requestJson`
+   * from there would leave shared data unvalidated.
+   *
+   * The `unknown` return is the guard rail that keeps this from being a way to
+   * skip validation: nothing here has been parsed, so a caller cannot hand the
+   * value to the UI without first running it through `parseWithFallback`.
+   */
+  async requestJson(path: string, init?: RequestInit): Promise<unknown> {
+    return this.fetch<unknown>(path, init);
+  }
+
   // Auth
   async sendCode(email: string): Promise<void> {
     await this.fetch("/auth/send-code", {
