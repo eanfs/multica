@@ -2,6 +2,7 @@
   "frontend": [
     ".github/actions/frontend-quality/**",
     "apps/web/**",
+    "apps/aurora/**",
     "apps/desktop/**",
     "apps/ui-lab/**",
     "packages/**",

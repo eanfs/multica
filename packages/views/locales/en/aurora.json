@@ -78,5 +78,12 @@
     "amount_positive": "+{{amount}}",
     "amount_negative": "−{{amount}}",
     "balance_after": "Balance after: {{amount}}"
+  },
+  "workspace": {
+    "unavailable_title": "This workspace isn't available",
+    "unavailable_description": "It may have been removed, or you may not have access to it.",
+    "open_workspace": "Open my workspace",
+    "missing_title": "No workspace yet",
+    "missing_description": "Signing in again finishes setting it up."
   }
 }
