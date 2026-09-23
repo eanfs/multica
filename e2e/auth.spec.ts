@@ -21,10 +21,7 @@ test.describe("Authentication", () => {
 
   test("unauthenticated user is redirected to /login", async ({ page }) => {
     const api = await createTestApi();
-    const [workspace] = await api.getWorkspaces();
-    if (!workspace) {
-      throw new Error("E2E workspace was not created");
-    }
+    const workspace = api.getWorkspace();
 
     await page.goto(`/${workspace.slug}/issues`, { waitUntil: "domcontentloaded" });
     await page.waitForURL("**/login", { timeout: 10000, waitUntil: "domcontentloaded" });

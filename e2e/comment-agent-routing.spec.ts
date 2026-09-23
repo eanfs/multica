@@ -14,7 +14,7 @@ test("reply stays with the thread agent and hides unused historical fallbacks", 
   let runtimeId: string | undefined;
   const agentIds: string[] = [];
   try {
-    const workspace = (await api.getWorkspaces())[0]!;
+    const workspace = api.getWorkspace();
     const user = await db.query<{ id: string }>(`SELECT id FROM "user" WHERE email = $1`, [api.getEmail()]);
     const userId = user.rows[0]!.id;
     const runtime = await db.query<{ id: string }>(

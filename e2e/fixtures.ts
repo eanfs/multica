@@ -119,22 +119,18 @@ export class TestApiClient {
     return res.json();
   }
 
-  setWorkspaceId(id: string) {
-    this.workspaceId = id;
-  }
-
-  setWorkspaceSlug(slug: string) {
-    this.workspaceSlug = slug;
-  }
-
+  /**
+   * Resolve the workspace with `slug`, creating it when it does not exist yet.
+   *
+   * Login auto-provisions a personal workspace, so the list is never empty and
+   * "no slug match" must mean "create" — never "use whatever the user already
+   * has". The previous `?? workspaces[0]` fallback returned that personal
+   * workspace and left the requested slug uncreated, so the suite silently ran
+   * against a workspace no spec had named (#57).
+   */
   async ensureWorkspace(name = "E2E Workspace", slug = "e2e-workspace") {
-    const workspaces = await this.getWorkspaces();
-    const workspace = workspaces.find((item) => item.slug === slug) ?? workspaces[0];
-    if (workspace) {
-      this.workspaceId = workspace.id;
-      this.workspaceSlug = workspace.slug;
-      return workspace;
-    }
+    const existing = await this.findWorkspaceBySlug(slug);
+    if (existing) return this.selectWorkspace(existing);
 
     const res = await this.authedFetch("/api/workspaces", {
       method: "POST",
@@ -142,20 +138,27 @@ export class TestApiClient {
     });
     if (res.ok) {
       const created = (await res.json()) as TestWorkspace;
-      this.workspaceId = created.id;
-      this.workspaceSlug = created.slug;
-      return created;
+      if (created.slug !== slug) {
+        throw new Error(`Workspace create returned slug ${created.slug}, expected ${slug}`);
+      }
+      return this.selectWorkspace(created);
     }
 
-    const refreshed = await this.getWorkspaces();
-    const created = refreshed.find((item) => item.slug === slug) ?? refreshed[0];
-    if (created) {
-      this.workspaceId = created.id;
-      this.workspaceSlug = created.slug;
-      return created;
-    }
+    // A concurrent run can create the slug between the list and the POST (409),
+    // and a failed response can still have committed. Re-resolve by slug only:
+    // any other workspace belongs to someone else.
+    const created = await this.findWorkspaceBySlug(slug);
+    if (created) return this.selectWorkspace(created);
 
     throw new Error(`Failed to ensure workspace ${slug}: ${res.status} ${res.statusText}`);
+  }
+
+  /** The workspace `ensureWorkspace` selected — what every later request is scoped to. */
+  getWorkspace(): { id: string; slug: string } {
+    if (!this.workspaceId || !this.workspaceSlug) {
+      throw new Error("No workspace selected; call ensureWorkspace first");
+    }
+    return { id: this.workspaceId, slug: this.workspaceSlug };
   }
 
   async markUserOnboarded() {
@@ -390,6 +393,17 @@ export class TestApiClient {
       throw new Error("Test API client is not logged in");
     }
     return this.email;
+  }
+
+  private async findWorkspaceBySlug(slug: string) {
+    const workspaces = await this.getWorkspaces();
+    return workspaces.find((item) => item.slug === slug);
+  }
+
+  private selectWorkspace(workspace: TestWorkspace) {
+    this.workspaceId = workspace.id;
+    this.workspaceSlug = workspace.slug;
+    return workspace;
   }
 
   private async authedFetch(path: string, init?: RequestInit) {

@@ -22,10 +22,7 @@ test("renders assistant quick actions and sends the hidden prompt", async ({
   let runtimeId: string | null = null;
 
   try {
-    const workspace = (await api.getWorkspaces())[0];
-    if (!workspace) throw new Error("E2E workspace missing");
-    api.setWorkspaceId(workspace.id);
-    api.setWorkspaceSlug(workspace.slug);
+    const workspace = api.getWorkspace();
 
     const user = await db.query<{ id: string }>(
       `SELECT id::text FROM "user" WHERE email = $1 LIMIT 1`,
