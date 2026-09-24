@@ -82,6 +82,7 @@ vi.mock("@multica/core/types", () => ({}));
 // ---------------------------------------------------------------------------
 
 import { LoginPage, validateCliCallback } from "./login-page";
+import { beginGoogleOAuthFlow, verifyGoogleOAuthState } from "./oauth-state";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -408,6 +409,73 @@ describe("LoginPage", () => {
     expect(
       screen.queryByRole("button", { name: /continue with google/i }),
     ).not.toBeInTheDocument();
+  });
+
+  // Regression: #53 — state has to carry a per-flow CSRF nonce, and the nonce
+  // has to be minted (and remembered) at flow start. Building it during render
+  // would regenerate it on every re-render and never match on the way back.
+  describe("Google OAuth state nonce (#53)", () => {
+    it("builds state when the flow starts, not while rendering", async () => {
+      const buildState = vi.fn(() => "nonce:render-time-state");
+      renderWithI18n(
+        <LoginPage
+          onSuccess={onSuccess}
+          google={{
+            clientId: "goog-123",
+            redirectUri: "http://localhost/cb",
+            state: buildState,
+          }}
+        />,
+      );
+
+      expect(buildState).not.toHaveBeenCalled();
+
+      const user = userEvent.setup();
+      await user.click(
+        screen.getByRole("button", { name: /continue with google/i }),
+      );
+
+      expect(buildState).toHaveBeenCalledTimes(1);
+      expect(window.location.href).toContain(
+        "state=nonce%3Arender-time-state",
+      );
+    });
+
+    it("mints a distinct, verifiable nonce per flow", async () => {
+      renderWithI18n(
+        <LoginPage
+          onSuccess={onSuccess}
+          google={{
+            clientId: "goog-123",
+            redirectUri: "http://localhost/cb",
+            state: () => beginGoogleOAuthFlow(["next:/invite/abc"]),
+          }}
+        />,
+      );
+
+      const user = userEvent.setup();
+      const button = screen.getByRole("button", {
+        name: /continue with google/i,
+      });
+
+      await user.click(button);
+      const first = new URL(window.location.href).searchParams.get("state")!;
+      await user.click(button);
+      const second = new URL(window.location.href).searchParams.get("state")!;
+
+      expect(first).not.toBe(second);
+      // The carrier still rides along, and both flows stay valid: starting a
+      // second flow must not invalidate the first.
+      expect(first).toMatch(/^nonce:[A-Za-z0-9_-]{43},next:\/invite\/abc$/);
+      expect(verifyGoogleOAuthState(first)).toEqual({
+        ok: true,
+        carriers: ["next:/invite/abc"],
+      });
+      expect(verifyGoogleOAuthState(second)).toEqual({
+        ok: true,
+        carriers: ["next:/invite/abc"],
+      });
+    });
   });
 
   // -------------------------------------------------------------------------

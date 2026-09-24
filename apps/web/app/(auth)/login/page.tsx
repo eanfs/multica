@@ -27,7 +27,11 @@ import { Button } from "@multica/ui/components/ui/button";
 import { Loader2 } from "lucide-react";
 import { setLoggedInCookie } from "@/features/auth/auth-cookie";
 import Link from "next/link";
-import { LoginPage, validateCliCallback } from "@multica/views/auth";
+import {
+  LoginPage,
+  beginGoogleOAuthFlow,
+  validateCliCallback,
+} from "@multica/views/auth";
 import { useT } from "@multica/views/i18n";
 
 /**
@@ -149,21 +153,23 @@ function LoginPageContent() {
     router.push(await resolveLoggedInDestination(qc, onboarded, list));
   };
 
-  // Build Google OAuth state: encode platform, next URL, and CLI callback
-  // params so the callback can redirect to the right place after login.
-  // CLI callback/state must survive the Google OAuth round-trip so the
+  // Build Google OAuth state carriers: encode platform, next URL, and CLI
+  // callback params so the callback can redirect to the right place after
+  // login. CLI callback/state must survive the Google OAuth round-trip so the
   // post-login callback page can redirect the JWT back to the CLI's local
   // HTTP listener (critical for headless / WSL2 environments).
-  const googleState = [
+  //
+  // The CSRF nonce is deliberately not part of this list: it is minted and
+  // remembered by `beginGoogleOAuthFlow` when the user starts the flow, and
+  // prepended to these carriers.
+  const googleStateCarriers = [
     platform === "desktop" ? "platform:desktop" : "",
     nextUrl ? `next:${nextUrl}` : "",
     cliCallbackRaw && validateCliCallback(cliCallbackRaw)
       ? `cli_callback:${encodeURIComponent(cliCallbackRaw)}`
       : "",
     cliState ? `cli_state:${encodeURIComponent(cliState)}` : "",
-  ]
-    .filter(Boolean)
-    .join(",") || undefined;
+  ].filter(Boolean);
 
   // While the desktop handoff is in progress (or has produced a token/error),
   // render a dedicated screen instead of flashing the login form or redirecting
@@ -223,7 +229,7 @@ function LoginPageContent() {
           ? {
               clientId: googleClientId,
               redirectUri: `${window.location.origin}/auth/callback`,
-              state: googleState,
+              state: () => beginGoogleOAuthFlow(googleStateCarriers),
             }
           : undefined
       }

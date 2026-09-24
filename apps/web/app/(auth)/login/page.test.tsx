@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multica/core/i18n/react";
 import enCommon from "@multica/views/locales/en/common.json";
@@ -22,6 +23,7 @@ function createWrapper() {
 
 const {
   mockIssueCliToken,
+  mockGetMe,
   mockListWorkspaces,
   mockListMyInvitations,
   mockPush,
@@ -30,6 +32,7 @@ const {
   authStateRef,
 } = vi.hoisted(() => ({
   mockIssueCliToken: vi.fn(),
+  mockGetMe: vi.fn(),
   mockListWorkspaces: vi.fn(),
   mockListMyInvitations: vi.fn(),
   mockPush: vi.fn(),
@@ -75,6 +78,13 @@ vi.mock("@/features/auth/auth-cookie", () => ({
   setLoggedInCookie: vi.fn(),
 }));
 
+// A configured instance is the only one that renders the Google button, which
+// is the flow the OAuth state nonce protects.
+vi.mock("@multica/core/config", () => ({
+  useConfigStore: (selector: (s: { googleClientId: string }) => unknown) =>
+    selector({ googleClientId: "goog-123" }),
+}));
+
 // Mock api
 vi.mock("@multica/core/api", () => ({
   api: {
@@ -82,11 +92,12 @@ vi.mock("@multica/core/api", () => ({
     listMyInvitations: mockListMyInvitations,
     verifyCode: vi.fn(),
     setToken: vi.fn(),
-    getMe: vi.fn(),
+    getMe: mockGetMe,
     issueCliToken: mockIssueCliToken,
   },
 }));
 
+import { verifyGoogleOAuthState } from "@multica/views/auth";
 import LoginPage from "./page";
 
 describe("LoginPage", () => {
@@ -97,11 +108,73 @@ describe("LoginPage", () => {
     authStateRef.state.isLoading = false;
     mockListWorkspaces.mockResolvedValue([]);
     mockListMyInvitations.mockResolvedValue([]);
+    // No existing session: the CLI-session probe must fall through rather than
+    // blow up on an unmocked response.
+    mockGetMe.mockRejectedValue(new Error("unauthorized"));
   });
 
   // Shared LoginPage behavior is canonical in
   // packages/views/auth/login-page.test.tsx. This wrapper suite only owns web
   // platform handoff and redirect behavior.
+
+  // Regression: #53 — `state` used to be nothing but carriers, so the callback
+  // had no way to tell whether the authorization code belonged to the browser
+  // that started the flow. It now leads with a per-flow CSRF nonce, and every
+  // carrier the login flow relies on still rides along behind it.
+  it("starts the Google flow with a nonce in front of the existing carriers", async () => {
+    searchParamsState.params = new URLSearchParams({
+      platform: "desktop",
+      next: "/invite/abc",
+      cli_callback: "http://127.0.0.1:9876/callback",
+      cli_state: "cli-state",
+    });
+
+    const hrefSetter = vi.fn();
+    const originalLocation = window.location;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      writable: true,
+      value: {
+        ...originalLocation,
+        origin: "https://app.example",
+        set href(value: string) {
+          hrefSetter(value);
+        },
+      },
+    });
+
+    try {
+      render(<LoginPage />, { wrapper: createWrapper() });
+
+      const user = userEvent.setup();
+      await user.click(
+        screen.getByRole("button", { name: /continue with google/i }),
+      );
+
+      const redirect = new URL(hrefSetter.mock.calls[0]![0] as string);
+      expect(redirect.origin).toBe("https://accounts.google.com");
+      const state = redirect.searchParams.get("state")!;
+      const parts = state.split(",");
+
+      expect(parts[0]).toMatch(/^nonce:[A-Za-z0-9_-]{43}$/);
+      expect(parts.slice(1)).toEqual([
+        "platform:desktop",
+        "next:/invite/abc",
+        "cli_callback:http%3A%2F%2F127.0.0.1%3A9876%2Fcallback",
+        "cli_state:cli-state",
+      ]);
+      // Remembered, so the callback can compare against it before exchanging.
+      expect(verifyGoogleOAuthState(state)).toEqual({
+        ok: true,
+        carriers: parts.slice(1),
+      });
+    } finally {
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: originalLocation,
+      });
+    }
+  });
 
   // Regression: MUL-1080 — if the user is already authenticated on the web
   // and the Desktop app redirects them to /login?platform=desktop, the web

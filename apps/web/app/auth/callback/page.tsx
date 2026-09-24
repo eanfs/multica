@@ -8,7 +8,11 @@ import { workspaceKeys } from "@multica/core/workspace/queries";
 import { paths, resolvePostAuthDestination } from "@multica/core/paths";
 import { api } from "@multica/core/api";
 import { createLogger } from "@multica/core/logger";
-import { validateCliCallback, redirectToCliCallback } from "@multica/views/auth";
+import {
+  validateCliCallback,
+  redirectToCliCallback,
+  verifyGoogleOAuthState,
+} from "@multica/views/auth";
 import {
   Card,
   CardHeader,
@@ -50,8 +54,21 @@ function CallbackContent() {
       return;
     }
 
-    const state = searchParams.get("state") || "";
-    const stateParts = state.split(",");
+    // CSRF gate (#53): the state must carry the nonce this browser minted when
+    // it started the flow. Checked — and consumed — before any code is
+    // exchanged, so a callback URL holding someone else's authorization code
+    // never reaches the server. A missing state is a rejection, not a pass.
+    const stateCheck = verifyGoogleOAuthState(searchParams.get("state"));
+    if (!stateCheck.ok) {
+      authLogger.warn(
+        "Google OAuth state failed CSRF validation",
+        stateCheck.reason,
+      );
+      setError({ kind: "state_mismatch" });
+      return;
+    }
+
+    const stateParts = stateCheck.carriers;
     const isDesktop = stateParts.includes("platform:desktop");
     const nextPart = stateParts.find((p) => p.startsWith("next:"));
     // Strip "next:" prefix, then drop anything that isn't a safe relative path
@@ -121,11 +138,10 @@ function CallbackContent() {
 
           // 2. Un-onboarded users may have pending invitations on their
           //    email even when no `next=` was carried (came from a fresh
-          //    login on multica.ai instead of clicking the email link,
-          //    or `state` was lost across the round-trip). Look them up by
-          //    email and route to the batch /invitations page if any.
-          //    Already-onboarded users skip this lookup — their new invites
-          //    surface in the sidebar dropdown, not as a forced wall.
+          //    login on multica.ai instead of clicking the email link). Look
+          //    them up by email and route to the batch /invitations page if
+          //    any. Already-onboarded users skip this lookup — their new
+          //    invites surface in the sidebar dropdown, not as a forced wall.
           if (!onboarded) {
             try {
               const invites = await api.listMyInvitations();
@@ -178,6 +194,8 @@ function CallbackContent() {
         return t(($) => $.web.callback.google_account_no_email);
       case "oauth_code_invalid":
         return t(($) => $.web.callback.oauth_code_invalid);
+      case "state_mismatch":
+        return t(($) => $.web.callback.state_mismatch);
     }
   })();
 
