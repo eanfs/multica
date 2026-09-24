@@ -1,11 +1,14 @@
 import { expect, type Page } from "@playwright/test";
 import { TestApiClient } from "./fixtures";
 
-const DEFAULT_E2E_NAME = "E2E User";
+export const DEFAULT_E2E_NAME = "E2E User";
 const E2E_WORKER = process.env.TEST_PARALLEL_INDEX ?? process.env.TEST_WORKER_INDEX ?? "0";
 const E2E_RUN_ID = process.env.E2E_RUN_ID ?? `${Date.now().toString(36)}-${process.pid.toString(36)}`;
-const DEFAULT_E2E_EMAIL = `e2e-${E2E_WORKER}-${E2E_RUN_ID}@multica.ai`;
-const DEFAULT_E2E_WORKSPACE = `e2e-workspace-${E2E_WORKER}-${E2E_RUN_ID}`;
+export const DEFAULT_E2E_EMAIL = `e2e-${E2E_WORKER}-${E2E_RUN_ID}@multica.ai`;
+// The workspace the suite runs against. `ensureWorkspace` creates it under this
+// exact slug; `openWorkspaceMenu` and `settings.spec.ts` select it by name.
+export const DEFAULT_E2E_WORKSPACE_NAME = `E2E Workspace ${E2E_WORKER}`;
+export const DEFAULT_E2E_WORKSPACE = `e2e-workspace-${E2E_WORKER}-${E2E_RUN_ID}`;
 
 async function waitForIssuesPage(page: Page) {
   await waitForPageText(page, "New Issue");
@@ -38,7 +41,7 @@ export async function loginAsDefault(page: Page): Promise<string> {
   const api = new TestApiClient();
   await api.login(DEFAULT_E2E_EMAIL, DEFAULT_E2E_NAME);
   const workspace = await api.ensureWorkspace(
-    `E2E Workspace ${E2E_WORKER}`,
+    DEFAULT_E2E_WORKSPACE_NAME,
     DEFAULT_E2E_WORKSPACE,
   );
   await api.markUserOnboarded();
@@ -64,7 +67,7 @@ export async function loginAsDefault(page: Page): Promise<string> {
 export async function createTestApi(): Promise<TestApiClient> {
   const api = new TestApiClient();
   await api.login(DEFAULT_E2E_EMAIL, DEFAULT_E2E_NAME);
-  await api.ensureWorkspace(`E2E Workspace ${E2E_WORKER}`, DEFAULT_E2E_WORKSPACE);
+  await api.ensureWorkspace(DEFAULT_E2E_WORKSPACE_NAME, DEFAULT_E2E_WORKSPACE);
   await api.markUserOnboarded();
   return api;
 }

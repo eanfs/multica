@@ -78,10 +78,7 @@ test.describe("Chat attachments", () => {
     // Resolve the workspace + caller so we can seed an agent/runtime/session
     // directly via SQL. Going through the HTTP API would require modelling
     // local-daemon ownership which isn't needed for this contract test.
-    const workspaces = await api.getWorkspaces();
-    const ws = workspaces[0]!;
-    api.setWorkspaceSlug(ws.slug);
-    api.setWorkspaceId(ws.id);
+    const ws = api.getWorkspace();
 
     const userRow = await pgc.query(
       `SELECT id FROM "user" WHERE email = $1 LIMIT 1`,
