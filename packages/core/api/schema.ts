@@ -17,8 +17,24 @@ export interface ParseOptions {
 }
 
 /**
+ * A validated value, plus whether it came from a body the schema accepted.
+ *
+ * `parseWithFallback` collapses both outcomes into `T`, which is what a caller
+ * that only needs something renderable wants. A caller for which the fallback
+ * would be a *claim* rather than a placeholder — "your wallet holds 0", "this
+ * workspace has no skills" — needs to tell the two apart, and reads the flag
+ * here instead of guessing from an empty list.
+ */
+export interface ParseResult<T> {
+  /** The parsed value, or `fallback` when the body failed validation. */
+  value: T;
+  /** True when `value` is the fallback rather than the server's body. */
+  degraded: boolean;
+}
+
+/**
  * Validate a JSON value parsed from an API response against a zod schema,
- * returning the parsed value on success or `fallback` on failure.
+ * returning the parsed value plus whether it was actually readable.
  *
  * On failure we log a warning with the endpoint and zod's structured error,
  * but never throw — the UI layer must keep rendering. This is the boundary
@@ -35,14 +51,14 @@ export interface ParseOptions {
  *
  * See CLAUDE.md "API Response Compatibility" for when to reach for this.
  */
-export function parseWithFallback<T>(
+export function parseWithFallbackResult<T>(
   data: unknown,
   schema: ZodType,
   fallback: T,
   opts: ParseOptions,
-): T {
+): ParseResult<T> {
   const result = schema.safeParse(data);
-  if (result.success) return result.data as T;
+  if (result.success) return { value: result.data as T, degraded: false };
   schemaLogger.warn(
     `API response failed schema validation: ${opts.endpoint}`,
     {
@@ -51,5 +67,23 @@ export function parseWithFallback<T>(
       received: data,
     },
   );
-  return fallback;
+  return { value: fallback, degraded: true };
+}
+
+/**
+ * The same validation, collapsed to the value.
+ *
+ * This is the shape almost every caller wants: something of the declared type
+ * to render, whether or not the body behind it was readable. It stays the
+ * narrow `T` it always was, so a caller that cannot act on degradation is not
+ * made to carry a flag it would ignore — reach for `parseWithFallbackResult`
+ * when the fallback would otherwise read as a fact.
+ */
+export function parseWithFallback<T>(
+  data: unknown,
+  schema: ZodType,
+  fallback: T,
+  opts: ParseOptions,
+): T {
+  return parseWithFallbackResult(data, schema, fallback, opts).value;
 }
