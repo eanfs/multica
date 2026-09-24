@@ -80,6 +80,10 @@
       "entry": ["eslint.config.mjs"],
       "project": ["**/*.{ts,tsx}"]
     },
+    "packages/nextjs": {
+      "entry": ["eslint.config.mjs"],
+      "project": ["**/*.{ts,tsx}"]
+    },
 
     "packages/eslint-config": {},
     "packages/tsconfig": {}

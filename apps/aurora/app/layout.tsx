@@ -4,8 +4,8 @@ import { cn } from "@multica/ui/lib/utils";
 import { RESOURCES } from "@multica/views/locales";
 import { ThemeProvider } from "@/components/theme-provider";
 import { AuroraProviders } from "@/components/aurora-providers";
-import { getRequestLocale } from "@/lib/request-locale";
-import { HTML_LANG } from "@/lib/html-lang";
+import { getRequestLocale } from "@multica/nextjs/request-locale";
+import { HTML_LANG } from "@multica/core/i18n/html-lang";
 import {
   resolveBrowserApiBaseUrl,
   resolveBrowserWsUrl,

@@ -1,0 +1,37 @@
+{
+  "name": "@multica/nextjs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "exports": {
+    "./auth-cookie": "./auth-cookie.ts",
+    "./client-os": "./client-os.ts",
+    "./in-app-history": "./in-app-history.ts",
+    "./request-locale": "./request-locale.ts",
+    "./use-user-locale-sync-enabled": "./use-user-locale-sync-enabled.ts"
+  },
+  "dependencies": {
+    "@multica/core": "workspace:*",
+    "next": "^16.3.4"
+  },
+  "peerDependencies": {
+    "react": "catalog:"
+  },
+  "devDependencies": {
+    "@multica/eslint-config": "workspace:*",
+    "@multica/tsconfig": "workspace:*",
+    "@testing-library/react": "catalog:",
+    "@types/react": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "jsdom": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

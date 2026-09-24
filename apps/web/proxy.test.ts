@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
-import { MULTICA_LOCALE_HEADER } from "./lib/locale-routing";
+import { MULTICA_LOCALE_HEADER } from "@multica/core/i18n/locale-routing";
 import { config, proxy } from "./proxy";
 
 function makeRequest(

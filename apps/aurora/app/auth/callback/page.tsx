@@ -20,7 +20,10 @@ import { verifyGoogleOAuthState } from "@multica/views/auth";
 import { Loader2 } from "lucide-react";
 import { resolveAuroraDestination } from "@/lib/routes";
 import { NoWorkspaceNotice } from "@/components/no-workspace-notice";
-import { callbackErrorFrom, type CallbackError } from "./callback-error";
+import {
+  callbackErrorFrom,
+  type CallbackError,
+} from "@multica/core/auth/callback-error";
 
 const authLogger = createLogger("aurora.auth.callback");
 

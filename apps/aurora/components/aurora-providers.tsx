@@ -6,12 +6,12 @@ import { createBrowserCookieLocaleAdapter } from "@multica/core/i18n/browser";
 import type { LocaleResources, SupportedLocale } from "@multica/core/i18n";
 import packageJson from "../package.json";
 import { AuroraNavigationProvider } from "@/platform/navigation";
-import { detectWebOS } from "@/platform/client-os";
-import { useUserLocaleSyncEnabled } from "@/platform/use-user-locale-sync-enabled";
+import { detectWebOS } from "@multica/nextjs/client-os";
+import { useUserLocaleSyncEnabled } from "@multica/nextjs/use-user-locale-sync-enabled";
 import {
   setLoggedInCookie,
   clearLoggedInCookie,
-} from "@/features/auth/auth-cookie";
+} from "@multica/nextjs/auth-cookie";
 
 // Derive the WebSocket URL from the page origin so self-hosted / LAN
 // deployments work without an explicit runtime wsUrl. The Next.js runtime proxy

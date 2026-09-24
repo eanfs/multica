@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { describe, expect, it } from "vitest";
-import { ApiError } from "@multica/core/api";
+import { ApiError } from "../api";
 import { callbackErrorFrom } from "./callback-error";
 
 describe("callbackErrorFrom", () => {

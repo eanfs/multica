@@ -10,7 +10,7 @@ import { useAuthStore } from "@multica/core/auth";
 import { useT } from "@multica/views/i18n";
 import { useWorkspaceSeen } from "@multica/views/workspace/use-workspace-seen";
 import { Sparkles } from "lucide-react";
-import { workspaceSlugFromPathname } from "@/lib/workspace-slug-from-pathname";
+import { workspaceSlugFromPathname } from "@multica/core/workspace/workspace-slug-from-pathname";
 import { AuroraShell } from "@/components/aurora-shell";
 import { WorkspaceUnavailable } from "@/components/workspace-unavailable";
 

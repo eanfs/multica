@@ -23,7 +23,10 @@ import {
 import { Button } from "@multica/ui/components/ui/button";
 import { useT } from "@multica/views/i18n";
 import { Loader2 } from "lucide-react";
-import { callbackErrorFrom, type CallbackError } from "./callback-error";
+import {
+  callbackErrorFrom,
+  type CallbackError,
+} from "@multica/core/auth/callback-error";
 
 const authLogger = createLogger("auth.callback");
 

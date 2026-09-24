@@ -74,7 +74,7 @@ vi.mock("@multica/core/auth", async () => {
 });
 
 // Mock auth-cookie
-vi.mock("@/features/auth/auth-cookie", () => ({
+vi.mock("@multica/nextjs/auth-cookie", () => ({
   setLoggedInCookie: vi.fn(),
 }));
 

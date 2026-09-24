@@ -25,7 +25,7 @@ import {
 } from "@multica/ui/components/ui/card";
 import { Button } from "@multica/ui/components/ui/button";
 import { Loader2 } from "lucide-react";
-import { setLoggedInCookie } from "@/features/auth/auth-cookie";
+import { setLoggedInCookie } from "@multica/nextjs/auth-cookie";
 import Link from "next/link";
 import {
   LoginPage,

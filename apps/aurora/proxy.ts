@@ -4,7 +4,7 @@ import { isReservedSlug } from "@multica/core/paths";
 import {
   MULTICA_LOCALE_HEADER,
   resolveLocaleFromSignals,
-} from "./lib/locale-routing";
+} from "@multica/core/i18n/locale-routing";
 import {
   isBackendSurfacePath,
   runtimeRewriteDestination,

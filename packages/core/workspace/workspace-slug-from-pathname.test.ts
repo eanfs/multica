@@ -36,5 +36,6 @@ describe("workspaceSlugFromPathname", () => {
     // comparing its own slug against these can never match.
     expect(workspaceSlugFromPathname("/login")).toBe("login");
     expect(workspaceSlugFromPathname("/workspaces/new")).toBe("workspaces");
+    expect(workspaceSlugFromPathname("/auth/callback")).toBe("auth");
   });
 });

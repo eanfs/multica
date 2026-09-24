@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { captureException } from "@multica/core/analytics";
 import type { SupportedLocale } from "@multica/core/i18n";
 import { resolveEmergencyLocale } from "./emergency-locale";
-import { HTML_LANG } from "@/lib/html-lang";
+import { HTML_LANG } from "@multica/core/i18n/html-lang";
 
 /**
  * Route-level error boundary for the web app. Next.js renders this (replacing

@@ -1,6 +1,6 @@
 import type { SupportedLocale } from "@multica/core/i18n";
 export { docsHrefForLocale } from "@/lib/docs-href";
-import { getRequestLocale } from "@/lib/request-locale";
+import { getRequestLocale } from "@multica/nextjs/request-locale";
 
 export const getUseCaseLocale = getRequestLocale;
 
