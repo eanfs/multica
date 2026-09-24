@@ -246,6 +246,13 @@ type Handler struct {
 	// blocklist plus local image screening); a vendor screening API replaces the
 	// implementation, not the call sites.
 	Moderation aurora.Moderator
+	// Payments is Aurora's Stripe surface. Nil when the deployment has no Stripe
+	// keys, which every billing endpoint reads as "payments disabled" and
+	// answers 503 — never as "free". Tests substitute a fake.
+	Payments aurora.PaymentProvider
+	// Tiers is Aurora's product catalog: what each plan grants and what it
+	// limits. Built once from config, so the numbers have a single source.
+	Tiers *aurora.TierCatalog
 	// Entitlements supplies workspace-scoped commercial gates. A nil provider
 	// preserves self-hosted behavior without extra reads.
 	Entitlements entitlement.Provider
@@ -528,6 +535,18 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		AutopilotService:             service.NewAutopilotService(queries, txStarter, bus, taskSvc),
 		Credit:                       creditSvc,
 		Moderation:                   aurora.NewDefaultModerator(),
+		Payments: aurora.NewStripeProvider(
+			cfg.StripeSecretKey,
+			cfg.StripeWebhookSecret,
+		),
+		Tiers: aurora.NewTierCatalog(
+			cfg.AuroraStripePriceCreatorMonthly,
+			cfg.AuroraStripePriceCreatorYearly,
+			cfg.AuroraStripePriceProMonthly,
+			cfg.AuroraStripePriceProYearly,
+			cfg.AuroraStripePriceTopup5,
+			cfg.AuroraStripePriceTopup20,
+		),
 		EmailService:                 emailService,
 		UpdateStore:                  NewInMemoryUpdateStore(),
 		ModelListStore:               NewInMemoryModelListStore(),

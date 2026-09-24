@@ -438,6 +438,19 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		LLMMaxRetries:            opts.LLMMaxRetries,
 		ServerVersion:            normalizeServerVersion(version),
 		AuroraSandboxToken:       strings.TrimSpace(os.Getenv("AURORA_SANDBOX_TOKEN")),
+		// Aurora billing (Plan 5). The Stripe keys stay server-side — see
+		// handler.AppConfig, which never carries them. Leaving the secret key or
+		// the webhook secret unset disables payments entirely (503), and leaving
+		// a price id unset disables just that one checkout, so a half-configured
+		// deployment cannot charge the wrong price.
+		StripeSecretKey:                 strings.TrimSpace(os.Getenv("STRIPE_SECRET_KEY")),
+		StripeWebhookSecret:             strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET")),
+		AuroraStripePriceCreatorMonthly: strings.TrimSpace(os.Getenv("AURORA_STRIPE_PRICE_CREATOR_MONTHLY")),
+		AuroraStripePriceCreatorYearly:  strings.TrimSpace(os.Getenv("AURORA_STRIPE_PRICE_CREATOR_YEARLY")),
+		AuroraStripePriceProMonthly:     strings.TrimSpace(os.Getenv("AURORA_STRIPE_PRICE_PRO_MONTHLY")),
+		AuroraStripePriceProYearly:      strings.TrimSpace(os.Getenv("AURORA_STRIPE_PRICE_PRO_YEARLY")),
+		AuroraStripePriceTopup5:         strings.TrimSpace(os.Getenv("AURORA_STRIPE_PRICE_TOPUP_5")),
+		AuroraStripePriceTopup20:        strings.TrimSpace(os.Getenv("AURORA_STRIPE_PRICE_TOPUP_20")),
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
 	invitationRateLimits := handler.DefaultInvitationRateLimits()
@@ -1408,6 +1421,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 	// Public API
 	r.Get("/api/config", h.GetConfig)
+	// Aurora's Stripe webhook. Outside the authenticated group on purpose:
+	// Stripe cannot present a session cookie, so the request is authenticated
+	// by its Stripe-Signature header instead (verified in the handler before
+	// the body is read as anything but bytes). The user a purchase belongs to
+	// comes from the event's own metadata, never from request headers.
+	r.Post("/api/aurora/billing/stripe/webhook", h.StripeWebhook)
 	r.With(contactSalesRL).Post("/api/contact-sales", h.CreateContactSales)
 	// Public share-link preview — no auth: shows the workspace name/slug and
 	// inviter so a not-yet-logged-in visitor can see what they're joining.
@@ -1923,6 +1942,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			// balance.
 			r.With(handler.RequireHumanActor).Get("/api/aurora/billing/balance", h.GetAuroraBillingBalance)
 			r.With(handler.RequireHumanActor).Get("/api/aurora/billing/transactions", h.ListAuroraBillingTransactions)
+			// Aurora plan checkout. Human-only for the same reason the reads
+			// above are: a task token may spend its owner's credits but must not
+			// start a purchase in their name.
+			r.With(handler.RequireHumanActor).Post("/api/aurora/billing/checkout", h.CreateAuroraCheckout)
+			r.With(handler.RequireHumanActor).Post("/api/aurora/billing/topup/checkout", h.CreateAuroraTopupCheckout)
 
 			// Assignee frequency
 			r.Get("/api/assignee-frequency", h.GetAssigneeFrequency)
