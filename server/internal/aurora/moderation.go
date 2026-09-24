@@ -10,6 +10,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -70,6 +71,7 @@ type Moderator interface {
 // moderation feature.
 const (
 	defaultAssetFetchTimeout = 10 * time.Second
+	defaultAssetDialTimeout  = 5 * time.Second
 	maxAssetBytes            = 16 << 20
 	maxScreenedPixels        = 25_000_000
 	// nsfwSkinRatioThreshold is the fraction of sampled pixels that may be
@@ -397,19 +399,13 @@ type AssetFetcher interface {
 }
 
 // HTTPAssetFetcher fetches asset bytes over HTTP(S) under a timeout and a hard
-// size cap.
+// size cap, through the guarded client newAssetHTTPClient builds.
 type HTTPAssetFetcher struct {
-	// Client defaults to a client with defaultAssetFetchTimeout.
-	Client *http.Client
 	// MaxBytes defaults to maxAssetBytes.
 	MaxBytes int64
 }
 
 func (f HTTPAssetFetcher) Fetch(ctx context.Context, mediaURL string) ([]byte, error) {
-	client := f.Client
-	if client == nil {
-		client = &http.Client{Timeout: defaultAssetFetchTimeout}
-	}
 	maxBytes := f.MaxBytes
 	if maxBytes <= 0 {
 		maxBytes = maxAssetBytes
@@ -419,7 +415,7 @@ func (f HTTPAssetFetcher) Fetch(ctx context.Context, mediaURL string) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	resp, err := client.Do(req)
+	resp, err := newAssetHTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -437,4 +433,81 @@ func (f HTTPAssetFetcher) Fetch(ctx context.Context, mediaURL string) ([]byte, e
 		return nil, fmt.Errorf("asset exceeds the %d-byte screening limit", maxBytes)
 	}
 	return raw, nil
+}
+
+// newAssetHTTPClient builds the client the default fetcher uses, and the
+// reason it is not http.DefaultClient.
+//
+// The URL being fetched is chosen by whoever reports the artifact, and the
+// artifact report is produced by an agent running inside the sandbox. Prompt
+// injection reaching that agent therefore reaches this fetch, which makes it an
+// SSRF sink: without a guard, a reported media_url of
+// http://169.254.169.254/latest/meta-data/ would have the server read cloud
+// instance credentials and store them as an "asset".
+//
+// Two defences, and both are needed:
+//
+//   - The dialer checks the address it is about to connect to, not the hostname
+//     it was given. Checking after a separate resolution would leave a
+//     DNS-rebinding window between the check and the connection; checking the
+//     dialled address closes it.
+//   - Redirects are refused. A 302 from an allowed host would otherwise hand
+//     the fetch to a host the URL validation never saw, and the object-store
+//     URL a daemon reports is final — there is nothing to follow.
+func newAssetHTTPClient() *http.Client {
+	// http.DefaultTransport is always a *http.Transport, and cloning it keeps
+	// the tuned pool settings and ProxyFromEnvironment support that a
+	// deployment's egress proxy depends on.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	dialer := &net.Dialer{Timeout: defaultAssetDialTimeout}
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		if len(addresses) == 0 {
+			return nil, fmt.Errorf("asset host %q resolved to no address", host)
+		}
+		// Every address has to be allowed, not just the one about to be dialled.
+		// A host that resolves to both a public and an internal address would
+		// otherwise pass the check on one and connect to the other, whichever
+		// the resolver happened to order first.
+		for _, resolved := range addresses {
+			if !isPublicIP(resolved.IP) {
+				return nil, fmt.Errorf("asset host %q resolves to non-public address %s", host, resolved.IP)
+			}
+		}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(addresses[0].IP.String(), port))
+	}
+
+	return &http.Client{
+		Timeout:   defaultAssetFetchTimeout,
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return fmt.Errorf("asset fetch must not redirect")
+		},
+	}
+}
+
+// isPublicIP reports whether the moderator may connect to an address. Loopback,
+// private, link-local, unique-local, multicast and unspecified ranges are all
+// refused: link-local is where cloud instance metadata lives, and the rest is
+// the internal network the fetch has no business reaching.
+func isPublicIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() ||
+		ip.IsMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	// 100.64.0.0/10 (carrier-grade NAT) has no stdlib predicate. IPv4-mapped
+	// IPv6 addresses reach the predicates above through To4, so they need no
+	// separate case.
+	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+		return false
+	}
+	return true
 }

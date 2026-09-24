@@ -3,6 +3,9 @@ package aurora
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -293,6 +296,79 @@ func TestModeratorScreenAssetAllowsNonImageKindsWithoutFetching(t *testing.T) {
 	// rejected, so an unknown kind is not a blanket bypass.
 	if decision, err := m.ScreenAsset(context.Background(), "file:///etc/passwd", "text"); err != nil || decision.Allowed {
 		t.Fatalf("ScreenAsset(file://, text) = %+v, %v; want blocked", decision, err)
+	}
+}
+
+// TestModeratorAssetFetcherRefusesNonPublicAddresses pins the SSRF guard. The
+// media_url being fetched is chosen by the artifact report, and that report is
+// produced by an agent inside the sandbox — so prompt injection reaching the
+// agent reaches this fetch. Cloud instance metadata lives on link-local, and the
+// deployment's own services live on loopback and the private ranges.
+func TestModeratorAssetFetcherRefusesNonPublicAddresses(t *testing.T) {
+	cases := map[string]bool{
+		"127.0.0.1":                          false, // loopback
+		"127.0.0.53":                         false, // loopback, not just .1
+		"::1":                                false, // IPv6 loopback
+		"169.254.169.254":                    false, // cloud instance metadata
+		"fe80::1":                            false, // IPv6 link-local
+		"10.0.0.5":                           false, // RFC1918
+		"172.16.4.4":                         false, // RFC1918
+		"192.168.1.1":                        false, // RFC1918
+		"fc00::1":                            false, // IPv6 unique-local
+		"100.64.0.1":                         false, // carrier-grade NAT
+		"0.0.0.0":                            false, // unspecified
+		"224.0.0.1":                          false, // multicast
+		"93.184.216.34":                      true,  // ordinary public address
+		"2606:2800:220:1:248:1893:25c8:1946": true,
+	}
+	for raw, want := range cases {
+		t.Run(raw, func(t *testing.T) {
+			ip := net.ParseIP(raw)
+			if ip == nil {
+				t.Fatalf("net.ParseIP(%q) failed", raw)
+			}
+			if got := isPublicIP(ip); got != want {
+				t.Errorf("isPublicIP(%s) = %v, want %v", raw, got, want)
+			}
+		})
+	}
+}
+
+// TestModeratorAssetFetcherRefusesToDialTheGuardRail covers the wiring, not just
+// the predicate: a fetch to a loopback host has to fail without the request
+// leaving the process. The message is asserted because a connection refused by
+// the OS would also error — and would mean the guard is not what stopped it.
+func TestModeratorAssetFetcherRefusesToDialTheGuardRail(t *testing.T) {
+	_, err := HTTPAssetFetcher{}.Fetch(context.Background(), "http://127.0.0.1:9/out.png")
+	if err == nil {
+		t.Fatal("fetching a loopback asset URL succeeded")
+	}
+	if !strings.Contains(err.Error(), "non-public address") {
+		t.Fatalf("fetch error = %v, want the non-public-address refusal", err)
+	}
+
+	// The same guard has to apply to the name, not just the literal: localhost
+	// resolves into the loopback range and must be refused for that reason.
+	_, err = HTTPAssetFetcher{}.Fetch(context.Background(), "http://localhost:9/out.png")
+	if err == nil {
+		t.Fatal("fetching a localhost asset URL succeeded")
+	}
+	if !strings.Contains(err.Error(), "non-public address") {
+		t.Fatalf("fetch error = %v, want the non-public-address refusal", err)
+	}
+}
+
+// TestModeratorAssetFetcherRefusesRedirects pins the second half of the SSRF
+// guard. A redirect is how a permitted host hands the fetch to one the URL
+// validation never saw, so the client has to refuse rather than follow.
+func TestModeratorAssetFetcherRefusesRedirects(t *testing.T) {
+	client := newAssetHTTPClient()
+	if client.CheckRedirect == nil {
+		t.Fatal("the default asset client follows redirects")
+	}
+	req := httptest.NewRequest(http.MethodGet, "https://cdn.example/out.png", nil)
+	if err := client.CheckRedirect(req, nil); err == nil {
+		t.Fatal("CheckRedirect admitted a redirect")
 	}
 }
 
