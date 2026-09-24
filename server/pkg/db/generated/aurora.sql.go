@@ -11,6 +11,38 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countActiveGenerations = `-- name: CountActiveGenerations :one
+SELECT count(*) FROM aurora_generation g
+JOIN agent_task_queue t ON t.id = g.task_id
+WHERE g.user_id = $1
+  AND t.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+`
+
+// Concurrency gate (Task 6): generations whose task has not reached a terminal
+// state. deferred counts as active — a retry armed with a backoff is still work
+// the user has in flight.
+func (q *Queries) CountActiveGenerations(ctx context.Context, userID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveGenerations, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countGenerationsThisMonth = `-- name: CountGenerationsThisMonth :one
+SELECT count(*) FROM aurora_generation
+WHERE user_id = $1 AND created_at >= date_trunc('month', now())
+`
+
+// Monthly generation quota (Task 6). The window is the calendar month, matching
+// the credit grant window so a user cannot spend one tier's quota against
+// another tier's month.
+func (q *Queries) CountGenerationsThisMonth(ctx context.Context, userID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countGenerationsThisMonth, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countWorkspacesForUser = `-- name: CountWorkspacesForUser :one
 SELECT count(*) FROM member WHERE user_id = $1
 `
@@ -197,6 +229,24 @@ func (q *Queries) GetAuroraGenerationByTaskID(ctx context.Context, taskID pgtype
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const getPersonalWorkspaceForUser = `-- name: GetPersonalWorkspaceForUser :one
+SELECT w.id FROM workspace w
+JOIN member m ON m.workspace_id = w.id
+WHERE m.user_id = $1 AND m.role = 'owner'
+ORDER BY w.created_at ASC
+LIMIT 1
+`
+
+// Aurora credits are granted to a personal workspace, but the ledger is keyed by
+// user. The owner membership is the anchor: a user can belong to many
+// workspaces, and the earliest owned one is the personal one created at signup.
+func (q *Queries) GetPersonalWorkspaceForUser(ctx context.Context, userID pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, getPersonalWorkspaceForUser, userID)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const listAuroraAssets = `-- name: ListAuroraAssets :many

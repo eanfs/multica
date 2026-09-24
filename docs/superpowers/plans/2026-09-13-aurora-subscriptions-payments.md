@@ -1373,11 +1373,20 @@ Plan 5 完成后，spec §9.1 的「可对外销售」里程碑即可交付（�
 | 16 | 各文档「后续 Plan 5/尚未编写」陈旧措辞同步为已编写（同步修改） |
 | 17 | 并发索引只注册 `concurrentIndexCleanups`（down 仅 DROP，注册 down-map 挂测试）；`make sqlc`/`make test` 改仓库根执行（无 server/Makefile）（Plan 1/2/3.5 同步修改） |
 
+## 修订记录（2026-09-24 Task 1 实现回写）
+
+| # | 修正 |
+|---|------|
+| 18 | Task 1 迁移序号按仓库现状重排：`460`–`462` → **`512`–`514`**（仓库已到 `511`；「实现状态」一节已预告必须重排）。表 / 唯一索引 / 扫描索引一一对应，无新增文件 |
+| 19 | Task 1 的 Files 清单补 `server/internal/handler/workspace_delete_manifest_test.go`：`TestWorkspaceDeletionManifestCoversPublicSchema` 要求 public schema 里每张表在 `workspaceDeletionManifest` 中显式分类，新表 `aurora_subscription` 记为 `workspaceDeleteKeep`（用户级订阅不属于任何 workspace，删 workspace 不得动它） |
+
 ---
 
 ## 实现状态（2026-09-23 记录）
 
-**尚未开始。本计划的任何代码、迁移或依赖在仓库中都不存在。**
+**2026-09-24 更新：Task 1 已实现**（迁移 `512`–`514`、`aurora_subscription.sql` 查询、`aurora.sql`/`credit.sql` 的 Task 4/6 预留查询），`make test` 全绿。Task 2–7 仍未开始。
+
+**以下为 2026-09-23 快照，除 Task 1 外仍然成立。**
 
 在 `aeb31e1e9` 上检索仓库核实：
 

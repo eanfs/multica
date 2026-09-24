@@ -62,3 +62,29 @@ WHERE id = $1 AND workspace_id = $2;
 
 -- name: CountWorkspacesForUser :one
 SELECT count(*) FROM member WHERE user_id = $1;
+
+-- name: CountGenerationsThisMonth :one
+-- Monthly generation quota (Task 6). The window is the calendar month, matching
+-- the credit grant window so a user cannot spend one tier's quota against
+-- another tier's month.
+SELECT count(*) FROM aurora_generation
+WHERE user_id = $1 AND created_at >= date_trunc('month', now());
+
+-- name: CountActiveGenerations :one
+-- Concurrency gate (Task 6): generations whose task has not reached a terminal
+-- state. deferred counts as active — a retry armed with a backoff is still work
+-- the user has in flight.
+SELECT count(*) FROM aurora_generation g
+JOIN agent_task_queue t ON t.id = g.task_id
+WHERE g.user_id = $1
+  AND t.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred');
+
+-- name: GetPersonalWorkspaceForUser :one
+-- Aurora credits are granted to a personal workspace, but the ledger is keyed by
+-- user. The owner membership is the anchor: a user can belong to many
+-- workspaces, and the earliest owned one is the personal one created at signup.
+SELECT w.id FROM workspace w
+JOIN member m ON m.workspace_id = w.id
+WHERE m.user_id = $1 AND m.role = 'owner'
+ORDER BY w.created_at ASC
+LIMIT 1;

@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS aurora_subscription_status_period_idx;
