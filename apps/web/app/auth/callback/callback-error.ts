@@ -10,7 +10,8 @@ export type CallbackError =
         | "signup_prohibited"
         | "email_not_allowed"
         | "google_account_no_email"
-        | "oauth_code_invalid";
+        | "oauth_code_invalid"
+        | "state_mismatch";
     }
   | { kind: "raw"; text: string };
 

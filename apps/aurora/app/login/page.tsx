@@ -10,7 +10,7 @@ import {
   workspaceListOptions,
 } from "@multica/core/workspace/queries";
 import type { Workspace } from "@multica/core/types";
-import { LoginPage } from "@multica/views/auth";
+import { LoginPage, beginGoogleOAuthFlow } from "@multica/views/auth";
 import { setLoggedInCookie } from "@/features/auth/auth-cookie";
 import { resolveAuroraDestination } from "@/lib/routes";
 import { NoWorkspaceNotice } from "@/components/no-workspace-notice";
@@ -84,8 +84,11 @@ function LoginPageContent() {
               clientId: googleClientId,
               redirectUri: `${window.location.origin}/auth/callback`,
               // `next` has to survive the OAuth round-trip, and `state` is the
-              // only channel that does.
-              state: nextUrl ? `next:${nextUrl}` : undefined,
+              // only channel that does. `beginGoogleOAuthFlow` prepends the
+              // per-flow CSRF nonce the callback compares against before it
+              // exchanges the code.
+              state: () =>
+                beginGoogleOAuthFlow(nextUrl ? [`next:${nextUrl}`] : []),
             }
           : undefined
       }

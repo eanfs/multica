@@ -5,6 +5,11 @@ import { I18nProvider } from "@multica/core/i18n/react";
 import { paths } from "@multica/core/paths";
 import { RESOURCES } from "@multica/views/locales";
 import { ApiError } from "@multica/core/api";
+import {
+  OAUTH_PENDING_NONCES_KEY,
+  beginGoogleOAuthFlow,
+  generateOAuthNonce,
+} from "@multica/views/auth";
 
 const {
   mockPush,
@@ -109,6 +114,16 @@ vi.mock("@multica/core/api", async () => {
 
 import CallbackPage from "./page";
 
+/**
+ * Build the `state` the login page would have handed to Google: carriers
+ * joined behind a nonce this browser minted. Going through the real producer
+ * keeps these tests honest about the CSRF gate — a state that never passed
+ * through it is now a rejected callback.
+ */
+function oauthState(...carriers: string[]): string {
+  return beginGoogleOAuthFlow(carriers);
+}
+
 function renderCallback(locale: SupportedLocale = "en") {
   return render(
     <I18nProvider locale={locale} resources={RESOURCES}>
@@ -129,12 +144,19 @@ describe("CallbackPage", () => {
         window.localStorage.removeItem(k);
       }
     }
+    // Drop any pending OAuth nonce so a flow started by one test cannot
+    // authorize the next one.
+    window.localStorage.removeItem(OAUTH_PENDING_NONCES_KEY);
     // Snapshot keys before deleting — forEach + delete skips entries because
     // the iteration index advances while the underlying list shrinks.
     Array.from(mockSearchParams.keys()).forEach((k) =>
       mockSearchParams.delete(k),
     );
     mockSearchParams.set("code", "test-code");
+    // The login page always hands Google a state carrying a nonce, so a
+    // realistic callback URL has one. Tests that care about the gate override
+    // or delete it.
+    mockSearchParams.set("state", oauthState());
     mockLoginWithGoogle.mockResolvedValue(makeUser());
     mockListWorkspaces.mockResolvedValue([]);
     mockListMyInvitations.mockResolvedValue([]);
@@ -246,7 +268,7 @@ describe("CallbackPage", () => {
     vi.mocked(mockedApi.googleLogin).mockRejectedValue(
       new ApiError("English fallback", 403, "Forbidden", { code: "signup_prohibited" }),
     );
-    mockSearchParams.set("state", state);
+    mockSearchParams.set("state", oauthState(state));
 
     renderCallback("zh-Hans");
 
@@ -257,7 +279,7 @@ describe("CallbackPage", () => {
   });
 
   it("unonboarded user honors a safe next= (e.g. /invite/{id}) so invitees aren't trapped", async () => {
-    mockSearchParams.set("state", "next:/invite/abc123");
+    mockSearchParams.set("state", oauthState("next:/invite/abc123"));
     renderCallback();
     await waitFor(() => {
       expect(mockPush).toHaveBeenCalledWith("/invite/abc123");
@@ -324,7 +346,7 @@ describe("CallbackPage", () => {
     mockLoginWithGoogle.mockResolvedValue(
       makeUser({ onboarded_at: "2026-01-01T00:00:00Z" }),
     );
-    mockSearchParams.set("state", "next:https://evil.example");
+    mockSearchParams.set("state", oauthState("next:https://evil.example"));
 
     renderCallback();
 
@@ -338,7 +360,7 @@ describe("CallbackPage", () => {
     mockLoginWithGoogle.mockResolvedValue(
       makeUser({ onboarded_at: "2026-01-01T00:00:00Z" }),
     );
-    mockSearchParams.set("state", "next:/invite/abc123");
+    mockSearchParams.set("state", oauthState("next:/invite/abc123"));
 
     renderCallback();
 
@@ -370,7 +392,10 @@ describe("CallbackPage", () => {
     try {
       mockSearchParams.set(
         "state",
-        "cli_callback:http://127.0.0.1:46233/callback,cli_state:abc123",
+        oauthState(
+          "cli_callback:http://127.0.0.1:46233/callback",
+          "cli_state:abc123",
+        ),
       );
       mockGoogleLogin.mockResolvedValue({ token: "cli-jwt-token" });
 
@@ -397,7 +422,10 @@ describe("CallbackPage", () => {
   });
 
   it("falls through to normal web flow when state contains invalid cli_callback", async () => {
-    mockSearchParams.set("state", "cli_callback:https://evil.com/callback");
+    mockSearchParams.set(
+      "state",
+      oauthState("cli_callback:https://evil.com/callback"),
+    );
     mockLoginWithGoogle.mockResolvedValue(makeUser());
     mockListWorkspaces.mockResolvedValue([]);
     mockListMyInvitations.mockResolvedValue([]);
@@ -430,7 +458,11 @@ describe("CallbackPage", () => {
     try {
       mockSearchParams.set(
         "state",
-        "platform:desktop,cli_callback:http://localhost:12345/callback,cli_state:mystate",
+        oauthState(
+          "platform:desktop",
+          "cli_callback:http://localhost:12345/callback",
+          "cli_state:mystate",
+        ),
       );
       mockGoogleLogin.mockResolvedValue({ token: "mixed-jwt" });
 
@@ -480,6 +512,73 @@ describe("CallbackPage", () => {
     renderCallback();
     await waitFor(() => {
       expect(mockPush).toHaveBeenCalledWith(paths.workspace("acme").issues());
+    });
+  });
+
+  // Regression: #53 — the state used to be a pure carrier, so any callback URL
+  // holding an attacker's authorization code would be exchanged for a session
+  // in the victim's browser (login-CSRF). The exchange is now gated on the
+  // nonce this browser minted when it started the flow.
+  describe("CSRF gate (#53)", () => {
+    it.each([
+      ["no state at all", null],
+      ["a state with no nonce field", "next:/invite/abc123"],
+      ["a state carrying only the desktop carrier", "platform:desktop"],
+    ])("refuses to exchange the code given %s", async (_case, state) => {
+      const { api: mockedApi } = await import("@multica/core/api");
+      if (state === null) mockSearchParams.delete("state");
+      else mockSearchParams.set("state", state);
+
+      renderCallback("zh-Hans");
+
+      expect(
+        await screen.findByText("本次登录并非从当前浏览器发起，请重新登录。"),
+      ).toBeInTheDocument();
+      expect(mockLoginWithGoogle).not.toHaveBeenCalled();
+      expect(mockedApi.googleLogin).not.toHaveBeenCalled();
+      expect(mockPush).not.toHaveBeenCalled();
+    });
+
+    it("refuses a well-formed nonce this browser never minted", async () => {
+      const { api: mockedApi } = await import("@multica/core/api");
+      // The attacker's own flow, presented to a browser that never started it.
+      mockSearchParams.set(
+        "state",
+        `nonce:${generateOAuthNonce()},next:/invite/abc123`,
+      );
+
+      renderCallback("zh-Hans");
+
+      expect(
+        await screen.findByText("本次登录并非从当前浏览器发起，请重新登录。"),
+      ).toBeInTheDocument();
+      expect(mockLoginWithGoogle).not.toHaveBeenCalled();
+      expect(mockedApi.googleLogin).not.toHaveBeenCalled();
+      expect(mockPush).not.toHaveBeenCalled();
+    });
+
+    it("refuses a captured callback URL replayed a second time", async () => {
+      const { api: mockedApi } = await import("@multica/core/api");
+      const mockGoogleLogin = mockedApi.googleLogin as ReturnType<typeof vi.fn>;
+      mockGoogleLogin.mockResolvedValue({ token: "cli-jwt" });
+      mockSearchParams.set(
+        "state",
+        oauthState("cli_callback:http://127.0.0.1:46233/callback"),
+      );
+
+      const first = renderCallback();
+      await waitFor(() => {
+        expect(mockedApi.googleLogin).toHaveBeenCalledTimes(1);
+      });
+      first.unmount();
+
+      // Same URL, opened again: the nonce was consumed by the first exchange.
+      renderCallback("zh-Hans");
+
+      expect(
+        await screen.findByText("本次登录并非从当前浏览器发起，请重新登录。"),
+      ).toBeInTheDocument();
+      expect(mockedApi.googleLogin).toHaveBeenCalledTimes(1);
     });
   });
 });

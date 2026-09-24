@@ -16,6 +16,7 @@ import {
   CardContent,
 } from "@multica/ui/components/ui/card";
 import { useT } from "@multica/views/i18n";
+import { verifyGoogleOAuthState } from "@multica/views/auth";
 import { Loader2 } from "lucide-react";
 import { resolveAuroraDestination } from "@/lib/routes";
 import { NoWorkspaceNotice } from "@/components/no-workspace-notice";
@@ -50,24 +51,25 @@ function CallbackContent() {
       return;
     }
 
+    // CSRF gate (#53): the state must carry the nonce this browser minted when
+    // it started the flow. Checked — and consumed — before the code is
+    // exchanged, so a callback URL holding someone else's authorization code
+    // never reaches the server. A missing state is a rejection, not a pass.
+    const stateCheck = verifyGoogleOAuthState(searchParams.get("state"));
+    if (!stateCheck.ok) {
+      authLogger.warn(
+        "Google OAuth state failed CSRF validation",
+        stateCheck.reason,
+      );
+      setError({ kind: "state_mismatch" });
+      return;
+    }
+
     // `state` round-trips through Google, so it is attacker-controlled by the
-    // time it returns: anything salvaged from it is sanitized before use.
-    //
-    // Known debt, inherited from apps/web's identical flow and deliberately not
-    // diverged here: this `state` is a carrier, not a CSRF nonce. It is whatever
-    // the login page put in `state` and is never compared against a value the
-    // browser kept, so nothing ties the code being exchanged to the browser that
-    // started the flow — the shape of a login-CSRF
-    // where a victim's browser is walked through someone else's authorization
-    // code. The `sanitizeNextUrl` below bounds where the result can be sent, not
-    // who it belongs to.
-    //
-    // The fix is to issue the nonce when the flow starts and require it back
-    // before exchanging the code, which touches all three clients plus the
-    // backend that owns the callback contract — a change for its own issue, not
-    // for the app wiring that added this second copy of the flow.
-    const stateParts = (searchParams.get("state") ?? "").split(",");
-    const nextPart = stateParts.find((p) => p.startsWith("next:"));
+    // time it returns: anything salvaged from it is sanitized before use. The
+    // nonce check above bounds *who* the code belongs to; `sanitizeNextUrl`
+    // bounds *where* the logged-in user can be sent.
+    const nextPart = stateCheck.carriers.find((p) => p.startsWith("next:"));
     const nextUrl = sanitizeNextUrl(nextPart ? nextPart.slice(5) : null);
 
     loginWithGoogle(code, `${window.location.origin}/auth/callback`)
@@ -116,6 +118,8 @@ function CallbackContent() {
           return t(($) => $.web.callback.google_account_no_email);
         case "oauth_code_invalid":
           return t(($) => $.web.callback.oauth_code_invalid);
+        case "state_mismatch":
+          return t(($) => $.web.callback.state_mismatch);
       }
     })();
 
