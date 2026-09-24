@@ -22,6 +22,7 @@ import { Spinner } from "@multica/ui/components/ui/spinner";
 import { Textarea } from "@multica/ui/components/ui/textarea";
 import {
   auroraAssetDownloadPath,
+  isAuroraDegraded,
   isAuroraGenerationTerminal,
   isAuroraInsufficientCreditsError,
   isAuroraRateLimitError,
@@ -119,7 +120,11 @@ function ComposerBody({
 
   const generationId = outcome.kind === "started" ? outcome.generationId : "";
   const detail = useAuroraGenerationDetail(generationId);
-  const generation = detail.data;
+  const generation = detail.data?.value;
+  // A body the schema rejected resolves the query without a generation to show,
+  // so it is "cannot see it right now" for the same reason a failed read is —
+  // and not, as it would render otherwise, a progress line that never moves.
+  const progressUnreadable = detail.isError || isAuroraDegraded(detail.data);
 
   const trimmedPrompt = prompt.trim();
   // One submission per drawer. A second POST reserves the skill's credits a
@@ -145,8 +150,8 @@ function ComposerBody({
         prompt: trimmedPrompt,
       });
       setOutcome(
-        created
-          ? { kind: "started", generationId: created.id }
+        created.value
+          ? { kind: "started", generationId: created.value.id }
           : { kind: "unreadable" },
       );
     } catch (error) {
@@ -229,16 +234,18 @@ function ComposerBody({
       ) : null}
 
       {/* An accepted generation always says something about itself. The detail
-          read can be in flight, and it can fail — the poll stops on a failed
-          read (../core/aurora/queries.ts) — and in both cases the drawer used to
-          render nothing at all, which reads as "the submit did nothing" and
+          read can be in flight, and it can fail or answer with a body the
+          schema rejects — the poll stops on a failed read
+          (../core/aurora/queries.ts) — and in all of those cases the drawer used
+          to render nothing at all, which reads as "the submit did nothing" and
           invites a second one.
 
-          A *failed* read is reported next to the last status rather than
-          instead of it: React Query keeps the data a failed refetch could not
-          replace, so one dropped poll tick says "here is where it was, and I
-          cannot see it now" instead of throwing away a status that was read
-          successfully a moment ago. */}
+          A read the client could not use is reported next to the last status
+          rather than instead of it: React Query keeps the data a failed refetch
+          could not replace, so one dropped poll tick says "here is where it was,
+          and I cannot see it now" instead of throwing away a status that was
+          read successfully a moment ago. A degraded body leaves nothing to keep
+          — it replaced the cache with a null — so it says only the first half. */}
       {outcome.kind === "started" ? (
         <>
           {generation ? (
@@ -263,7 +270,7 @@ function ComposerBody({
                 </p>
               ) : null}
             </div>
-          ) : detail.isError ? null : (
+          ) : progressUnreadable ? null : (
             <div className="flex items-center gap-2">
               <Spinner aria-hidden="true" />
               <p className="text-caption text-muted-foreground">
@@ -272,7 +279,7 @@ function ComposerBody({
             </div>
           )}
 
-          {detail.isError ? (
+          {progressUnreadable ? (
             <Alert variant="destructive">
               <CircleAlert aria-hidden="true" />
               <AlertDescription>
@@ -354,7 +361,13 @@ function SubmitFailure({
 }) {
   const { t } = useT("aurora");
   const locale = useLocale();
-  const { data: balance } = useAuroraBalance();
+  const { data: balancePayload } = useAuroraBalance();
+  // A degraded balance parses to 0 rather than to nothing, which would turn the
+  // fallback into a quoted figure. Read as absent, exactly like a pending or
+  // failed wallet read.
+  const balance = isAuroraDegraded(balancePayload)
+    ? undefined
+    : balancePayload?.value;
 
   if (isAuroraInsufficientCreditsError(error)) {
     const cost = formatCredits(skill.credits, locale);
@@ -365,9 +378,10 @@ function SubmitFailure({
         <AlertDescription>
           {/* The 402 itself is what makes this prompt true, so the price alone
               is a complete sentence. The balance is added only when there is
-              one to show: while the wallet query is pending or failed there is
-              no number here, and "you have 0" would be a claim the client never
-              read — the user would top up against a figure we invented. */}
+              one to show: while the wallet query is pending, failed, or
+              unreadable there is no number here, and "you have 0" would be a
+              claim the client never read — the user would top up against a
+              figure we invented. */}
           {balance === undefined
             ? t(($) => $.composer.insufficient_cost_only, { cost })
             : t(($) => $.composer.insufficient_description, {

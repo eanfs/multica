@@ -7,6 +7,7 @@ import { Progress } from "@multica/ui/components/ui/progress";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import {
   isAuroraCheckoutConflictError,
+  isAuroraDegraded,
   isAuroraPaymentsUnavailableError,
   useAuroraBalance,
   useAuroraGenerations,
@@ -97,7 +98,7 @@ export function AuroraBilling() {
     refetchSubscription,
   ]);
 
-  const transactions = transactionsQuery.data ?? [];
+  const transactions = transactionsQuery.data?.value ?? [];
 
   // A ledger row's `reference` is a generation id for a charge or its refund,
   // and a grant key (`sub:`/`signup:`) for everything else. Only the first kind
@@ -105,12 +106,15 @@ export function AuroraBilling() {
   // below are built once and both misses fall through to the kind.
   const { skillIdByGeneration, skillNameById } = useMemo(() => {
     const skillIdByGeneration = new Map<string, string>();
-    for (const generation of generationsQuery.data ?? []) {
+    for (const generation of generationsQuery.data?.value ?? []) {
       skillIdByGeneration.set(generation.id, generation.skillId);
     }
     return {
       skillIdByGeneration,
-      skillNameById: skillDisplayNamesById(skillsQuery.data ?? [], locale),
+      skillNameById: skillDisplayNamesById(
+        skillsQuery.data?.value ?? [],
+        locale,
+      ),
     };
   }, [generationsQuery.data, skillsQuery.data, locale]);
 
@@ -141,18 +145,28 @@ export function AuroraBilling() {
     transactionsQuery.isPending ||
     subscriptionQuery.isPending ||
     topupsQuery.isPending;
-  // A failed read is only fatal when it left nothing behind: a background
-  // refetch that failed over cached data is stale but still readable. Billing
-  // state is included here because hiding a failed plan read or rendering a
-  // failed catalog read as "no packs" would misrepresent a purchase boundary.
+  // A read the schema rejected is fatal on its own, because its fallback is a
+  // number rather than a blank: a corrupted balance parses to 0, and "you have
+  // 0 credits" is not a degraded rendering of the truth — it is a different
+  // statement, and one that sends the user to top up against it. The ledger
+  // degrades to an empty list, which reads as "you have never spent anything".
+  //
+  // A *failed* read is only fatal when it left nothing behind: a background
+  // refetch that failed over rows already in cache is a stale ledger, and
+  // replacing a readable balance and ledger with an error card is the worse
+  // trade. Same rule as the library. Billing state is included here because
+  // hiding a failed plan read or rendering a failed catalog read as "no packs"
+  // would misrepresent a purchase boundary.
   const loadFailed =
     (transactionsQuery.isError && transactions.length === 0) ||
+    isAuroraDegraded(transactionsQuery.data) ||
     (balanceQuery.isError && balanceQuery.data === undefined) ||
+    isAuroraDegraded(balanceQuery.data) ||
     (subscriptionQuery.isError && subscriptionQuery.data === undefined) ||
     (topupsQuery.isError && topupsQuery.data === undefined);
 
   const balance = formatMicroCredits(
-    balanceQuery.data?.availableMicro ?? 0,
+    balanceQuery.data?.value?.availableMicro ?? 0,
     locale,
   );
   const topups = topupsQuery.data ?? [];

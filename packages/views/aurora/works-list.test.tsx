@@ -78,12 +78,20 @@ function renderWorks() {
   return renderWithI18n(<WorksList />);
 }
 
+/**
+ * A resolved read, shaped the way `parseAurora*` hands it to the query: the
+ * payload plus whether the body behind it was readable.
+ */
+function read<T>(value: T, degraded = false) {
+  return { data: { value, degraded }, isPending: false };
+}
+
 describe("WorksList", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.generations.mockReturnValue({ data: [generation()], isPending: false });
-    mocks.assets.mockReturnValue({ data: [asset()], isPending: false });
-    mocks.skills.mockReturnValue({ data: [POSTER], isPending: false });
+    mocks.generations.mockReturnValue(read([generation()]));
+    mocks.assets.mockReturnValue(read([asset()]));
+    mocks.skills.mockReturnValue(read([POSTER]));
   });
 
   it("lists a generation with the skill that produced it", () => {
@@ -99,10 +107,7 @@ describe("WorksList", () => {
     // A failed generation is refunded in full (aurora.go's completion path
     // writes creditsCharged 0), so the amount it reserved is not a cost —
     // printing it under "credits" claims a spend that never happened.
-    mocks.generations.mockReturnValue({
-      data: [generation({ status: "failed" })],
-      isPending: false,
-    });
+    mocks.generations.mockReturnValue(read([generation({ status: "failed" })]));
 
     renderWorks();
 
@@ -113,10 +118,9 @@ describe("WorksList", () => {
   it("names the skill as unknown rather than blank when the catalog has dropped it", () => {
     // A generation outlives the catalog entry that made it, so the row has to
     // say something the reader can act on instead of rendering nothing.
-    mocks.generations.mockReturnValue({
-      data: [generation({ skillId: "retired-skill" })],
-      isPending: false,
-    });
+    mocks.generations.mockReturnValue(
+      read([generation({ skillId: "retired-skill" })]),
+    );
 
     renderWorks();
 
@@ -124,10 +128,9 @@ describe("WorksList", () => {
   });
 
   it("links every asset to its download route", () => {
-    mocks.assets.mockReturnValue({
-      data: [asset(), asset({ id: "asset-2", kind: "video", format: "mp4" })],
-      isPending: false,
-    });
+    mocks.assets.mockReturnValue(
+      read([asset(), asset({ id: "asset-2", kind: "video", format: "mp4" })]),
+    );
 
     renderWorks();
 
@@ -144,10 +147,7 @@ describe("WorksList", () => {
   });
 
   it("does not repeat an asset's kind when it has no format to show above it", () => {
-    mocks.assets.mockReturnValue({
-      data: [asset({ format: null })],
-      isPending: false,
-    });
+    mocks.assets.mockReturnValue(read([asset({ format: null })]));
 
     renderWorks();
 
@@ -222,14 +222,50 @@ describe("WorksList", () => {
     expect(screen.getByText("a launch poster")).toBeInTheDocument();
   });
 
+  it("stays silent about unknown skills when the catalog body could not be read", () => {
+    // A degraded catalog parses to an empty list, so it is not "the catalog
+    // dropped this entry" either — same silence as a failed read.
+    mocks.skills.mockReturnValue(read([], true));
+
+    renderWorks();
+
+    expect(screen.queryByText("Unknown skill")).not.toBeInTheDocument();
+    expect(screen.getByText("a launch poster")).toBeInTheDocument();
+  });
+
   it("offers the empty copy before anything has been generated", () => {
-    mocks.generations.mockReturnValue({ data: [], isPending: false });
-    mocks.assets.mockReturnValue({ data: [], isPending: false });
+    mocks.generations.mockReturnValue(read([]));
+    mocks.assets.mockReturnValue(read([]));
 
     renderWorks();
 
     expect(screen.getByText("No generations yet")).toBeInTheDocument();
     expect(screen.getByText("No content yet")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
+  });
+
+  it("reports a list it could not read as a failed load, not as an empty library", () => {
+    // GH #55: a malformed 200 parses to [] and resolves the query, so the
+    // screen used to claim the workspace had generated nothing.
+    mocks.generations.mockReturnValue(read([], true));
+    mocks.assets.mockReturnValue(read([], true));
+
+    renderWorks();
+
+    expect(screen.getByText("Could not load your works")).toBeInTheDocument();
+    expect(screen.queryByText("No generations yet")).not.toBeInTheDocument();
+    expect(screen.queryByText("No content yet")).not.toBeInTheDocument();
+  });
+
+  it("reports the unreadable half even when the other list resolved", () => {
+    // One read is enough: the library is one screen, and a screen that cannot
+    // be trusted about its assets is not a screen that can be trusted about
+    // anything on it. Same rule a failed read already followed.
+    mocks.assets.mockReturnValue(read([], true));
+
+    renderWorks();
+
+    expect(screen.getByText("Could not load your works")).toBeInTheDocument();
+    expect(screen.queryByText("a launch poster")).not.toBeInTheDocument();
   });
 });

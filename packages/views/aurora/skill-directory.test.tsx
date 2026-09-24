@@ -116,10 +116,13 @@ function cards() {
 describe("SkillDirectory", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.skills.mockReturnValue({ data: ALL_SKILLS, isPending: false });
+    mocks.skills.mockReturnValue({
+      data: { value: ALL_SKILLS, degraded: false },
+      isPending: false,
+    });
     mocks.detail.mockReturnValue({ data: undefined, isPending: true });
     mocks.balance.mockReturnValue({
-      data: { availableMicro: 0 },
+      data: { value: { availableMicro: 0 }, degraded: false },
       isPending: false,
     });
   });
@@ -198,6 +201,29 @@ describe("SkillDirectory", () => {
     expect(
       screen.getByText("Could not load the skill directory"),
     ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(refetch).toHaveBeenCalled();
+  });
+
+  it("reports a catalog it could not read as a failed load, not an empty directory", async () => {
+    // GH #55: a 200 whose body the schema rejected parses to an empty catalog
+    // and resolves the query, so `isError` is false. Without the degraded flag
+    // this rendered as "No matching skills" — a claim the client never read.
+    const user = userEvent.setup();
+    const refetch = vi.fn();
+    mocks.skills.mockReturnValue({
+      data: { value: [], degraded: true },
+      isPending: false,
+      refetch,
+    });
+
+    renderDirectory();
+
+    expect(
+      screen.getByText("Could not load the skill directory"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No matching skills")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Try again" }));
     expect(refetch).toHaveBeenCalled();

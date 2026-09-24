@@ -76,6 +76,14 @@ export const auroraWalletKeys = {
 // queries below that can drift on their own therefore set a stale-time; the
 // catalog, which is a server-side constant (`aurora/catalog.go`), keeps the
 // default.
+//
+// Most `data` below is a `ParseResult`: the payload plus whether the body it
+// came from was readable. A degraded read is *not* an error state — nothing
+// threw, so `isError` stays false — which means a view that only checks
+// `isError` renders the fallback as the response. Views combine the two with
+// `isAuroraDegraded` (./api). The plan and the pack catalog are the exception:
+// their parsers throw on a malformed body, so those queries surface a real
+// error state instead.
 
 export function auroraSkillsOptions(wsId: string) {
   return queryOptions({
@@ -103,9 +111,9 @@ export function auroraGenerationDetailOptions(wsId: string, id: string) {
     queryFn: () => getAuroraGeneration(id),
     enabled: wsId.length > 0 && id.length > 0,
     // MVP progress: poll while the generation can still change, stop once it
-    // cannot. A malformed-but-successful body parses to null, which is not
-    // terminal, so it keeps polling rather than parking the screen on an empty
-    // result — the next tick is what recovers it.
+    // cannot. A malformed-but-successful body degrades to a null value, which
+    // is not terminal, so it keeps polling rather than parking the screen on an
+    // empty result — the next tick is what recovers it.
     //
     // A *failed* read stops instead. `refetchInterval` ignores query status
     // (QueryObserver re-arms the timer unconditionally), so without this an
@@ -115,7 +123,7 @@ export function auroraGenerationDetailOptions(wsId: string, id: string) {
     // terminal error state by then, so polling it again buys nothing.
     refetchInterval: (query) =>
       query.state.status === "error" ||
-      isAuroraGenerationTerminal(query.state.data?.status)
+      isAuroraGenerationTerminal(query.state.data?.value?.status)
         ? false
         : AURORA_GENERATION_POLL_MS,
   });

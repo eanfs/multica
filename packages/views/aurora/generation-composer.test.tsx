@@ -88,6 +88,15 @@ async function submitPrompt(prompt = "a launch poster") {
   return user;
 }
 
+/**
+ * A read, shaped the way `parseAurora*` hands it over: the payload plus whether
+ * the body behind it was readable. Used for both the create mutation's result
+ * and the query's `data`.
+ */
+function payload<T>(value: T, degraded = false) {
+  return { value, degraded };
+}
+
 describe("GenerationComposer", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -98,15 +107,15 @@ describe("GenerationComposer", () => {
       refetch: mocks.detailRefetch,
     });
     mocks.balance.mockReturnValue({
-      data: { availableMicro: 100 * MICRO },
+      data: payload({ availableMicro: 100 * MICRO }),
       isPending: false,
     });
   });
 
   it("sends the prompt and follows the generation it started", async () => {
-    mocks.create.mockResolvedValue(detail({ status: "queued" }));
+    mocks.create.mockResolvedValue(payload(detail({ status: "queued" })));
     mocks.detail.mockReturnValue({
-      data: detail({ status: "running" }),
+      data: payload(detail({ status: "running" })),
       isPending: false,
     });
 
@@ -182,21 +191,23 @@ describe("GenerationComposer", () => {
   });
 
   it("shows the finished assets and the app's library link", async () => {
-    mocks.create.mockResolvedValue(detail());
+    mocks.create.mockResolvedValue(payload(detail()));
     mocks.detail.mockReturnValue({
-      data: detail({
-        status: "completed",
-        assets: [
-          {
-            id: "asset-1",
-            generationId: "gen-1",
-            kind: "image",
-            mediaUrl: "https://cdn.test/poster.png",
-            format: "png",
-            createdAt: "2026-09-23T00:00:00Z",
-          },
-        ],
-      }),
+      data: payload(
+        detail({
+          status: "completed",
+          assets: [
+            {
+              id: "asset-1",
+              generationId: "gen-1",
+              kind: "image",
+              mediaUrl: "https://cdn.test/poster.png",
+              format: "png",
+              createdAt: "2026-09-23T00:00:00Z",
+            },
+          ],
+        }),
+      ),
       isPending: false,
     });
 
@@ -211,9 +222,9 @@ describe("GenerationComposer", () => {
   });
 
   it("omits the library link when the host app supplies no route", async () => {
-    mocks.create.mockResolvedValue(detail());
+    mocks.create.mockResolvedValue(payload(detail()));
     mocks.detail.mockReturnValue({
-      data: detail({ status: "completed" }),
+      data: payload(detail({ status: "completed" })),
       isPending: false,
     });
 
@@ -230,9 +241,9 @@ describe("GenerationComposer", () => {
     // A second POST reserves the skill's credits again, and the drawer can only
     // follow one generation — so the button is not a retry once the server has
     // accepted the first call.
-    mocks.create.mockResolvedValue(detail());
+    mocks.create.mockResolvedValue(payload(detail()));
     mocks.detail.mockReturnValue({
-      data: detail({ status: "running" }),
+      data: payload(detail({ status: "running" })),
       isPending: false,
     });
 
@@ -248,7 +259,7 @@ describe("GenerationComposer", () => {
     // A 2xx whose body will not parse means the generation may well exist and
     // its credits are already reserved, so the generic "try again" copy would
     // walk the user into a second charge.
-    mocks.create.mockResolvedValue(null);
+    mocks.create.mockResolvedValue(payload(null, true));
 
     renderComposer({});
     await submitPrompt();
@@ -267,7 +278,7 @@ describe("GenerationComposer", () => {
     // The copy sends the user to the library before starting another, so the
     // button has to agree with it: a second POST here reserves the skill's
     // credits again for a generation the first one may well have started.
-    mocks.create.mockResolvedValue(null);
+    mocks.create.mockResolvedValue(payload(null, true));
 
     const user = userEvent.setup();
     renderComposer({});
@@ -285,7 +296,7 @@ describe("GenerationComposer", () => {
     // and rendering nothing here is what let the drawer look like a submit that
     // never happened.
     const user = userEvent.setup();
-    mocks.create.mockResolvedValue(detail());
+    mocks.create.mockResolvedValue(payload(detail()));
     mocks.detail.mockReturnValue({
       data: undefined,
       isPending: false,
@@ -308,9 +319,9 @@ describe("GenerationComposer", () => {
     // React Query keeps the data a failed refetch could not replace, so one
     // dropped poll tick reports the error *beside* the last known status
     // instead of replacing a status that was read successfully a moment ago.
-    mocks.create.mockResolvedValue(detail());
+    mocks.create.mockResolvedValue(payload(detail()));
     mocks.detail.mockReturnValue({
-      data: detail({ status: "running" }),
+      data: payload(detail({ status: "running" })),
       isPending: false,
       isError: true,
       refetch: mocks.detailRefetch,
@@ -325,6 +336,26 @@ describe("GenerationComposer", () => {
     ).toBeInTheDocument();
   });
 
+  it("reports a progress read it could not parse instead of waiting forever", async () => {
+    // GH #55: a 2xx body the schema rejected leaves a null generation and
+    // resolves the query, so `isError` is false. The drawer used to sit on the
+    // spinner for a generation it had no status for.
+    mocks.create.mockResolvedValue(payload(detail()));
+    mocks.detail.mockReturnValue({
+      data: payload(null, true),
+      isPending: false,
+      refetch: mocks.detailRefetch,
+    });
+
+    renderComposer({});
+    await submitPrompt();
+
+    expect(
+      await screen.findByText("Could not read this generation's progress."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Generating")).not.toBeInTheDocument();
+  });
+
   it("does not state a balance it could not read", async () => {
     // Quoting "you have 0" off an unloaded wallet sends the user to top up
     // against a number the client invented.
@@ -332,6 +363,26 @@ describe("GenerationComposer", () => {
       new ApiError("insufficient credits", 402, "Payment Required"),
     );
     mocks.balance.mockReturnValue({ data: undefined, isPending: true });
+
+    renderComposer({});
+    await submitPrompt();
+
+    expect(await screen.findByText("Not enough credits")).toBeInTheDocument();
+    expect(
+      screen.getByText("This skill costs 760 credits."),
+    ).toBeInTheDocument();
+  });
+
+  it("does not state a balance it could not parse", async () => {
+    // A corrupted wallet body parses to 0 — a number, not a blank — so this is
+    // the one case where the fallback would be quoted as a fact (GH #55).
+    mocks.create.mockRejectedValue(
+      new ApiError("insufficient credits", 402, "Payment Required"),
+    );
+    mocks.balance.mockReturnValue({
+      data: payload({ availableMicro: 0 }, true),
+      isPending: false,
+    });
 
     renderComposer({});
     await submitPrompt();
