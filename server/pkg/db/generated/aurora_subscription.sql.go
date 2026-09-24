@@ -13,7 +13,7 @@ import (
 
 const getAuroraSubscriptionByStripeID = `-- name: GetAuroraSubscriptionByStripeID :one
 SELECT id, user_id, tier, status, stripe_customer_id, stripe_subscription_id,
-       current_period_end, cancel_at_period_end, created_at, updated_at
+       current_period_end, cancel_at_period_end, stripe_event_created, created_at, updated_at
 FROM aurora_subscription
 WHERE stripe_subscription_id = $1
 `
@@ -32,6 +32,7 @@ func (q *Queries) GetAuroraSubscriptionByStripeID(ctx context.Context, stripeSub
 		&i.StripeSubscriptionID,
 		&i.CurrentPeriodEnd,
 		&i.CancelAtPeriodEnd,
+		&i.StripeEventCreated,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -40,7 +41,7 @@ func (q *Queries) GetAuroraSubscriptionByStripeID(ctx context.Context, stripeSub
 
 const getAuroraSubscriptionByUser = `-- name: GetAuroraSubscriptionByUser :one
 SELECT id, user_id, tier, status, stripe_customer_id, stripe_subscription_id,
-       current_period_end, cancel_at_period_end, created_at, updated_at
+       current_period_end, cancel_at_period_end, stripe_event_created, created_at, updated_at
 FROM aurora_subscription
 WHERE user_id = $1
 `
@@ -59,6 +60,7 @@ func (q *Queries) GetAuroraSubscriptionByUser(ctx context.Context, userID pgtype
 		&i.StripeSubscriptionID,
 		&i.CurrentPeriodEnd,
 		&i.CancelAtPeriodEnd,
+		&i.StripeEventCreated,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -67,7 +69,7 @@ func (q *Queries) GetAuroraSubscriptionByUser(ctx context.Context, userID pgtype
 
 const listActiveSubscriptionsForGrant = `-- name: ListActiveSubscriptionsForGrant :many
 SELECT id, user_id, tier, status, stripe_customer_id, stripe_subscription_id,
-       current_period_end, cancel_at_period_end, created_at, updated_at
+       current_period_end, cancel_at_period_end, stripe_event_created, created_at, updated_at
 FROM aurora_subscription
 WHERE status = 'active' AND current_period_end > now()
 ORDER BY user_id
@@ -94,6 +96,7 @@ func (q *Queries) ListActiveSubscriptionsForGrant(ctx context.Context) ([]Aurora
 			&i.StripeSubscriptionID,
 			&i.CurrentPeriodEnd,
 			&i.CancelAtPeriodEnd,
+			&i.StripeEventCreated,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -108,18 +111,31 @@ func (q *Queries) ListActiveSubscriptionsForGrant(ctx context.Context) ([]Aurora
 }
 
 const upsertAuroraSubscription = `-- name: UpsertAuroraSubscription :one
-INSERT INTO aurora_subscription (user_id, tier, status, stripe_customer_id, stripe_subscription_id, current_period_end, cancel_at_period_end)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (user_id) DO UPDATE SET
-    tier = EXCLUDED.tier,
-    status = EXCLUDED.status,
-    stripe_customer_id = COALESCE(EXCLUDED.stripe_customer_id, aurora_subscription.stripe_customer_id),
-    stripe_subscription_id = COALESCE(EXCLUDED.stripe_subscription_id, aurora_subscription.stripe_subscription_id),
-    current_period_end = EXCLUDED.current_period_end,
-    cancel_at_period_end = EXCLUDED.cancel_at_period_end,
-    updated_at = now()
-RETURNING id, user_id, tier, status, stripe_customer_id, stripe_subscription_id,
-          current_period_end, cancel_at_period_end, created_at, updated_at
+WITH upsert AS (
+    INSERT INTO aurora_subscription (user_id, tier, status, stripe_customer_id, stripe_subscription_id, current_period_end, cancel_at_period_end, stripe_event_created)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    ON CONFLICT (user_id) DO UPDATE SET
+        tier = EXCLUDED.tier,
+        status = EXCLUDED.status,
+        stripe_customer_id = COALESCE(EXCLUDED.stripe_customer_id, aurora_subscription.stripe_customer_id),
+        stripe_subscription_id = COALESCE(EXCLUDED.stripe_subscription_id, aurora_subscription.stripe_subscription_id),
+        current_period_end = EXCLUDED.current_period_end,
+        cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+        stripe_event_created = EXCLUDED.stripe_event_created,
+        updated_at = now()
+    WHERE EXCLUDED.stripe_event_created >= aurora_subscription.stripe_event_created
+    RETURNING id, user_id, tier, status, stripe_customer_id, stripe_subscription_id,
+              current_period_end, cancel_at_period_end, stripe_event_created, created_at, updated_at
+)
+SELECT id, user_id, tier, status, stripe_customer_id, stripe_subscription_id,
+       current_period_end, cancel_at_period_end, stripe_event_created, created_at, updated_at
+FROM upsert
+UNION ALL
+SELECT id, user_id, tier, status, stripe_customer_id, stripe_subscription_id,
+       current_period_end, cancel_at_period_end, stripe_event_created, created_at, updated_at
+FROM aurora_subscription
+WHERE user_id = $1 AND NOT EXISTS (SELECT 1 FROM upsert)
+LIMIT 1
 `
 
 type UpsertAuroraSubscriptionParams struct {
@@ -130,14 +146,45 @@ type UpsertAuroraSubscriptionParams struct {
 	StripeSubscriptionID pgtype.Text        `json:"stripe_subscription_id"`
 	CurrentPeriodEnd     pgtype.Timestamptz `json:"current_period_end"`
 	CancelAtPeriodEnd    bool               `json:"cancel_at_period_end"`
+	StripeEventCreated   pgtype.Timestamptz `json:"stripe_event_created"`
+}
+
+type UpsertAuroraSubscriptionRow struct {
+	ID                   pgtype.UUID        `json:"id"`
+	UserID               pgtype.UUID        `json:"user_id"`
+	Tier                 string             `json:"tier"`
+	Status               string             `json:"status"`
+	StripeCustomerID     pgtype.Text        `json:"stripe_customer_id"`
+	StripeSubscriptionID pgtype.Text        `json:"stripe_subscription_id"`
+	CurrentPeriodEnd     pgtype.Timestamptz `json:"current_period_end"`
+	CancelAtPeriodEnd    bool               `json:"cancel_at_period_end"`
+	StripeEventCreated   pgtype.Timestamptz `json:"stripe_event_created"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
 }
 
 // The webhook is the only writer. user_id is the conflict target (unique index
 // aurora_subscription_user_idx), so replaying an event converges on one row.
-// The Stripe ids COALESCE rather than overwrite: an event that carries no
-// subscription id (a customer.created, say) must not erase the id a later
-// lookup depends on.
-func (q *Queries) UpsertAuroraSubscription(ctx context.Context, arg UpsertAuroraSubscriptionParams) (AuroraSubscription, error) {
+//
+// The upsert is order-safe, not merely idempotent: Stripe delivers events out
+// of order, and applying an older one would regress the row. The concrete
+// failure is a checkout.session.completed delayed behind a
+// customer.subscription.deleted — without the guard it rewrites status back to
+// 'active' with a fresh period, and the monthly grant scan (Task 4) starts
+// paying credits for a subscription nobody is being charged for.
+//
+// The guard is `EXCLUDED.stripe_event_created >= stripe_event_created` rather
+// than `>`: Stripe's created field has one-second resolution, so the events
+// that belong to one checkout legitimately share a timestamp, and rejecting
+// ties would drop real state changes. Ties keep delivery order, which is the
+// pre-guard behaviour; only a strictly older event is refused.
+//
+// The CTE exists so a refused event still returns the authoritative row: the
+// caller gets the current state and never has to read pgx.ErrNoRows as a
+// business outcome. The Stripe ids COALESCE rather than overwrite, because an
+// event that carries no subscription id (a customer.created, say) must not
+// erase the id a later lookup depends on.
+func (q *Queries) UpsertAuroraSubscription(ctx context.Context, arg UpsertAuroraSubscriptionParams) (UpsertAuroraSubscriptionRow, error) {
 	row := q.db.QueryRow(ctx, upsertAuroraSubscription,
 		arg.UserID,
 		arg.Tier,
@@ -146,8 +193,9 @@ func (q *Queries) UpsertAuroraSubscription(ctx context.Context, arg UpsertAurora
 		arg.StripeSubscriptionID,
 		arg.CurrentPeriodEnd,
 		arg.CancelAtPeriodEnd,
+		arg.StripeEventCreated,
 	)
-	var i AuroraSubscription
+	var i UpsertAuroraSubscriptionRow
 	err := row.Scan(
 		&i.ID,
 		&i.UserID,
@@ -157,6 +205,7 @@ func (q *Queries) UpsertAuroraSubscription(ctx context.Context, arg UpsertAurora
 		&i.StripeSubscriptionID,
 		&i.CurrentPeriodEnd,
 		&i.CancelAtPeriodEnd,
+		&i.StripeEventCreated,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

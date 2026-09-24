@@ -13,14 +13,26 @@ import (
 
 const countActiveGenerations = `-- name: CountActiveGenerations :one
 SELECT count(*) FROM aurora_generation g
-JOIN agent_task_queue t ON t.id = g.task_id
+LEFT JOIN agent_task_queue t ON t.id = g.task_id
 WHERE g.user_id = $1
-  AND t.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+  AND (
+    t.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+    OR (t.id IS NULL AND g.status = 'queued')
+  )
 `
 
 // Concurrency gate (Task 6): generations whose task has not reached a terminal
 // state. deferred counts as active — a retry armed with a backoff is still work
 // the user has in flight.
+//
+// The join is LEFT, and an unlinked row counts when its generation is still
+// 'queued'. CreateAuroraGeneration inserts the generation first and links
+// task_id afterwards, so an inner join leaves that window invisible: two
+// requests arriving together would each see zero active work and both be
+// admitted past a concurrency of one. The status check is what keeps the
+// widening safe — a generation that failed before it ever got a task must not
+// occupy a slot forever, so only the pre-link 'queued' state counts without one.
+// t.id IS NULL covers a dangling task_id as well as a NULL one.
 func (q *Queries) CountActiveGenerations(ctx context.Context, userID pgtype.UUID) (int64, error) {
 	row := q.db.QueryRow(ctx, countActiveGenerations, userID)
 	var count int64

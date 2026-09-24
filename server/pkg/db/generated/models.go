@@ -247,6 +247,7 @@ type AuroraSubscription struct {
 	StripeSubscriptionID pgtype.Text        `json:"stripe_subscription_id"`
 	CurrentPeriodEnd     pgtype.Timestamptz `json:"current_period_end"`
 	CancelAtPeriodEnd    bool               `json:"cancel_at_period_end"`
+	StripeEventCreated   pgtype.Timestamptz `json:"stripe_event_created"`
 	CreatedAt            pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
 }

@@ -19,6 +19,15 @@
 -- MVP semantics: cancelation stops future grants only; credits already granted
 -- stay spendable until their monthly window expires (Task 4).
 --
+-- stripe_event_created is the `created` of the Stripe event that last wrote this
+-- row, and it is what makes the upsert order-safe. Stripe does not guarantee
+-- delivery order: a checkout.session.completed delayed behind a
+-- customer.subscription.deleted would otherwise overwrite the cancelation and
+-- reactivate the subscription — which would make the row eligible for monthly
+-- grants the user is no longer paying for. The upsert refuses any event older
+-- than this value. NOT NULL because every write originates from a Stripe event;
+-- a caller that cannot supply one has no business writing this table.
+--
 -- No foreign key to user by house rule; the association is application-level.
 CREATE TABLE IF NOT EXISTS aurora_subscription (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -29,6 +38,7 @@ CREATE TABLE IF NOT EXISTS aurora_subscription (
     stripe_subscription_id TEXT,
     current_period_end timestamptz,
     cancel_at_period_end BOOLEAN NOT NULL DEFAULT false,
+    stripe_event_created timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );

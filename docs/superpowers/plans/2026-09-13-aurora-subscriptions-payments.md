@@ -1380,6 +1380,13 @@ Plan 5 完成后，spec §9.1 的「可对外销售」里程碑即可交付（�
 | 18 | Task 1 迁移序号按仓库现状重排：`460`–`462` → **`512`–`514`**（仓库已到 `511`；「实现状态」一节已预告必须重排）。表 / 唯一索引 / 扫描索引一一对应，无新增文件 |
 | 19 | Task 1 的 Files 清单补 `server/internal/handler/workspace_delete_manifest_test.go`：`TestWorkspaceDeletionManifestCoversPublicSchema` 要求 public schema 里每张表在 `workspaceDeletionManifest` 中显式分类，新表 `aurora_subscription` 记为 `workspaceDeleteKeep`（用户级订阅不属于任何 workspace，删 workspace 不得动它） |
 
+## 修订记录（2026-09-24 codex review 回写）
+
+| # | 修正 |
+|---|------|
+| 20 | **upsert 改为顺序安全**（review P1）。表补 `stripe_event_created timestamptz NOT NULL`（写入该行的 Stripe 事件 `created`），upsert 加守卫 `EXCLUDED.stripe_event_created >= stripe_event_created`，拒绝更旧的事件。原实现只保证幂等、不保证顺序，而 Stripe **不保证投递顺序**：滞后的 `checkout.session.completed` 会把已取消订阅写回 `active` 并刷新周期，Task 4 的月发放扫描随即开始给一个已停止付费的订阅发积分。用 `>=` 而非 `>`：Stripe `created` 精度为秒，同一次 checkout 的事件共享时间戳，拒绝同秒会丢真实状态变更（同秒保持投递顺序，即加守卫前的行为）。守卫用 CTE 包一层，被拒事件仍返回当前行，**Task 3 无需把 `pgx.ErrNoRows` 当业务结果**。**Task 3 改动点：`db.UpsertAuroraSubscriptionParams` 必须补 `StripeEventCreated: ev.Created`（NOT NULL，漏了编译不过）** |
+| 21 | **`CountActiveGenerations` 改 LEFT JOIN**（review P2）。`CreateAuroraGeneration` 先插 generation 行、之后才回填 `task_id`，内连接让该窗口内的并发检查看到 0：两个同时到达的请求都能穿过 `Concurrency = 1`。`task_id` 未回填（或悬空）时仅 `status = 'queued'` 计入——失败且从未挂上任务的 generation 不能永久占用一个并发配额 |
+
 ---
 
 ## 实现状态（2026-09-23 记录）
