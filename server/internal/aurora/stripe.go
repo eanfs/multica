@@ -1,0 +1,127 @@
+package aurora
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/stripe/stripe-go/v86"
+	"github.com/stripe/stripe-go/v86/webhook"
+)
+
+// Event is the minimal Stripe event shape handlers depend on. ID is the
+// Stripe event id — the idempotency key for topup grants. Raw carries the
+// type-specific object JSON (checkout session or subscription), which the
+// handler unmarshals into the stripe-go type for that event.
+type Event struct {
+	ID   string
+	Type string
+	Raw  []byte
+}
+
+// PaymentProvider is the narrow Stripe surface Aurora needs. Handlers depend
+// on this interface; tests use a fake. The real implementation wraps stripe-go.
+type PaymentProvider interface {
+	CreateSubscriptionCheckout(ctx context.Context, priceID, successURL, cancelURL, userID, tier string) (url string, err error)
+	CreateTopupCheckout(ctx context.Context, priceID, successURL, cancelURL, userID, topupID string) (url string, err error)
+	GetSubscriptionPeriodEnd(ctx context.Context, subscriptionID string) (time.Time, error)
+	ConstructEvent(payload []byte, sigHeader string) (Event, error)
+}
+
+// StripeProvider implements PaymentProvider via stripe-go. ConstructEvent
+// verifies the webhook signature before anything else touches the payload.
+//
+// The API key lives on the client rather than in stripe's package-global Key,
+// so a test that builds a provider with a dummy key cannot re-point a provider
+// another test is using.
+type StripeProvider struct {
+	client        *stripe.Client
+	webhookSecret string
+}
+
+// NewStripeProvider returns nil unless both keys are configured — handlers
+// treat a nil provider as "payments disabled" and fail closed with 503.
+func NewStripeProvider(secretKey, webhookSecret string) *StripeProvider {
+	if secretKey == "" || webhookSecret == "" {
+		return nil
+	}
+	return &StripeProvider{
+		client:        stripe.NewClient(secretKey),
+		webhookSecret: webhookSecret,
+	}
+}
+
+func (p *StripeProvider) CreateSubscriptionCheckout(ctx context.Context, priceID, successURL, cancelURL, userID, tier string) (string, error) {
+	session, err := p.client.V1CheckoutSessions.Create(ctx, &stripe.CheckoutSessionCreateParams{
+		Mode:       stripe.String(stripe.CheckoutSessionModeSubscription),
+		LineItems:  []*stripe.CheckoutSessionCreateLineItemParams{{Price: stripe.String(priceID), Quantity: stripe.Int64(1)}},
+		SuccessURL: stripe.String(successURL),
+		CancelURL:  stripe.String(cancelURL),
+		// The webhook is the only thing that learns who paid: the client
+		// returns to its own route, and the session id is not ours to trust.
+		Metadata: map[string]string{"userId": userID, "tier": tier},
+	})
+	if err != nil {
+		return "", err
+	}
+	return session.URL, nil
+}
+
+func (p *StripeProvider) CreateTopupCheckout(ctx context.Context, priceID, successURL, cancelURL, userID, topupID string) (string, error) {
+	session, err := p.client.V1CheckoutSessions.Create(ctx, &stripe.CheckoutSessionCreateParams{
+		Mode:       stripe.String(stripe.CheckoutSessionModePayment),
+		LineItems:  []*stripe.CheckoutSessionCreateLineItemParams{{Price: stripe.String(priceID), Quantity: stripe.Int64(1)}},
+		SuccessURL: stripe.String(successURL),
+		CancelURL:  stripe.String(cancelURL),
+		// topupId selects the credit amount from the catalog; the amount is
+		// never read back from Stripe, so a tampered id can only pick another
+		// listed pack, never mint credits.
+		Metadata: map[string]string{"userId": userID, "topupId": topupID},
+	})
+	if err != nil {
+		return "", err
+	}
+	return session.URL, nil
+}
+
+// GetSubscriptionPeriodEnd reads the subscription's current billing period
+// end. Stripe moved `current_period_end` off the subscription onto its items
+// (a subscription can now bill several items on different cycles), so the
+// latest item period is the subscription's period — the whole-plan checkout
+// this product sells has exactly one item, and taking the max is what keeps
+// the answer right if that ever stops being true.
+func (p *StripeProvider) GetSubscriptionPeriodEnd(ctx context.Context, subscriptionID string) (time.Time, error) {
+	sub, err := p.client.V1Subscriptions.Retrieve(ctx, subscriptionID, &stripe.SubscriptionRetrieveParams{})
+	if err != nil {
+		return time.Time{}, err
+	}
+	var end int64
+	if sub.Items != nil {
+		for _, item := range sub.Items.Data {
+			if item.CurrentPeriodEnd > end {
+				end = item.CurrentPeriodEnd
+			}
+		}
+	}
+	if end == 0 {
+		// A period-less subscription would otherwise be stored as the epoch,
+		// which the monthly grant scan reads as "long expired" — a silent
+		// downgrade instead of a visible failure.
+		return time.Time{}, fmt.Errorf("subscription %s has no current period end", subscriptionID)
+	}
+	return time.Unix(end, 0).UTC(), nil
+}
+
+// ConstructEvent verifies the webhook signature and returns the minimal event
+// the handler routes on. An unverified payload never leaves this method.
+func (p *StripeProvider) ConstructEvent(payload []byte, sigHeader string) (Event, error) {
+	event, err := webhook.ConstructEvent(payload, sigHeader, p.webhookSecret)
+	if err != nil {
+		return Event{}, err
+	}
+	var raw []byte
+	if event.Data != nil {
+		raw = event.Data.Raw
+	}
+	return Event{ID: event.ID, Type: string(event.Type), Raw: raw}, nil
+}

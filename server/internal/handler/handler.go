@@ -155,6 +155,33 @@ type Config struct {
 	// it in constant time; a wrong or missing token is a 401. Empty disables
 	// the endpoint. Populated from AURORA_SANDBOX_TOKEN.
 	AuroraSandboxToken string
+
+	// StripeSecretKey and StripeWebhookSecret configure Aurora billing (Plan 5
+	// Task 2). Both are server-side only and must never reach AppConfig: the
+	// secret key can charge the account and the webhook secret is what proves
+	// an event came from Stripe. Either one empty leaves the payment provider
+	// nil, which makes every billing endpoint fail closed with 503 rather than
+	// accept a checkout it cannot charge.
+	//   - StripeSecretKey     -> STRIPE_SECRET_KEY
+	//   - StripeWebhookSecret -> STRIPE_WEBHOOK_SECRET
+	StripeSecretKey     string
+	StripeWebhookSecret string
+	// AuroraStripePrice* map a tier or topup to its Stripe price id. Test and
+	// live modes use different ids, so they are configuration rather than
+	// constants; an empty id makes that specific checkout fail closed with 503
+	// instead of charging whatever price happens to be default.
+	//   - AuroraStripePriceCreatorMonthly -> AURORA_STRIPE_PRICE_CREATOR_MONTHLY
+	//   - AuroraStripePriceCreatorYearly  -> AURORA_STRIPE_PRICE_CREATOR_YEARLY
+	//   - AuroraStripePriceProMonthly     -> AURORA_STRIPE_PRICE_PRO_MONTHLY
+	//   - AuroraStripePriceProYearly      -> AURORA_STRIPE_PRICE_PRO_YEARLY
+	//   - AuroraStripePriceTopup5         -> AURORA_STRIPE_PRICE_TOPUP_5
+	//   - AuroraStripePriceTopup20        -> AURORA_STRIPE_PRICE_TOPUP_20
+	AuroraStripePriceCreatorMonthly string
+	AuroraStripePriceCreatorYearly  string
+	AuroraStripePriceProMonthly     string
+	AuroraStripePriceProYearly      string
+	AuroraStripePriceTopup5         string
+	AuroraStripePriceTopup20        string
 }
 
 type cloudRuntimeProxy interface {
