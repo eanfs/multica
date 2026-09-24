@@ -20,6 +20,7 @@ import (
 func cleanupPersonalWorkspace(t *testing.T, userID string) {
 	t.Helper()
 	t.Cleanup(func() {
+		cleanupUserCredits(userID)
 		_, _ = testPool.Exec(context.Background(), `
 			DELETE FROM issue_status WHERE workspace_id IN (
 				SELECT workspace_id FROM member WHERE user_id = $1
@@ -32,6 +33,14 @@ func cleanupPersonalWorkspace(t *testing.T, userID string) {
 	})
 }
 
+// cleanupUserCredits removes a user's wallet and ledger. Neither table carries
+// a foreign key to "user", so deleting the user would strand them; the signup
+// path writes both (the Aurora signup bonus).
+func cleanupUserCredits(userID string) {
+	_, _ = testPool.Exec(context.Background(), `DELETE FROM credit_ledger WHERE user_id = $1`, userID)
+	_, _ = testPool.Exec(context.Background(), `DELETE FROM credit_balance WHERE user_id = $1`, userID)
+}
+
 // cleanupPersonalWorkspaceByEmail removes the personal workspace (plus its
 // seeded issue-status rows) and the user for a signup identified by email.
 // Unlike cleanupPersonalWorkspace it can be registered up front, before the
@@ -39,6 +48,10 @@ func cleanupPersonalWorkspace(t *testing.T, userID string) {
 func cleanupPersonalWorkspaceByEmail(t *testing.T, email string) {
 	t.Helper()
 	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), `
+			DELETE FROM credit_ledger WHERE user_id = (SELECT id FROM "user" WHERE email = $1)`, email)
+		_, _ = testPool.Exec(context.Background(), `
+			DELETE FROM credit_balance WHERE user_id = (SELECT id FROM "user" WHERE email = $1)`, email)
 		_, _ = testPool.Exec(context.Background(), `
 			DELETE FROM issue_status WHERE workspace_id IN (
 				SELECT workspace_id FROM member WHERE user_id = (SELECT id FROM "user" WHERE email = $1)
@@ -290,6 +303,15 @@ func TestFindOrCreateUserProvisionsPersonalWorkspace(t *testing.T) {
 		t.Fatalf("expected 1 personal workspace after signup, got %d", n)
 	}
 
+	// Signup also grants the one-time Aurora bonus into that workspace.
+	bal, err := testHandler.Credit.Balance(context.Background(), user.ID)
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if bal != auroraSignupBonusMicro {
+		t.Fatalf("signup bonus = %d, want %d", bal, auroraSignupBonusMicro)
+	}
+
 	_, isNew2, err := testHandler.findOrCreateUser(context.Background(), email, "")
 	if err != nil {
 		t.Fatalf("second findOrCreateUser: %v", err)
@@ -303,5 +325,14 @@ func TestFindOrCreateUserProvisionsPersonalWorkspace(t *testing.T) {
 	)
 	if n2 != 1 {
 		t.Fatalf("second call should not create another workspace, got %d", n2)
+	}
+	// The bonus runs on every login, so the ledger key — not the login count —
+	// is what has to keep it to one grant.
+	bal2, err := testHandler.Credit.Balance(context.Background(), user.ID)
+	if err != nil {
+		t.Fatalf("Balance after relogin: %v", err)
+	}
+	if bal2 != bal {
+		t.Fatalf("signup bonus duplicated on relogin: before=%d after=%d", bal, bal2)
 	}
 }

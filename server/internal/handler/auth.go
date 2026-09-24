@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/logger"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
@@ -255,8 +256,27 @@ func (h *Handler) findOrCreateUser(ctx context.Context, email, displayName strin
 		slog.Warn("personal-workspace provisioning skipped: handler has no transaction starter", "user_id", uuidToString(user.ID))
 	}
 
+	// One-time Aurora signup bonus, granted into the personal workspace
+	// provisioned just above. Best-effort and idempotent via the ledger key
+	// ("grant:signup:<userID>"), so it runs on every login: a transient failure
+	// self-heals on the next one, and a user who signs in again is never
+	// credited twice. The credit service is nil only in handler tests that
+	// build a Handler without New().
+	if h.Credit != nil {
+		if wsID, err := h.Queries.GetPersonalWorkspaceForUser(ctx, user.ID); err != nil {
+			slog.Warn("failed to resolve personal workspace for aurora signup bonus", "error", err, "user_id", uuidToString(user.ID))
+		} else if err := h.Credit.Grant(ctx, user.ID, wsID, auroraSignupBonusMicro, aurora.LedgerKindAdjustment, "signup:"+uuidToString(user.ID)); err != nil {
+			slog.Warn("failed to grant aurora signup bonus", "error", err, "user_id", uuidToString(user.ID))
+		}
+	}
+
 	return user, isNew, nil
 }
+
+// auroraSignupBonusMicro is the one-time Aurora credit grant every new account
+// receives. Signup bonuses never expire, which is why the settlement's expiry
+// phase sums only "sub:" references.
+const auroraSignupBonusMicro = 500 * microCreditsPerCredit
 
 // signupSourceFromRequest reads the attribution cookie the web frontend
 // sets on the first pageview (UTM + referrer bundle). The frontend writes
