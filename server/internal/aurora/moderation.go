@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/jpeg"
@@ -417,7 +418,7 @@ func (f HTTPAssetFetcher) Fetch(ctx context.Context, mediaURL string) ([]byte, e
 	}
 	resp, err := newAssetHTTPClient().Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fetchError(mediaURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -491,6 +492,37 @@ func newAssetHTTPClient() *http.Client {
 			return fmt.Errorf("asset fetch must not redirect")
 		},
 	}
+}
+
+// fetchError renders a fetch failure without the URL's query string.
+//
+// In every real deployment the media_url is a presigned object-store URL, so its
+// query carries a bearer credential with a short lifetime — and the moderator's
+// errors do not stay in the request. They are written to the moderation audit
+// table and to the server log, both of which outlive the signature they would
+// otherwise leak.
+func fetchError(mediaURL string, err error) error {
+	// *url.Error renders the whole URL, query included, so unwrap to the cause
+	// and print the redacted URL ourselves. The cause (a dial or TLS failure)
+	// names the address it could not reach, which is not a secret.
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		err = urlErr.Err
+	}
+	return fmt.Errorf("fetch %s: %w", redactAssetURL(mediaURL), err)
+}
+
+// redactAssetURL strips the parts of a URL that must not reach a log line: the
+// query (a presigned signature), the fragment, and any userinfo.
+func redactAssetURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "<unparseable asset url>"
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	parsed.User = nil
+	return parsed.String()
 }
 
 // isPublicIP reports whether the moderator may connect to an address. Loopback,

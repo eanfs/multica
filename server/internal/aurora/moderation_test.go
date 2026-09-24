@@ -372,6 +372,31 @@ func TestModeratorAssetFetcherRefusesRedirects(t *testing.T) {
 	}
 }
 
+// TestModeratorAssetFetcherRedactsTheSignedURL pins the second half of the
+// fetch's leak surface. A presigned object URL carries a bearer credential in
+// its query, and the moderator's errors do not stay in the request: they are
+// written to the audit table and the server log, both of which outlive the
+// signature. The guard-rail refusal is used as the vehicle because it is
+// reachable offline, but every fetch error goes through the same rendering.
+func TestModeratorAssetFetcherRedactsTheSignedURL(t *testing.T) {
+	const signed = "http://127.0.0.1:9/out.png?X-Amz-Signature=deadbeef&X-Amz-Credential=secret"
+
+	_, err := HTTPAssetFetcher{}.Fetch(context.Background(), signed)
+	if err == nil {
+		t.Fatal("fetching a loopback asset URL succeeded")
+	}
+	for _, secret := range []string{"X-Amz-Signature", "deadbeef", "X-Amz-Credential", "secret"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("fetch error leaks %q: %v", secret, err)
+		}
+	}
+	// The path still has to be there: a redacted error that says nothing about
+	// which object failed is not an error anyone can act on.
+	if !strings.Contains(err.Error(), "/out.png") {
+		t.Errorf("fetch error dropped the object path: %v", err)
+	}
+}
+
 func TestModeratorNewDefaultModeratorLoadsTheRepositoryTable(t *testing.T) {
 	// Guards the embedded-file wiring: a moderator built by the exported
 	// constructor must enforce the checked-in table, not an empty one.
