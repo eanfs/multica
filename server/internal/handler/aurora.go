@@ -1204,3 +1204,109 @@ func stripeCustomerIDFromSubscription(sub *stripe.Subscription) *string {
 	id := sub.Customer.ID
 	return &id
 }
+
+// AuroraSubscriptionLimits is the caller's effective entitlement: the gates the
+// server actually applies, from the tier catalog.
+type AuroraSubscriptionLimits struct {
+	GenerationsPerMonth int `json:"generationsPerMonth"`
+	Concurrency         int `json:"concurrency"`
+}
+
+// AuroraSubscriptionUsage is how much of the month's allowance the caller has
+// spent, so the plan screen can show a progress bar rather than a bare number.
+type AuroraSubscriptionUsage struct {
+	GenerationsUsedThisMonth int64 `json:"generationsUsedThisMonth"`
+	ActiveGenerations        int64 `json:"activeGenerations"`
+}
+
+// AuroraSubscriptionResponse is the plan screen's whole state.
+//
+// Tier is the *effective* tier — the one Limits carries — not the tier named on
+// a subscription row. The two differ for a canceled or past-due plan, and a
+// response that named the stored tier beside free-tier limits would describe a
+// plan the user does not have. Status is the stored subscription status, empty
+// when there is no row at all, which is what tells a canceled subscriber apart
+// from one who never subscribed.
+type AuroraSubscriptionResponse struct {
+	Tier              string                   `json:"tier"`
+	Status            string                   `json:"status"`
+	CurrentPeriodEnd  *string                  `json:"currentPeriodEnd"`
+	CancelAtPeriodEnd bool                     `json:"cancelAtPeriodEnd"`
+	Limits            AuroraSubscriptionLimits `json:"limits"`
+	Usage             AuroraSubscriptionUsage  `json:"usage"`
+}
+
+// GetAuroraSubscription reports the caller's plan, its limits and this month's
+// usage. Like the other billing reads it is account-scoped: the plan belongs to
+// the user, not to the workspace the request is made from.
+func (h *Handler) GetAuroraSubscription(w http.ResponseWriter, r *http.Request) {
+	userUUID, ok := auroraBillingUser(w, r)
+	if !ok {
+		return
+	}
+	limits, err := aurora.LimitsForUser(r.Context(), h.Queries, h.Tiers, userUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load subscription")
+		return
+	}
+	usedThisMonth, err := h.Queries.CountGenerationsThisMonth(r.Context(), userUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load usage")
+		return
+	}
+	activeGenerations, err := h.Queries.CountActiveGenerations(r.Context(), userUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load usage")
+		return
+	}
+
+	response := AuroraSubscriptionResponse{
+		Tier: limits.Tier,
+		Limits: AuroraSubscriptionLimits{
+			GenerationsPerMonth: limits.GenerationsPerMonth,
+			Concurrency:         limits.Concurrency,
+		},
+		Usage: AuroraSubscriptionUsage{
+			GenerationsUsedThisMonth: usedThisMonth,
+			ActiveGenerations:        activeGenerations,
+		},
+	}
+
+	sub, err := h.Queries.GetAuroraSubscriptionByUser(r.Context(), userUUID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// No plan row: the free tier with no period. Not an error — a user who
+		// has never subscribed is the common case.
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "failed to load subscription")
+		return
+	default:
+		response.Status = sub.Status
+		response.CancelAtPeriodEnd = sub.CancelAtPeriodEnd
+		if sub.CurrentPeriodEnd.Valid {
+			end := sub.CurrentPeriodEnd.Time.UTC().Format(time.RFC3339Nano)
+			response.CurrentPeriodEnd = &end
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"subscription": response})
+}
+
+// AuroraTopupResponse is one purchasable credit pack as the plan screen lists
+// it. The Stripe price id is deliberately absent: it is deployment
+// configuration, the client only ever passes the id back, and leaking it would
+// let a caller probe which Stripe mode the server is in.
+type AuroraTopupResponse struct {
+	ID      string `json:"id"`
+	Credits int64  `json:"credits"`
+}
+
+// ListAuroraTopups returns the credit packs this deployment sells, in catalog
+// order.
+func (h *Handler) ListAuroraTopups(w http.ResponseWriter, r *http.Request) {
+	topups := make([]AuroraTopupResponse, 0, len(h.Tiers.Topups))
+	for _, topup := range h.Tiers.Topups {
+		topups = append(topups, AuroraTopupResponse{ID: topup.ID, Credits: topup.Credits})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"topups": topups})
+}

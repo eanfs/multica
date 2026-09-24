@@ -1877,3 +1877,171 @@ func TestEnsureFreeMonthlyGrantUsesTheMonthlyReference(t *testing.T) {
 		t.Fatalf("ledger rows with reference %q = %d, want 1", want, n)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Subscription status and topup list (Plan 5 Task 7)
+// ---------------------------------------------------------------------------
+
+type auroraSubscriptionPayload struct {
+	Subscription struct {
+		Tier              string  `json:"tier"`
+		Status            string  `json:"status"`
+		CurrentPeriodEnd  *string `json:"currentPeriodEnd"`
+		CancelAtPeriodEnd bool    `json:"cancelAtPeriodEnd"`
+		Limits            struct {
+			GenerationsPerMonth int `json:"generationsPerMonth"`
+			Concurrency         int `json:"concurrency"`
+		} `json:"limits"`
+		Usage struct {
+			GenerationsUsedThisMonth int64 `json:"generationsUsedThisMonth"`
+			ActiveGenerations        int64 `json:"activeGenerations"`
+		} `json:"usage"`
+	} `json:"subscription"`
+}
+
+func getAuroraSubscription(t *testing.T) auroraSubscriptionPayload {
+	t.Helper()
+	req := newRequest(http.MethodGet, "/api/aurora/billing/subscription", nil)
+	return testutil.Decode[auroraSubscriptionPayload](t, testHandler.GetAuroraSubscription, req, http.StatusOK)
+}
+
+// A user who never subscribed is not an error: the endpoint answers with the
+// free tier and no period, so the plan screen renders one shape either way.
+func TestAuroraSubscriptionDefaultsToFree(t *testing.T) {
+	creditTestReset(t)
+	auroraSubscriptionTestReset(t)
+	free, ok := testHandler.Tiers.Lookup("free")
+	if !ok {
+		t.Fatal("free tier missing from the catalog")
+	}
+
+	out := getAuroraSubscription(t).Subscription
+	if out.Tier != "free" {
+		t.Fatalf("tier = %q, want free", out.Tier)
+	}
+	if out.Status != "" {
+		t.Fatalf("status = %q, want empty for a user with no subscription row", out.Status)
+	}
+	if out.CurrentPeriodEnd != nil {
+		t.Fatalf("currentPeriodEnd = %v, want null", *out.CurrentPeriodEnd)
+	}
+	if out.Limits.GenerationsPerMonth != free.GenerationsPerMonth || out.Limits.Concurrency != free.Concurrency {
+		t.Fatalf("limits = %+v, want the free tier %+v", out.Limits, free)
+	}
+}
+
+// The response's tier is the effective one — the tier its limits belong to. A
+// canceled creator is on free limits, and reporting "creator" beside them would
+// describe a plan the user does not have.
+func TestAuroraSubscriptionReportsTheEffectiveTier(t *testing.T) {
+	creditTestReset(t)
+	auroraSubscriptionTestReset(t)
+	dbfx.Insert(t, "aurora_subscription", testutil.Cols{
+		"user_id": testUserID, "tier": "creator", "status": "canceled",
+	})
+
+	out := getAuroraSubscription(t).Subscription
+	if out.Tier != "free" {
+		t.Fatalf("tier = %q, want free for a canceled plan", out.Tier)
+	}
+	if out.Status != "canceled" {
+		t.Fatalf("status = %q, want canceled", out.Status)
+	}
+}
+
+func TestAuroraSubscriptionReportsAnActivePlan(t *testing.T) {
+	creditTestReset(t)
+	auroraSubscriptionTestReset(t)
+	pro, ok := testHandler.Tiers.Lookup("pro")
+	if !ok {
+		t.Fatal("pro tier missing from the catalog")
+	}
+	periodEnd := time.Now().Add(30 * 24 * time.Hour).UTC().Truncate(time.Second)
+	dbfx.Insert(t, "aurora_subscription", testutil.Cols{
+		"user_id": testUserID, "tier": "pro", "status": "active",
+		"current_period_end":     periodEnd,
+		"cancel_at_period_end":   true,
+		"stripe_subscription_id": "sub_status_" + uuid.NewString(),
+	})
+
+	out := getAuroraSubscription(t).Subscription
+	if out.Tier != "pro" || out.Status != "active" {
+		t.Fatalf("subscription = %s/%s, want pro/active", out.Tier, out.Status)
+	}
+	if !out.CancelAtPeriodEnd {
+		t.Fatal("cancelAtPeriodEnd = false, want true")
+	}
+	if out.Limits.GenerationsPerMonth != pro.GenerationsPerMonth || out.Limits.Concurrency != pro.Concurrency {
+		t.Fatalf("limits = %+v, want the pro tier %+v", out.Limits, pro)
+	}
+	if out.CurrentPeriodEnd == nil {
+		t.Fatal("currentPeriodEnd = null, want the stored period end")
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, *out.CurrentPeriodEnd)
+	if err != nil {
+		t.Fatalf("currentPeriodEnd %q is not RFC3339: %v", *out.CurrentPeriodEnd, err)
+	}
+	if !parsed.Equal(periodEnd) {
+		t.Fatalf("currentPeriodEnd = %v, want %v", parsed, periodEnd)
+	}
+}
+
+// The plan screen shows this month's usage against the plan's cap, so the
+// endpoint reports the same counts the entitlement gate enforces.
+func TestAuroraSubscriptionReportsUsage(t *testing.T) {
+	creditTestReset(t)
+	auroraSubscriptionTestReset(t)
+	seedAuroraGenerationForUser(t, testUserID)
+
+	out := getAuroraSubscription(t).Subscription
+	if out.Usage.GenerationsUsedThisMonth != 1 {
+		t.Fatalf("generationsUsedThisMonth = %d, want 1", out.Usage.GenerationsUsedThisMonth)
+	}
+	if out.Usage.ActiveGenerations != 0 {
+		t.Fatalf("activeGenerations = %d, want 0 (the seeded row has no task)", out.Usage.ActiveGenerations)
+	}
+}
+
+func TestAuroraSubscriptionRequiresAuthentication(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/aurora/billing/subscription", nil)
+	testutil.Call(t, testHandler.GetAuroraSubscription, req).Want(http.StatusUnauthorized)
+}
+
+// The topup list is what the plan screen's purchase buttons are built from. The
+// Stripe price id stays server-side: it is deployment configuration and the
+// client only ever passes the id back.
+func TestListAuroraTopups(t *testing.T) {
+	req := newRequest(http.MethodGet, "/api/aurora/billing/topups", nil)
+	out := testutil.Decode[struct {
+		Topups []struct {
+			ID      string `json:"id"`
+			Credits int64  `json:"credits"`
+		} `json:"topups"`
+	}](t, testHandler.ListAuroraTopups, req, http.StatusOK)
+
+	if len(out.Topups) != 2 {
+		t.Fatalf("topups = %d, want 2", len(out.Topups))
+	}
+	for _, topup := range out.Topups {
+		want, ok := testHandler.Tiers.LookupTopup(topup.ID)
+		if !ok {
+			t.Fatalf("topup %q is not in the catalog", topup.ID)
+		}
+		if topup.Credits != want.Credits {
+			t.Fatalf("topup %q credits = %d, want %d", topup.ID, topup.Credits, want.Credits)
+		}
+	}
+}
+
+// The response must not carry the price id, whatever a future field is called.
+func TestListAuroraTopupsHidesPriceIDs(t *testing.T) {
+	oldTiers := testHandler.Tiers
+	testHandler.Tiers = aurora.NewTierCatalog("", "", "", "", "price_secret_5", "price_secret_20")
+	t.Cleanup(func() { testHandler.Tiers = oldTiers })
+
+	req := newRequest(http.MethodGet, "/api/aurora/billing/topups", nil)
+	response := testutil.Call(t, testHandler.ListAuroraTopups, req).Want(http.StatusOK)
+	if body := response.Text(); strings.Contains(body, "price_secret") {
+		t.Fatalf("topup response leaks a price id: %s", body)
+	}
+}

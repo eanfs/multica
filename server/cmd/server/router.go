@@ -1947,6 +1947,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			// start a purchase in their name.
 			r.With(handler.RequireHumanActor).Post("/api/aurora/billing/checkout", h.CreateAuroraCheckout)
 			r.With(handler.RequireHumanActor).Post("/api/aurora/billing/topup/checkout", h.CreateAuroraTopupCheckout)
+			r.With(handler.RequireHumanActor).Get("/api/aurora/billing/subscription", h.GetAuroraSubscription)
+			r.With(handler.RequireHumanActor).Get("/api/aurora/billing/topups", h.ListAuroraTopups)
 
 			// Assignee frequency
 			r.Get("/api/assignee-frequency", h.GetAssigneeFrequency)
