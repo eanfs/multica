@@ -113,9 +113,15 @@ test.describe("Chat attachments", () => {
     );
     createdAgentId = agentIns.rows[0].id as string;
 
+    // `explicitly_created_at` is the durable marker that makes a session a
+    // public Chat (migration 420). Without it the session only becomes public
+    // once it holds a non-command message, so `/api/upload-file` rejects the
+    // upload with 404 before the first message exists.
     const sessionIns = await pgc.query(
-      `INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, status)
-       VALUES ($1, $2, $3, 'E2E Chat Attachment Session', 'active')
+      `INSERT INTO chat_session (
+         workspace_id, agent_id, creator_id, title, status, explicitly_created_at
+       )
+       VALUES ($1, $2, $3, 'E2E Chat Attachment Session', 'active', now())
        RETURNING id`,
       [ws.id, createdAgentId, userId],
     );

@@ -32,8 +32,10 @@ test.describe("Navigation", () => {
     await expect(page).toHaveURL(/\/settings/, { timeout: ROUTE_CHANGE_TIMEOUT });
     await waitForPageText(page, "Settings");
 
-    await expect(page.getByRole("tab", { name: "General" })).toBeVisible();
-    await expect(page.getByRole("tab", { name: "Members" })).toBeVisible();
+    // Settings sections are links in the settings rail, not tabs.
+    const settingsNav = page.getByRole("navigation", { name: "Settings" });
+    await expect(settingsNav.getByRole("link", { name: "General" })).toBeVisible();
+    await expect(settingsNav.getByRole("link", { name: "Members" })).toBeVisible();
   });
 
   test("agents page shows agent list", async ({ page }) => {

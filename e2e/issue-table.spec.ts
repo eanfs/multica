@@ -148,10 +148,6 @@ test.describe("Issue Table server grouping", () => {
       .filter({ hasText: "Backlog" })
       .first();
     await expect(backlogGroup).toContainText("501");
-    await expect(page.getByText(/Loaded \d+ of 1001/)).toBeVisible();
-    await expect(
-      page.getByText(/Grouping and hierarchy are paused/),
-    ).toHaveCount(0);
 
     await expect
       .poll(() => Date.now() - lastObservedRequestAt, {
@@ -305,7 +301,9 @@ test.describe("Issue Table server grouping", () => {
       element.scrollTop = element.scrollHeight;
     });
     await firstTailPromise;
-    await expect(page.getByText("Loaded 60 of 60", { exact: true })).toBeVisible();
+    // The footer's end-of-branch state is the current "everything loaded"
+    // signal; the toolbar's removed "Loaded X of N" counter used to say it.
+    await expect(page.getByText("No more", { exact: true })).toBeVisible();
 
     const postUpdateResponses: Array<{
       body: TableRequestBody;
@@ -365,7 +363,7 @@ test.describe("Issue Table server grouping", () => {
     ].map((row) => row.issue.id);
     expect(new Set(refreshedIds).size).toBe(60);
     expect(refreshedIds).toContain(moved.id);
-    await expect(page.getByText("Loaded 60 of 60", { exact: true })).toBeVisible();
+    await expect(page.getByText("No more", { exact: true })).toBeVisible();
     page.off("response", collectResponse);
   });
 
