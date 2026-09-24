@@ -2,6 +2,27 @@ import { expect, test } from "@playwright/test";
 
 test.use({ locale: "zh-CN" });
 
+/**
+ * The callback must exchange its single-use code exactly once.
+ *
+ * `next dev` renders the App Router under React StrictMode (Next enables it
+ * for the app router when `reactStrictMode` is unset), which double-invokes
+ * the callback effect. A development run therefore legitimately sends the same
+ * exchange twice before the mock rejects the replay. A third exchange, or any
+ * exchange with a different payload, is the re-exchange regression this spec
+ * guards against.
+ */
+function expectExchangesOnce(
+  exchanges: unknown[],
+  code: string,
+  origin: string,
+) {
+  expect(exchanges.length).toBeGreaterThan(0);
+  expect(exchanges.length).toBeLessThanOrEqual(2);
+  expect(new Set(exchanges.map((entry) => JSON.stringify(entry))).size).toBe(1);
+  expect(exchanges[0]).toEqual({ code, redirect_uri: `${origin}/auth/callback` });
+}
+
 for (const scenario of [
   {
     name: "different account language",
@@ -25,6 +46,13 @@ for (const scenario of [
       throw new Error("The callback regression requires a configured baseURL");
     }
     const origin = new URL(baseURL).origin;
+    // The browser talks to the API on its own origin whenever
+    // NEXT_PUBLIC_API_URL is absolute — which is what both `.env` and
+    // `.env.worktree` generate. "First-party" therefore means the frontend
+    // origin or the configured API base; anything else is third-party.
+    const apiOrigin = new URL(
+      process.env.NEXT_PUBLIC_API_URL || `http://localhost:${process.env.PORT || "8080"}`,
+    ).origin;
     const code = "locale-regression-code";
     const user = {
       id: "66666666-6666-4666-8666-666666666666",
@@ -77,7 +105,7 @@ for (const scenario of [
     await context.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
-      if (url.origin !== origin) {
+      if (url.origin !== origin && url.origin !== apiOrigin) {
         if (
           /(^|\.)(google\.com|googleapis\.com|googleusercontent\.com)$/.test(url.hostname)
         ) {
@@ -136,7 +164,7 @@ for (const scenario of [
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       });
       await expect(page).toHaveURL(`${origin}/auth/callback?code=${code}`);
-      expect(exchanges).toEqual([{ code, redirect_uri: `${origin}/auth/callback` }]);
+      expectExchangesOnce(exchanges, code, origin);
       expect(callbackDocuments).toBe(1);
       expect(
         (await context.cookies(origin)).find((cookie) => cookie.name === "multica-locale")?.value,
@@ -152,7 +180,7 @@ for (const scenario of [
         (await context.cookies(origin)).find((cookie) => cookie.name === "multica-locale")?.value,
       ).toBe(scenario.language);
       expect(await page.evaluate(() => localStorage.getItem("multica_token"))).toBeNull();
-      expect(exchanges).toHaveLength(1);
+      expectExchangesOnce(exchanges, code, origin);
       expect(callbackDocuments).toBe(1);
       expect(unexpectedApiRequests).toEqual([]);
       expect(googleRequests).toEqual([]);

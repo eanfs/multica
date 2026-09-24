@@ -81,6 +81,19 @@ function mockAgent(ownerId: string, workspaceId: string) {
 async function mockApis(page: Page, ownerId: string) {
   const captured: { allowlist?: unknown } = {};
 
+  // The creator-only MCP Apps tab is gated on the deployment's
+  // `composio_mcp_apps` flag, which ships off. Patch the real config response
+  // for this spec so the test does not depend on the local environment
+  // turning a product flag on.
+  await page.route("**/api/config", async (route) => {
+    const response = await route.fetch();
+    const config = (await response.json()) as {
+      feature_flags?: Record<string, boolean>;
+    };
+    config.feature_flags = { ...config.feature_flags, composio_mcp_apps: true };
+    await route.fulfill({ response, json: config });
+  });
+
   await page.route("**/api/integrations/composio/toolkits", (route) =>
     route.fulfill({
       status: 200,
@@ -161,8 +174,10 @@ test.describe("Agent MCP tab (creator-only)", () => {
     });
     await waitForPageText(page, "MCP Test Agent");
 
-    // The creator-only tab entry is present and opens the connection list.
-    const tab = page.getByRole("button", { name: "MCP Apps" });
+    // The creator-only entry is a Capabilities sub-tab; the detail rail only
+    // renders a section's sub-tabs while that section is active.
+    await page.getByRole("tab", { name: "Capabilities" }).click();
+    const tab = page.getByRole("tab", { name: "MCP Apps" });
     await expect(tab).toBeVisible({ timeout: 15000 });
     await tab.click();
 
@@ -185,9 +200,10 @@ test.describe("Agent MCP tab (creator-only)", () => {
     await waitForPageText(page, "MCP Test Agent");
 
     // Other tabs render, but the creator-only MCP Apps entry must not.
-    await expect(page.getByRole("button", { name: "Activity" })).toBeVisible({
+    // The agent detail rail renamed `activity` to `work` in MUL-7107.
+    await expect(page.getByRole("tab", { name: "Work" })).toBeVisible({
       timeout: 15000,
     });
-    await expect(page.getByRole("button", { name: "MCP Apps" })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "MCP Apps" })).toHaveCount(0);
   });
 });

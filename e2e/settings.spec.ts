@@ -22,10 +22,9 @@ test.describe("Settings", () => {
     const newName = "Renamed WS " + Date.now();
     await nameInput.fill(newName);
 
-    // Save
-    await page.locator("button", { hasText: "Save" }).click();
-
-    await expect(page.getByText("Workspace settings saved").first()).toBeVisible({ timeout: 5000 });
+    // The workspace details form auto-saves; there is no Save button. Wait for
+    // the auto-save toast the same way the restore below does.
+    await expect(page.getByText("Workspace settings saved").first()).toBeVisible({ timeout: 10000 });
 
     // Sidebar should reflect the new name WITHOUT page refresh
     await expect(page.getByRole("button", { name: new RegExp(newName) }).first()).toBeVisible();
@@ -33,8 +32,7 @@ test.describe("Settings", () => {
     // Restore original name so other tests aren't affected
     await nameInput.clear();
     await nameInput.fill(originalName.trim());
-    await page.locator("button", { hasText: "Save" }).click();
-    await expect(page.getByText("Workspace settings saved").first()).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText("Workspace settings saved").first()).toBeVisible({ timeout: 10000 });
     await expect(page.getByRole("button", { name: new RegExp(originalName) }).first()).toBeVisible();
   });
 
@@ -51,6 +49,19 @@ test.describe("Settings", () => {
 
     // Stateful: connections is empty until the (mocked) connect flow lands.
     let connected = false;
+
+    // The Composio section is gated on the deployment's `composio_mcp_apps`
+    // flag, which ships off. Patch the real config response for this spec so
+    // the test does not depend on the local environment turning a product flag
+    // on.
+    await page.route("**/api/config", async (route) => {
+      const response = await route.fetch();
+      const config = (await response.json()) as {
+        feature_flags?: Record<string, boolean>;
+      };
+      config.feature_flags = { ...config.feature_flags, composio_mcp_apps: true };
+      await route.fulfill({ response, json: config });
+    });
 
     await page.route("**/api/integrations/composio/toolkits", (route) =>
       route.fulfill({
