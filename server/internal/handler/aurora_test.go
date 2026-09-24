@@ -1986,11 +1986,28 @@ func TestAuroraSubscriptionReportsAnActivePlan(t *testing.T) {
 	}
 }
 
+// auroraGenerationsTestReset removes the fixture user's generation rows so a
+// usage assertion counts what its own test seeded. Several earlier tests leave
+// a generation row behind (the ones that assert a refused or failed create),
+// and the month's count is a property of the user, not of the test.
+func auroraGenerationsTestReset(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		if _, err := testPool.Exec(context.Background(),
+			`DELETE FROM aurora_generation WHERE user_id = $1`, testUserID); err != nil {
+			t.Fatalf("reset aurora_generation: %v", err)
+		}
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
 // The plan screen shows this month's usage against the plan's cap, so the
 // endpoint reports the same counts the entitlement gate enforces.
 func TestAuroraSubscriptionReportsUsage(t *testing.T) {
 	creditTestReset(t)
 	auroraSubscriptionTestReset(t)
+	auroraGenerationsTestReset(t)
 	seedAuroraGenerationForUser(t, testUserID)
 
 	out := getAuroraSubscription(t).Subscription
