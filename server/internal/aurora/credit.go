@@ -13,14 +13,18 @@ import (
 var ErrInsufficientCredits = errors.New("insufficient credits")
 
 // Ledger kinds follow the cloud wallet contract
-// (packages/core/types/billing.ts): topup | deduction | refund | adjustment.
-// "expire" is added by Plan 5 (LedgerKindExpire + Expire, monthly
-// settlement).
+// (packages/core/types/billing.ts): topup | deduction | refund | adjustment |
+// expire.
 const (
 	LedgerKindTopup      = "topup"
 	LedgerKindDeduction  = "deduction"
 	LedgerKindRefund     = "refund"
 	LedgerKindAdjustment = "adjustment"
+	// LedgerKindExpire is the unused remainder of a monthly grant, deducted at
+	// the end of that grant's month (settlement.go). It is a distinct kind so
+	// the transactions screen can explain the debit rather than showing an
+	// unexplained negative.
+	LedgerKindExpire = "expire"
 )
 
 // TxBeginner is the narrow transaction-starting surface CreditService needs.
@@ -81,6 +85,21 @@ func (s *CreditService) Grant(ctx context.Context, userID, workspaceID pgtype.UU
 		return fmt.Errorf("grant amount must be positive, got %d", amountMicro)
 	}
 	return s.adjust(ctx, userID, workspaceID, amountMicro, kind, "grant:"+reference, reference)
+}
+
+// Expire deducts the unused remainder of a monthly grant, recording an
+// "expire" ledger row keyed by "expire:"+reference (reference =
+// "<userID>:<YYYY-MM>"). Idempotent like every other ledger write, so the
+// settlement loop can rerun its expiry phase freely.
+//
+// A user who spent below the grant amount has no remainder left to expire;
+// adjust then returns ErrInsufficientCredits and the caller skips them rather
+// than over-deducting.
+func (s *CreditService) Expire(ctx context.Context, userID, workspaceID pgtype.UUID, amountMicro int64, reference string) error {
+	if amountMicro <= 0 {
+		return fmt.Errorf("expire amount must be positive, got %d", amountMicro)
+	}
+	return s.adjust(ctx, userID, workspaceID, -amountMicro, LedgerKindExpire, "expire:"+reference, reference)
 }
 
 // adjust applies a signed delta: negative delta = deduct (must have balance),
