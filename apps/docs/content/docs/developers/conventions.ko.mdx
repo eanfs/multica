@@ -33,11 +33,13 @@ Multica 코드를 작성하거나, 번역을 변경하거나, 중국어 제품 �
 | `packages/core` | 앱 종속적이지 않은 것만 | `react-dom`, `localStorage`, `process.env`, `next/*`, UI 라이브러리 |
 | `packages/ui` | 없음 | `@multica/core`, 비즈니스 로직 |
 | `packages/views` | `core/`, `ui/` | `next/*`, `react-router-dom`, stores |
+| `packages/nextjs` | `core/`, `next/*` | `react-router-dom`, electron, 다른 앱 |
 | `apps/web/platform/` | `next/*` | 다른 앱 |
+| `apps/aurora/platform/` | `next/*` | 다른 앱 |
 | `apps/desktop/.../platform/` | `react-router-dom`, electron | 다른 앱 |
 | `apps/mobile/` | `@multica/core`의 유형과 순수 함수 | Web/Desktop의 React 페이지, store, 플랫폼 구현 |
 
-두 앱 모두에 동일한 로직이 나타난다면 반드시 공유 패키지로 추출해야 합니다. "사소한" 중복이라는 예외는 없습니다. Mobile은 독립된 UI, 데이터 계층, 출시 절차를 가지며 유형과 순수 함수만 공유합니다.
+두 앱 모두에 동일한 로직이 나타난다면 반드시 공유 패키지로 추출해야 합니다. "사소한" 중복이라는 예외는 없습니다. Web과 Aurora는 프레임워크에 종속되지 않는 로직은 `packages/core`에서, `next/*`에 의존하는 헬퍼는 `packages/nextjs`에서 공유합니다. Mobile은 독립된 UI, 데이터 계층, 출시 절차를 가지며 유형과 순수 함수만 공유합니다.
 
 ### 파일과 컴포넌트
 
