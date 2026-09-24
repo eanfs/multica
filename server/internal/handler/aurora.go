@@ -95,6 +95,26 @@ func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Screen before anything is written. A rejected prompt must not seed
+	// agents, reserve credits, or leave a generation row behind, so the screen
+	// runs ahead of every side effect rather than merely ahead of the insert.
+	decision, err := h.Moderation.ScreenPrompt(r.Context(), req.Prompt)
+	if err != nil {
+		// Fail closed: a moderator that cannot reach a verdict must not be read
+		// as approval (spec §10 red line). The failed screen is recorded — an
+		// outage that silently rejects is a thing an operator has to be able to
+		// see.
+		slog.Error("aurora prompt moderation failed", "workspace_id", uuidToString(workspaceID), "error", err)
+		h.recordModerationBlock(r.Context(), pgtype.UUID{}, workspaceID, aurora.ModerationScopePrompt, "moderation adapter error: "+err.Error())
+		writeError(w, http.StatusInternalServerError, "content moderation unavailable")
+		return
+	}
+	if !decision.Allowed {
+		h.recordModerationBlock(r.Context(), pgtype.UUID{}, workspaceID, aurora.ModerationScopePrompt, decision.Reason)
+		writeError(w, http.StatusUnprocessableEntity, decision.Reason)
+		return
+	}
+
 	// Lazy seed so the enqueue below always has an execution carrier. owner_id
 	// references "user", and the caller is a real member, so the caller's id
 	// satisfies the FK (in the personal-space MVP it is the workspace owner,
@@ -206,14 +226,42 @@ func (h *Handler) markGenerationFailed(ctx context.Context, workspaceID, generat
 	}
 }
 
+// recordModerationBlock appends one rejection to the moderation audit trail.
+//
+// The write is best-effort: the content is already rejected by the time it
+// runs, and failing the request afterwards would not produce the missing row.
+// A warning is logged instead, because a log that silently stops recording is
+// worse than one that says so.
+//
+// generationID is the zero UUID when a prompt was rejected before its
+// generation row existed. The row is then keyed by workspace alone, which is
+// the most specific identity available at that point.
+func (h *Handler) recordModerationBlock(ctx context.Context, generationID, workspaceID pgtype.UUID, scope, reason string) {
+	if _, err := h.Queries.CreateAuroraModerationLog(ctx, db.CreateAuroraModerationLogParams{
+		GenerationID: generationID,
+		WorkspaceID:  workspaceID,
+		Scope:        scope,
+		Verdict:      aurora.ModerationVerdictBlocked,
+		Reason:       reason,
+	}); err != nil {
+		slog.Warn("aurora moderation log write failed",
+			"scope", scope, "workspace_id", uuidToString(workspaceID), "error", err)
+	}
+}
+
 // failGenerationAndRefund rolls a post-reservation failure back: refund the
 // reserved micro-credits (idempotent via the generation-id reference) and mark
 // the generation failed. Both writes are best-effort — the request path is
 // already returning an error — but a failed refund is logged so a customer is
 // never silently left charged for work that never started.
 func (h *Handler) failGenerationAndRefund(ctx context.Context, userID, workspaceID, generationID pgtype.UUID, amountMicro int64, reason string) {
-	if err := h.Credit.Refund(ctx, userID, workspaceID, amountMicro, uuidToString(generationID)); err != nil {
-		slog.Warn("aurora generation refund failed", "generation_id", uuidToString(generationID), "error", err)
+	// A generation that never reached the reservation has nothing to give back,
+	// and Refund rejects a non-positive amount rather than treating it as a
+	// no-op — so skip it instead of logging a warning for a non-event.
+	if amountMicro > 0 {
+		if err := h.Credit.Refund(ctx, userID, workspaceID, amountMicro, uuidToString(generationID)); err != nil {
+			slog.Warn("aurora generation refund failed", "generation_id", uuidToString(generationID), "error", err)
+		}
 	}
 	h.markGenerationFailed(ctx, workspaceID, generationID, reason)
 }

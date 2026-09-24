@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS aurora_moderation_log_workspace_idx;

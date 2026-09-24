@@ -329,6 +329,14 @@ deleted_aurora_assets AS (
 deleted_aurora_generations AS (
     DELETE FROM aurora_generation WHERE workspace_id = $1
 ),
+-- The moderation audit trail is workspace-scoped leaf data with no FK, so it
+-- goes with the workspace rather than outliving it with a dangling
+-- workspace_id. Its generation_id is not a dependency: the row is keyed by
+-- workspace, and a NULL generation_id (a prompt rejected before its generation
+-- existed) is deleted by the same statement.
+deleted_aurora_moderation_logs AS (
+    DELETE FROM aurora_moderation_log WHERE workspace_id = $1
+),
 deleted_channel_outbound_cards AS (
     DELETE FROM channel_outbound_card_message
     WHERE chat_session_id IN (SELECT id FROM ws_sessions)

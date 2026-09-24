@@ -228,6 +228,16 @@ type AuroraGeneration struct {
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 }
 
+type AuroraModerationLog struct {
+	ID           pgtype.UUID        `json:"id"`
+	GenerationID pgtype.UUID        `json:"generation_id"`
+	WorkspaceID  pgtype.UUID        `json:"workspace_id"`
+	Scope        string             `json:"scope"`
+	Verdict      string             `json:"verdict"`
+	Reason       string             `json:"reason"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
 type Autopilot struct {
 	ID                 pgtype.UUID        `json:"id"`
 	WorkspaceID        pgtype.UUID        `json:"workspace_id"`

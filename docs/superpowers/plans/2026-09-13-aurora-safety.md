@@ -87,15 +87,15 @@ git commit -m "feat(aurora): wire moderation into generation create and completi
 
 ---
 
-## 实现状态（2026-09-23 记录）
+## 实现状态（2026-09-24 记录）
 
-**尚未开始。本计划的任何代码、迁移或依赖在仓库中都不存在。**
+**Task 1 与 Task 2 已实现**（#63 / #65，迁移 `510`–`511`，原计划的 `459` 按实际顺延）。
 
-在 `aeb31e1e9` 上检索仓库核实：
+- **Task 1** —— 默认 adapter 是仓库内中英双语违禁词表（`blocked_terms.json`，ASCII 词按整词匹配以免 `rape` 命中 `grape`，CJK 词按子串匹配）+ 本地图片肤色启发式检测（纯 Go、无外部服务、无模型权重）。视频在 MVP 只校验容器，其余类型只校验 URL。
+- **Task 2** —— 接入点是 `CreateAuroraGeneration`（prompt 前置审核：拒绝时 `422` + 审计行，且不 seed agent、不 reserve、不落 generation 行）与 `ReportTaskArtifacts`（产物后置审核：拒绝时 generation 判 `failed` + 退款 + 不落 asset 行 + 审计行）。`fail-closed` 是硬线：adapter 报错一律按拒绝处理并记录。
 
-- Plan safety —— `server/` 下 `moderation`、`Moderator`、`blocked_terms`、`ScreenPrompt`、`ScreenAsset` **零命中**。Task 1 与 Task 2 均未开始。
-- Plan 5 —— `aurora_subscription`、`PaymentProvider`、`TierCatalog`、`LimitsForUser`、`tiers.go` **零命中**；`server/go.mod` 无 Stripe 依赖。七个 Task 全部未做。唯一沾边的产物 `server/internal/aurora/credit.go` 里的 `LedgerKindExpire`，是 Plan 2 为**本计划 Task 4 预留**的，不是实现。
+> **回写文件与计划不符（已按实际实现）。** 计划写的是 `server/internal/service/aurora_completion.go`，那是 Plan 3 落地前的预期；实际回写路径是 `server/internal/handler/aurora_artifact.go` 的 `ReportTaskArtifacts`，它是 `CreateAuroraAsset` 的唯一调用点。后置审核必须落在写行之前才能满足「asset 不落库」，因此接在那里而不是 `aurora_completion.go`。
 
-**动手前必须先重排迁移序号。** 本计划的文件序号是对着远早于当前的仓库状态定的（Plan safety 假设从 `459` 起），而 `server/migrations/` 现在已过 `509`。规则同 Plan 2——`CREATE [UNIQUE] INDEX CONCURRENTLY`、每个索引单独一个迁移文件、并逐个注册进 `cmd/migrate/main.go` 的 `concurrentIndexCleanups`。
+**Deferred 部分未变**：供应商审核 API、视频帧级审核、权益门禁 `GateAurora*`（self-host 下 fail-open 已核实）、审核复核 UI。
 
-**为什么重要。** 这两个计划是当前技术 MVP 与 spec「可对外销售」里程碑之间的最后两块：Plan 5 提供付费档位与 Stripe，Plan safety 提供界定它们的**内容审核**与**权益门禁**。
+**Plan 5 仍未开始**，其迁移序号同样需要在动手前按合并时 `server/migrations` 最新重排（本计划原假设 `459`，实际顺延到 `510`/`511`）。

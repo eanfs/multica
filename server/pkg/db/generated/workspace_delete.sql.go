@@ -314,6 +314,9 @@ deleted_aurora_assets AS (
 deleted_aurora_generations AS (
     DELETE FROM aurora_generation WHERE workspace_id = $1
 ),
+deleted_aurora_moderation_logs AS (
+    DELETE FROM aurora_moderation_log WHERE workspace_id = $1
+),
 deleted_channel_outbound_cards AS (
     DELETE FROM channel_outbound_card_message
     WHERE chat_session_id IN (SELECT id FROM ws_sessions)
@@ -502,6 +505,11 @@ WHERE channel_media_pending_object.workspace_id = $1
 // Aurora content-creation rows are workspace-keyed leaf data with no FK, so
 // both are swept here by workspace_id. Assets reference generations by
 // application-level id only, so order is not load-bearing.
+// The moderation audit trail is workspace-scoped leaf data with no FK, so it
+// goes with the workspace rather than outliving it with a dangling
+// workspace_id. Its generation_id is not a dependency: the row is keyed by
+// workspace, and a NULL generation_id (a prompt rejected before its generation
+// existed) is deleted by the same statement.
 // Same no-FK chore as chat_draft_restore above. Matched on workspace_id rather
 // than the session set because that column exists precisely so this statement
 // does not have to join through chat_session, which it deletes in this same CTE.
