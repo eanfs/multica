@@ -11,6 +11,38 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countActiveGenerations = `-- name: CountActiveGenerations :one
+SELECT count(*) FROM aurora_generation g
+JOIN agent_task_queue t ON t.id = g.task_id
+WHERE g.user_id = $1
+  AND t.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+`
+
+// Concurrency entitlement usage (Plan 5 Task 6). A generation is in flight
+// while its task row is in any non-terminal state; the list mirrors the
+// statuses the runtime sweeper treats as live work.
+func (q *Queries) CountActiveGenerations(ctx context.Context, userID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveGenerations, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countGenerationsThisMonth = `-- name: CountGenerationsThisMonth :one
+SELECT count(*) FROM aurora_generation
+WHERE user_id = $1 AND created_at >= date_trunc('month', now())
+`
+
+// Monthly entitlement usage (Plan 5 Task 6). "This month" is the natural month
+// in the database's timezone, matching the settlement window (Task 4) so a
+// grant and the count that consumes it agree on where the month starts.
+func (q *Queries) CountGenerationsThisMonth(ctx context.Context, userID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countGenerationsThisMonth, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countWorkspacesForUser = `-- name: CountWorkspacesForUser :one
 SELECT count(*) FROM member WHERE user_id = $1
 `
@@ -197,6 +229,26 @@ func (q *Queries) GetAuroraGenerationByTaskID(ctx context.Context, taskID pgtype
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const getPersonalWorkspaceForUser = `-- name: GetPersonalWorkspaceForUser :one
+SELECT w.id FROM workspace w
+JOIN member m ON m.workspace_id = w.id
+WHERE m.user_id = $1 AND m.role = 'owner'
+ORDER BY w.created_at ASC
+LIMIT 1
+`
+
+// The workspace a user-scoped credit write is attributed to. Aurora's ledger
+// rows carry a workspace_id, and a personal plan's grants belong to the
+// personal space — the workspace the user owns (Plan 1 provisions exactly one
+// at signup). Ordered by creation so the first-owned space wins if a user
+// somehow owns more than one.
+func (q *Queries) GetPersonalWorkspaceForUser(ctx context.Context, userID pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, getPersonalWorkspaceForUser, userID)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const listAuroraAssets = `-- name: ListAuroraAssets :many

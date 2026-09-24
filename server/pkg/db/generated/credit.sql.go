@@ -155,3 +155,89 @@ func (q *Queries) ListCreditTransactions(ctx context.Context, arg ListCreditTran
 	}
 	return items, nil
 }
+
+const listMonthlyGrantRecipients = `-- name: ListMonthlyGrantRecipients :many
+SELECT DISTINCT user_id FROM credit_ledger
+WHERE kind = 'adjustment' AND reference LIKE 'sub:%'
+  AND created_at >= $1 AND created_at < $2
+`
+
+type ListMonthlyGrantRecipientsParams struct {
+	FromTs pgtype.Timestamptz `json:"from_ts"`
+	ToTs   pgtype.Timestamptz `json:"to_ts"`
+}
+
+// Every user who received a monthly grant in the window: the expiry phase's
+// work list (Plan 5 Task 4).
+func (q *Queries) ListMonthlyGrantRecipients(ctx context.Context, arg ListMonthlyGrantRecipientsParams) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listMonthlyGrantRecipients, arg.FromTs, arg.ToTs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var user_id pgtype.UUID
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const sumCreditLedgerInWindow = `-- name: SumCreditLedgerInWindow :one
+SELECT coalesce(sum(amount_micro), 0)::bigint
+FROM credit_ledger
+WHERE user_id = $1 AND kind = ANY($2::text[])
+  AND created_at >= $3 AND created_at < $4
+`
+
+type SumCreditLedgerInWindowParams struct {
+	UserID pgtype.UUID        `json:"user_id"`
+	Kinds  []string           `json:"kinds"`
+	FromTs pgtype.Timestamptz `json:"from_ts"`
+	ToTs   pgtype.Timestamptz `json:"to_ts"`
+}
+
+// Net signed movement in a window, for the monthly expiry (Plan 5 Task 4).
+// Deductions are negative and refunds positive in the ledger, so a plain SUM
+// is already the net spend; kinds is passed as an array so one query serves
+// both the spend window and any future narrower one.
+func (q *Queries) SumCreditLedgerInWindow(ctx context.Context, arg SumCreditLedgerInWindowParams) (int64, error) {
+	row := q.db.QueryRow(ctx, sumCreditLedgerInWindow,
+		arg.UserID,
+		arg.Kinds,
+		arg.FromTs,
+		arg.ToTs,
+	)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const sumMonthlyGrantInWindow = `-- name: SumMonthlyGrantInWindow :one
+SELECT coalesce(sum(amount_micro), 0)::bigint
+FROM credit_ledger
+WHERE user_id = $1 AND kind = 'adjustment'
+  AND reference LIKE 'sub:%'
+  AND created_at >= $2 AND created_at < $3
+`
+
+type SumMonthlyGrantInWindowParams struct {
+	UserID pgtype.UUID        `json:"user_id"`
+	FromTs pgtype.Timestamptz `json:"from_ts"`
+	ToTs   pgtype.Timestamptz `json:"to_ts"`
+}
+
+// Monthly "sub:" grants only — signup bonuses and topups never expire, so the
+// expiry phase must not sum them (Plan 5 Task 4).
+func (q *Queries) SumMonthlyGrantInWindow(ctx context.Context, arg SumMonthlyGrantInWindowParams) (int64, error) {
+	row := q.db.QueryRow(ctx, sumMonthlyGrantInWindow, arg.UserID, arg.FromTs, arg.ToTs)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}

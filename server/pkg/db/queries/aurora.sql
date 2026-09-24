@@ -62,3 +62,31 @@ WHERE id = $1 AND workspace_id = $2;
 
 -- name: CountWorkspacesForUser :one
 SELECT count(*) FROM member WHERE user_id = $1;
+
+-- name: CountGenerationsThisMonth :one
+-- Monthly entitlement usage (Plan 5 Task 6). "This month" is the natural month
+-- in the database's timezone, matching the settlement window (Task 4) so a
+-- grant and the count that consumes it agree on where the month starts.
+SELECT count(*) FROM aurora_generation
+WHERE user_id = $1 AND created_at >= date_trunc('month', now());
+
+-- name: CountActiveGenerations :one
+-- Concurrency entitlement usage (Plan 5 Task 6). A generation is in flight
+-- while its task row is in any non-terminal state; the list mirrors the
+-- statuses the runtime sweeper treats as live work.
+SELECT count(*) FROM aurora_generation g
+JOIN agent_task_queue t ON t.id = g.task_id
+WHERE g.user_id = $1
+  AND t.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred');
+
+-- name: GetPersonalWorkspaceForUser :one
+-- The workspace a user-scoped credit write is attributed to. Aurora's ledger
+-- rows carry a workspace_id, and a personal plan's grants belong to the
+-- personal space — the workspace the user owns (Plan 1 provisions exactly one
+-- at signup). Ordered by creation so the first-owned space wins if a user
+-- somehow owns more than one.
+SELECT w.id FROM workspace w
+JOIN member m ON m.workspace_id = w.id
+WHERE m.user_id = $1 AND m.role = 'owner'
+ORDER BY w.created_at ASC
+LIMIT 1;

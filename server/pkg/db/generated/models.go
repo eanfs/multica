@@ -238,6 +238,19 @@ type AuroraModerationLog struct {
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
+type AuroraSubscription struct {
+	ID                   pgtype.UUID        `json:"id"`
+	UserID               pgtype.UUID        `json:"user_id"`
+	Tier                 string             `json:"tier"`
+	Status               string             `json:"status"`
+	StripeCustomerID     pgtype.Text        `json:"stripe_customer_id"`
+	StripeSubscriptionID pgtype.Text        `json:"stripe_subscription_id"`
+	CurrentPeriodEnd     pgtype.Timestamptz `json:"current_period_end"`
+	CancelAtPeriodEnd    bool               `json:"cancel_at_period_end"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Autopilot struct {
 	ID                 pgtype.UUID        `json:"id"`
 	WorkspaceID        pgtype.UUID        `json:"workspace_id"`

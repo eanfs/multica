@@ -32,3 +32,29 @@ FROM credit_ledger
 WHERE user_id = $1
 ORDER BY created_at DESC
 LIMIT $2;
+
+-- name: SumCreditLedgerInWindow :one
+-- Net signed movement in a window, for the monthly expiry (Plan 5 Task 4).
+-- Deductions are negative and refunds positive in the ledger, so a plain SUM
+-- is already the net spend; kinds is passed as an array so one query serves
+-- both the spend window and any future narrower one.
+SELECT coalesce(sum(amount_micro), 0)::bigint
+FROM credit_ledger
+WHERE user_id = sqlc.arg(user_id) AND kind = ANY(sqlc.arg(kinds)::text[])
+  AND created_at >= sqlc.arg(from_ts) AND created_at < sqlc.arg(to_ts);
+
+-- name: SumMonthlyGrantInWindow :one
+-- Monthly "sub:" grants only — signup bonuses and topups never expire, so the
+-- expiry phase must not sum them (Plan 5 Task 4).
+SELECT coalesce(sum(amount_micro), 0)::bigint
+FROM credit_ledger
+WHERE user_id = sqlc.arg(user_id) AND kind = 'adjustment'
+  AND reference LIKE 'sub:%'
+  AND created_at >= sqlc.arg(from_ts) AND created_at < sqlc.arg(to_ts);
+
+-- name: ListMonthlyGrantRecipients :many
+-- Every user who received a monthly grant in the window: the expiry phase's
+-- work list (Plan 5 Task 4).
+SELECT DISTINCT user_id FROM credit_ledger
+WHERE kind = 'adjustment' AND reference LIKE 'sub:%'
+  AND created_at >= sqlc.arg(from_ts) AND created_at < sqlc.arg(to_ts);
