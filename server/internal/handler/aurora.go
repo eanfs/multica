@@ -118,6 +118,44 @@ func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Local entitlement gates (spec §6.3). They run before anything is written
+	// or enqueued: a refused request must not seed agents, reserve credits, or
+	// leave a generation row behind.
+	limits, err := aurora.LimitsForUser(r.Context(), h.Queries, h.Tiers, userUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load limits")
+		return
+	}
+	usedThisMonth, err := h.Queries.CountGenerationsThisMonth(r.Context(), userUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load usage")
+		return
+	}
+	if usedThisMonth >= int64(limits.GenerationsPerMonth) {
+		writeError(w, http.StatusTooManyRequests, "monthly generation limit reached")
+		return
+	}
+	activeGenerations, err := h.Queries.CountActiveGenerations(r.Context(), userUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load usage")
+		return
+	}
+	if activeGenerations >= int64(limits.Concurrency) {
+		writeError(w, http.StatusTooManyRequests, "concurrency limit reached")
+		return
+	}
+	// The free tier's monthly credits are granted lazily, on the month's first
+	// generation. This must happen before the reservation below: a new month
+	// starts with an empty wallet, so reserving first would reject with 402 the
+	// very request the grant exists to pay for. Best-effort — a failure here
+	// only delays the grant, and the month-scoped ledger key retries it on the
+	// next attempt.
+	if limits.Tier == "free" {
+		if err := h.ensureFreeMonthlyGrant(r.Context(), userUUID); err != nil {
+			slog.Warn("failed to grant aurora free monthly credits", "error", err, "user_id", userID)
+		}
+	}
+
 	// Lazy seed so the enqueue below always has an execution carrier. owner_id
 	// references "user", and the caller is a real member, so the caller's id
 	// satisfies the FK (in the personal-space MVP it is the workspace owner,
@@ -192,6 +230,21 @@ func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request)
 		Status:          updated.Status,
 		CreditsReserved: updated.CreditsReserved,
 	}})
+}
+
+// ensureFreeMonthlyGrant grants the free tier's monthly credits to a user
+// without an active subscription. Idempotent per month via the ledger key
+// ("grant:sub:<userID>:<YYYY-MM>"), so calling it on every free-tier
+// generation grants once, and the monthly settlement treats a free grant
+// exactly like a paid one when the month's remainder expires.
+func (h *Handler) ensureFreeMonthlyGrant(ctx context.Context, userID pgtype.UUID) error {
+	wsID, err := h.Queries.GetPersonalWorkspaceForUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	month := time.Now().UTC().Format("2006-01")
+	return h.Credit.Grant(ctx, userID, wsID, h.Tiers.FreeMonthlyMicro(), aurora.LedgerKindAdjustment,
+		"sub:"+uuidToString(userID)+":"+month)
 }
 
 // ensureAuroraSystemAgents serialises the idempotent system-agent seed behind a

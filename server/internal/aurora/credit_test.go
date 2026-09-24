@@ -13,15 +13,23 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
+// auroraTestPool is the package's fixture pool, skipping the test when no
+// database is reachable — the same contract every DB-backed test here follows.
+func auroraTestPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	if agentsTestPool == nil {
+		t.Skip("database not available")
+	}
+	return agentsTestPool
+}
+
 // newTestCreditService builds a credit service on the package's fixture pool.
 // The pool is the transaction beginner: the service only needs Begin, and
 // spending a connection per operation is what the production wiring does too.
 func newTestCreditService(t *testing.T) (*aurora.CreditService, *pgxpool.Pool) {
 	t.Helper()
-	if agentsTestPool == nil {
-		t.Skip("database not available")
-	}
-	return aurora.NewCreditService(db.New(agentsTestPool), agentsTestPool), agentsTestPool
+	pool := auroraTestPool(t)
+	return aurora.NewCreditService(db.New(pool), pool), pool
 }
 
 // newAuroraTestUser creates a throwaway user for a credit test and removes it,

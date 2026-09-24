@@ -163,12 +163,14 @@ func TestCreateAuroraGenerationReservesAndEnqueues(t *testing.T) {
 		testPool.Exec(context.Background(), `DELETE FROM aurora_generation WHERE id = $1`, gen.ID)
 	})
 
+	// The caller has no subscription, so this first generation of the month
+	// also granted the free tier's monthly credits before reserving.
 	bal, err := testHandler.Credit.Balance(ctx, user)
 	if err != nil {
 		t.Fatalf("Balance: %v", err)
 	}
-	if want := int64(1_000_000_000 - wantReserved); bal != want {
-		t.Fatalf("balance after reserve = %d, want %d", bal, want)
+	if want := int64(1_000_000_000) + testHandler.Tiers.FreeMonthlyMicro() - wantReserved; bal != want {
+		t.Fatalf("balance after reserve = %d, want %d (seed + free monthly grant - reserved)", bal, want)
 	}
 
 	// The row must still be scoped to the workspace and user resolved from the
@@ -1751,4 +1753,127 @@ func TestStripeWebhookIgnoresUnknownEventType(t *testing.T) {
 		events: []aurora.Event{{ID: "evt_invoice", Type: "invoice.paid", Raw: []byte(`{}`)}},
 	})
 	postStripeWebhook(t, `{"type":"invoice.paid"}`, http.StatusOK)
+}
+
+// ---------------------------------------------------------------------------
+// Local entitlement gates (Plan 5 Task 6)
+// ---------------------------------------------------------------------------
+
+// seedAuroraGenerationForUser inserts one generation row for a user, dated now,
+// and removes it when the test ends. Counting rows is how the monthly gate
+// measures usage, so a test that needs usage seeds rows rather than running the
+// whole create flow.
+func seedAuroraGenerationForUser(t *testing.T, userID string) string {
+	t.Helper()
+	return dbfx.Insert(t, "aurora_generation", testutil.Cols{
+		"workspace_id": testWorkspaceID,
+		"user_id":      userID,
+		"skill_id":     "xhs-image",
+		"prompt":       "seeded for an entitlement test",
+		"status":       "completed",
+	})
+}
+
+// The monthly cap is a hard stop: the eleventh generation in a month is refused
+// for a free user, before anything is written.
+func TestCreateAuroraGenerationRejectsOverMonthlyLimit(t *testing.T) {
+	creditTestReset(t)
+	auroraSubscriptionTestReset(t)
+	cleanupAuroraSystemAgents(t)
+	free, _ := testHandler.Tiers.Lookup("free")
+	for i := 0; i < free.GenerationsPerMonth; i++ {
+		seedAuroraGenerationForUser(t, testUserID)
+	}
+
+	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
+		"skillId": "xhs-image",
+		"prompt":  "超出月度上限的生成请求",
+	})
+	testutil.Call(t, testHandler.CreateAuroraGeneration, req).Want(http.StatusTooManyRequests)
+
+	// A refused request must not have created a generation row of its own.
+	if n := dbfx.Count(t,
+		`SELECT count(*) FROM aurora_generation WHERE user_id = $1 AND status = 'queued'`,
+		testUserID,
+	); n != 0 {
+		t.Fatalf("queued generations = %d after a refused request, want 0", n)
+	}
+}
+
+// Concurrency is the second gate, and it counts in-flight work rather than the
+// month's total: a free user may have one generation running at a time.
+func TestCreateAuroraGenerationRejectsOverConcurrency(t *testing.T) {
+	creditTestReset(t)
+	auroraSubscriptionTestReset(t)
+	cleanupAuroraSystemAgents(t)
+
+	agentID := dbfx.Agent(t, "Aurora concurrency gate agent", testRuntimeID)
+	taskID := dbfx.Task(t, agentID, testutil.Cols{"status": "queued", "runtime_id": testRuntimeID})
+	seedAuroraGenerationForUser(t, testUserID)
+	dbfx.Exec(t, `UPDATE aurora_generation SET task_id = $1 WHERE user_id = $2 AND task_id IS NULL`, taskID, testUserID)
+
+	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
+		"skillId": "xhs-image",
+		"prompt":  "超出并发上限的生成请求",
+	})
+	testutil.Call(t, testHandler.CreateAuroraGeneration, req).Want(http.StatusTooManyRequests)
+}
+
+// A free user with an empty wallet gets the month's free credits on their first
+// generation of the month — granted before the reservation, or the request
+// would be rejected for insufficient credits. A second generation in the same
+// month must not grant them again.
+func TestCreateAuroraGenerationGrantsFreeMonthlyCreditsOnce(t *testing.T) {
+	creditTestReset(t)
+	auroraSubscriptionTestReset(t)
+	cleanupAuroraSystemAgents(t)
+	ctx := context.Background()
+
+	// xhs-image costs 620 credits and the free grant is 200, so the first
+	// generation still fails for want of credits — what this test pins is that
+	// the grant happened, and happened once.
+	req := func() *http.Request {
+		return newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
+			"skillId": "xhs-image",
+			"prompt":  "免费额度发放测试",
+		})
+	}
+	testutil.Call(t, testHandler.CreateAuroraGeneration, req()).Want(http.StatusPaymentRequired)
+
+	bal, err := testHandler.Credit.Balance(ctx, parseUUID(testUserID))
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if bal != testHandler.Tiers.FreeMonthlyMicro() {
+		t.Fatalf("balance = %d, want the free monthly grant %d", bal, testHandler.Tiers.FreeMonthlyMicro())
+	}
+
+	testutil.Call(t, testHandler.CreateAuroraGeneration, req()).Want(http.StatusPaymentRequired)
+	bal2, err := testHandler.Credit.Balance(ctx, parseUUID(testUserID))
+	if err != nil {
+		t.Fatalf("Balance after the second request: %v", err)
+	}
+	if bal2 != bal {
+		t.Fatalf("the free monthly grant was duplicated: before=%d after=%d", bal, bal2)
+	}
+}
+
+// A free grant is a monthly grant like any other: the settlement expires its
+// unused remainder, which is why the lazy grant uses the same "sub:" reference
+// shape as a paid plan.
+func TestEnsureFreeMonthlyGrantUsesTheMonthlyReference(t *testing.T) {
+	creditTestReset(t)
+	auroraSubscriptionTestReset(t)
+	ctx := context.Background()
+
+	if err := testHandler.ensureFreeMonthlyGrant(ctx, parseUUID(testUserID)); err != nil {
+		t.Fatalf("ensureFreeMonthlyGrant: %v", err)
+	}
+	want := "sub:" + testUserID + ":" + time.Now().UTC().Format("2006-01")
+	if n := dbfx.Count(t,
+		`SELECT count(*) FROM credit_ledger WHERE user_id = $1 AND kind = 'adjustment' AND reference = $2`,
+		testUserID, want,
+	); n != 1 {
+		t.Fatalf("ledger rows with reference %q = %d, want 1", want, n)
+	}
 }
