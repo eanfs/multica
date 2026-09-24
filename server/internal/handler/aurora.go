@@ -1103,6 +1103,11 @@ func (h *Handler) handleSubscriptionUpsert(ctx context.Context, ev aurora.Event)
 		}
 		return err
 	}
+	// The tier is carried over rather than read from the event: a Stripe
+	// subscription object does not name the plan this product sold — that
+	// lives in the checkout session's metadata — and the MVP has no plan
+	// switching, so the row's tier is the only trustworthy answer.
+	//
 	// An event whose object carries no item periods must not wipe the stored
 	// period: the upsert writes the column unconditionally, and a NULL period
 	// reads as "expired" to the monthly grant scan.

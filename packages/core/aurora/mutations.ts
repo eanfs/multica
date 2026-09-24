@@ -89,8 +89,11 @@ export function useCreateAuroraCheckout() {
       if (checkoutUrl) navigateToCheckout(checkoutUrl);
     },
     onSettled: () => {
+      // The plan the card names, and the wallet — the webhook grants the first
+      // month's credits, so both move. The pack catalogue does not, so it is
+      // left alone.
       qc.invalidateQueries({ queryKey: auroraWalletKeys.subscription() });
-      qc.invalidateQueries({ queryKey: auroraWalletKeys.all() });
+      qc.invalidateQueries({ queryKey: auroraWalletKeys.balance() });
     },
   });
 }
@@ -105,7 +108,9 @@ export function useCreateAuroraTopupCheckout() {
       if (checkoutUrl) navigateToCheckout(checkoutUrl);
     },
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: auroraWalletKeys.all() });
+      // Only the wallet moves: a top-up buys credits, not a plan.
+      qc.invalidateQueries({ queryKey: auroraWalletKeys.balance() });
+      qc.invalidateQueries({ queryKey: auroraWalletKeys.transactions() });
     },
   });
 }
