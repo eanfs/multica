@@ -321,6 +321,7 @@ var concurrentIndexCleanups = map[string]string{
 	"507_aurora_asset_generation_idx":                           "aurora_asset_generation_idx",
 	"508_aurora_asset_workspace_idx":                            "aurora_asset_workspace_idx",
 	"509_aurora_generation_task_idx":                            "aurora_generation_task_idx",
+	"511_aurora_moderation_log_workspace_idx":                   "aurora_moderation_log_workspace_idx",
 	"484_issue_triage_state_index":                              "idx_issue_triage_state",
 }
 

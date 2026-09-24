@@ -214,6 +214,11 @@ type Handler struct {
 	// yet, so generation enqueue and the task sweeper reach it through the
 	// handler (Plan 3).
 	Credit *aurora.CreditService
+	// Moderation screens Aurora prompts and produced artifacts before they are
+	// persisted or charged for. New installs the built-in adapter (bilingual
+	// blocklist plus local image screening); a vendor screening API replaces the
+	// implementation, not the call sites.
+	Moderation aurora.Moderator
 	// Entitlements supplies workspace-scoped commercial gates. A nil provider
 	// preserves self-hosted behavior without extra reads.
 	Entitlements entitlement.Provider
@@ -495,6 +500,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		IssueService:                 service.NewIssueService(queries, txStarter, bus, analyticsClient, taskSvc),
 		AutopilotService:             service.NewAutopilotService(queries, txStarter, bus, taskSvc),
 		Credit:                       creditSvc,
+		Moderation:                   aurora.NewDefaultModerator(),
 		EmailService:                 emailService,
 		UpdateStore:                  NewInMemoryUpdateStore(),
 		ModelListStore:               NewInMemoryModelListStore(),

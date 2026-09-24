@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -14,6 +15,13 @@ func TestReportTaskArtifactsWritesAssetRows(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
+	// The artifacts below point at URLs no test can fetch, and the default
+	// moderator fails closed on bytes it cannot inspect — which would make this
+	// test about moderation rather than about the writeback. Screening is
+	// stubbed to admit here; the default adapter's own verdicts are covered in
+	// server/internal/aurora and its wiring in aurora_moderation_test.go.
+	withAuroraModeration(t, &stubModerator{assetDecision: aurora.Decision{Allowed: true}})
+
 	ctx := context.Background()
 
 	issueID := dbfx.Issue(t, "aurora artifact issue")

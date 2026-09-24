@@ -36,6 +36,7 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"attachment":                         workspaceDelete,
 	"aurora_asset":                       workspaceDelete,
 	"aurora_generation":                  workspaceDelete,
+	"aurora_moderation_log":              workspaceDelete,
 	"autopilot":                          workspaceDelete,
 	"autopilot_collaborator":             workspaceDelete,
 	"autopilot_quota_period":             workspaceDelete,
