@@ -1,8 +1,17 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useWorkspaceId } from "../hooks";
-import { createAuroraGeneration, deleteAuroraAsset } from "./api";
+import {
+  createAuroraCheckout,
+  createAuroraGeneration,
+  createAuroraTopupCheckout,
+  deleteAuroraAsset,
+} from "./api";
 import { auroraKeys, auroraWalletKeys } from "./queries";
-import type { CreateAuroraGenerationRequest } from "./types";
+import type {
+  CreateAuroraCheckoutRequest,
+  CreateAuroraGenerationRequest,
+  CreateAuroraTopupCheckoutRequest,
+} from "./types";
 
 /**
  * Enqueues one generation.
@@ -52,4 +61,63 @@ export function useDeleteAuroraAsset() {
       qc.invalidateQueries({ queryKey: auroraKeys.generations(wsId) });
     },
   });
+}
+
+/**
+ * Starts a subscription checkout and sends the browser to Stripe.
+ *
+ * The navigation is part of the mutation rather than a `useEffect` on the
+ * result: the checkout URL is a one-shot destination, and keeping it out of
+ * component state means a re-render cannot navigate a second time.
+ *
+ * On success the wallet and the plan are invalidated. The purchase completes on
+ * Stripe's origin, so this client will not see the webhook that grants the
+ * credits — the invalidation is what makes the return trip re-read both, and
+ * `auroraSubscriptionOptions`' stale-time covers the case where the webhook
+ * lands a moment later.
+ *
+ * A 409 (a live subscription already exists) and a 503 (no Stripe
+ * configuration) are left to the caller: neither is retryable, and the screen
+ * has copy for both.
+ */
+export function useCreateAuroraCheckout() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (request: CreateAuroraCheckoutRequest) =>
+      createAuroraCheckout(request),
+    onSuccess: (checkoutUrl) => {
+      if (checkoutUrl) navigateToCheckout(checkoutUrl);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: auroraWalletKeys.subscription() });
+      qc.invalidateQueries({ queryKey: auroraWalletKeys.all() });
+    },
+  });
+}
+
+/** Starts a one-time credit purchase. Same shape as the subscription one. */
+export function useCreateAuroraTopupCheckout() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (request: CreateAuroraTopupCheckoutRequest) =>
+      createAuroraTopupCheckout(request),
+    onSuccess: (checkoutUrl) => {
+      if (checkoutUrl) navigateToCheckout(checkoutUrl);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: auroraWalletKeys.all() });
+    },
+  });
+}
+
+/**
+ * Hands the browser to Stripe's hosted checkout.
+ *
+ * A full-page navigation, not a router push: the destination is another origin,
+ * so it is outside every adapter's route table. `assign` is used rather than
+ * `open` so the current page stays in history and the back button returns the
+ * user to the plan screen if they abandon the purchase.
+ */
+function navigateToCheckout(url: string) {
+  if (typeof window !== "undefined") window.location.assign(url);
 }

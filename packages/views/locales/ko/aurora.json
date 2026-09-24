@@ -70,14 +70,70 @@
     "title": "크레딧",
     "balance_title": "사용 가능한 크레딧",
     "top_up": "충전",
-    "top_up_placeholder": "크레딧 구매는 구독과 함께 제공됩니다.",
     "transactions_title": "사용 내역",
     "transactions_empty_title": "내역이 없습니다",
     "transactions_empty_description": "크레딧 변동이 여기에 표시됩니다.",
     "load_failed_title": "크레딧을 불러오지 못했습니다",
     "amount_positive": "+{{amount}}",
     "amount_negative": "−{{amount}}",
-    "balance_after": "변동 후 잔액: {{amount}}"
+    "balance_after": "변동 후 잔액: {{amount}}",
+    "subscription": {
+      "title": "요금제",
+      "tiers": {
+        "free": {
+          "name": "무료",
+          "price": "$0",
+          "summary": "월 200 크레딧"
+        },
+        "creator": {
+          "name": "크리에이터",
+          "price": "$9.90/월",
+          "summary": "월 3,000 크레딧"
+        },
+        "pro": {
+          "name": "프로",
+          "price": "$29/월",
+          "summary": "월 12,000 크레딧"
+        },
+        "unknown": {
+          "name": "알 수 없는 요금제",
+          "price": "",
+          "summary": ""
+        }
+      },
+      "status": {
+        "active": "사용 중",
+        "past_due": "결제 필요",
+        "canceled": "취소됨",
+        "unknown": "알 수 없음"
+      },
+      "renews_on": "{{date}} 갱신",
+      "cancel_scheduled": "기간이 끝나면 종료됩니다.",
+      "usage_label": "이번 달 생성 횟수",
+      "usage_value": "{{used}} / {{limit}}",
+      "subscribe": "구독"
+    },
+    "topup": {
+      "title": "크레딧 구매",
+      "empty": "판매 중인 크레딧 상품이 없습니다.",
+      "pack": "{{credits}} 크레딧 · {{price}}",
+      "packs": {
+        "t5": {
+          "price": "$5"
+        },
+        "t20": {
+          "price": "$20"
+        },
+        "other": {
+          "price": ""
+        }
+      }
+    },
+    "checkout": {
+      "failed": "구매를 시작하지 못했습니다. 다시 시도해 주세요.",
+      "already_subscribed": "이미 구독 중입니다.",
+      "unavailable": "이 인스턴스에서는 결제를 사용할 수 없습니다."
+    }
   },
   "workspace": {
     "unavailable_title": "이 워크스페이스를 열 수 없습니다",

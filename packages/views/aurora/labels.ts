@@ -108,6 +108,71 @@ export function skillDisplayNamesById(
   );
 }
 
+/** A plan, as `aurora.billing.subscription.tiers.*`. */
+export type AuroraTierLabel = "free" | "creator" | "pro" | "unknown";
+
+const TIER_LABELS: Record<string, AuroraTierLabel> = {
+  free: "free",
+  creator: "creator",
+  pro: "pro",
+};
+
+/**
+ * The label key for a plan.
+ *
+ * The server sends the tier as a plain string (a new one must still parse), so
+ * this ends in a fallback: a plan this build has never heard of reads as an
+ * unknown plan rather than as an empty label.
+ */
+export function subscriptionTierLabel(
+  tier: string | undefined,
+): AuroraTierLabel {
+  return TIER_LABELS[tier ?? ""] ?? "unknown";
+}
+
+/** A subscription state, as `aurora.billing.subscription.status.*`. */
+export type AuroraSubscriptionStatusLabel =
+  | "active"
+  | "past_due"
+  | "canceled"
+  | "unknown";
+
+const SUBSCRIPTION_STATUS_LABELS: Record<
+  string,
+  AuroraSubscriptionStatusLabel
+> = {
+  active: "active",
+  past_due: "past_due",
+  canceled: "canceled",
+};
+
+/** The label key for a subscription's stored status. */
+export function subscriptionStatusLabel(
+  status: string | undefined,
+): AuroraSubscriptionStatusLabel {
+  return SUBSCRIPTION_STATUS_LABELS[status ?? ""] ?? "unknown";
+}
+
+/** A credit pack, as `aurora.billing.topup.packs.*`. */
+export type AuroraTopupPackLabel = "t5" | "t20" | "other";
+
+const TOPUP_PACK_LABELS: Record<string, AuroraTopupPackLabel> = {
+  t5: "t5",
+  t20: "t20",
+};
+
+/**
+ * The label key for a credit pack's price.
+ *
+ * Packs are priced in copy rather than on the wire: the server sends the pack's
+ * credits, not what it costs, so the price lives with the rest of the
+ * translated text. A pack this build does not know gets no price rather than a
+ * wrong one.
+ */
+export function topupPackLabel(id: string): AuroraTopupPackLabel {
+  return TOPUP_PACK_LABELS[id] ?? "other";
+}
+
 /** A directory category tab, as `aurora.directory.categories.*`. */
 export type AuroraCategoryLabel =
   | "image"

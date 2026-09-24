@@ -1,4 +1,4 @@
-export { AuroraBilling, type AuroraBillingProps } from "./billing";
+export { AuroraBilling } from "./billing";
 export {
   GenerationComposer,
   type GenerationComposerProps,

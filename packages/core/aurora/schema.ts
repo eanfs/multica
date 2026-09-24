@@ -115,3 +115,61 @@ export type AuroraTransaction = z.infer<typeof auroraTransactionSchema>;
 export const auroraTransactionsSchema = z.object({
   transactions: z.array(auroraTransactionSchema).default([]),
 });
+
+/**
+ * GET /api/aurora/billing/subscription.
+ *
+ * `tier` is the tier the server's gates actually apply — a canceled plan
+ * reports the free tier here — while `status` is the stored subscription
+ * status and is empty for a user with no plan row at all. The two together are
+ * what let the screen say "Free" without claiming a canceled plan is still
+ * running.
+ *
+ * Every field carries a default because the endpoint is the one the plan screen
+ * renders first: a server that predates it (or a degraded body) must still
+ * produce a free-plan card rather than a blank screen.
+ */
+export const auroraSubscriptionSchema = z.object({
+  tier: z.string().default("free"),
+  status: z.string().default(""),
+  currentPeriodEnd: z.string().nullable().default(null),
+  cancelAtPeriodEnd: z.boolean().default(false),
+  limits: z
+    .object({
+      generationsPerMonth: z.number().default(10),
+      concurrency: z.number().default(1),
+    })
+    .default({ generationsPerMonth: 10, concurrency: 1 }),
+  usage: z
+    .object({
+      generationsUsedThisMonth: z.number().default(0),
+      activeGenerations: z.number().default(0),
+    })
+    .default({ generationsUsedThisMonth: 0, activeGenerations: 0 }),
+});
+export type AuroraSubscription = z.infer<typeof auroraSubscriptionSchema>;
+
+export const auroraSubscriptionResponseSchema = z.object({
+  subscription: auroraSubscriptionSchema,
+});
+
+/** GET /api/aurora/billing/topups — the purchasable credit packs. */
+export const auroraTopupSchema = z.object({
+  id: z.string(),
+  credits: z.number(),
+});
+export type AuroraTopup = z.infer<typeof auroraTopupSchema>;
+
+export const auroraTopupsSchema = z.object({
+  topups: z.array(auroraTopupSchema).default([]),
+});
+
+/**
+ * The checkout endpoints' shared answer: a URL to send the browser to. No
+ * default — a body without a URL means the checkout did not start, and a
+ * placeholder URL would navigate the user somewhere meaningless.
+ */
+export const auroraCheckoutResponseSchema = z.object({
+  checkoutUrl: z.string(),
+});
+export type AuroraCheckout = z.infer<typeof auroraCheckoutResponseSchema>;

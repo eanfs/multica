@@ -70,14 +70,70 @@
     "title": "クレジット",
     "balance_title": "利用可能なクレジット",
     "top_up": "チャージ",
-    "top_up_placeholder": "クレジットの購入はサブスクリプションと同時に提供されます。",
     "transactions_title": "利用履歴",
     "transactions_empty_title": "履歴がありません",
     "transactions_empty_description": "クレジットの増減がここに表示されます。",
     "load_failed_title": "クレジットを読み込めませんでした",
     "amount_positive": "+{{amount}}",
     "amount_negative": "−{{amount}}",
-    "balance_after": "変動後の残高：{{amount}}"
+    "balance_after": "変動後の残高：{{amount}}",
+    "subscription": {
+      "title": "プラン",
+      "tiers": {
+        "free": {
+          "name": "無料",
+          "price": "$0",
+          "summary": "毎月 200 クレジット"
+        },
+        "creator": {
+          "name": "クリエイター",
+          "price": "$9.90/月",
+          "summary": "毎月 3,000 クレジット"
+        },
+        "pro": {
+          "name": "プロ",
+          "price": "$29/月",
+          "summary": "毎月 12,000 クレジット"
+        },
+        "unknown": {
+          "name": "不明なプラン",
+          "price": "",
+          "summary": ""
+        }
+      },
+      "status": {
+        "active": "有効",
+        "past_due": "支払い待ち",
+        "canceled": "解約済み",
+        "unknown": "不明"
+      },
+      "renews_on": "{{date}} に更新",
+      "cancel_scheduled": "期間終了時に終了します。",
+      "usage_label": "今月の生成回数",
+      "usage_value": "{{used}} / {{limit}}",
+      "subscribe": "購読する"
+    },
+    "topup": {
+      "title": "クレジットを購入",
+      "empty": "販売中のクレジットパックはありません。",
+      "pack": "{{credits}} クレジット · {{price}}",
+      "packs": {
+        "t5": {
+          "price": "$5"
+        },
+        "t20": {
+          "price": "$20"
+        },
+        "other": {
+          "price": ""
+        }
+      }
+    },
+    "checkout": {
+      "failed": "購入を開始できませんでした。もう一度お試しください。",
+      "already_subscribed": "すでに購読しています。",
+      "unavailable": "このインスタンスでは支払いを利用できません。"
+    }
   },
   "workspace": {
     "unavailable_title": "このワークスペースを開けません",

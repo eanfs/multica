@@ -4,19 +4,29 @@ import { ApiError, setApiInstance } from "../api";
 import type { ApiClient } from "../api/client";
 import {
   auroraAssetDownloadPath,
+  createAuroraCheckout,
   createAuroraGeneration,
+  createAuroraTopupCheckout,
   deleteAuroraAsset,
+  getAuroraSubscription,
+  isAuroraCheckoutConflictError,
   isAuroraInsufficientCreditsError,
+  isAuroraPaymentsUnavailableError,
   isAuroraRateLimitError,
   listAuroraAssets,
   listAuroraGenerations,
   listAuroraSkills,
+  listAuroraTopups,
   parseAuroraAssets,
   parseAuroraBalance,
+  parseAuroraCheckout,
   parseAuroraGeneration,
   parseAuroraGenerationDetail,
   parseAuroraGenerations,
   parseAuroraSkills,
+  parseAuroraSubscription,
+  parseAuroraTopupCheckout,
+  parseAuroraTopups,
   parseAuroraTransactions,
 } from "./api";
 
@@ -166,6 +176,53 @@ describe("parseAuroraBalance and parseAuroraTransactions", () => {
   });
 });
 
+describe("parseAuroraSubscription", () => {
+  it("reads the plan the server reports", () => {
+    const res = parseAuroraSubscription({
+      subscription: { tier: "pro", status: "active" },
+    });
+
+    expect(res.tier).toBe("pro");
+    expect(res.status).toBe("active");
+  });
+
+  it("degrades an unreadable body to the free plan", () => {
+    // Not null: the card always renders, and "free, nothing used" is the state
+    // closest to what a failed read actually knows.
+    const res = parseAuroraSubscription({ subscription: "nope" });
+
+    expect(res.tier).toBe("free");
+    expect(res.limits).toEqual({ generationsPerMonth: 10, concurrency: 1 });
+  });
+});
+
+describe("parseAuroraTopups", () => {
+  it("degrades an unreadable body to no packs", () => {
+    expect(parseAuroraTopups({ topups: 7 })).toEqual([]);
+  });
+
+  it("reads the packs", () => {
+    expect(
+      parseAuroraTopups({ topups: [{ id: "t20", credits: 20000 }] }),
+    ).toEqual([{ id: "t20", credits: 20000 }]);
+  });
+});
+
+describe("parseAuroraCheckout", () => {
+  it("reads the checkout URL", () => {
+    expect(
+      parseAuroraCheckout({ checkoutUrl: "https://checkout.stripe.com/c/1" }),
+    ).toBe("https://checkout.stripe.com/c/1");
+  });
+
+  it("reads an unreadable body as null rather than an empty URL", () => {
+    // An empty string would navigate the browser to the current page, as if
+    // the purchase had completed.
+    expect(parseAuroraCheckout({})).toBeNull();
+    expect(parseAuroraTopupCheckout({ checkoutUrl: 7 })).toBeNull();
+  });
+});
+
 describe("request paths", () => {
   beforeEach(() => {
     setApiInstance(null as unknown as ApiClient);
@@ -209,6 +266,46 @@ describe("request paths", () => {
     );
   });
 
+  it("reads the plan and the topup list from the billing endpoints", async () => {
+    let requests = installFakeClient({ subscription: { tier: "free" } });
+
+    await getAuroraSubscription();
+
+    expect(requests[0]?.path).toBe("/api/aurora/billing/subscription");
+
+    requests = installFakeClient({ topups: [] });
+    await listAuroraTopups();
+    expect(requests[0]?.path).toBe("/api/aurora/billing/topups");
+  });
+
+  it("posts the checkout bodies as JSON", async () => {
+    const returnURLs = {
+      successUrl: "https://app.example.com/acme/billing?checkout=success",
+      cancelUrl: "https://app.example.com/acme/billing?checkout=cancel",
+    };
+    let requests = installFakeClient({ checkoutUrl: "https://stripe.test/1" });
+
+    await createAuroraCheckout({
+      tier: "creator",
+      billingCycle: "monthly",
+      ...returnURLs,
+    });
+
+    expect(requests[0]?.path).toBe("/api/aurora/billing/checkout");
+    expect(requests[0]?.init?.method).toBe("POST");
+    expect(requests[0]?.init?.body).toBe(
+      JSON.stringify({
+        tier: "creator",
+        billingCycle: "monthly",
+        ...returnURLs,
+      }),
+    );
+
+    requests = installFakeClient({ checkoutUrl: "https://stripe.test/2" });
+    await createAuroraTopupCheckout({ topupId: "t5", ...returnURLs });
+    expect(requests[0]?.path).toBe("/api/aurora/billing/topup/checkout");
+  });
+
   it("deletes an asset with no body to read", async () => {
     const requests = installFakeClient(undefined);
 
@@ -244,6 +341,22 @@ describe("error classification", () => {
     ).toBe(true);
   });
 
+  it("reads 409 as an existing subscription", () => {
+    expect(
+      isAuroraCheckoutConflictError(
+        new ApiError("subscription already exists", 409, "Conflict"),
+      ),
+    ).toBe(true);
+  });
+
+  it("reads 503 as a deployment without payments", () => {
+    expect(
+      isAuroraPaymentsUnavailableError(
+        new ApiError("payments not configured", 503, "Unavailable"),
+      ),
+    ).toBe(true);
+  });
+
   it("does not claim unrelated failures", () => {
     expect(isAuroraInsufficientCreditsError(new Error("network"))).toBe(false);
     expect(isAuroraRateLimitError(new ApiError("boom", 500, "Server Error"))).toBe(
@@ -252,5 +365,12 @@ describe("error classification", () => {
     expect(isAuroraInsufficientCreditsError(new ApiError("boom", 429, "Rate"))).toBe(
       false,
     );
+    expect(isAuroraCheckoutConflictError(new Error("network"))).toBe(false);
+    expect(
+      isAuroraCheckoutConflictError(new ApiError("boom", 503, "Unavailable")),
+    ).toBe(false);
+    expect(
+      isAuroraPaymentsUnavailableError(new ApiError("boom", 409, "Conflict")),
+    ).toBe(false);
   });
 });
