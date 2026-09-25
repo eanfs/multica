@@ -102,6 +102,11 @@ type Config struct {
 	// MULTICA_APP_URL (falling back to FRONTEND_ORIGIN). It is kept separate
 	// from PublicURL because split app/API deployments use different origins.
 	AppURL string
+	// CheckoutReturnOrigins is the deployment's explicit browser-origin allowlist
+	// for Stripe success/cancel redirects. It normally mirrors CORS_ALLOWED_ORIGINS;
+	// AppURL is also accepted independently so a canonical app URL remains valid
+	// when CORS uses only development defaults.
+	CheckoutReturnOrigins []string
 	// TrustedProxies are CIDRs whose source IP we trust to set
 	// X-Forwarded-For / X-Real-IP. Empty means "trust nothing": the rate
 	// limiter uses r.RemoteAddr exclusively. Populated via the

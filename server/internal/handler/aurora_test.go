@@ -1377,15 +1377,18 @@ func (f *fakePayments) ConstructEvent(payload []byte, sigHeader string) (aurora.
 func installAuroraPayments(t *testing.T, fp aurora.PaymentProvider) {
 	t.Helper()
 	oldPayments, oldTiers := testHandler.Payments, testHandler.Tiers
+	oldCheckoutReturnOrigins := testHandler.cfg.CheckoutReturnOrigins
 	testHandler.Payments = fp
 	testHandler.Tiers = aurora.NewTierCatalog(
 		"price_creator_monthly", "price_creator_yearly",
 		"price_pro_monthly", "price_pro_yearly",
 		"price_topup_5", "price_topup_20",
 	)
+	testHandler.cfg.CheckoutReturnOrigins = []string{"https://aurora.example.com"}
 	t.Cleanup(func() {
 		testHandler.Payments = oldPayments
 		testHandler.Tiers = oldTiers
+		testHandler.cfg.CheckoutReturnOrigins = oldCheckoutReturnOrigins
 	})
 }
 
@@ -1501,12 +1504,25 @@ func TestCreateSubscriptionCheckoutRequiresReturnURLs(t *testing.T) {
 		"missing cancelUrl":  {"tier": "creator", "successUrl": "https://aurora.example.com/success"},
 		"relative url":       {"tier": "creator", "successUrl": "/success", "cancelUrl": "/cancel"},
 		"javascript url":     {"tier": "creator", "successUrl": "javascript:alert(1)", "cancelUrl": "https://aurora.example.com/cancel"},
+		"userinfo":           {"tier": "creator", "successUrl": "https://user@aurora.example.com/success", "cancelUrl": "https://aurora.example.com/cancel"},
+		"wrong port":         {"tier": "creator", "successUrl": "https://aurora.example.com:444/success", "cancelUrl": "https://aurora.example.com/cancel"},
+		"wrong scheme":       {"tier": "creator", "successUrl": "http://aurora.example.com/success", "cancelUrl": "https://aurora.example.com/cancel"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			req := newRequest(http.MethodPost, "/api/aurora/billing/checkout", body)
 			testutil.Call(t, testHandler.CreateAuroraCheckout, req).Want(http.StatusBadRequest)
 		})
 	}
+}
+
+func TestCreateSubscriptionCheckoutRejectsUntrustedReturnOrigin(t *testing.T) {
+	auroraSubscriptionTestReset(t)
+	installAuroraPayments(t, &fakePayments{checkoutURL: "https://checkout.stripe.com/c/test"})
+	req := newRequest(http.MethodPost, "/api/aurora/billing/checkout", checkoutBody(map[string]string{
+		"tier": "creator", "billingCycle": "monthly",
+		"successUrl": "https://evil.example.com/steal-checkout",
+	}))
+	testutil.Call(t, testHandler.CreateAuroraCheckout, req).Want(http.StatusBadRequest)
 }
 
 // A deployment with no Stripe keys must not pretend it can take money: the
@@ -1546,13 +1562,8 @@ func TestCreateSubscriptionCheckoutRejectsUnknownBillingCycle(t *testing.T) {
 // A tier whose price id is not configured fails closed rather than charging
 // whatever price Stripe's default happens to be.
 func TestCreateSubscriptionCheckoutRejectsUnconfiguredPrice(t *testing.T) {
-	oldPayments, oldTiers := testHandler.Payments, testHandler.Tiers
-	testHandler.Payments = &fakePayments{checkoutURL: "https://checkout.stripe.com/c/test"}
+	installAuroraPayments(t, &fakePayments{checkoutURL: "https://checkout.stripe.com/c/test"})
 	testHandler.Tiers = aurora.NewTierCatalog("", "", "", "", "", "")
-	t.Cleanup(func() {
-		testHandler.Payments = oldPayments
-		testHandler.Tiers = oldTiers
-	})
 
 	req := newRequest(http.MethodPost, "/api/aurora/billing/checkout", checkoutBody(map[string]string{
 		"tier": "creator", "billingCycle": "monthly",
@@ -1622,6 +1633,15 @@ func TestCreateTopupCheckout(t *testing.T) {
 	if out.CheckoutURL != fp.checkoutURL {
 		t.Fatalf("checkoutUrl = %q, want %q", out.CheckoutURL, fp.checkoutURL)
 	}
+}
+
+func TestCreateTopupCheckoutRejectsUntrustedReturnOrigin(t *testing.T) {
+	installAuroraPayments(t, &fakePayments{checkoutURL: "https://checkout.stripe.com/c/topup"})
+	req := newRequest(http.MethodPost, "/api/aurora/billing/topup/checkout", checkoutBody(map[string]string{
+		"topupId":   "t5",
+		"cancelUrl": "https://evil.example.com/steal-checkout",
+	}))
+	testutil.Call(t, testHandler.CreateAuroraTopupCheckout, req).Want(http.StatusBadRequest)
 }
 
 func TestCreateTopupCheckoutRejectsUnknownTopup(t *testing.T) {
