@@ -51,7 +51,7 @@
   - 表 `aurora_subscription`：`id uuid PK`、`user_id uuid NOT NULL`、`tier text NOT NULL`（`free|creator|pro`）、`status text NOT NULL`（`active|past_due|canceled`）、`stripe_customer_id text`、`stripe_subscription_id text`、`current_period_end timestamptz`、`cancel_at_period_end bool NOT NULL DEFAULT false`、`created_at`、`updated_at`。唯一索引 `(user_id)`（一人一订阅，个人产品线）；索引 `(status, current_period_end)`（发放 cron 扫描）。
   - 查询：`UpsertAuroraSubscription`、`GetAuroraSubscriptionByUser`、`GetAuroraSubscriptionByStripeID`、`ListActiveSubscriptionsForGrant`、`CountGenerationsThisMonth`、`CountActiveGenerations`、`SumCreditLedgerInWindow`、`SumMonthlyGrantInWindow`、`ListMonthlyGrantRecipients`、`GetPersonalWorkspaceForUser`。
 
-- [ ] **Step 1: 写 migration 文件**
+- [x] **Step 1: 写 migration 文件**
 
 `server/migrations/460_aurora_subscription.up.sql`：
 
@@ -108,11 +108,11 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS aurora_subscription_status_period_idx
 DROP INDEX CONCURRENTLY IF EXISTS aurora_subscription_status_period_idx;
 ```
 
-- [ ] **Step 2: 注册 up 映射**
+- [x] **Step 2: 注册 up 映射**
 
 `server/cmd/migrate/main.go`：把 `aurora_subscription_user_idx` 与 `aurora_subscription_status_period_idx` 各加一条进 `concurrentIndexCleanups`（**只注册 up 映射**——down 文件仅 `DROP INDEX CONCURRENTLY`，注册进 `concurrentDownIndexCleanups` 会被 `TestConcurrentIndexCleanupsMatchTheirMigrations` 判为「有 cleanup hook 但该方向没有 CREATE CONCURRENTLY」而挂掉；down 映射只收 down 方向重建索引的 migration，见 `main.go:303-311`）。preMigrationHooks 由 up 注册自动派生，无需手加。
 
-- [ ] **Step 3: 写 sqlc 查询文件**
+- [x] **Step 3: 写 sqlc 查询文件**
 
 `server/pkg/db/queries/aurora_subscription.sql`：
 
@@ -200,12 +200,12 @@ ORDER BY w.created_at ASC
 LIMIT 1;
 ```
 
-- [ ] **Step 4: `make sqlc` + `make test` 验证**
+- [x] **Step 4: `make sqlc` + `make test` 验证**
 
 Run: `make sqlc && make test`（仓库根；`make test` 先跑 `go run ./cmd/migrate up` 再跑全部 Go 测试）
 Expected: 生成全部查询；`TestEveryConcurrentUpBuildHasCleanup` 与 `TestConcurrentIndexCleanupsMatchTheirMigrations` 通过；Go 测试全绿。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add server/migrations/460_* server/migrations/461_* server/migrations/462_* server/pkg/db/queries/ server/pkg/db/generated/ server/cmd/migrate/main.go
@@ -229,7 +229,7 @@ git commit -m "feat(aurora): add subscription table and settlement queries"
   - `aurora.NewStripeProvider(secretKey, webhookSecret string) *StripeProvider`（任一 key 为空时返回 `nil`，handler 侧以 nil 判定 503 fail-closed）。
   - `(*StripeProvider).ConstructEvent(payload []byte, sigHeader string) (aurora.Event, error)` —— 用 stripe-go `webhook.ConstructEvent` 验签，`Event` 含 `ID`（Stripe 事件 id，topup 幂等键）。
 
-- [ ] **Step 1: 写接口与配置读取**
+- [x] **Step 1: 写接口与配置读取**
 
 `server/internal/aurora/stripe.go`：
 
@@ -343,7 +343,7 @@ func (p *StripeProvider) ConstructEvent(payload []byte, sigHeader string) (Event
 
 > 实现时核对 `/api/config` handler 的字段列表，**确保上述 secret 不被序列化**（若 config handler 是显式字段映射则天然安全；若是整体序列化则需改映射）。
 
-- [ ] **Step 2: 写测试**
+- [x] **Step 2: 写测试**
 
 `server/internal/aurora/stripe_test.go`（package `aurora_test`）：
 
@@ -370,12 +370,12 @@ func TestConstructEventRejectsBadSignature(t *testing.T) {
 
 （真实签名验证的往返测试用 stripe-go `webhook.ComputeSignature` 构造合法头部；不做真实网络调用。）
 
-- [ ] **Step 3: 跑测试确认失败→实现→通过**
+- [x] **Step 3: 跑测试确认失败→实现→通过**
 
 Run: `cd server && go test ./internal/aurora/ -run TestConstructEvent`
 Expected: 编译失败 → 实现后 PASS。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add server/internal/aurora/stripe.go server/internal/aurora/stripe_test.go server/internal/handler/config.go server/go.mod server/go.sum
@@ -403,7 +403,7 @@ git commit -m "feat(aurora): stripe provider with webhook signature verification
   - `POST /api/aurora/billing/stripe/webhook`（**公开路由**）→ 验签 → 事件路由（见 Step 4）→ `200`。
   - `GET /api/aurora/billing/subscription`（Task 6 扩展用量字段）。
 
-- [ ] **Step 1: 写 tiers 失败测试**
+- [x] **Step 1: 写 tiers 失败测试**
 
 `server/internal/aurora/tiers_test.go`（package `aurora_test`）：
 
@@ -446,7 +446,7 @@ func TestTierCatalog(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 实现 tiers**
+- [x] **Step 2: 实现 tiers**
 
 `server/internal/aurora/tiers.go`：
 
@@ -524,7 +524,7 @@ func (c *TierCatalog) FreeMonthlyMicro() int64 {
 }
 ```
 
-- [ ] **Step 3: 写 checkout/webhook 失败测试**
+- [x] **Step 3: 写 checkout/webhook 失败测试**
 
 `server/internal/handler/aurora_test.go` 追加（fake provider 注入 `testHandler.Payments`——在测试里替换为 fake；`testHandler.Tiers` 用空 price id 的目录）：
 
@@ -599,7 +599,7 @@ func TestStripeWebhookTopupCompleted(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: 实现 handler + 路由**
+- [x] **Step 4: 实现 handler + 路由**
 
 `server/internal/handler/aurora.go` 追加（依赖 `h.Credit`、`h.Payments`、`h.Tiers`）：
 
@@ -779,7 +779,7 @@ r.Post("/api/aurora/billing/stripe/webhook", h.StripeWebhook)
 
 > `UpsertAuroraSubscriptionParams.CurrentPeriodEnd` 类型以 sqlc 生成为准（`timestamptz` 列 → `pgtype.Timestamptz` 或 `time.Time`，按生成结果对齐）。
 
-- [ ] **Step 5: 跑测试 + Commit**
+- [x] **Step 5: 跑测试 + Commit**
 
 Run: `cd server && go test ./internal/handler/ -run 'TestCreateSubscriptionCheckout|TestStripeWebhook'`
 Expected: PASS。
@@ -808,7 +808,7 @@ git commit -m "feat(aurora): subscription checkout and stripe webhook billing"
 
 **过期语义（自然月窗口，简化法）**：发放发生在订阅/续订当月（webhook 立即发首月）或 Free 档惰性发放（Task 6），reference 均为 `sub:<userID>:<YYYY-MM>`。过期 = `max(0, 上月 sub 发放额 + 上月净消费)`，其中净消费 = 上月 `kind IN (deduction, refund)` 的 `amount_micro` 之和（deduction 为负、refund 为正，SUM 直接可得净值）。**发放额只统计 `reference LIKE 'sub:%'` 的行**——注册赠送（`signup:`）与充值（topup kind）永不过期，不得计入。消费默认先抵扣「当月过期额度」；跨月退款进入当月净值、补跑延迟（错过 1 号后用户已消费导致余额不足）时 Expire 失败被跳过——两者记录为已知偏差。
 
-- [ ] **Step 1: 扩展 CreditService 失败测试**
+- [x] **Step 1: 扩展 CreditService 失败测试**
 
 `server/internal/aurora/credit_test.go` 追加：
 
@@ -834,7 +834,7 @@ func TestExpireIsIdempotent(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 实现 `Expire`**
+- [x] **Step 2: 实现 `Expire`**
 
 `server/internal/aurora/credit.go` 追加（`adjust` 复用；负数即扣除）：
 
@@ -851,7 +851,7 @@ func (s *CreditService) Expire(ctx context.Context, userID, workspaceID pgtype.U
 }
 ```
 
-- [ ] **Step 3: 写 settlement 失败测试**
+- [x] **Step 3: 写 settlement 失败测试**
 
 `server/internal/aurora/settlement_test.go`（package `aurora_test`）：
 
@@ -888,7 +888,7 @@ func TestRunMonthlySettlementIdempotent(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: 实现 settlement**
+- [x] **Step 4: 实现 settlement**
 
 `server/internal/aurora/settlement.go`：
 
@@ -1034,7 +1034,7 @@ func startAuroraSettlement(ctx context.Context, queries *db.Queries, credit *aur
 
 （在 `server/cmd/server` 的 server 启动处调用 `startAuroraSettlement`；接入点以 `runtime_sweeper` 的启动位置为准。）
 
-- [ ] **Step 5: 跑测试 + Commit**
+- [x] **Step 5: 跑测试 + Commit**
 
 Run: `cd server && go test ./internal/aurora/ -run 'TestExpire|TestRunMonthlySettlement'`
 Expected: PASS。
@@ -1056,7 +1056,7 @@ git commit -m "feat(aurora): monthly credit grant and expiry settlement"
 - Consumes: Plan 2 `h.Credit`、Plan 1 `ensurePersonalWorkspace`、Task 1 的 `GetPersonalWorkspaceForUser`。
 - Produces：注册（含 Google OAuth 首登）成功后一次性 `Grant(kind=adjustment, 500*1_000_000 micro, reference="signup:<userID>")`，幂等；瞬时失败 best-effort（下次登录幂等重试补发）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `server/internal/handler/auth_personal_workspace_test.go` 的 `TestFindOrCreateUserProvisionsPersonalWorkspace` 追加断言：
 
@@ -1080,7 +1080,7 @@ git commit -m "feat(aurora): monthly credit grant and expiry settlement"
 	}
 ```
 
-- [ ] **Step 2: 实现**
+- [x] **Step 2: 实现**
 
 `server/internal/handler/auth.go` `findOrCreateUser` 内、`ensurePersonalWorkspace` 之后追加（与它并列 best-effort，幂等 reference 保证只发一次）：
 
@@ -1097,7 +1097,7 @@ git commit -m "feat(aurora): monthly credit grant and expiry settlement"
 	}
 ```
 
-- [ ] **Step 3: 跑测试 + Commit**
+- [x] **Step 3: 跑测试 + Commit**
 
 Run: `cd server && go test ./internal/handler/ -run TestFindOrCreateUserProvisionsPersonalWorkspace`
 Expected: PASS。
@@ -1124,7 +1124,7 @@ git commit -m "feat(aurora): grant signup bonus credits on first login"
   - `aurora.LimitsForUser(ctx, q, tiers, userID) (AuroraLimits, error)` —— 无订阅行或非 active → Free 档。
   - `CreateAuroraGeneration` 消费顺序：**limits 检查 → Free 档惰性月发放 →（Plan 3 Task 2 的插行/Reserve/入队）**：`CountGenerationsThisMonth >= GenerationsPerMonth` → `429`；`CountActiveGenerations >= Concurrency` → `429`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```go
 func TestCreateAuroraGenerationRejectsOverMonthlyLimit(t *testing.T) {
@@ -1149,7 +1149,7 @@ func TestLimitsForUserDefaultsToFree(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 实现 + 跑测试 + Commit**
+- [x] **Step 2: 实现 + 跑测试 + Commit**
 
 `server/internal/aurora/entitlement.go`：
 
@@ -1278,8 +1278,8 @@ git commit -m "feat(aurora): local entitlement gates and lazy free-tier grant"
   - **query key 说明**：subscription/topups 端点是 **user-scoped**（非 workspace-scoped），query key 不含 wsId——Plan 4 的 wsId 规则只约束 workspace-scoped 查询，此处显式豁免并注释。
   - checkout 跳转：mutation 传客户端构造的 `successUrl`/`cancelUrl`（`${window.location.origin}/${slug}/billing?checkout=success|cancel`，apps/aurora 平台层允许 `window`）。
 
-- [ ] **Step 1: 写 handler 失败测试**（无订阅 → Free + usage 计数；有 creator 订阅 → 对应 limits；topups 列表两条且无 priceId）
-- [ ] **Step 2: 实现 handler + 路由 + 跑测试 + Commit**
+- [x] **Step 1: 写 handler 失败测试**（无订阅 → Free + usage 计数；有 creator 订阅 → 对应 limits；topups 列表两条且无 priceId）
+- [x] **Step 2: 实现 handler + 路由 + 跑测试 + Commit**
 
 ```bash
 cd server && go test ./internal/handler/ -run TestAuroraSubscription
@@ -1287,7 +1287,7 @@ git add server/internal/handler/aurora.go server/internal/handler/aurora_test.go
 git commit -m "feat(aurora): subscription status and topup list endpoints"
 ```
 
-- [ ] **Step 3: 前端 schema/hooks 失败测试**
+- [x] **Step 3: 前端 schema/hooks 失败测试**
 
 `packages/core/aurora/schema.ts` 追加（Plan 4 模式，`parseWithFallback` 带 `{endpoint}`）：
 
@@ -1315,11 +1315,11 @@ export const auroraCheckoutResponseSchema = z.object({ checkoutUrl: z.string() }
 
 malformed 测试补 fallback 用例（`types.test.ts`）。
 
-- [ ] **Step 4: 前端 hooks + billing 视图 + i18n**
+- [x] **Step 4: 前端 hooks + billing 视图 + i18n**
 
 `queries.ts` 加 `useAuroraSubscription()`/`useAuroraTopups()`（user-scoped keys，注释说明豁免 wsId）；`mutations.ts` 加 `useCreateAuroraCheckout()`/`useCreateAuroraTopupCheckout()`（body 带 slug 路由的 successUrl/cancelUrl，成功后跳转 checkoutUrl）。`billing.tsx`：订阅卡片（tier 名称经四语 key、状态、续期日、`usage.generationsUsedThisMonth / limits.generationsPerMonth` 进度条）+ 「升级/订阅」与「充值」按钮（Free/无订阅显示档位表与价格 $0/$9.9/$29 及 topup $5/$20）；组件测试 mock hooks（Plan 4 模式）。四语 aurora.json 补 key（`billing.subscription.*`、`billing.topup.*`、`billing.checkout.*`），中文文案遵循 `apps/docs/content/docs/developers/conventions.mdx`。
 
-- [ ] **Step 5: 跑测试 + Commit**
+- [x] **Step 5: 跑测试 + Commit**
 
 Run: `pnpm typecheck && pnpm test`（aurora 相关测试）+ `make test`（仓库根）
 
@@ -1349,7 +1349,7 @@ git commit -m "feat(aurora): subscription and topup UI with checkout"
 
 ## 执行交接
 
-Plan 5 完成后，spec §9.1 的「可对外销售」里程碑即可交付（安全计划 Plan safety 同步完成时）。实现顺序：Task 1 → 2 → 3 → 4 → 5 → 6 → 7；每任务 `make test` 全绿再进下一个。
+Plan 5 and the Plan safety content-moderation tasks are complete, so the repository-side sellable milestone in spec §9.1 is implemented. Operational rollout still requires Stripe secrets/price IDs and the external infrastructure called out by the deferred sections. The completed implementation order was Task 1 → 2 → 3 → 4 → 5 → 6 → 7.
 
 ## 修订记录（2026-09-13 PR #2 review 回写）
 
@@ -1375,15 +1375,18 @@ Plan 5 完成后，spec §9.1 的「可对外销售」里程碑即可交付（�
 
 ---
 
-## 实现状态（2026-09-23 记录）
+## Implementation status (2026-09-25)
 
-**尚未开始。本计划的任何代码、迁移或依赖在仓库中都不存在。**
+**All seven tasks are complete and merged in PR #77** (story #62; tickets #64 and #66–#71).
 
-在 `aeb31e1e9` 上检索仓库核实：
+- **Task 1** — `aurora_subscription`, its sqlc queries, and the user/status indexes landed in migrations `512`–`514`. Final review added durable checkout intent and Stripe event-ordering fields in migration `515`.
+- **Task 2** — `PaymentProvider` is backed by stripe-go `v86.4.2`; secrets remain server-only, webhook signatures are verified, and missing payment configuration fails closed.
+- **Task 3** — the tier catalog, subscription/top-up checkout endpoints, and public Stripe webhook are live. Durable checkout idempotency, paid-session checks, canonical subscription reads, and event-order reconciliation make retries and out-of-order lifecycle events safe.
+- **Task 4** — monthly allowance reconciliation and expiry run at startup and daily with month-scoped idempotency. Allowance grants serialize per user and top up only the missing amount; signup bonuses and top-ups never expire.
+- **Task 5** — the 500-credit signup bonus uses explicit eligibility in migrations `516`–`517`, so historical accounts are not backfilled and concurrent first-login paths cannot duplicate the grant.
+- **Task 6** — local monthly-generation and concurrency limits are enforced from `TierCatalog`; Free-tier allowance creation and generation reservation are serialized so concurrent creates cannot bypass the limits.
+- **Task 7** — subscription/top-up API schemas and hooks, billing status/usage, checkout navigation, return polling, the billing view, and locale parity are implemented across the shared frontend packages and Aurora app.
 
-- Plan safety —— `server/` 下 `moderation`、`Moderator`、`blocked_terms`、`ScreenPrompt`、`ScreenAsset` **零命中**。Task 1 与 Task 2 均未开始。
-- Plan 5 —— `aurora_subscription`、`PaymentProvider`、`TierCatalog`、`LimitsForUser`、`tiers.go` **零命中**；`server/go.mod` 无 Stripe 依赖。七个 Task 全部未做。唯一沾边的产物 `server/internal/aurora/credit.go` 里的 `LedgerKindExpire`，是 Plan 2 为**本计划 Task 4 预留**的，不是实现。
+Verification on the final PR head passed all required CI checks, including backend, frontend, sqlc, views, and vulnerability scanning. Focused backend and frontend checks also passed locally. The local full Go suite surfaced unrelated load-sensitive tests that passed in isolation and are documented in the PR rather than hidden.
 
-**动手前必须先重排迁移序号。** 本计划的文件序号是对着远早于当前的仓库状态定的（Plan safety 假设从 `459` 起），而 `server/migrations/` 现在已过 `509`。规则同 Plan 2——`CREATE [UNIQUE] INDEX CONCURRENTLY`、每个索引单独一个迁移文件、并逐个注册进 `cmd/migrate/main.go` 的 `concurrentIndexCleanups`。
-
-**为什么重要。** 这两个计划是当前技术 MVP 与 spec「可对外销售」里程碑之间的最后两块：Plan 5 提供付费档位与 Stripe，Plan safety 提供界定它们的**内容审核**与**权益门禁**。
+The planned deferred scope is unchanged: self-service plan changes/cancellation, past-due enforcement, invoices/receipts, automated refunds, cloud `GateAurora*`, FIFO credit batches, and prorated billing.
