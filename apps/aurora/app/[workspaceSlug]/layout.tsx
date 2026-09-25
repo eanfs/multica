@@ -87,9 +87,10 @@ export default function WorkspaceLayout({
   // Remember whether this slug has resolved before. A workspace that disappears
   // from under us — deleted elsewhere, or the user removed from it — is a
   // relocate, not a dead end: shared core answers it with a full-page navigation
-  // to the next workspace (packages/core/realtime/use-realtime-sync.ts), and
-  // that fetch is still in flight when the list stops containing this slug.
-  // Without this the dead end below flashes for the length of that round-trip.
+  // to the destination this app registered (packages/core/realtime/use-realtime-sync.ts
+  // asking platform/workspace-destination.ts), and that fetch is still in
+  // flight when the list stops containing this slug. Without this the dead end
+  // below flashes for the length of that round-trip.
   const hasBeenSeen = useWorkspaceSeen(workspaceSlug, !!workspace);
 
   const loadingIndicator = (

@@ -9,10 +9,11 @@ import { DeadEndScreen } from "@/components/dead-end-screen";
  * open. Deliberately does not distinguish "no such workspace" from "exists but
  * not mine" — saying which would let anyone enumerate slugs.
  *
- * This is Aurora's own screen rather than the shared `NoAccessPage`: that one
- * recovers through `resolvePostAuthDestination`, which sends users to
- * /onboarding or /workspaces/new. Aurora serves neither, so the shared screen
- * would offer a button that 404s.
+ * This is Aurora's own screen rather than the shared `NoAccessPage`, whose
+ * copy describes the Multica workspace list. The recovery underneath is the
+ * same decision either way: it opens the workspace the user still has, which
+ * is what the shared page's resolver — now injectable, and injected here in
+ * `platform/workspace-destination.ts` — would resolve to as well.
  */
 export function WorkspaceUnavailable() {
   const { t } = useT("aurora");

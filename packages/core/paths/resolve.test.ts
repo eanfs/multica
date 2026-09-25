@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Workspace } from "../types";
 import { paths } from "./paths";
-import { resolvePostAuthDestination } from "./resolve";
+import {
+  resolvePostAuthDestination,
+  resolveWorkspaceDestination,
+  setWorkspaceDestinationResolver,
+} from "./resolve";
 
 function makeWs(slug: string): Workspace {
   return {
@@ -43,5 +47,50 @@ describe("resolvePostAuthDestination", () => {
     // user whose last workspace got deleted or who left it. They skip
     // re-onboarding and go straight to workspace creation.
     expect(resolvePostAuthDestination([], true)).toBe(paths.newWorkspace());
+  });
+});
+
+describe("resolveWorkspaceDestination", () => {
+  afterEach(() => {
+    setWorkspaceDestinationResolver(null);
+  });
+
+  it("answers exactly as resolvePostAuthDestination does until an app injects", () => {
+    // The shared call sites used to call resolvePostAuthDestination directly.
+    // Web and desktop inject nothing, so every branch has to come out
+    // byte-for-byte the same or this change moves their users.
+    const ws = [makeWs("acme")];
+    expect(
+      resolveWorkspaceDestination({ workspaces: ws, hasOnboarded: false }),
+    ).toBe(resolvePostAuthDestination(ws, false));
+    expect(
+      resolveWorkspaceDestination({ workspaces: ws, hasOnboarded: true }),
+    ).toBe(resolvePostAuthDestination(ws, true));
+    expect(
+      resolveWorkspaceDestination({ workspaces: [], hasOnboarded: true }),
+    ).toBe(resolvePostAuthDestination([], true));
+  });
+
+  it("returns the injected app's destination and passes it the context", () => {
+    const injected = vi.fn(() => "/aurora/skills");
+    setWorkspaceDestinationResolver(injected);
+    const ws = [makeWs("acme")];
+
+    expect(
+      resolveWorkspaceDestination({ workspaces: ws, hasOnboarded: false }),
+    ).toBe("/aurora/skills");
+    expect(injected).toHaveBeenCalledWith({
+      workspaces: ws,
+      hasOnboarded: false,
+    });
+  });
+
+  it("goes back to the default when the injection is cleared", () => {
+    setWorkspaceDestinationResolver(() => "/elsewhere");
+    setWorkspaceDestinationResolver(null);
+
+    expect(
+      resolveWorkspaceDestination({ workspaces: [], hasOnboarded: true }),
+    ).toBe(paths.newWorkspace());
   });
 });

@@ -8,6 +8,7 @@ import packageJson from "../package.json";
 import { AuroraNavigationProvider } from "@/platform/navigation";
 import { detectWebOS } from "@multica/nextjs/client-os";
 import { useUserLocaleSyncEnabled } from "@multica/nextjs/use-user-locale-sync-enabled";
+import { useAuroraWorkspaceDestination } from "@/platform/workspace-destination";
 import {
   setLoggedInCookie,
   clearLoggedInCookie,
@@ -51,6 +52,9 @@ export function AuroraProviders({
   wsUrl?: string;
 }) {
   const syncUserLocale = useUserLocaleSyncEnabled();
+  // Tell core where this app sends a user who lost their workspace — the
+  // Multica routes it defaults to are 404s here.
+  useAuroraWorkspaceDestination();
   // Stable identity reference so downstream effects keyed on it don't see a new
   // object on every parent render.
   const identity = useMemo(

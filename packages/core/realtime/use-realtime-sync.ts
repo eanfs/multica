@@ -69,7 +69,7 @@ import {
   promotePendingChatTask,
   removePendingChatTask,
 } from "../chat/pending";
-import { resolvePostAuthDestination, useHasOnboarded } from "../paths";
+import { resolveWorkspaceDestination, useHasOnboarded } from "../paths";
 import type {
   MemberAddedPayload,
   WorkspaceDeletedPayload,
@@ -1238,21 +1238,21 @@ export function useRealtimeSync(
     // --- Side-effect handlers (toast, navigation) ---
 
     // After the current workspace disappears (deleted or we were kicked out),
-    // navigate to another workspace the user still has access to, or to the
-    // create-workspace page. We use a full-page navigation: this reliably
-    // tears down any in-flight queries / subscriptions tied to the dead
-    // workspace without relying on framework-specific routers from here in
-    // core.
+    // navigate to another workspace the user still has access to, or wherever
+    // the app injects as its entry point when there is none. We use a
+    // full-page navigation: this reliably tears down any in-flight queries /
+    // subscriptions tied to the dead workspace without relying on
+    // framework-specific routers from here in core.
     const relocateAfterWorkspaceLoss = async (lostWsId: string) => {
       const wsList = await qc.fetchQuery({
         ...workspaceListOptions(),
         staleTime: 0,
       });
       const remaining = wsList.filter((w) => w.id !== lostWsId);
-      const target = resolvePostAuthDestination(
-        remaining,
-        hasOnboardedRef.current,
-      );
+      const target = resolveWorkspaceDestination({
+        workspaces: remaining,
+        hasOnboarded: hasOnboardedRef.current,
+      });
       if (typeof window !== "undefined") {
         window.location.assign(target);
       }

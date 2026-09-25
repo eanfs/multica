@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@multica/ui/components/ui/button";
 import {
-  resolvePostAuthDestination,
+  resolveWorkspaceDestination,
   useHasOnboarded,
 } from "@multica/core/paths";
 import { workspaceListOptions } from "@multica/core/workspace/queries";
@@ -43,7 +43,7 @@ export function NoAccessPage() {
   // replace, not push: the failed `/<bad-slug>` URL must not stay in history,
   // or a browser Back would land the user right back on this NoAccessPage.
   const recover = () => {
-    nav.replace(resolvePostAuthDestination(workspaces, hasOnboarded));
+    nav.replace(resolveWorkspaceDestination({ workspaces, hasOnboarded }));
   };
 
   return (

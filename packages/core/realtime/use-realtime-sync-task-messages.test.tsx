@@ -21,7 +21,7 @@ vi.mock("../platform/workspace-storage", () => ({
 
 vi.mock("../paths", () => ({
   useHasOnboarded: () => true,
-  resolvePostAuthDestination: () => "/",
+  resolveWorkspaceDestination: () => "/",
 }));
 
 const HELD_TASK = "11111111-1111-4111-8111-111111111111";

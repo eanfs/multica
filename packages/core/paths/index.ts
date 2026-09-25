@@ -33,7 +33,16 @@ export type {
   TabEntityData,
   TabLabelKey,
 } from "./tab-presentation";
-export { resolvePostAuthDestination, useHasOnboarded } from "./resolve";
+export {
+  resolvePostAuthDestination,
+  resolveWorkspaceDestination,
+  setWorkspaceDestinationResolver,
+  useHasOnboarded,
+} from "./resolve";
+export type {
+  WorkspaceDestinationContext,
+  WorkspaceDestinationResolver,
+} from "./resolve";
 export {
   WorkspaceSlugProvider,
   useWorkspaceSlug,

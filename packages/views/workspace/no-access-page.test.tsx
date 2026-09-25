@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { I18nProvider } from "@multica/core/i18n/react";
+import { setWorkspaceDestinationResolver } from "@multica/core/paths";
 import enCommon from "../locales/en/common.json";
 import enWorkspace from "../locales/en/workspace.json";
 import { NoAccessPage } from "./no-access-page";
@@ -59,6 +60,11 @@ describe("NoAccessPage", () => {
     logout.mockReset();
   });
 
+  afterEach(() => {
+    // The destination resolver is module-global; leave the default behind.
+    setWorkspaceDestinationResolver(null);
+  });
+
   it("renders generic message that doesn't leak existence", () => {
     renderPage();
     expect(
@@ -70,6 +76,15 @@ describe("NoAccessPage", () => {
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: /go to my workspaces/i }));
     expect(navigate).toHaveBeenCalledWith("/valid-team/issues");
+  });
+
+  it("recovers to the destination the host app injected", () => {
+    // The shared views used to hard-code resolvePostAuthDestination, which
+    // sends any non-Multica client to a route it does not serve (#56).
+    setWorkspaceDestinationResolver(() => "/elsewhere/skills");
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /go to my workspaces/i }));
+    expect(navigate).toHaveBeenCalledWith("/elsewhere/skills");
   });
 
   it("clears last_workspace_slug cookie on mount so the proxy stops looping us back", () => {
