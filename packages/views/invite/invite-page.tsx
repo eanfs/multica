@@ -10,7 +10,7 @@ import {
 } from "@multica/core/workspace/queries";
 import {
   paths,
-  resolvePostAuthDestination,
+  resolveWorkspaceDestination,
   useHasOnboarded,
 } from "@multica/core/paths";
 import { AppLink, useNavigation } from "../navigation";
@@ -58,7 +58,10 @@ export function InvitePage({ invitationId, onBack }: InvitePageProps) {
   // page is a pre-workspace global route so we can't rely on WorkspaceSlugProvider.
   const { data: wsList = [] } = useQuery(workspaceListOptions());
   const hasOnboarded = useHasOnboarded();
-  const fallbackDest = resolvePostAuthDestination(wsList, hasOnboarded);
+  const fallbackDest = resolveWorkspaceDestination({
+    workspaces: wsList,
+    hasOnboarded,
+  });
 
   const handleAccept = async () => {
     setAccepting(true);

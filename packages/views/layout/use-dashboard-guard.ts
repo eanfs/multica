@@ -5,7 +5,7 @@ import { useNavigationStore } from "@multica/core/navigation";
 import { useAuthStore } from "@multica/core/auth";
 import {
   paths,
-  resolvePostAuthDestination,
+  resolveWorkspaceDestination,
   useCurrentWorkspace,
   useHasOnboarded,
 } from "@multica/core/paths";
@@ -21,8 +21,8 @@ import { useNavigation } from "../navigation";
  *  - Not logged in → /login
  *  - Logged in but workspace list not yet loaded → wait (don't bounce prematurely)
  *  - Logged in but URL slug doesn't resolve to any workspace →
- *    `resolvePostAuthDestination(list, hasOnboarded)` (workspace-presence first;
- *    see paths/resolve.ts for the full table)
+ *    `resolveWorkspaceDestination` (workspace-presence first; see
+ *    paths/resolve.ts for the full table and the app injection point)
  *
  * This guard only redirects when the URL slug doesn't resolve. Onboarding
  * itself marks the user onboarded before navigating into a workspace, so
@@ -56,7 +56,7 @@ export function useDashboardGuard() {
     }
     if (!workspaceListReady) return;
     if (!workspace) {
-      replace(resolvePostAuthDestination(workspaces, hasOnboarded));
+      replace(resolveWorkspaceDestination({ workspaces, hasOnboarded }));
     }
   }, [user, isLoading, workspaceListReady, workspace, workspaces, hasOnboarded, replace]);
 

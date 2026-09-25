@@ -21,7 +21,7 @@ vi.mock("../platform/workspace-storage", () => ({
 
 vi.mock("../paths", () => ({
   useHasOnboarded: () => true,
-  resolvePostAuthDestination: () => "/",
+  resolveWorkspaceDestination: () => "/",
 }));
 
 // Records every ws.on handler by event name so a test can fire one directly.

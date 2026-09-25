@@ -27,7 +27,7 @@ import {
 import { issueKeys } from "@multica/core/issues/queries";
 import { api } from "@multica/core/api";
 import {
-  resolvePostAuthDestination,
+  resolveWorkspaceDestination,
   useCurrentWorkspace,
   useHasOnboarded,
 } from "@multica/core/paths";
@@ -124,7 +124,9 @@ export function WorkspaceTab() {
     // takes over immediately, or the new-workspace overlay takes over
     // (which has no workspace context, so null is correct).
     setCurrentWorkspace(null, null);
-    navigation.push(resolvePostAuthDestination(remaining, hasOnboarded));
+    navigation.push(
+      resolveWorkspaceDestination({ workspaces: remaining, hasOnboarded }),
+    );
   };
 
   const [name, setName] = useState(workspace?.name ?? "");
