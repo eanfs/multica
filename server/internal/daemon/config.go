@@ -2,12 +2,14 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -165,6 +167,21 @@ type Config struct {
 	// prefers a matching, executable override over resolving the profile's
 	// command_name on PATH. nil/empty means "always resolve via PATH".
 	ProfileCommandOverrides map[string]string
+
+	// Managed configures the server-hosted managed sandbox bootstrap. A
+	// managed process is always foreground, contains exactly one workspace and
+	// one runtime, and never reads the user's CLI config or workstation home.
+	Managed ManagedConfig
+}
+
+// ManagedConfig holds the managed-mode settings that are not derivable from
+// the enrolled response.
+type ManagedConfig struct {
+	// Enabled selects the managed bootstrap path in Daemon.Run.
+	Enabled bool
+	// EnrollmentTokenFile is the absolute path of the single-use mse_ secret.
+	// It is re-read and re-validated by bootstrapManaged.
+	EnrollmentTokenFile string
 }
 
 // Overrides allows CLI flags to override environment variables and defaults.
@@ -198,6 +215,15 @@ type Overrides struct {
 	// Single-direction for the same reason as DisableAutoUpdate: the
 	// env/default already resolves to enabled.
 	DisableAutoReload bool
+	// Managed selects the server-hosted managed sandbox bootstrap. Managed mode
+	// rejects every workstation identity source; see validateManagedOverrides.
+	Managed bool
+	// ManagedEnrollmentTokenFile is the absolute path of the single-use mse_
+	// enrollment secret.
+	ManagedEnrollmentTokenFile string
+	// Foreground is set by the CLI when the daemon runs in the foreground. A
+	// managed process must be foreground, so managed mode rejects false.
+	Foreground bool
 }
 
 // LoadConfig builds the daemon configuration from environment variables
@@ -211,6 +237,15 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	serverBaseURL, err := NormalizeServerBaseURL(rawServerURL)
 	if err != nil {
 		return Config{}, err
+	}
+
+	// Managed mode is additive and gated: validate its workstation-identity
+	// and enrollment-secret constraints before any workstation source is read.
+	managedEnabled := overrides.Managed
+	if managedEnabled {
+		if err := validateManagedOverrides(overrides); err != nil {
+			return Config{}, err
+		}
 	}
 
 	// Apply backend overrides from the CLI config file (issue #3875).
@@ -239,33 +274,47 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	// file should not prevent daemon startup, since the daemon can still run
 	// purely from env-var configuration. We log a warning and proceed with
 	// no overrides.
+	// A managed process never reads the user's CLI config or workstation home.
 	var profileCommandOverrides map[string]string
-	if cliCfg, err := cli.LoadCLIConfigForProfile(overrides.Profile); err != nil {
-		slog.Warn("could not load CLI config for backend overrides; proceeding without",
-			"profile", overrides.Profile, "err", err)
-	} else {
-		if oc := openclawOverrideFrom(cliCfg); oc != nil {
-			applyOpenclawOverride(oc)
-		}
-		// Per-machine custom-runtime command path overrides (MUL-3284).
-		// Copy into our own map so later mutation of the loaded config can't
-		// alias daemon state, and so an empty map normalizes to nil.
-		if len(cliCfg.ProfileCommandOverrides) > 0 {
-			profileCommandOverrides = make(map[string]string, len(cliCfg.ProfileCommandOverrides))
-			for id, path := range cliCfg.ProfileCommandOverrides {
-				if id == "" || strings.TrimSpace(path) == "" {
-					continue
+	if !managedEnabled {
+		if cliCfg, err := cli.LoadCLIConfigForProfile(overrides.Profile); err != nil {
+			slog.Warn("could not load CLI config for backend overrides; proceeding without",
+				"profile", overrides.Profile, "err", err)
+		} else {
+			if oc := openclawOverrideFrom(cliCfg); oc != nil {
+				applyOpenclawOverride(oc)
+			}
+			// Per-machine custom-runtime command path overrides (MUL-3284).
+			// Copy into our own map so later mutation of the loaded config can't
+			// alias daemon state, and so an empty map normalizes to nil.
+			if len(cliCfg.ProfileCommandOverrides) > 0 {
+				profileCommandOverrides = make(map[string]string, len(cliCfg.ProfileCommandOverrides))
+				for id, path := range cliCfg.ProfileCommandOverrides {
+					if id == "" || strings.TrimSpace(path) == "" {
+						continue
+					}
+					profileCommandOverrides[id] = path
 				}
-				profileCommandOverrides[id] = path
 			}
 		}
 	}
 
 	// Discover installed agent CLIs. Extracted so the periodic workspace sync
-	// can re-run the same discovery on a live daemon (MUL-5439).
-	agents := probeAgentCLIs()
-	if len(agents) == 0 && !overrides.AllowNoAgents {
-		return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, codearts, codex, copilot, opencode, deveco, openclaw, hermes, pi, omp, cursor-agent, kimi, reasonix, dsh, kiro-cli, agy, qodercli, qoderclicn, traecli, grok, qwen, qwenpaw, mcode, dim, or zeroclaw and ensure it is on PATH")
+	// can re-run the same discovery on a live daemon (MUL-5439). A managed
+	// process skips every non-Claude probe: it may launch exactly one provider,
+	// and it must not touch a login shell or any workstation-specific path.
+	var agents map[string]AgentEntry
+	if managedEnabled {
+		claude, err := managedClaudeAgent()
+		if err != nil {
+			return Config{}, err
+		}
+		agents = map[string]AgentEntry{"claude": claude}
+	} else {
+		agents = probeAgentCLIs()
+		if len(agents) == 0 && !overrides.AllowNoAgents {
+			return Config{}, fmt.Errorf("no agent CLI found: install claude, codebuddy, codearts, codex, copilot, opencode, deveco, openclaw, hermes, pi, omp, cursor-agent, kimi, reasonix, dsh, kiro-cli, agy, qodercli, qoderclicn, traecli, grok, qwen, qwenpaw, mcode, dim, or zeroclaw and ensure it is on PATH")
+		}
 	}
 
 	claudeArgs, err := shellArgsFromEnv("MULTICA_CLAUDE_ARGS")
@@ -482,40 +531,49 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	// Profile
 	profile := overrides.Profile
 
-	// daemon_id resolution: override > env > persistent UUID on disk.
-	// The persistent UUID is written once to `<profile-dir>/daemon.id` and
-	// then reused forever so hostname drift (.local suffix, system rename,
-	// mDNS state, profile switch) no longer mints a new runtime identity.
-	// Callers may still pin a specific id via MULTICA_DAEMON_ID or the
-	// override field (e.g. for tests or embedded environments).
-	daemonID := strings.TrimSpace(os.Getenv("MULTICA_DAEMON_ID"))
-	if overrides.DaemonID != "" {
-		daemonID = overrides.DaemonID
-	}
-	if daemonID == "" {
-		persisted, err := EnsureDaemonID(profile)
-		if err != nil {
-			return Config{}, fmt.Errorf("ensure daemon id: %w", err)
+	// daemon identity is workstation-only. A managed process mints no local
+	// daemon.id and merges no legacy rows: its identity arrives with the
+	// enrollment response.
+	var (
+		daemonID        string
+		legacyDaemonIDs []string
+	)
+	if !managedEnabled {
+		// daemon_id resolution: override > env > persistent UUID on disk.
+		// The persistent UUID is written once to `<profile-dir>/daemon.id` and
+		// then reused forever so hostname drift (.local suffix, system rename,
+		// mDNS state, profile switch) no longer mints a new runtime identity.
+		// Callers may still pin a specific id via MULTICA_DAEMON_ID or the
+		// override field (e.g. for tests or embedded environments).
+		daemonID = strings.TrimSpace(os.Getenv("MULTICA_DAEMON_ID"))
+		if overrides.DaemonID != "" {
+			daemonID = overrides.DaemonID
 		}
-		daemonID = persisted
+		if daemonID == "" {
+			persisted, err := EnsureDaemonID(profile)
+			if err != nil {
+				return Config{}, fmt.Errorf("ensure daemon id: %w", err)
+			}
+			daemonID = persisted
+		}
+		// Historical daemon_ids derived from the current hostname/profile. The
+		// server uses these at register time to merge any pre-UUID runtime rows
+		// for this machine into the new UUID-keyed row and delete the stale ones.
+		legacyDaemonIDs = LegacyDaemonIDs(host, profile)
+		// Pre-change (#1220) daemon identity was stored per profile, which means
+		// the same machine could end up with multiple leftover daemon.id files
+		// — e.g. ~/.multica/daemon.id (default) plus ~/.multica/profiles/<x>/
+		// daemon.id. Surface those UUIDs so the server can merge their runtime
+		// rows into the canonical machine UUID. Fatal-free: a broken profiles
+		// dir shouldn't block startup.
+		if uuids, err := LegacyDaemonUUIDs(); err == nil {
+			legacyDaemonIDs = append(legacyDaemonIDs, uuids...)
+		}
+		// Strip anything that collides with the resolved daemon_id (e.g. when
+		// the user explicitly pins MULTICA_DAEMON_ID=<hostname>, or when the
+		// canonical id was itself promoted from a pre-change profile file).
+		legacyDaemonIDs = filterLegacyIDs(legacyDaemonIDs, daemonID)
 	}
-	// Historical daemon_ids derived from the current hostname/profile. The
-	// server uses these at register time to merge any pre-UUID runtime rows
-	// for this machine into the new UUID-keyed row and delete the stale ones.
-	legacyDaemonIDs := LegacyDaemonIDs(host, profile)
-	// Pre-change (#1220) daemon identity was stored per profile, which means
-	// the same machine could end up with multiple leftover daemon.id files
-	// — e.g. ~/.multica/daemon.id (default) plus ~/.multica/profiles/<x>/
-	// daemon.id. Surface those UUIDs so the server can merge their runtime
-	// rows into the canonical machine UUID. Fatal-free: a broken profiles
-	// dir shouldn't block startup.
-	if uuids, err := LegacyDaemonUUIDs(); err == nil {
-		legacyDaemonIDs = append(legacyDaemonIDs, uuids...)
-	}
-	// Strip anything that collides with the resolved daemon_id (e.g. when
-	// the user explicitly pins MULTICA_DAEMON_ID=<hostname>, or when the
-	// canonical id was itself promoted from a pre-change profile file).
-	legacyDaemonIDs = filterLegacyIDs(legacyDaemonIDs, daemonID)
 
 	deviceName := envOrDefault("MULTICA_DAEMON_DEVICE_NAME", host)
 	if overrides.DeviceName != "" {
@@ -546,6 +604,14 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	gcEnabled := true
 	if v := os.Getenv("MULTICA_GC_ENABLED"); v == "false" || v == "0" {
 		gcEnabled = false
+	}
+	// A managed process claims with exactly one slot, keeps no environment
+	// after a task, and always leaves workspace GC on. These are structural
+	// invariants of the one-workspace/one-runtime sandbox, not operator knobs.
+	if managedEnabled {
+		maxConcurrentTasks = 1
+		keepEnv = false
+		gcEnabled = true
 	}
 	gcInterval, err := durationFromEnv("MULTICA_GC_INTERVAL", DefaultGCInterval)
 	if err != nil {
@@ -621,6 +687,12 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	if overrides.DisableAutoReload {
 		autoReloadEnabled = false
 	}
+	// A managed sandbox image is immutable and server-provisioned: it neither
+	// pulls releases nor follows an on-disk binary.
+	if managedEnabled {
+		autoUpdateEnabled = false
+		autoReloadEnabled = false
+	}
 
 	return Config{
 		ServerBaseURL:                   serverBaseURL,
@@ -629,6 +701,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		DeviceName:                      deviceName,
 		RuntimeName:                     runtimeName,
 		Profile:                         profile,
+		Managed:                         ManagedConfig{Enabled: managedEnabled, EnrollmentTokenFile: strings.TrimSpace(overrides.ManagedEnrollmentTokenFile)},
 		Agents:                          agents,
 		WorkspacesRoot:                  workspacesRoot,
 		KeepEnvAfterTask:                keepEnv,
@@ -668,6 +741,98 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		QwenArgs:                        qwenArgs,
 		QwenpawArgs:                     qwenpawArgs,
 		ProfileCommandOverrides:         profileCommandOverrides,
+	}, nil
+}
+
+// managedEnrollmentTokenPattern is the only accepted managed enrollment
+// secret shape: the mse_ prefix plus 40 lowercase hex characters (20 random
+// bytes).
+var managedEnrollmentTokenPattern = regexp.MustCompile("^mse_[0-9a-f]{40}$")
+
+// managedEnrollmentTokenMaxBytes bounds the enrollment secret file so a
+// compromised mount cannot feed the daemon an unbounded blob.
+const managedEnrollmentTokenMaxBytes = 256
+
+// validateManagedOverrides rejects every workstation identity source before
+// LoadConfig reads any of them, then validates the enrollment secret file.
+func validateManagedOverrides(overrides Overrides) error {
+	if !overrides.Foreground {
+		return errors.New("managed mode requires --foreground")
+	}
+	if overrides.Profile != "" {
+		return fmt.Errorf("managed mode does not accept a local profile (got %q)", overrides.Profile)
+	}
+	if overrides.DaemonID != "" {
+		return errors.New("managed mode does not accept --daemon-id")
+	}
+	if id := strings.TrimSpace(os.Getenv("MULTICA_DAEMON_ID")); id != "" {
+		return errors.New("managed mode does not accept MULTICA_DAEMON_ID")
+	}
+	if launchedBy := strings.TrimSpace(os.Getenv("MULTICA_LAUNCHED_BY")); launchedBy != "" {
+		return fmt.Errorf("managed mode does not accept a daemon launched by %q", launchedBy)
+	}
+	_, err := readManagedEnrollmentToken(overrides.ManagedEnrollmentTokenFile)
+	return err
+}
+
+// readManagedEnrollmentToken reads and validates the single-use mse_ secret.
+// It fails closed on any path, permission, size, or shape surprise so a
+// misconfigured sandbox cannot start with a weaker credential than intended.
+func readManagedEnrollmentToken(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", errors.New("managed mode requires --managed-enrollment-token-file")
+	}
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("managed enrollment token file must be an absolute path, got %q", path)
+	}
+	// Lstat, not Stat: a symlink to an owner-only file would otherwise let a
+	// writable path in the image stand in for the real secret.
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", fmt.Errorf("read managed enrollment token file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("managed enrollment token file %q must not be a symlink", path)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("managed enrollment token file %q must be a regular file", path)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("managed enrollment token file %q must not be group- or world-accessible", path)
+	}
+	if info.Mode().Perm()&0o400 == 0 {
+		return "", fmt.Errorf("managed enrollment token file %q must be owner-readable", path)
+	}
+	if info.Size() > managedEnrollmentTokenMaxBytes {
+		return "", fmt.Errorf("managed enrollment token file %q exceeds %d bytes", path, managedEnrollmentTokenMaxBytes)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read managed enrollment token file: %w", err)
+	}
+	if len(data) > managedEnrollmentTokenMaxBytes {
+		return "", fmt.Errorf("managed enrollment token file %q exceeds %d bytes", path, managedEnrollmentTokenMaxBytes)
+	}
+	token := strings.TrimSpace(string(data))
+	if !managedEnrollmentTokenPattern.MatchString(token) {
+		return "", errors.New("managed enrollment token file must contain a single mse_ enrollment secret (mse_ followed by 40 lowercase hex characters)")
+	}
+	return token, nil
+}
+
+// managedClaudeAgent resolves the one agent provider a managed process may
+// launch. Unlike probeAgentCLIs it never forks a login shell or consults any
+// other provider's workstation configuration.
+func managedClaudeAgent() (AgentEntry, error) {
+	cmd := envOrDefault("MULTICA_CLAUDE_PATH", "claude")
+	path, err := resolveAgentExecutablePath(cmd)
+	if err != nil {
+		return AgentEntry{}, fmt.Errorf("managed mode requires a claude executable: %w", err)
+	}
+	return AgentEntry{
+		Path:    path,
+		Command: cmd,
+		Model:   strings.TrimSpace(os.Getenv("MULTICA_CLAUDE_MODEL")),
 	}, nil
 }
 

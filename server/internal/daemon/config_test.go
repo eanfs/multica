@@ -1822,3 +1822,152 @@ func TestApplyOpenclawOverride_CLITimeout(t *testing.T) {
 		}
 	})
 }
+
+// TestManagedConfigRejectsMissingOrOversizedTokenFile pins the fail-closed
+// enrollment-secret file contract: absolute path, regular non-symlink file,
+// owner-only permissions, bounded size, and an mse_<40 hex> body.
+func TestManagedConfigRejectsMissingOrOversizedTokenFile(t *testing.T) {
+	fakeClaude := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("MULTICA_CLAUDE_PATH", fakeClaude)
+	t.Setenv("MULTICA_DAEMON_ID", "")
+	t.Setenv("MULTICA_LAUNCHED_BY", "")
+
+	dir := t.TempDir()
+	writeMode := func(name, content string, mode os.FileMode) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), mode); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatalf("chmod %s: %v", name, err)
+		}
+		return path
+	}
+
+	missing := filepath.Join(dir, "absent")
+	directory := filepath.Join(dir, "as-directory")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	oversized := writeMode("oversized", strings.Repeat("a", 257), 0o600)
+	groupReadable := writeMode("group-readable", testManagedEnrollmentToken, 0o644)
+	notOwnerReadable := writeMode("not-owner-readable", testManagedEnrollmentToken, 0o000)
+	badContent := writeMode("bad-content", "not-an-enrollment-token", 0o600)
+	target := writeMode("symlink-target", testManagedEnrollmentToken, 0o600)
+	symlink := filepath.Join(dir, "symlink")
+	if err := os.Symlink(target, symlink); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	valid := writeMode("valid", testManagedEnrollmentToken+"\n", 0o600)
+
+	cases := map[string]string{
+		"missing path":       "",
+		"relative path":      filepath.Join("relative", "token"),
+		"absent file":        missing,
+		"directory":          directory,
+		"oversized":          oversized,
+		"group readable":     groupReadable,
+		"not owner readable": notOwnerReadable,
+		"symlink":            symlink,
+		"wrong content":      badContent,
+	}
+	for name, tokenFile := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadConfig(Overrides{
+				Managed:                    true,
+				ManagedEnrollmentTokenFile: tokenFile,
+				Foreground:                 true,
+				ServerURL:                  "http://localhost:0",
+				WorkspacesRoot:             t.TempDir(),
+			})
+			if err == nil {
+				t.Fatalf("LoadConfig(managed) with %s token file = nil, want error", name)
+			}
+		})
+	}
+
+	t.Run("valid file loads managed config", func(t *testing.T) {
+		cfg, err := LoadConfig(Overrides{
+			Managed:                    true,
+			ManagedEnrollmentTokenFile: valid,
+			Foreground:                 true,
+			ServerURL:                  "http://localhost:0",
+			WorkspacesRoot:             t.TempDir(),
+		})
+		if err != nil {
+			t.Fatalf("LoadConfig(managed) = %v", err)
+		}
+		if !cfg.Managed.Enabled {
+			t.Error("managed config not enabled")
+		}
+		if cfg.Managed.EnrollmentTokenFile != valid {
+			t.Errorf("managed enrollment token file = %q, want %q", cfg.Managed.EnrollmentTokenFile, valid)
+		}
+	})
+}
+
+// TestManagedConfigRejectsWorkstationIdentity keeps a managed process from
+// inheriting a workstation profile, daemon id, desktop launch, or background
+// start.
+func TestManagedConfigRejectsWorkstationIdentity(t *testing.T) {
+	fakeClaude := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("MULTICA_CLAUDE_PATH", fakeClaude)
+	t.Setenv("MULTICA_DAEMON_ID", "")
+	t.Setenv("MULTICA_LAUNCHED_BY", "")
+	valid := writeManagedTokenFile(t, testManagedEnrollmentToken)
+
+	base := func() Overrides {
+		return Overrides{
+			Managed:                    true,
+			ManagedEnrollmentTokenFile: valid,
+			Foreground:                 true,
+			ServerURL:                  "http://localhost:0",
+			WorkspacesRoot:             t.TempDir(),
+		}
+	}
+
+	t.Run("local profile", func(t *testing.T) {
+		overrides := base()
+		overrides.Profile = "workstation"
+		if _, err := LoadConfig(overrides); err == nil {
+			t.Fatal("managed mode accepted a local profile")
+		}
+	})
+
+	t.Run("daemon id override", func(t *testing.T) {
+		overrides := base()
+		overrides.DaemonID = "11111111-1111-1111-1111-111111111111"
+		if _, err := LoadConfig(overrides); err == nil {
+			t.Fatal("managed mode accepted an explicit daemon id")
+		}
+	})
+
+	t.Run("daemon id env", func(t *testing.T) {
+		t.Setenv("MULTICA_DAEMON_ID", "11111111-1111-1111-1111-111111111111")
+		if _, err := LoadConfig(base()); err == nil {
+			t.Fatal("managed mode accepted MULTICA_DAEMON_ID")
+		}
+	})
+
+	t.Run("desktop launch", func(t *testing.T) {
+		t.Setenv("MULTICA_LAUNCHED_BY", "desktop")
+		if _, err := LoadConfig(base()); err == nil {
+			t.Fatal("managed mode accepted a desktop launch")
+		}
+	})
+
+	t.Run("background start", func(t *testing.T) {
+		overrides := base()
+		overrides.Foreground = false
+		if _, err := LoadConfig(overrides); err == nil {
+			t.Fatal("managed mode accepted a background start")
+		}
+	})
+}

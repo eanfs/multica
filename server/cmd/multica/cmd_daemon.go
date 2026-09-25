@@ -94,6 +94,8 @@ var daemonDiskUsageCmd = &cobra.Command{
 func init() {
 	f := daemonStartCmd.Flags()
 	f.Bool("foreground", false, "Run in the foreground instead of background")
+	f.Bool("managed", false, "Run as a server-hosted managed sandbox (requires --foreground)")
+	f.String("managed-enrollment-token-file", "", "Absolute path to the single-use mse_ enrollment secret (managed mode)")
 	f.String("daemon-id", "", "Unique daemon identifier (env: MULTICA_DAEMON_ID)")
 	f.String("device-name", "", "Human-readable device name (env: MULTICA_DAEMON_DEVICE_NAME)")
 	f.String("runtime-name", "", "Runtime display name (env: MULTICA_AGENT_RUNTIME_NAME)")
@@ -545,7 +547,13 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	if err := requireHumanLocalCommand("daemon start"); err != nil {
 		return err
 	}
+	managed, _ := cmd.Flags().GetBool("managed")
 	foreground, _ := cmd.Flags().GetBool("foreground")
+	// A managed sandbox has no workstation profile, PID file, or log sink to
+	// background into, so it must own the process.
+	if managed && !foreground {
+		return fmt.Errorf("--managed requires --foreground")
+	}
 	if foreground {
 		return runDaemonForeground(cmd)
 	}
@@ -916,25 +924,34 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 func runDaemonForeground(cmd *cobra.Command) error {
 	util.EnsureHiddenConsole()
 
+	managed, _ := cmd.Flags().GetBool("managed")
+	managedEnrollmentTokenFile, _ := cmd.Flags().GetString("managed-enrollment-token-file")
+
 	profile := resolveProfile(cmd)
 
 	// Load the profile config once — several daemon knobs fall back to
 	// values persisted here when both the CLI flag and the env var are
 	// unset. Errors reading the config are non-fatal for anything other
 	// than server URL: an unreadable / missing config only means "no
-	// persisted overrides", not "cannot start".
-	fileCfg, _ := cli.LoadCLIConfigForProfile(profile)
+	// persisted overrides", not "cannot start". A managed sandbox never
+	// reads this file: its only configured inputs are flags and env vars.
+	var fileCfg cli.CLIConfig
+	if !managed {
+		fileCfg, _ = cli.LoadCLIConfigForProfile(profile)
+	}
 	// Pick the log sink. A user who runs `daemon start --foreground` in a shell
 	// keeps live, colored logging on their terminal (a documented debugging
 	// path — see docs troubleshooting). A detached/background child, whose
 	// stderr the launcher redirected to a file, instead routes structured logs
 	// into the size-bounded, rotating daemon.log so the file can't grow without
-	// limit. We distinguish the two by whether stderr is a terminal.
+	// limit. We distinguish the two by whether stderr is a terminal. A managed
+	// process always logs to stderr: its container captures that, and the
+	// workstation daemon.log path must stay untouched.
 	var (
 		logger     *slog.Logger
 		logRotator *lumberjack.Logger
 	)
-	if logger_pkg.StderrIsTerminal() {
+	if managed || logger_pkg.StderrIsTerminal() {
 		logger = logger_pkg.NewLogger("daemon")
 	} else {
 		// An older self-update launcher may have handed this process daemon.log
@@ -953,6 +970,11 @@ func runDaemonForeground(cmd *cobra.Command) error {
 	}
 
 	serverURL := resolveDaemonServerURL(cmd, profile)
+	if managed {
+		// No stored CLI config fallback: the sandbox supplies the server URL
+		// explicitly through the flag or environment.
+		serverURL = cli.FlagOrEnv(cmd, "server-url", "MULTICA_SERVER_URL", "")
+	}
 	// Each persistable daemon knob follows the same three-tier precedence:
 	//
 	//   --flag  >  MULTICA_… env  >  config.json  >  built-in default
@@ -972,19 +994,30 @@ func runDaemonForeground(cmd *cobra.Command) error {
 		"MULTICA_AGENT_RUNTIME_NAME",
 		fileCfg.RuntimeName,
 	)
-	workspacesRoot, err := resolveWorkspacesRootForProfile(profile, flagString(cmd, "workspaces-root"))
+	var workspacesRoot string
+	var err error
+	if managed {
+		// Resolve from flag/env only; a named profile directory is a
+		// workstation concept.
+		workspacesRoot, err = daemon.ResolveWorkspacesRoot("", flagString(cmd, "workspaces-root"))
+	} else {
+		workspacesRoot, err = resolveWorkspacesRootForProfile(profile, flagString(cmd, "workspaces-root"))
+	}
 	if err != nil {
 		return err
 	}
 
 	overrides := daemon.Overrides{
-		ServerURL:      serverURL,
-		DaemonID:       flagString(cmd, "daemon-id"),
-		DeviceName:     deviceNameFlag,
-		RuntimeName:    runtimeNameFlag,
-		WorkspacesRoot: workspacesRoot,
-		Profile:        profile,
-		HealthPort:     healthPortForProfile(profile),
+		ServerURL:                  serverURL,
+		DaemonID:                   flagString(cmd, "daemon-id"),
+		DeviceName:                 deviceNameFlag,
+		RuntimeName:                runtimeNameFlag,
+		WorkspacesRoot:             workspacesRoot,
+		Profile:                    profile,
+		HealthPort:                 healthPortForProfile(profile),
+		Managed:                    managed,
+		ManagedEnrollmentTokenFile: managedEnrollmentTokenFile,
+		Foreground:                 true,
 	}
 	pollFlag, _ := cmd.Flags().GetDuration("poll-interval")
 	pollOverride, err := resolveDaemonDurationOverride(pollFlag, "MULTICA_DAEMON_POLL_INTERVAL", fileCfg.PollInterval)
@@ -1080,12 +1113,15 @@ func runDaemonForeground(cmd *cobra.Command) error {
 
 	d := daemon.New(cfg, logger)
 
-	// Write PID file so "daemon stop" can find us.
-	if dir := daemonDirForProfile(profile); dir != "" {
-		os.MkdirAll(dir, 0o755)
-		os.WriteFile(daemonPIDPathForProfile(profile), []byte(strconv.Itoa(os.Getpid())), 0o644)
+	// Write PID file so "daemon stop" can find us. A managed sandbox has no
+	// workstation daemon directory or stop command, so it writes nothing there.
+	if !managed {
+		if dir := daemonDirForProfile(profile); dir != "" {
+			os.MkdirAll(dir, 0o755)
+			os.WriteFile(daemonPIDPathForProfile(profile), []byte(strconv.Itoa(os.Getpid())), 0o644)
+		}
+		defer os.Remove(daemonPIDPathForProfile(profile))
 	}
-	defer os.Remove(daemonPIDPathForProfile(profile))
 
 	if err := d.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		return err

@@ -2116,8 +2116,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.logger.Warn("workspaces root marker not written; CLI fail-closed guard limited to task workdirs", "error", err)
 	}
 
-	// Load auth token from CLI config.
-	if err := d.resolveAuth(); err != nil {
+	// Startup auth. A managed process exchanges its single-use enrollment
+	// secret for the workspace-scoped mdt_ credential and installs the one
+	// enrolled runtime; a workstation daemon loads the stored PAT and syncs
+	// the workspaces it belongs to. Branching here keeps workstation
+	// registration, workspace sync, and token refresh off the managed path.
+	if d.cfg.Managed.Enabled {
+		if err := d.bootstrapManaged(ctx); err != nil {
+			return err
+		}
+	} else if err := d.resolveAuth(); err != nil {
 		return err
 	}
 
@@ -2132,41 +2140,52 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// already run, so a missing token still fails fast before we begin serving.
 	go d.serveHealth(ctx, healthLn, time.Now())
 
-	// Renew the PAT before the first API call, then do the initial
-	// workspace sync. Both steps live in preflightAuth so the ordering
-	// invariant (renew first) is enforced at one site instead of
-	// scattered into Run, and tests can exercise the failure paths
-	// without the full Run setup.
-	if err := d.preflightAuth(ctx); err != nil {
-		return err
+	if !d.cfg.Managed.Enabled {
+		// Renew the PAT before the first API call, then do the initial
+		// workspace sync. Both steps live in preflightAuth so the ordering
+		// invariant (renew first) is enforced at one site instead of
+		// scattered into Run, and tests can exercise the failure paths
+		// without the full Run setup.
+		if err := d.preflightAuth(ctx); err != nil {
+			return err
+		}
 	}
 
 	// Deregister runtimes on shutdown (uses a fresh context since ctx will be cancelled).
 	defer d.deregisterRuntimes()
 
-	// Start workspace sync loop to discover newly created workspaces.
-	go d.workspaceSyncLoop(ctx)
+	// The report outbox, wakeup/batch poller, execution, heartbeat, and GC
+	// loops are shared by workstation and managed daemons. A managed process
+	// runs exactly these: its single runtime is already installed, so it skips
+	// workspace sync, remote workspace discovery, agent rediscovery,
+	// auto-update, and token renewal. It never starts a second claim loop; the
+	// wakeup/batch poller below is the existing one with one slot.
 	go d.terminalReportReplayLoop(ctx)
-
-	// Discover agent CLIs installed after startup (MUL-5439). Separate from the
-	// workspace sync loop because that one runs on a thirty-minute consistency
-	// interval — far too slow for "install a CLI, see it under Runtimes".
-	go d.agentDiscoveryLoop(ctx)
+	if !d.cfg.Managed.Enabled {
+		go d.workspaceSyncLoop(ctx)
+		// Discover agent CLIs installed after startup (MUL-5439). Separate from
+		// the workspace sync loop because that one runs on a thirty-minute
+		// consistency interval — far too slow for "install a CLI, see it under
+		// Runtimes".
+		go d.agentDiscoveryLoop(ctx)
+	}
 
 	taskWakeups := make(chan taskWakeup, 256)
 	go d.taskWakeupLoop(ctx, taskWakeups)
 	go d.heartbeatLoop(ctx)
 	go d.gcLoop(ctx)
-	go d.autoUpdateLoop(ctx)
-	go d.tokenRenewalLoop(ctx)
+	if !d.cfg.Managed.Enabled {
+		go d.autoUpdateLoop(ctx)
+		go d.tokenRenewalLoop(ctx)
+	}
 
-	// Preflight succeeded and the background loops are up: the daemon has
-	// registered its runtimes and can now claim and run tasks. Flip /health
-	// from "starting" to "running" — this is the signal `daemon start`'s
-	// readiness wait blocks on, so success is reported only after startup
-	// actually completed, not merely because the health port came up.
+	// Startup succeeded and the background loops are up: the daemon has its
+	// runtimes and can now claim and run tasks. Flip /health from "starting" to
+	// "running" — this is the signal `daemon start`'s readiness wait blocks
+	// on, so success is reported only after startup actually completed, not
+	// merely because the health port came up.
 	d.ready.Store(true)
-	d.logger.Debug("background loops launched (workspace-sync, terminal-report-replay, task-wakeup, heartbeat, gc, auto-update, token-renewal); health now reporting ready")
+	d.logger.Debug("background loops launched (terminal-report-replay, task-wakeup, heartbeat, gc, and, for workstation daemons, workspace-sync, agent-discovery, auto-update, token-renewal); health now reporting ready")
 	err = d.pollLoop(ctx, taskWakeups)
 	d.logger.Debug("daemon main loop returning", "error", err)
 	return err

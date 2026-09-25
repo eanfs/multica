@@ -27,6 +27,13 @@ type Runtime struct {
 	Name     string `json:"name"`
 	Provider string `json:"provider"`
 	Status   string `json:"status"`
+	// WorkspaceID, RuntimeMode, and DaemonID come from the server's runtime
+	// projection. Managed install compares them against the enrollment envelope
+	// to keep a response from binding a workspace, mode, or daemon it did not
+	// enroll.
+	WorkspaceID string `json:"workspace_id"`
+	RuntimeMode string `json:"runtime_mode"`
+	DaemonID    string `json:"daemon_id"`
 	// ProfileID is non-empty when this runtime was registered from a
 	// workspace custom runtime profile (MUL-3284). It links the runtime row
 	// back to the profile so the daemon can resolve the profile's

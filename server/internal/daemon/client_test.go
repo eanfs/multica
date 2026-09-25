@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -576,5 +577,88 @@ func TestTerminalReportsCarryDurableWorkDir(t *testing.T) {
 				t.Fatalf("durable_work_dir = %v, want %q (body: %v)", got, durableWorkDir, body)
 			}
 		})
+	}
+}
+
+// TestClientEnrollManagedSendsBearerWithoutJSONIdentity pins the enrollment
+// contract: the single-use mse_ secret is the request credential, the body is
+// empty (no caller-selected identity), and the client's long-lived token is not
+// replaced by the exchange itself.
+func TestClientEnrollManagedSendsBearerWithoutJSONIdentity(t *testing.T) {
+	const enrollmentToken = "mse_0123456789abcdef0123456789abcdef01234567"
+
+	var (
+		gotMethod string
+		gotPath   string
+		gotAuth   string
+		gotBody   string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"workspace_id": "11111111-1111-1111-1111-111111111111",
+			"daemon_id": "daemon-managed",
+			"runtime": {
+				"id": "22222222-2222-2222-2222-222222222222",
+				"workspace_id": "11111111-1111-1111-1111-111111111111",
+				"daemon_id": "daemon-managed",
+				"name": "aurora-managed",
+				"provider": "aurora_managed",
+				"runtime_mode": "cloud",
+				"status": "online"
+			},
+			"execution_provider": "claude",
+			"max_concurrency": 1,
+			"daemon_token": "mdt_managed",
+			"daemon_token_expires_at": "2026-09-25T12:00:00Z"
+		}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	c.SetToken("mul_long_lived")
+
+	resp, err := c.EnrollManaged(context.Background(), enrollmentToken)
+	if err != nil {
+		t.Fatalf("EnrollManaged: %v", err)
+	}
+
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %s, want POST", gotMethod)
+	}
+	if gotPath != "/api/daemon/managed/enroll" {
+		t.Errorf("path = %q, want /api/daemon/managed/enroll", gotPath)
+	}
+	if gotAuth != "Bearer "+enrollmentToken {
+		t.Errorf("Authorization = %q, want the mse_ enrollment bearer", gotAuth)
+	}
+	if strings.TrimSpace(gotBody) != "" {
+		t.Errorf("enrollment body = %q, want an empty body (no caller-selected identity)", gotBody)
+	}
+	if c.Token() != "mul_long_lived" {
+		t.Errorf("client token = %q, want the long-lived token unchanged until validation", c.Token())
+	}
+	if resp.WorkspaceID != "11111111-1111-1111-1111-111111111111" {
+		t.Errorf("workspace_id = %q", resp.WorkspaceID)
+	}
+	if resp.DaemonID != "daemon-managed" {
+		t.Errorf("daemon_id = %q", resp.DaemonID)
+	}
+	if resp.Runtime.ID != "22222222-2222-2222-2222-222222222222" {
+		t.Errorf("runtime.id = %q", resp.Runtime.ID)
+	}
+	if resp.Runtime.Provider != "aurora_managed" || resp.Runtime.RuntimeMode != "cloud" {
+		t.Errorf("runtime projection = %+v, want persisted aurora_managed/cloud", resp.Runtime)
+	}
+	if resp.ExecutionProvider != "claude" || resp.MaxConcurrency != 1 {
+		t.Errorf("execution projection = %q/%d, want claude/1", resp.ExecutionProvider, resp.MaxConcurrency)
+	}
+	if resp.DaemonToken != "mdt_managed" {
+		t.Errorf("daemon_token = %q, want the minted mdt_ token", resp.DaemonToken)
 	}
 }
