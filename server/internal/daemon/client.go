@@ -718,6 +718,34 @@ func (c *Client) RenewToken(ctx context.Context) (*RenewTokenResponse, error) {
 	return &resp, nil
 }
 
+// ManagedEnrollmentResponse is the typed answer to a managed sandbox
+// enrollment. The runtime projection is the persisted carrier identity
+// (aurora_managed/cloud); ExecutionProvider is the separate execution
+// identity (claude) the daemon installs for launch review.
+type ManagedEnrollmentResponse struct {
+	WorkspaceID          string    `json:"workspace_id"`
+	DaemonID             string    `json:"daemon_id"`
+	Runtime              Runtime   `json:"runtime"`
+	ExecutionProvider    string    `json:"execution_provider"`
+	MaxConcurrency       int       `json:"max_concurrency"`
+	DaemonToken          string    `json:"daemon_token"`
+	DaemonTokenExpiresAt time.Time `json:"daemon_token_expires_at"`
+}
+
+// EnrollManaged exchanges a single-use mse_ enrollment secret for the managed
+// daemon credential. The secret is request-local: it is sent as the bearer for
+// this call only and never replaces the client's long-lived token, which
+// bootstrapManaged overwrites with the minted mdt_ token after the response has
+// passed validation. The request carries no body, so a caller cannot select a
+// workspace, runtime, daemon, provider, concurrency, or expiry.
+func (c *Client) EnrollManaged(ctx context.Context, enrollmentToken string) (ManagedEnrollmentResponse, error) {
+	var resp ManagedEnrollmentResponse
+	if err := c.postJSONWithToken(ctx, "/api/daemon/managed/enroll", enrollmentToken, nil, &resp); err != nil {
+		return ManagedEnrollmentResponse{}, err
+	}
+	return resp, nil
+}
+
 // ListWorkspaces fetches the minimal workspace membership set used by the
 // daemon. New servers expose a daemon-specific endpoint with ETag support;
 // when an installed daemon talks to an older server, the first 404 switches
@@ -1270,11 +1298,17 @@ func (c *Client) getJSONWithToken(ctx context.Context, path, token string, respB
 // postJSONWithToken is getJSONWithToken's write counterpart, for the daemon's
 // task-scoped calls that carry a body.
 func (c *Client) postJSONWithToken(ctx context.Context, path, token string, reqBody, respBody any) error {
-	encoded, err := json.Marshal(reqBody)
-	if err != nil {
-		return err
+	// A nil body is a deliberately empty request (managed enrollment names no
+	// caller identity); anything else is JSON-encoded as usual.
+	var body io.Reader
+	if reqBody != nil {
+		encoded, err := json.Marshal(reqBody)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(encoded)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(encoded))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, body)
 	if err != nil {
 		return err
 	}

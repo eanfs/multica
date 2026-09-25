@@ -994,3 +994,20 @@ func clearDaemonTaskEnv(t *testing.T) {
 		t.Setenv(key, "")
 	}
 }
+
+// TestDaemonStartManagedRequiresForeground pins the CLI half of the managed
+// contract: a managed sandbox has no background profile/PID/log path, so the
+// start command must refuse it before resolving any workstation state.
+func TestDaemonStartManagedRequiresForeground(t *testing.T) {
+	cmd := &cobra.Command{Use: "start"}
+	cmd.Flags().Bool("foreground", false, "")
+	cmd.Flags().Bool("managed", false, "")
+	if err := cmd.Flags().Set("managed", "true"); err != nil {
+		t.Fatalf("set managed flag: %v", err)
+	}
+
+	err := runDaemonStart(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "--managed requires --foreground") {
+		t.Fatalf("runDaemonStart(managed, background) = %v, want the foreground requirement", err)
+	}
+}
