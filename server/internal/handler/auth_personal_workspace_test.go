@@ -33,10 +33,11 @@ func cleanupPersonalWorkspace(t *testing.T, userID string) {
 	})
 }
 
-// cleanupUserCredits removes a user's wallet and ledger. Neither table carries
-// a foreign key to "user", so deleting the user would strand them; the signup
-// path writes both (the Aurora signup bonus).
+// cleanupUserCredits removes a user's signup eligibility, wallet, and ledger.
+// None carries a foreign key to "user", so deleting the user would strand
+// them; the signup path writes all three.
 func cleanupUserCredits(userID string) {
+	_, _ = testPool.Exec(context.Background(), `DELETE FROM aurora_signup_bonus WHERE user_id = $1`, userID)
 	_, _ = testPool.Exec(context.Background(), `DELETE FROM credit_ledger WHERE user_id = $1`, userID)
 	_, _ = testPool.Exec(context.Background(), `DELETE FROM credit_balance WHERE user_id = $1`, userID)
 }
@@ -48,6 +49,8 @@ func cleanupUserCredits(userID string) {
 func cleanupPersonalWorkspaceByEmail(t *testing.T, email string) {
 	t.Helper()
 	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), `
+			DELETE FROM aurora_signup_bonus WHERE user_id = (SELECT id FROM "user" WHERE email = $1)`, email)
 		_, _ = testPool.Exec(context.Background(), `
 			DELETE FROM credit_ledger WHERE user_id = (SELECT id FROM "user" WHERE email = $1)`, email)
 		_, _ = testPool.Exec(context.Background(), `
@@ -278,6 +281,64 @@ func TestGoogleLoginKeepsRenamedPersonalWorkspace(t *testing.T) {
 	assertPersonalWorkspaceName(t, userID, "My Studio")
 }
 
+// TestFindOrCreateUserDoesNotBackfillSignupBonus keeps accounts created before
+// Plan 5 out of the one-time signup promotion.
+func TestFindOrCreateUserDoesNotBackfillSignupBonus(t *testing.T) {
+	email := "existing-before-aurora-" + t.Name() + "@multica.ai"
+	userID := dbfx.User(t, "Existing User", email)
+	cleanupPersonalWorkspace(t, userID)
+
+	user, isNew, err := testHandler.findOrCreateUser(context.Background(), email, "")
+	if err != nil {
+		t.Fatalf("findOrCreateUser: %v", err)
+	}
+	if isNew {
+		t.Fatal("pre-existing account reported as new")
+	}
+	bal, err := testHandler.Credit.Balance(context.Background(), user.ID)
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if bal != 0 {
+		t.Fatalf("historical account received signup bonus %d, want 0", bal)
+	}
+}
+
+// TestFindOrCreateUserRetriesPendingSignupBonus proves an eligible account whose
+// first grant failed is retried and finalized on a later login.
+func TestFindOrCreateUserRetriesPendingSignupBonus(t *testing.T) {
+	email := "pending-aurora-bonus-" + t.Name() + "@multica.ai"
+	userID := dbfx.User(t, "Pending Bonus User", email)
+	cleanupPersonalWorkspace(t, userID)
+
+	userUUID := parseUUID(userID)
+	if err := testHandler.Queries.CreateAuroraSignupBonusEligibility(context.Background(), userUUID); err != nil {
+		t.Fatalf("CreateAuroraSignupBonusEligibility: %v", err)
+	}
+
+	user, isNew, err := testHandler.findOrCreateUser(context.Background(), email, "")
+	if err != nil {
+		t.Fatalf("findOrCreateUser: %v", err)
+	}
+	if isNew {
+		t.Fatal("eligible account reported as new")
+	}
+	bal, err := testHandler.Credit.Balance(context.Background(), user.ID)
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if bal != auroraSignupBonusMicro {
+		t.Fatalf("pending signup bonus = %d, want %d", bal, auroraSignupBonusMicro)
+	}
+	status, err := testHandler.Queries.GetAuroraSignupBonusStatus(context.Background(), userUUID)
+	if err != nil {
+		t.Fatalf("GetAuroraSignupBonusStatus: %v", err)
+	}
+	if status != "granted" {
+		t.Fatalf("signup bonus status = %q, want granted", status)
+	}
+}
+
 // TestFindOrCreateUserProvisionsPersonalWorkspace covers the login path:
 // a new email through findOrCreateUser (the shared funnel behind both
 // VerifyCode and GoogleLogin) lands with a personal workspace, and a second
@@ -326,8 +387,8 @@ func TestFindOrCreateUserProvisionsPersonalWorkspace(t *testing.T) {
 	if n2 != 1 {
 		t.Fatalf("second call should not create another workspace, got %d", n2)
 	}
-	// The bonus runs on every login, so the ledger key — not the login count —
-	// is what has to keep it to one grant.
+	// A granted eligibility is final, so logging in again cannot add a second
+	// ledger entry.
 	bal2, err := testHandler.Credit.Balance(context.Background(), user.ID)
 	if err != nil {
 		t.Fatalf("Balance after relogin: %v", err)

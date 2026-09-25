@@ -21,8 +21,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
-	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/aurora"
+	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/logger"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
@@ -194,6 +194,75 @@ func nameFromEmail(email string) string {
 	return email
 }
 
+// createUserWithAuroraSignupBonusEligibility makes the signup edge durable.
+// Production handlers always have TxStarter; the fallback keeps lightweight
+// handler tests working while preserving the same write order.
+func (h *Handler) createUserWithAuroraSignupBonusEligibility(ctx context.Context, params db.CreateUserParams) (db.User, error) {
+	if h.TxStarter == nil {
+		user, err := h.Queries.CreateUser(ctx, params)
+		if err != nil {
+			return db.User{}, err
+		}
+		if err := h.Queries.CreateAuroraSignupBonusEligibility(ctx, user.ID); err != nil {
+			return db.User{}, err
+		}
+		return user, nil
+	}
+
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return db.User{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	qtx := h.Queries.WithTx(tx)
+	user, err := qtx.CreateUser(ctx, params)
+	if err != nil {
+		return db.User{}, err
+	}
+	if err := qtx.CreateAuroraSignupBonusEligibility(ctx, user.ID); err != nil {
+		return db.User{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return db.User{}, err
+	}
+	return user, nil
+}
+
+// grantPendingAuroraSignupBonus retries only signups explicitly recorded after
+// this feature shipped. Accounts without an eligibility row predate the bonus
+// and must never be backfilled.
+func (h *Handler) grantPendingAuroraSignupBonus(ctx context.Context, user db.User) {
+	if h.Credit == nil {
+		return
+	}
+
+	status, err := h.Queries.GetAuroraSignupBonusStatus(ctx, user.ID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return
+	}
+	if err != nil {
+		slog.Warn("failed to load aurora signup bonus eligibility", "error", err, "user_id", uuidToString(user.ID))
+		return
+	}
+	if status != "pending" {
+		return
+	}
+
+	wsID, err := h.Queries.GetPersonalWorkspaceForUser(ctx, user.ID)
+	if err != nil {
+		slog.Warn("failed to resolve personal workspace for aurora signup bonus", "error", err, "user_id", uuidToString(user.ID))
+		return
+	}
+	if err := h.Credit.Grant(ctx, user.ID, wsID, auroraSignupBonusMicro, aurora.LedgerKindAdjustment, "signup:"+uuidToString(user.ID)); err != nil {
+		slog.Warn("failed to grant aurora signup bonus", "error", err, "user_id", uuidToString(user.ID))
+		return
+	}
+	if err := h.Queries.MarkAuroraSignupBonusGranted(ctx, user.ID); err != nil {
+		slog.Warn("failed to mark aurora signup bonus granted", "error", err, "user_id", uuidToString(user.ID))
+	}
+}
+
 // findOrCreateUser returns the existing user for an email, or creates one if
 // none exists. displayName is the name the caller already knows for the
 // account — GoogleLogin passes the Google profile name, VerifyCode has none —
@@ -230,7 +299,7 @@ func (h *Handler) findOrCreateUser(ctx context.Context, email, displayName strin
 		if name == "" {
 			name = nameFromEmail(email)
 		}
-		created, err := h.Queries.CreateUser(ctx, db.CreateUserParams{
+		created, err := h.createUserWithAuroraSignupBonusEligibility(ctx, db.CreateUserParams{
 			Name:  name,
 			Email: email,
 		})
@@ -256,19 +325,10 @@ func (h *Handler) findOrCreateUser(ctx context.Context, email, displayName strin
 		slog.Warn("personal-workspace provisioning skipped: handler has no transaction starter", "user_id", uuidToString(user.ID))
 	}
 
-	// One-time Aurora signup bonus, granted into the personal workspace
-	// provisioned just above. Best-effort and idempotent via the ledger key
-	// ("grant:signup:<userID>"), so it runs on every login: a transient failure
-	// self-heals on the next one, and a user who signs in again is never
-	// credited twice. The credit service is nil only in handler tests that
-	// build a Handler without New().
-	if h.Credit != nil {
-		if wsID, err := h.Queries.GetPersonalWorkspaceForUser(ctx, user.ID); err != nil {
-			slog.Warn("failed to resolve personal workspace for aurora signup bonus", "error", err, "user_id", uuidToString(user.ID))
-		} else if err := h.Credit.Grant(ctx, user.ID, wsID, auroraSignupBonusMicro, aurora.LedgerKindAdjustment, "signup:"+uuidToString(user.ID)); err != nil {
-			slog.Warn("failed to grant aurora signup bonus", "error", err, "user_id", uuidToString(user.ID))
-		}
-	}
+	// The eligibility row is created atomically with a new account. Leaving it
+	// pending until the idempotent ledger write succeeds makes transient workspace
+	// or credit failures retry on the next login without backfilling older users.
+	h.grantPendingAuroraSignupBonus(ctx, user)
 
 	return user, isNew, nil
 }

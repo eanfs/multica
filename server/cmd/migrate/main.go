@@ -324,6 +324,7 @@ var concurrentIndexCleanups = map[string]string{
 	"511_aurora_moderation_log_workspace_idx":                   "aurora_moderation_log_workspace_idx",
 	"513_aurora_subscription_user_idx":                          "aurora_subscription_user_idx",
 	"514_aurora_subscription_status_period_idx":                 "aurora_subscription_status_period_idx",
+	"517_aurora_signup_bonus_user_idx":                          "aurora_signup_bonus_user_idx",
 	"484_issue_triage_state_index":                              "idx_issue_triage_state",
 }
 
