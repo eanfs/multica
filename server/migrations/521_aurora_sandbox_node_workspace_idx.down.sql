@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS aurora_sandbox_node_workspace_uidx;

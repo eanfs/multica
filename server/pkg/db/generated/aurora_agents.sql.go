@@ -62,7 +62,6 @@ const getAuroraManagedRuntime = `-- name: GetAuroraManagedRuntime :one
 
 SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name FROM agent_runtime
 WHERE workspace_id = $1
-  AND daemon_id IS NULL
   AND runtime_mode = 'cloud'
   AND provider = $2
 ORDER BY created_at ASC, id ASC
@@ -80,11 +79,10 @@ type GetAuroraManagedRuntimeParams struct {
 // kind='system' agent, one skill row, and the agent_skill junction — on first
 // generation creation.
 // The workspace's server-hosted (managed) runtime, the idempotency anchor for
-// seeding. daemon_id is NULL because no daemon has claimed it yet; a sandbox
-// daemon claims it later (Plan 3 Task 3). There is no unique constraint that
-// covers a NULL daemon_id — migration 121's partial index keys
-// (workspace_id, daemon_id, provider) and NULLs are distinct — so the seed
-// looks it up rather than relying on an ON CONFLICT arbiter.
+// seeding. It may be unbound (daemon_id still NULL) or already bound to the
+// sandbox daemon that enrolled it, so the lookup does not filter on daemon_id;
+// migration 526's partial unique index enforces one such runtime per workspace,
+// so this ordering can never choose between duplicates.
 func (q *Queries) GetAuroraManagedRuntime(ctx context.Context, arg GetAuroraManagedRuntimeParams) (AgentRuntime, error) {
 	row := q.db.QueryRow(ctx, getAuroraManagedRuntime, arg.WorkspaceID, arg.Provider)
 	var i AgentRuntime

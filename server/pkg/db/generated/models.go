@@ -238,6 +238,26 @@ type AuroraModerationLog struct {
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
+type AuroraSandboxNode struct {
+	ID                   pgtype.UUID        `json:"id"`
+	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
+	RuntimeID            pgtype.UUID        `json:"runtime_id"`
+	DaemonID             string             `json:"daemon_id"`
+	BackendNodeID        pgtype.Text        `json:"backend_node_id"`
+	ImageDigest          string             `json:"image_digest"`
+	State                string             `json:"state"`
+	EnrollmentTokenHash  pgtype.Text        `json:"enrollment_token_hash"`
+	EnrollmentExpiresAt  pgtype.Timestamptz `json:"enrollment_expires_at"`
+	EnrollmentConsumedAt pgtype.Timestamptz `json:"enrollment_consumed_at"`
+	LastActiveAt         pgtype.Timestamptz `json:"last_active_at"`
+	DrainStartedAt       pgtype.Timestamptz `json:"drain_started_at"`
+	StartedAt            pgtype.Timestamptz `json:"started_at"`
+	StoppedAt            pgtype.Timestamptz `json:"stopped_at"`
+	FailureReason        pgtype.Text        `json:"failure_reason"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
+}
+
 type AuroraSignupBonu struct {
 	UserID    pgtype.UUID        `json:"user_id"`
 	Status    string             `json:"status"`
