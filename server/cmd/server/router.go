@@ -438,7 +438,6 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		LLMDefaultModel:          strings.TrimSpace(os.Getenv("MULTICA_LLM_DEFAULT_MODEL")),
 		LLMMaxRetries:            opts.LLMMaxRetries,
 		ServerVersion:            normalizeServerVersion(version),
-		AuroraSandboxToken:       strings.TrimSpace(os.Getenv("AURORA_SANDBOX_TOKEN")),
 		// Aurora billing (Plan 5). The Stripe keys stay server-side — see
 		// handler.AppConfig, which never carries them. Leaving the secret key or
 		// the webhook secret unset disables payments entirely (503), and leaving
@@ -1468,11 +1467,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// the browsers above; the other four composio endpoints stay session-gated.
 	r.Get("/api/integrations/composio/callback", h.ComposioCallback)
 
-	// Managed (server-hosted) runtime registration for Aurora sandbox daemons.
+	// Managed (server-hosted) runtime enrollment for Aurora sandbox daemons.
 	// Registered on the parent router rather than under the /api/daemon group so
-	// it is not gated by DaemonAuth: the request authenticates via the shared
-	// AURORA_SANDBOX_TOKEN instead of a per-daemon token (Plan 3 Task 3).
-	r.Post("/api/daemon/managed/register", h.ManagedRuntimeRegister)
+	// it is not gated by DaemonAuth: the request authenticates by exchanging a
+	// single-use enrollment secret for the daemon token, which it does not have
+	// yet (Plan A Task 3).
+	r.Post("/api/daemon/managed/enroll", h.ManagedRuntimeEnroll)
 
 	// Daemon API routes (require daemon token or valid user token)
 	r.Route("/api/daemon", func(r chi.Router) {
