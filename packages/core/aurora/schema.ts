@@ -170,6 +170,9 @@ export const auroraTopupsSchema = z.object({
  * placeholder URL would navigate the user somewhere meaningless.
  */
 export const auroraCheckoutResponseSchema = z.object({
-  checkoutUrl: z.string(),
+  // A checkout URL crosses a trust boundary and is handed to an external
+  // navigator. Absolute HTTPS is the minimum safe contract: zod's URL check
+  // alone also accepts schemes such as javascript:.
+  checkoutUrl: z.url({ protocol: /^https$/ }),
 });
 export type AuroraCheckout = z.infer<typeof auroraCheckoutResponseSchema>;

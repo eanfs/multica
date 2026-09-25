@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type {
   AuroraGeneration,
@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   topups: vi.fn(),
   createCheckout: vi.fn(),
   createTopupCheckout: vi.fn(),
+  openExternal: vi.fn(),
 }));
 
 vi.mock("@multica/core/aurora", async (importOriginal) => {
@@ -36,6 +37,11 @@ vi.mock("@multica/core/aurora", async (importOriginal) => {
     useCreateAuroraCheckout: () => mocks.createCheckout(),
     useCreateAuroraTopupCheckout: () => mocks.createTopupCheckout(),
   };
+});
+
+vi.mock("../platform", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../platform")>();
+  return { ...actual, openExternal: mocks.openExternal };
 });
 
 vi.mock("@multica/core/paths", async (importOriginal) => {
@@ -107,10 +113,11 @@ function mutation() {
  */
 const APP_ORIGIN = "https://app.example.com";
 
-function renderBilling() {
+function renderBilling(searchParams = new URLSearchParams()) {
   return renderWithI18n(
     <NavigationProvider
       value={stubNavigationAdapter({
+        searchParams,
         getShareableUrl: (path) => new URL(path, APP_ORIGIN).toString(),
       })}
     >
@@ -132,6 +139,10 @@ function subscribeButtonFor(plan: string): HTMLElement {
 }
 
 describe("AuroraBilling", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.balance.mockReturnValue({
@@ -144,12 +155,14 @@ describe("AuroraBilling", () => {
     mocks.transactions.mockReturnValue({
       data: [transaction()],
       isPending: false,
+      refetch: vi.fn(),
     });
     mocks.generations.mockReturnValue({ data: [GENERATION], isPending: false });
     mocks.skills.mockReturnValue({ data: [POSTER], isPending: false });
     mocks.subscription.mockReturnValue({
       data: subscription(),
       isPending: false,
+      refetch: vi.fn(),
     });
     mocks.topups.mockReturnValue({
       data: [
@@ -157,6 +170,7 @@ describe("AuroraBilling", () => {
         { id: "t20", credits: 20000 },
       ],
       isPending: false,
+      refetch: vi.fn(),
     });
     mocks.createCheckout.mockReturnValue(mutation());
     mocks.createTopupCheckout.mockReturnValue(mutation());
@@ -259,6 +273,77 @@ describe("AuroraBilling", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("reports a failed subscription read instead of hiding the plan card", async () => {
+    const user = userEvent.setup();
+    const refetch = vi.fn();
+    mocks.subscription.mockReturnValue({
+      data: undefined,
+      isPending: false,
+      isError: true,
+      refetch,
+    });
+
+    renderBilling();
+
+    expect(screen.getByText("Could not load your credits")).toBeInTheDocument();
+    expect(screen.queryByText("Plan")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(refetch).toHaveBeenCalled();
+  });
+
+  it("reports a failed top-up catalog read instead of claiming it is empty", async () => {
+    const user = userEvent.setup();
+    const refetch = vi.fn();
+    mocks.topups.mockReturnValue({
+      data: undefined,
+      isPending: false,
+      isError: true,
+      refetch,
+    });
+
+    renderBilling();
+
+    expect(screen.getByText("Could not load your credits")).toBeInTheDocument();
+    expect(screen.queryByText("No top-up packs available.")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(refetch).toHaveBeenCalled();
+  });
+
+  it("polls billing state after returning from a successful checkout", () => {
+    vi.useFakeTimers();
+    const balanceRefetch = vi.fn();
+    const transactionsRefetch = vi.fn();
+    const subscriptionRefetch = vi.fn();
+    mocks.balance.mockReturnValue({
+      data: { availableMicro: 1000 * MICRO },
+      isPending: false,
+      refetch: balanceRefetch,
+    });
+    mocks.transactions.mockReturnValue({
+      data: [transaction()],
+      isPending: false,
+      refetch: transactionsRefetch,
+    });
+    mocks.subscription.mockReturnValue({
+      data: subscription(),
+      isPending: false,
+      refetch: subscriptionRefetch,
+    });
+
+    renderBilling(new URLSearchParams("checkout=success"));
+
+    expect(balanceRefetch).toHaveBeenCalledTimes(1);
+    expect(transactionsRefetch).toHaveBeenCalledTimes(1);
+    expect(subscriptionRefetch).toHaveBeenCalledTimes(1);
+
+    act(() => vi.advanceTimersByTime(2_000));
+
+    expect(balanceRefetch).toHaveBeenCalledTimes(2);
+    expect(transactionsRefetch).toHaveBeenCalledTimes(2);
+    expect(subscriptionRefetch).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
   it("names the plan and measures usage against its limit", () => {
     mocks.subscription.mockReturnValue({
       data: subscription({
@@ -293,9 +378,53 @@ describe("AuroraBilling", () => {
     expect(screen.getByText("Renews Oct 24, 2026")).toBeInTheDocument();
   });
 
+  it("does not promise renewal when cancellation is scheduled", () => {
+    mocks.subscription.mockReturnValue({
+      data: subscription({
+        tier: "pro",
+        status: "active",
+        currentPeriodEnd: "2026-10-24T00:00:00Z",
+        cancelAtPeriodEnd: true,
+      }),
+      isPending: false,
+    });
+
+    renderBilling();
+
+    expect(screen.queryByText("Renews Oct 24, 2026")).not.toBeInTheDocument();
+    expect(screen.getByText("Ends at the end of the period.")).toBeInTheDocument();
+  });
+
+  it("does not promise renewal for a canceled subscription", () => {
+    mocks.subscription.mockReturnValue({
+      data: subscription({
+        status: "canceled",
+        currentPeriodEnd: "2026-10-24T00:00:00Z",
+      }),
+      isPending: false,
+    });
+
+    renderBilling();
+
+    expect(screen.queryByText("Renews Oct 24, 2026")).not.toBeInTheDocument();
+  });
+
   it("offers no subscribe button while a live plan exists", () => {
     mocks.subscription.mockReturnValue({
       data: subscription({ tier: "creator", status: "active" }),
+      isPending: false,
+    });
+
+    renderBilling();
+
+    expect(
+      screen.queryByRole("button", { name: "Subscribe" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("fails closed when the server reports an unknown subscription status", () => {
+    mocks.subscription.mockReturnValue({
+      data: subscription({ tier: "creator", status: "paused" }),
       isPending: false,
     });
 
@@ -330,7 +459,7 @@ describe("AuroraBilling", () => {
 
     // The API host is not a page the user can be sent back to, so the client
     // builds the return URLs from its own origin and the workspace slug route.
-    expect(createCheckout.mutate).toHaveBeenCalledWith({
+    expect(createCheckout.mutate.mock.calls[0]?.[0]).toEqual({
       tier: "creator",
       billingCycle: "monthly",
       successUrl: "https://app.example.com/acme/billing?checkout=success",
@@ -348,11 +477,34 @@ describe("AuroraBilling", () => {
       screen.getByRole("button", { name: "5,000 credits · $5" }),
     );
 
-    expect(createTopupCheckout.mutate).toHaveBeenCalledWith({
+    expect(createTopupCheckout.mutate.mock.calls[0]?.[0]).toEqual({
       topupId: "t5",
       successUrl: "https://app.example.com/acme/billing?checkout=success",
       cancelUrl: "https://app.example.com/acme/billing?checkout=cancel",
     });
+  });
+
+  it("hands a successful checkout URL to the platform external navigator", async () => {
+    const user = userEvent.setup();
+    const createCheckout = {
+      mutate: vi.fn(
+        (
+          _request: unknown,
+          options?: { onSuccess?: (checkoutUrl: string) => void },
+        ) => options?.onSuccess?.("https://checkout.stripe.com/c/1"),
+      ),
+      isPending: false,
+      error: null,
+    };
+    mocks.createCheckout.mockReturnValue(createCheckout);
+
+    renderBilling();
+    await user.click(subscribeButtonFor("Creator"));
+
+    expect(mocks.openExternal).toHaveBeenCalledWith(
+      "https://checkout.stripe.com/c/1",
+      { webTarget: "same-tab" },
+    );
   });
 
   it("says the instance does not sell plans when payments are unavailable", () => {

@@ -180,57 +180,68 @@ export function parseAuroraTransactions(data: unknown): AuroraTransaction[] {
 }
 
 /**
- * The caller's plan, or the free tier.
+ * The caller's plan.
  *
- * The fallback is a free plan rather than null: the card must render something,
- * and "free, nothing used" is the state a degraded read is closest to — the
- * limits it shows are the ones the server would apply to a user it knows
- * nothing about.
+ * Optional fields still receive schema defaults for compatibility with older
+ * servers, but a body that cannot identify a subscription at all is not safe to
+ * turn into Free: this screen can start a real recurring purchase. The unique
+ * fallback object lets us retain parseWithFallback's boundary diagnostics while
+ * promoting degradation to a visible query error.
  */
 export function parseAuroraSubscription(data: unknown): AuroraSubscription {
-  return parseWithFallback<{ subscription: AuroraSubscription }>(
+  const fallback = { subscription: auroraSubscriptionSchema.parse({}) };
+  const parsed = parseWithFallback<{ subscription: AuroraSubscription }>(
     data,
     auroraSubscriptionResponseSchema,
-    { subscription: auroraSubscriptionSchema.parse({}) },
+    fallback,
     { endpoint: SUBSCRIPTION_ENDPOINT },
-  ).subscription;
+  );
+  if (parsed === fallback) throw new Error("invalid subscription response");
+  return parsed.subscription;
 }
 
-/** The purchasable credit packs, or none. */
+/** The purchasable credit packs; an unreadable catalog is a visible error. */
 export function parseAuroraTopups(data: unknown): AuroraTopup[] {
-  return parseWithFallback<{ topups: AuroraTopup[] }>(
+  const fallback: { topups: AuroraTopup[] } = { topups: [] };
+  const parsed = parseWithFallback<{ topups: AuroraTopup[] }>(
     data,
     auroraTopupsSchema,
-    { topups: [] },
+    fallback,
     { endpoint: TOPUPS_ENDPOINT },
-  ).topups;
+  );
+  if (parsed === fallback) throw new Error("invalid topup response");
+  return parsed.topups;
 }
 
 /**
- * The checkout URL from a started purchase, or null when the body is
- * unreadable.
+ * The validated HTTPS checkout URL from a started purchase.
  *
- * Null rather than an empty string: the caller navigates to this value, and an
- * empty one would send the browser to the current page as if the purchase had
- * completed.
+ * A malformed response throws: checkout is a command, and silently returning a
+ * placeholder would leave the button with neither navigation nor an error.
  */
-export function parseAuroraCheckout(data: unknown): string | null {
+export function parseAuroraCheckout(data: unknown): string {
   return parseCheckoutUrl(data, CHECKOUT_ENDPOINT);
 }
 
 /** The same body shape, logged under the topup endpoint it came from. */
-export function parseAuroraTopupCheckout(data: unknown): string | null {
+export function parseAuroraTopupCheckout(data: unknown): string {
   return parseCheckoutUrl(data, TOPUP_CHECKOUT_ENDPOINT);
 }
 
-function parseCheckoutUrl(data: unknown, endpoint: string): string | null {
+function parseCheckoutUrl(data: unknown, endpoint: string): string {
   const parsed = parseWithFallback<AuroraCheckout | null>(
     data,
     auroraCheckoutResponseSchema,
     null,
     { endpoint },
   );
-  return parsed?.checkoutUrl ?? null;
+  if (!parsed) {
+    // A checkout is a command, not a readable projection: treating a malformed
+    // 200 body as a successful null result leaves the button with no navigation
+    // and no error. Throw so the mutation enters its visible failure state.
+    throw new Error("invalid checkout response");
+  }
+  return parsed.checkoutUrl;
 }
 
 // ---------------------------------------------------------------------------
@@ -343,7 +354,7 @@ export async function listAuroraTopups(): Promise<AuroraTopup[]> {
  */
 export async function createAuroraCheckout(
   request: CreateAuroraCheckoutRequest,
-): Promise<string | null> {
+): Promise<string> {
   const raw = await api.requestJson(AURORA_CHECKOUT_PATH, {
     method: "POST",
     body: JSON.stringify(request),
@@ -354,7 +365,7 @@ export async function createAuroraCheckout(
 /** Starts a one-time credit purchase and returns the checkout URL. */
 export async function createAuroraTopupCheckout(
   request: CreateAuroraTopupCheckoutRequest,
-): Promise<string | null> {
+): Promise<string> {
   const raw = await api.requestJson(AURORA_TOPUP_CHECKOUT_PATH, {
     method: "POST",
     body: JSON.stringify(request),

@@ -186,19 +186,20 @@ describe("parseAuroraSubscription", () => {
     expect(res.status).toBe("active");
   });
 
-  it("degrades an unreadable body to the free plan", () => {
-    // Not null: the card always renders, and "free, nothing used" is the state
-    // closest to what a failed read actually knows.
-    const res = parseAuroraSubscription({ subscription: "nope" });
-
-    expect(res.tier).toBe("free");
-    expect(res.limits).toEqual({ generationsPerMonth: 10, concurrency: 1 });
+  it("rejects an unreadable body instead of inventing a free plan", () => {
+    // Billing state controls a real purchase. A paid user must not see a
+    // purchase-capable Free card because the response contract degraded.
+    expect(() =>
+      parseAuroraSubscription({ subscription: "nope" }),
+    ).toThrow("invalid subscription response");
   });
 });
 
 describe("parseAuroraTopups", () => {
-  it("degrades an unreadable body to no packs", () => {
-    expect(parseAuroraTopups({ topups: 7 })).toEqual([]);
+  it("rejects an unreadable body instead of claiming no packs are sold", () => {
+    expect(() => parseAuroraTopups({ topups: 7 })).toThrow(
+      "invalid topup response",
+    );
   });
 
   it("reads the packs", () => {
@@ -215,11 +216,23 @@ describe("parseAuroraCheckout", () => {
     ).toBe("https://checkout.stripe.com/c/1");
   });
 
-  it("reads an unreadable body as null rather than an empty URL", () => {
-    // An empty string would navigate the browser to the current page, as if
-    // the purchase had completed.
-    expect(parseAuroraCheckout({})).toBeNull();
-    expect(parseAuroraTopupCheckout({ checkoutUrl: 7 })).toBeNull();
+  it("rejects an unreadable body instead of reporting a successful checkout", () => {
+    expect(() => parseAuroraCheckout({})).toThrow("invalid checkout response");
+    expect(() => parseAuroraTopupCheckout({ checkoutUrl: 7 })).toThrow(
+      "invalid checkout response",
+    );
+  });
+
+  it("rejects checkout destinations that are not absolute HTTPS URLs", () => {
+    expect(() =>
+      parseAuroraCheckout({ checkoutUrl: "http://checkout.stripe.test/c/1" }),
+    ).toThrow("invalid checkout response");
+    expect(() =>
+      parseAuroraCheckout({ checkoutUrl: "javascript:alert(1)" }),
+    ).toThrow("invalid checkout response");
+    expect(() => parseAuroraCheckout({ checkoutUrl: "/checkout/1" })).toThrow(
+      "invalid checkout response",
+    );
   });
 });
 

@@ -173,7 +173,7 @@ describe("useCreateAuroraCheckout", () => {
     vi.unstubAllGlobals();
   });
 
-  it("sends the browser to the checkout URL", async () => {
+  it("returns the checkout URL without performing browser navigation", async () => {
     setApiInstance({
       requestJson: vi.fn(async () => ({
         checkoutUrl: "https://checkout.stripe.com/c/1",
@@ -184,8 +184,9 @@ describe("useCreateAuroraCheckout", () => {
       wrapper: wrapper(newClient()),
     });
 
+    let checkoutUrl: string | undefined;
     await act(async () => {
-      await result.current.mutateAsync({
+      checkoutUrl = await result.current.mutateAsync({
         tier: "creator",
         billingCycle: "monthly",
         successUrl: "https://app.example.com/acme/billing?checkout=success",
@@ -193,7 +194,8 @@ describe("useCreateAuroraCheckout", () => {
       });
     });
 
-    expect(assign).toHaveBeenCalledWith("https://checkout.stripe.com/c/1");
+    expect(checkoutUrl).toBe("https://checkout.stripe.com/c/1");
+    expect(assign).not.toHaveBeenCalled();
   });
 
   it("posts the plan and refreshes the plan and the wallet", async () => {

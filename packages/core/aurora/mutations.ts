@@ -64,17 +64,15 @@ export function useDeleteAuroraAsset() {
 }
 
 /**
- * Starts a subscription checkout and sends the browser to Stripe.
+ * Starts a subscription checkout.
  *
- * The navigation is part of the mutation rather than a `useEffect` on the
- * result: the checkout URL is a one-shot destination, and keeping it out of
- * component state means a re-render cannot navigate a second time.
+ * Core returns the validated checkout URL but deliberately does not navigate:
+ * external navigation is platform behavior (web same-tab vs Electron shell),
+ * so the view hands this result to its platform adapter.
  *
  * On success the wallet and the plan are invalidated. The purchase completes on
  * Stripe's origin, so this client will not see the webhook that grants the
- * credits — the invalidation is what makes the return trip re-read both, and
- * `auroraSubscriptionOptions`' stale-time covers the case where the webhook
- * lands a moment later.
+ * credits — the invalidation is what makes the return trip re-read both.
  *
  * A 409 (a live subscription already exists) and a 503 (no Stripe
  * configuration) are left to the caller: neither is retryable, and the screen
@@ -85,9 +83,6 @@ export function useCreateAuroraCheckout() {
   return useMutation({
     mutationFn: (request: CreateAuroraCheckoutRequest) =>
       createAuroraCheckout(request),
-    onSuccess: (checkoutUrl) => {
-      if (checkoutUrl) navigateToCheckout(checkoutUrl);
-    },
     onSettled: () => {
       // The plan the card names, and the wallet — the webhook grants the first
       // month's credits, so both move. The pack catalogue does not, so it is
@@ -104,25 +99,10 @@ export function useCreateAuroraTopupCheckout() {
   return useMutation({
     mutationFn: (request: CreateAuroraTopupCheckoutRequest) =>
       createAuroraTopupCheckout(request),
-    onSuccess: (checkoutUrl) => {
-      if (checkoutUrl) navigateToCheckout(checkoutUrl);
-    },
     onSettled: () => {
       // Only the wallet moves: a top-up buys credits, not a plan.
       qc.invalidateQueries({ queryKey: auroraWalletKeys.balance() });
       qc.invalidateQueries({ queryKey: auroraWalletKeys.transactions() });
     },
   });
-}
-
-/**
- * Hands the browser to Stripe's hosted checkout.
- *
- * A full-page navigation, not a router push: the destination is another origin,
- * so it is outside every adapter's route table. `assign` is used rather than
- * `open` so the current page stays in history and the back button returns the
- * user to the plan screen if they abandon the purchase.
- */
-function navigateToCheckout(url: string) {
-  if (typeof window !== "undefined") window.location.assign(url);
 }

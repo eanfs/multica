@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { CreditCard, Wallet } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { Progress } from "@multica/ui/components/ui/progress";
@@ -24,7 +24,8 @@ import {
   CollectionPageHeader,
   CollectionPageState,
 } from "../layout/collection-page";
-import { useAppOrigin } from "../navigation";
+import { useAppOrigin, useNavigation } from "../navigation";
+import { openExternal } from "../platform";
 import { useLocale, useT } from "../i18n";
 import { formatCredits, formatMicroCredits } from "./format";
 import {
@@ -35,6 +36,9 @@ import {
   topupPackLabel,
 } from "./labels";
 import { AuroraLoadFailed } from "./load-failed";
+
+const CHECKOUT_RETURN_POLL_MS = 2_000;
+const CHECKOUT_RETURN_MAX_POLLS = 30;
 
 /**
  * The wallet and the plan: what is left, how it moved, and the way to buy more.
@@ -48,6 +52,7 @@ export function AuroraBilling() {
   const { t } = useT("aurora");
   const { t: tBilling } = useT("billing");
   const locale = useLocale();
+  const navigation = useNavigation();
   const appOrigin = useAppOrigin();
   const slug = useWorkspaceSlug();
   const balanceQuery = useAuroraBalance();
@@ -58,6 +63,39 @@ export function AuroraBilling() {
   const topupsQuery = useAuroraTopups();
   const checkout = useCreateAuroraCheckout();
   const topupCheckout = useCreateAuroraTopupCheckout();
+  const checkoutReturned = navigation.searchParams.get("checkout") === "success";
+  const { refetch: refetchBalance } = balanceQuery;
+  const { refetch: refetchTransactions } = transactionsQuery;
+  const { refetch: refetchSubscription } = subscriptionQuery;
+
+  // Stripe may redirect the browser before its webhook commits. A one-off read
+  // can therefore return the pre-payment plan and wallet; staleTime only marks
+  // that data stale later and does not schedule another read. Poll for one
+  // minute after an explicit success return so the webhook race self-heals,
+  // then stop to avoid turning an abandoned or delayed payment into permanent
+  // background traffic.
+  useEffect(() => {
+    if (!checkoutReturned) return;
+
+    let polls = 0;
+    const refresh = () => {
+      polls += 1;
+      void refetchBalance();
+      void refetchTransactions();
+      void refetchSubscription();
+    };
+    refresh();
+    const timer = setInterval(() => {
+      refresh();
+      if (polls >= CHECKOUT_RETURN_MAX_POLLS) clearInterval(timer);
+    }, CHECKOUT_RETURN_POLL_MS);
+    return () => clearInterval(timer);
+  }, [
+    checkoutReturned,
+    refetchBalance,
+    refetchTransactions,
+    refetchSubscription,
+  ]);
 
   const transactions = transactionsQuery.data ?? [];
 
@@ -98,16 +136,20 @@ export function AuroraBilling() {
     return skillNameById.get(skillId) ?? null;
   }
 
-  const isLoading = balanceQuery.isPending || transactionsQuery.isPending;
+  const isLoading =
+    balanceQuery.isPending ||
+    transactionsQuery.isPending ||
+    subscriptionQuery.isPending ||
+    topupsQuery.isPending;
   // A failed read is only fatal when it left nothing behind: a background
-  // refetch that failed over rows already in cache is a stale ledger, and
-  // replacing a readable balance and ledger with an error card is the worse
-  // trade. Same rule as the library. The plan card is exempt from it — its
-  // schema degrades to the free tier rather than to nothing, so a failed plan
-  // read leaves a readable card behind.
+  // refetch that failed over cached data is stale but still readable. Billing
+  // state is included here because hiding a failed plan read or rendering a
+  // failed catalog read as "no packs" would misrepresent a purchase boundary.
   const loadFailed =
     (transactionsQuery.isError && transactions.length === 0) ||
-    (balanceQuery.isError && balanceQuery.data === undefined);
+    (balanceQuery.isError && balanceQuery.data === undefined) ||
+    (subscriptionQuery.isError && subscriptionQuery.data === undefined) ||
+    (topupsQuery.isError && topupsQuery.data === undefined);
 
   const balance = formatMicroCredits(
     balanceQuery.data?.availableMicro ?? 0,
@@ -130,6 +172,8 @@ export function AuroraBilling() {
             onRetry={() => {
               void balanceQuery.refetch();
               void transactionsQuery.refetch();
+              void subscriptionQuery.refetch();
+              void topupsQuery.refetch();
             }}
           />
         ) : (
@@ -141,7 +185,13 @@ export function AuroraBilling() {
                 canCheckout={returnURLs !== null}
                 onSubscribe={(tier) => {
                   if (!returnURLs) return;
-                  checkout.mutate({ tier, billingCycle: "monthly", ...returnURLs });
+                  checkout.mutate(
+                    { tier, billingCycle: "monthly", ...returnURLs },
+                    {
+                      onSuccess: (checkoutUrl) =>
+                        openExternal(checkoutUrl, { webTarget: "same-tab" }),
+                    },
+                  );
                 }}
               />
             ) : null}
@@ -184,10 +234,18 @@ export function AuroraBilling() {
                       disabled={topupCheckout.isPending || !returnURLs}
                       onClick={() => {
                         if (!returnURLs) return;
-                        topupCheckout.mutate({
-                          topupId: topup.id,
-                          ...returnURLs,
-                        });
+                        topupCheckout.mutate(
+                          {
+                            topupId: topup.id,
+                            ...returnURLs,
+                          },
+                          {
+                            onSuccess: (checkoutUrl) =>
+                              openExternal(checkoutUrl, {
+                                webTarget: "same-tab",
+                              }),
+                          },
+                        );
                       }}
                     >
                       <CreditCard aria-hidden="true" className="size-3.5" />
@@ -287,11 +345,11 @@ function PlanSection({
     ? formatDate(subscription.currentPeriodEnd, locale)
     : null;
 
-  // A live subscription is not for sale again: the server answers 409. A
-  // canceled or past-due one may be bought again, which is what keeps the
-  // buttons on screen for a lapsed subscriber.
+  // A user without a subscription (empty status), or one whose prior plan is
+  // canceled, may buy a plan. Unknown future states fail closed: an older
+  // client must not offer a second recurring subscription it cannot interpret.
   const canSubscribe =
-    subscription.status !== "active" && subscription.status !== "past_due";
+    subscription.status === "" || subscription.status === "canceled";
 
   return (
     <section className="flex flex-col gap-3 rounded-lg border border-surface-border p-4">
@@ -320,7 +378,9 @@ function PlanSection({
         ) : null}
       </div>
 
-      {renewsOn ? (
+      {renewsOn &&
+      subscription.status === "active" &&
+      !subscription.cancelAtPeriodEnd ? (
         <span className="text-caption text-muted-foreground">
           {t(($) => $.billing.subscription.renews_on, { date: renewsOn })}
         </span>
