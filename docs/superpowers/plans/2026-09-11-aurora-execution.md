@@ -3,6 +3,8 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
 > 修订：2026-09-13（评审回写，详见文末「修订记录」）
+>
+> **2026-09-25 status:** Task 6's former external-infrastructure boundary is superseded by the repository-owned master plan at `docs/superpowers/plans/2026-09-22-aurora-sandbox-tool-surface.md` and its four `2026-09-25-aurora-*` child plans. Planning is complete in pr://eanfs/multica/84; implementation has not started.
 
 **Goal:** 让一次 Aurora generation 真正跑起来：入队 → 托管 agent 执行 → 产物回写 asset、结算积分。含 self-host runtime fleet、沙箱节点镜像（infra）与创建端点频率闸门。
 
@@ -200,6 +202,8 @@ git commit -m "feat(aurora): self-host runtime fleet controller"
 
 ### Task 6（infra）: 沙箱节点镜像 + 工具面收窄（待建能力）
 
+> **Superseded implementation detail (2026-09-25):** Do not execute this section as written. The complete repository-owned scope, dependency order, interfaces, security controls, provider routing, and acceptance gates are defined in [`2026-09-22-aurora-sandbox-tool-surface.md`](2026-09-22-aurora-sandbox-tool-surface.md) and its four child plans. Issue #29 remains open; Plan A is the next executable frontier.
+
 **Files:**
 - Create: `deploy/aurora-sandbox/`（Dockerfile、entrypoint、镜像构建脚本）
 - Modify: `server/pkg/agent/`（**additive** per-agent 启动配置，见下）
@@ -274,7 +278,7 @@ Plan 3 完成。后续顺序：Plan 3.5（进度与作品库 API）→ Plan 4（
 
 ## 完成记录（2026-09-23 回填）
 
-**状态：除 Task 6 外全部完成；Task 6 拆分为「本仓库内」与「外部基础设施」两部分。**
+**Status: every task except Task 6 is complete. Task 6 now has a complete repository-owned implementation plan; code implementation has not started.**
 
 | Task | Ticket | PR | 结果 |
 | --- | --- | --- | --- |
@@ -283,11 +287,11 @@ Plan 3 完成。后续顺序：Plan 3.5（进度与作品库 API）→ Plan 4（
 | Task 3 — managed runtime 注册 | #26 | #42 | 已合并 |
 | Task 4 — 完成回写 → asset + 结算/退款 | #27 | #45 | 已合并 |
 | Task 5（infra）— self-host fleet controller | #28 | #43 | 已合并 |
-| Task 6（infra）— 沙箱镜像 + 工具面收窄 | #29 | #47（仅代码侧） | **部分完成** |
+| Task 6 (infra) — managed sandbox runtime + 13-skill tool surface | #29 | #47 (code-side narrowing, merged); #84 (complete plan, review) | **Planning complete; implementation pending** |
 | Task 7 — 创建端点频率闸门 | #30 | #44 | 已合并 |
 
-**Task 6 的边界。** 仓库内部分已合并：`pkg/agent` 的 additive per-agent 启动收窄（`PermissionMode` / `DisallowedTools`，默认不改变现有用户 agent 行为）、Aurora 系统 agent 的 `MaxTurns = 30`、以及在未 onboard 的 provider 上**拒绝执行 Aurora 任务（fail-closed）**，而不是静默回退到 `bypassPermissions`。仍未做且**不在本仓库实现**：沙箱镜像构建、容器/VM 隔离、出网白名单、资源上限、作为 daemon 级第一道闸的 `MULTICA_AGENT_TIMEOUT`，以及 HyperFrames 文生视频冒烟。该拆分记录在 [`2026-09-22-aurora-sandbox-tool-surface.md`](2026-09-22-aurora-sandbox-tool-surface.md)。
+**The new Task 6 boundary.** Merged PR #47 covers only additive per-agent launch narrowing in `pkg/agent` (`PermissionMode` / `DisallowedTools`, with no default behavior change for existing user agents), `MaxTurns = 30` for Aurora system agents, and fail-closed rejection for providers that have not been reviewed. The remaining work is no longer classified as infrastructure outside this repository: scoped enrollment, daemon credentials and claim-set installation, `aurora_managed` → `claude` execution mapping, one node per workspace, Docker isolation and egress proxying, explicit provider routes for all 13 available skills, structured artifact staging/reporting, image version locks/SBOM/signing, and Linux/macOS/real-provider acceptance all belong in this repository. PR #84 contains the master plan and four child plans; implementation order is Plan A → B → C → D.
 
-**验收。** fake-CLI 参数断言那条已满足；HyperFrames 冒烟那条**未满足**——它需要沙箱镜像。issue #29 保持 open。
+**Current acceptance.** The fake-CLI launch-argument assertion is complete, and the detailed planning pass is complete. The managed-daemon lifecycle, 13-skill fake matrix, Linux Docker security boundary, signed images, and gated real-provider smoke are not implemented. Issue #29 remains open with `S2-InProgress`.
 
 **完成后的新发现**（在 Plan 4 期间发现，已单开 issue，不在此修复）：OAuth login-CSRF #53、core 的 workspace-loss 重定向 #56、`apps/web` 与 `apps/aurora` 的重复模块 #54、`parseWithFallback` 掩盖降级响应 #55、e2e 基线 #57 / #58。
