@@ -317,6 +317,9 @@ deleted_aurora_generations AS (
 deleted_aurora_moderation_logs AS (
     DELETE FROM aurora_moderation_log WHERE workspace_id = $1
 ),
+deleted_aurora_sandbox_nodes AS (
+    DELETE FROM aurora_sandbox_node WHERE workspace_id = $1
+),
 deleted_channel_outbound_cards AS (
     DELETE FROM channel_outbound_card_message
     WHERE chat_session_id IN (SELECT id FROM ws_sessions)
@@ -510,6 +513,10 @@ WHERE channel_media_pending_object.workspace_id = $1
 // workspace_id. Its generation_id is not a dependency: the row is keyed by
 // workspace, and a NULL generation_id (a prompt rejected before its generation
 // existed) is deleted by the same statement.
+// Sandbox node rows are workspace-keyed leaf data with no FK, so the workspace
+// teardown removes them by workspace_id. The bound runtime and daemon tokens are
+// swept by the runtime/administration steps; the node itself has no cascading
+// relationship to them.
 // Same no-FK chore as chat_draft_restore above. Matched on workspace_id rather
 // than the session set because that column exists precisely so this statement
 // does not have to join through chat_session, which it deletes in this same CTE.

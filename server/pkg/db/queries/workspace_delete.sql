@@ -337,6 +337,13 @@ deleted_aurora_generations AS (
 deleted_aurora_moderation_logs AS (
     DELETE FROM aurora_moderation_log WHERE workspace_id = $1
 ),
+-- Sandbox node rows are workspace-keyed leaf data with no FK, so the workspace
+-- teardown removes them by workspace_id. The bound runtime and daemon tokens are
+-- swept by the runtime/administration steps; the node itself has no cascading
+-- relationship to them.
+deleted_aurora_sandbox_nodes AS (
+    DELETE FROM aurora_sandbox_node WHERE workspace_id = $1
+),
 deleted_channel_outbound_cards AS (
     DELETE FROM channel_outbound_card_message
     WHERE chat_session_id IN (SELECT id FROM ws_sessions)

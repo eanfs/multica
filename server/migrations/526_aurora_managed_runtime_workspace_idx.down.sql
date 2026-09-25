@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS agent_runtime_aurora_managed_workspace_uidx;
