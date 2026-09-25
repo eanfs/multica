@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/analytics"
+	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/database"
@@ -666,6 +667,11 @@ func main() {
 		HeartbeatScheduler:  heartbeatScheduler,
 		LLMMaxRetries:       llmMaxRetries,
 	})
+	// Aurora managed sandbox enrollment: exchange a single-use mse_ secret for
+	// the workspace- and daemon-scoped mdt_ credential a managed daemon runs on.
+	// Built from the primary pool; tests inject their own service.
+	h.SandboxEnrollment = aurora.NewSandboxEnrollmentService(pool, queries, nil)
+
 	var replicaQueries *db.Queries
 	if replicaPool != nil {
 		replicaQueries = db.New(replicaPool)

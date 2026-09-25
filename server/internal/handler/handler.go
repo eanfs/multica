@@ -155,11 +155,6 @@ type Config struct {
 	// Surfaced through /api/config so self-hosted operators can confirm which
 	// server build is deployed. Empty in dev builds.
 	ServerVersion string
-	// AuroraSandboxToken is the shared secret a sandbox daemon presents to
-	// POST /api/daemon/managed/register (Plan 3 Task 3). The endpoint compares
-	// it in constant time; a wrong or missing token is a 401. Empty disables
-	// the endpoint. Populated from AURORA_SANDBOX_TOKEN.
-	AuroraSandboxToken string
 
 	// StripeSecretKey and StripeWebhookSecret configure Aurora billing (Plan 5
 	// Task 2). Both are server-side only and must never reach AppConfig: the
@@ -258,6 +253,12 @@ type Handler struct {
 	// Tiers is Aurora's product catalog: what each plan grants and what it
 	// limits. Built once from config, so the numbers have a single source.
 	Tiers *aurora.TierCatalog
+	// SandboxEnrollment exchanges a single-use mse_ enrollment secret for the
+	// workspace- and daemon-scoped mdt_ credential a managed sandbox daemon is
+	// served with (Plan A Task 3). Nil when no fleet integration is configured;
+	// the enroll endpoint then fails closed rather than falling back to a shared
+	// token.
+	SandboxEnrollment *aurora.SandboxEnrollmentService
 	// Entitlements supplies workspace-scoped commercial gates. A nil provider
 	// preserves self-hosted behavior without extra reads.
 	Entitlements entitlement.Provider
