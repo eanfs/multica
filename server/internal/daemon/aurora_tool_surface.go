@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -17,6 +18,12 @@ var errAuroraSurfaceNotOnboarded = errors.New("aurora provider has no reviewed s
 // that prefix to apply the sandbox execution policy below only to Aurora tasks —
 // ordinary user agents keep their default autonomous surface.
 const auroraSystemKeyPrefix = "aurora:"
+
+// auroraExecutionProvider is the only provider with a reviewed Aurora sandbox
+// surface, and the only execution identity a managed enrollment may install.
+// The persisted runtime keeps its carrier identity (aurora_managed); execution
+// comes from the enrollment envelope, never from the database row.
+const auroraExecutionProvider = "claude"
 
 // auroraMaxTurns caps how many agent turns a single Aurora generation may take.
 // It is the MVP turn bound from Plan 3 Task 6; the daemon previously never set
@@ -38,20 +45,21 @@ type auroraSurface struct {
 }
 
 // auroraToolSurface returns the narrowed surface for an Aurora system agent on
-// provider, and whether that provider has a reviewed surface. The narrowing has
-// two parts: turn off bypass (so the deny list binds) and deny the host-touching
-// tools the provider exposes.
+// provider. The narrowing has two parts: turn off bypass (so the deny list
+// binds) and deny the host-touching tools the provider exposes.
 //
 // It fails closed: only claude has a reviewed surface for the MVP, so any other
-// provider reports ok=false and the caller must refuse the task rather than fall
-// back to the default autonomous (bypassPermissions) surface. The per-skill
-// allow/deny composition and codex/other-provider equivalents are refined as
-// each is onboarded onto the sandbox image (Plan 3 follow-up).
-func auroraToolSurface(provider string) (auroraSurface, bool) {
+// provider returns errAuroraSurfaceNotOnboarded and the caller must refuse the
+// task rather than fall back to the default autonomous (bypassPermissions)
+// surface. aurora_managed is a persisted carrier identity, not an executable
+// provider, so passing it through is an error too. The per-skill allow/deny
+// composition and codex/other-provider equivalents are refined as each is
+// onboarded onto the sandbox image (Plan 3 follow-up).
+func auroraToolSurface(provider string) (auroraSurface, error) {
 	switch provider {
-	case "claude":
-		return auroraSurface{permissionMode: "default", disallowed: []string{"Bash", "WebFetch", "WebSearch"}}, true
+	case auroraExecutionProvider:
+		return auroraSurface{permissionMode: "default", disallowed: []string{"Bash", "WebFetch", "WebSearch"}}, nil
 	default:
-		return auroraSurface{}, false
+		return auroraSurface{}, fmt.Errorf("%w: %s", errAuroraSurfaceNotOnboarded, provider)
 	}
 }

@@ -12,8 +12,8 @@ func TestIsAuroraTask(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name      string
-		agent     *AgentData
+		name       string
+		agent      *AgentData
 		wantAurora bool
 	}{
 		{name: "aurora system agent", agent: &AgentData{SystemKey: "aurora:image"}, wantAurora: true},
@@ -37,9 +37,9 @@ func TestIsAuroraTask(t *testing.T) {
 func TestAuroraToolSurface(t *testing.T) {
 	t.Parallel()
 
-	surface, ok := auroraToolSurface("claude")
-	if !ok {
-		t.Fatal("claude must have a reviewed surface")
+	surface, err := auroraToolSurface("claude")
+	if err != nil {
+		t.Fatalf("claude must have a reviewed surface: %v", err)
 	}
 	if surface.permissionMode != "default" {
 		t.Fatalf("claude permission mode = %q, want %q", surface.permissionMode, "default")
@@ -52,8 +52,89 @@ func TestAuroraToolSurface(t *testing.T) {
 
 	// Un-onboarded providers fail closed so runTask refuses the task instead of
 	// falling back to the default autonomous (bypass) surface.
-	if _, ok := auroraToolSurface("codex"); ok {
-		t.Fatal("codex must not yet have a reviewed surface")
+	if _, err := auroraToolSurface("codex"); !errors.Is(err, errAuroraSurfaceNotOnboarded) {
+		t.Fatalf("codex must fail closed, got %v", err)
+	}
+}
+
+// installForTest installs the persisted carrier runtime through the same
+// enrollment path the managed bootstrap uses and returns the in-memory runtime
+// the daemon would actually launch. Sharing the install is the point: execution
+// identity must come from enrollment, not from a hand-built runtimeIndex row.
+func installForTest(t *testing.T, persisted Runtime, executionProvider string) Runtime {
+	t.Helper()
+
+	runtime := persisted
+	if runtime.ID == "" {
+		runtime.ID = testManagedRuntimeID
+	}
+	if runtime.WorkspaceID == "" {
+		runtime.WorkspaceID = testManagedWorkspaceID
+	}
+	if runtime.DaemonID == "" {
+		runtime.DaemonID = testManagedDaemonID
+	}
+
+	d := newManagedTestDaemon(t)
+	resp := ManagedEnrollmentResponse{
+		WorkspaceID:       runtime.WorkspaceID,
+		DaemonID:          runtime.DaemonID,
+		Runtime:           runtime,
+		ExecutionProvider: executionProvider,
+		MaxConcurrency:    1,
+		DaemonToken:       "mdt_managed",
+	}
+	if err := d.installManagedEnrollment(resp); err != nil {
+		t.Fatalf("installForTest: installManagedEnrollment() = %v", err)
+	}
+	installed := d.findRuntime(runtime.ID)
+	if installed == nil {
+		t.Fatalf("installForTest: runtime %s was not installed", runtime.ID)
+	}
+	return *installed
+}
+
+// TestManagedAuroraTaskUsesClaudeToolSurface pins the carrier/execution split
+// where it matters for launch: an aurora_managed runtime installed through the
+// enrollment path must run as claude, and that provider's reviewed surface must
+// keep Bash denied. The persisted runtime provider is never an execution value.
+func TestManagedAuroraTaskUsesClaudeToolSurface(t *testing.T) {
+	t.Parallel()
+
+	persisted := Runtime{ID: testManagedRuntimeID, Provider: "aurora_managed", RuntimeMode: "cloud"}
+	installed := installForTest(t, persisted, "claude")
+
+	if installed.Provider != "claude" {
+		t.Fatalf("installed runtime provider = %q, want claude", installed.Provider)
+	}
+
+	surface, err := auroraToolSurface(installed.Provider)
+	if err != nil {
+		t.Fatalf("auroraToolSurface(%q) error = %v, want a reviewed surface", installed.Provider, err)
+	}
+	if surface.permissionMode == "" || surface.permissionMode == "bypassPermissions" {
+		t.Fatalf("surface permission mode = %q, want a non-bypass mode", surface.permissionMode)
+	}
+	// The reviewed surface is a deny list under the non-bypass mode above, so
+	// "allowed tools do not contain Bash" means Bash is explicitly denied.
+	if !slices.Contains(surface.disallowed, "Bash") {
+		t.Fatalf("surface disallowed tools = %v, want Bash denied", surface.disallowed)
+	}
+	for _, tool := range []string{"WebFetch", "WebSearch"} {
+		if !slices.Contains(surface.disallowed, tool) {
+			t.Errorf("surface disallowed tools = %v, want %s denied", surface.disallowed, tool)
+		}
+	}
+}
+
+// TestAuroraManagedIsNotAnExecutableProvider pins the fail-closed boundary: the
+// persisted carrier provider must never be accepted as an execution provider,
+// even if a future install path forgets to remap it to claude.
+func TestAuroraManagedIsNotAnExecutableProvider(t *testing.T) {
+	t.Parallel()
+
+	if _, err := auroraToolSurface("aurora_managed"); !errors.Is(err, errAuroraSurfaceNotOnboarded) {
+		t.Fatalf("auroraToolSurface(aurora_managed) error = %v, want errAuroraSurfaceNotOnboarded", err)
 	}
 }
 
