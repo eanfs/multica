@@ -266,6 +266,18 @@ func (q *Queries) ListAuroraSandboxNodesForReap(ctx context.Context, arg ListAur
 	return items, nil
 }
 
+const lockAuroraSandboxEnrollmentWorkspace = `-- name: LockAuroraSandboxEnrollmentWorkspace :exec
+SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text, 0))
+`
+
+// Transaction-scoped advisory lock on a workspace, taken before issuance reads
+// or writes the node row. It is what makes first-issue safe when no row exists
+// yet to FOR UPDATE, so two concurrent issues cannot both mint a node.
+func (q *Queries) LockAuroraSandboxEnrollmentWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, lockAuroraSandboxEnrollmentWorkspace, workspaceID)
+	return err
+}
+
 const lockAuroraSandboxNodeByWorkspace = `-- name: LockAuroraSandboxNodeByWorkspace :one
 SELECT id, workspace_id, runtime_id, daemon_id, backend_node_id, image_digest, state, enrollment_token_hash, enrollment_expires_at, enrollment_consumed_at, last_active_at, drain_started_at, started_at, stopped_at, failure_reason, created_at, updated_at FROM aurora_sandbox_node
 WHERE workspace_id = $1
@@ -395,8 +407,12 @@ UPDATE aurora_sandbox_node
 SET enrollment_token_hash = $2,
     enrollment_expires_at = $3,
     enrollment_consumed_at = NULL,
-    failure_reason = NULL,
     state = 'starting',
+    started_at = NULL,
+    stopped_at = NULL,
+    drain_started_at = NULL,
+    backend_node_id = NULL,
+    failure_reason = NULL,
     updated_at = now()
 WHERE workspace_id = $1
 RETURNING id, workspace_id, runtime_id, daemon_id, backend_node_id, image_digest, state, enrollment_token_hash, enrollment_expires_at, enrollment_consumed_at, last_active_at, drain_started_at, started_at, stopped_at, failure_reason, created_at, updated_at

@@ -75,6 +75,18 @@ func GenerateDaemonToken() (string, error) {
 	return "mdt_" + hex.EncodeToString(b), nil
 }
 
+// GenerateManagedEnrollmentToken creates a single-use managed sandbox
+// enrollment secret: "mse_" + 40 random hex chars. The server stores only its
+// SHA-256 hash and spends it exactly once, so the raw value is returned to the
+// caller alone.
+func GenerateManagedEnrollmentToken() (string, error) {
+	b := make([]byte, 20) // 20 bytes = 40 hex chars
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate managed enrollment token: %w", err)
+	}
+	return "mse_" + hex.EncodeToString(b), nil
+}
+
 // GenerateAgentTaskToken creates a new task-scoped agent auth token:
 // "mat_" + 40 random hex chars. The token is single-purpose — bound to a
 // specific (agent_id, task_id) pair on the server side — and is what the

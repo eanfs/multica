@@ -32,6 +32,12 @@ SELECT * FROM aurora_sandbox_node
 WHERE workspace_id = $1
 FOR UPDATE;
 
+-- name: LockAuroraSandboxEnrollmentWorkspace :exec
+-- Transaction-scoped advisory lock on a workspace, taken before issuance reads
+-- or writes the node row. It is what makes first-issue safe when no row exists
+-- yet to FOR UPDATE, so two concurrent issues cannot both mint a node.
+SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg('workspace_id')::uuid::text, 0));
+
 -- name: ConsumeAuroraSandboxEnrollment :one
 -- Atomically spends a single-use enrollment secret. The predicate is the
 -- exactly-once guard: only an unconsumed, unexpired secret on a starting node
@@ -55,8 +61,12 @@ UPDATE aurora_sandbox_node
 SET enrollment_token_hash = $2,
     enrollment_expires_at = $3,
     enrollment_consumed_at = NULL,
-    failure_reason = NULL,
     state = 'starting',
+    started_at = NULL,
+    stopped_at = NULL,
+    drain_started_at = NULL,
+    backend_node_id = NULL,
+    failure_reason = NULL,
     updated_at = now()
 WHERE workspace_id = $1
 RETURNING *;
