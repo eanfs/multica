@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -920,10 +921,10 @@ func (h *Handler) CreateAuroraCheckout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	// The client owns the return URLs (it knows its own origin and the
-	// workspace slug route /<slug>/billing); the API host must not be used.
-	if !validCheckoutURL(req.SuccessURL) || !validCheckoutURL(req.CancelURL) {
-		writeError(w, http.StatusBadRequest, "successUrl and cancelUrl must be http(s) URLs")
+	// The client supplies the workspace route because it knows the slug, while the
+	// server pins that route to a configured app origin before giving it to Stripe.
+	if !h.validCheckoutURL(req.SuccessURL) || !h.validCheckoutURL(req.CancelURL) {
+		writeError(w, http.StatusBadRequest, "successUrl and cancelUrl must use a trusted app origin")
 		return
 	}
 	tier, ok := h.Tiers.Lookup(req.Tier)
@@ -1026,11 +1027,51 @@ func (h *Handler) beginAuroraSubscriptionCheckout(
 	return checkoutID, nil
 }
 
-// validCheckoutURL accepts http(s) absolute URLs only — the only shapes the
-// frontend will pass; anything else (javascript:, relative, empty) is rejected.
-func validCheckoutURL(u string) bool {
-	parsed, err := url.Parse(u)
-	return err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http") && parsed.Host != ""
+// checkoutOrigin normalizes an absolute HTTP(S) URL to a scheme, hostname, and
+// effective port. Userinfo is rejected even when the hostname is trusted: it is
+// misleading in a Stripe redirect and browsers render it inconsistently.
+func checkoutOrigin(raw string) (string, bool) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Opaque != "" || parsed.User != nil {
+		return "", false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "https" && scheme != "http" {
+		return "", false
+	}
+	hostname := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	if hostname == "" {
+		return "", false
+	}
+	port := parsed.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return scheme + "://" + net.JoinHostPort(hostname, port), true
+}
+
+// validCheckoutURL accepts paths only on browser origins explicitly trusted by
+// this deployment. Stripe follows these values after payment, so accepting an
+// arbitrary absolute URL would turn Checkout into an open redirect.
+func (h *Handler) validCheckoutURL(raw string) bool {
+	origin, ok := checkoutOrigin(raw)
+	if !ok {
+		return false
+	}
+	if appOrigin, valid := checkoutOrigin(h.cfg.AppURL); valid && origin == appOrigin {
+		return true
+	}
+	for _, candidate := range h.cfg.CheckoutReturnOrigins {
+		allowed, valid := checkoutOrigin(candidate)
+		if valid && origin == allowed {
+			return true
+		}
+	}
+	return false
 }
 
 // CreateAuroraTopupCheckout starts a one-time credit purchase. Same
@@ -1053,8 +1094,8 @@ func (h *Handler) CreateAuroraTopupCheckout(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if !validCheckoutURL(req.SuccessURL) || !validCheckoutURL(req.CancelURL) {
-		writeError(w, http.StatusBadRequest, "successUrl and cancelUrl must be http(s) URLs")
+	if !h.validCheckoutURL(req.SuccessURL) || !h.validCheckoutURL(req.CancelURL) {
+		writeError(w, http.StatusBadRequest, "successUrl and cancelUrl must use a trusted app origin")
 		return
 	}
 	topup, ok := h.Tiers.LookupTopup(req.TopupID)
