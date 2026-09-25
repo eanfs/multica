@@ -191,7 +191,14 @@ ON CONFLICT (user_id) DO UPDATE SET
     checkout_billing_cycle = NULL,
     stripe_event_created_at = EXCLUDED.stripe_event_created_at,
     updated_at = now()
-WHERE aurora_subscription.stripe_event_created_at <= EXCLUDED.stripe_event_created_at
+WHERE aurora_subscription.stripe_event_created_at < EXCLUDED.stripe_event_created_at
+   OR (
+       aurora_subscription.stripe_event_created_at = EXCLUDED.stripe_event_created_at
+       AND NOT (
+           aurora_subscription.status = 'canceled'
+           AND EXCLUDED.status <> 'canceled'
+       )
+   )
 RETURNING id, user_id, tier, status, stripe_customer_id, stripe_subscription_id,
           current_period_end, cancel_at_period_end, created_at, updated_at,
           checkout_idempotency_key, checkout_billing_cycle, stripe_event_created_at
@@ -208,8 +215,10 @@ type UpsertAuroraSubscriptionParams struct {
 	StripeEventCreatedAt int64              `json:"stripe_event_created_at"`
 }
 
-// Apply only the newest Stripe event seen for this user. Checkout and lifecycle
-// events clear the pending intent once Stripe owns the subscription state.
+// Apply only a non-stale Stripe event. Event timestamps have one-second
+// precision, so a canceled subscription also wins ties: that Stripe
+// subscription cannot become active again, and a late same-second update must
+// not resurrect it.
 func (q *Queries) UpsertAuroraSubscription(ctx context.Context, arg UpsertAuroraSubscriptionParams) (AuroraSubscription, error) {
 	row := q.db.QueryRow(ctx, upsertAuroraSubscription,
 		arg.UserID,

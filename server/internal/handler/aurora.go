@@ -37,7 +37,10 @@ const maxAuroraGenerationBodyBytes = 256 * 1024
 // exactly.
 const microCreditsPerCredit = 1_000_000
 
-const auroraCheckoutIntentTTL = 24 * time.Hour
+// Stripe Checkout Sessions expire after at most 24 hours. Keep the local intent
+// for an extra hour so request latency or modest clock skew cannot let a new
+// checkout replace one Stripe may still complete.
+const auroraCheckoutIntentTTL = 25 * time.Hour
 
 var (
 	errAuroraMonthlyGenerationLimit = errors.New("monthly generation limit reached")
@@ -1299,19 +1302,27 @@ func (h *Handler) handleSubscriptionUpsert(ctx context.Context, ev aurora.Event)
 	if err != nil || !ok {
 		return err
 	}
-	periodEnd := subscriptionItemPeriodEnd(&sub)
-	if !periodEnd.Valid {
-		periodEnd = existing.CurrentPeriodEnd
+	state, err := h.Payments.GetSubscriptionState(ctx, sub.ID)
+	if err != nil {
+		return err
 	}
-	status := stripeSubscriptionStatus(sub.Status)
+	periodEnd := existing.CurrentPeriodEnd
+	if !state.CurrentPeriodEnd.IsZero() {
+		periodEnd = pgtype.Timestamptz{Time: state.CurrentPeriodEnd, Valid: true}
+	}
+	customerID := stripeCustomerIDFromSubscription(&sub)
+	if state.CustomerID != "" {
+		customerID = &state.CustomerID
+	}
+	status := stripeSubscriptionStatus(stripe.SubscriptionStatus(state.Status))
 	applied, err := h.upsertAuroraSubscriptionEvent(ctx, db.UpsertAuroraSubscriptionParams{
 		UserID:               existing.UserID,
 		Tier:                 existing.Tier,
 		Status:               status,
-		StripeCustomerID:     ptrToText(stripeCustomerIDFromSubscription(&sub)),
+		StripeCustomerID:     ptrToText(customerID),
 		StripeSubscriptionID: ptrToText(&sub.ID),
 		CurrentPeriodEnd:     periodEnd,
-		CancelAtPeriodEnd:    sub.CancelAtPeriodEnd,
+		CancelAtPeriodEnd:    state.CancelAtPeriodEnd,
 		StripeEventCreatedAt: ev.Created,
 	})
 	if err != nil || !applied || status != "active" {
@@ -1380,25 +1391,6 @@ func stripeSubscriptionStatus(status stripe.SubscriptionStatus) string {
 	default:
 		return "past_due"
 	}
-}
-
-// subscriptionItemPeriodEnd reads the latest billing period end off a
-// subscription object. Stripe moved `current_period_end` from the subscription
-// onto its items, so the subscription's period is the latest item period.
-// Invalid when no item carries one.
-func subscriptionItemPeriodEnd(sub *stripe.Subscription) pgtype.Timestamptz {
-	var end int64
-	if sub != nil && sub.Items != nil {
-		for _, item := range sub.Items.Data {
-			if item.CurrentPeriodEnd > end {
-				end = item.CurrentPeriodEnd
-			}
-		}
-	}
-	if end == 0 {
-		return pgtype.Timestamptz{}
-	}
-	return pgtype.Timestamptz{Time: time.Unix(end, 0).UTC(), Valid: true}
 }
 
 // stripeCustomerID reads the customer id off a checkout session, which carries

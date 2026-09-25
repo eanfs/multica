@@ -1474,6 +1474,26 @@ func TestCreateSubscriptionCheckoutReusesPendingIntent(t *testing.T) {
 	}
 }
 
+func TestCreateSubscriptionCheckoutDoesNotReplacePotentiallyLiveStripeSession(t *testing.T) {
+	auroraSubscriptionTestReset(t)
+	fp := &fakePayments{checkoutURL: "https://checkout.stripe.com/c/test"}
+	installAuroraPayments(t, fp)
+	dbfx.Insert(t, "aurora_subscription", testutil.Cols{
+		"user_id": testUserID, "tier": "creator", "status": "pending",
+		"checkout_idempotency_key": "aurora-sub-existing",
+		"checkout_billing_cycle":   "monthly",
+		"updated_at":               time.Now().Add(-24*time.Hour - 30*time.Minute),
+	})
+
+	req := newRequest(http.MethodPost, "/api/aurora/billing/checkout", checkoutBody(map[string]string{
+		"tier": "pro", "billingCycle": "monthly",
+	}))
+	testutil.Call(t, testHandler.CreateAuroraCheckout, req).Want(http.StatusConflict)
+	if len(fp.subscriptionCheckoutKeys) != 0 {
+		t.Fatalf("Stripe checkout calls = %d, want none while the previous session may still complete", len(fp.subscriptionCheckoutKeys))
+	}
+}
+
 func TestCreateSubscriptionCheckoutRequiresReturnURLs(t *testing.T) {
 	installAuroraPayments(t, &fakePayments{checkoutURL: "https://checkout.stripe.com/c/test"})
 	for name, body := range map[string]map[string]string{
@@ -1884,11 +1904,14 @@ func TestStripeWebhookSubscriptionUpdated(t *testing.T) {
 	creditTestReset(t)
 	auroraSubscriptionTestReset(t)
 	installAuroraPayments(t, &fakePayments{
+		subscriptionStatus: "past_due",
+		cancelAtPeriodEnd:  true,
+		periodEnd:          time.Unix(4102444800, 0).UTC(),
 		events: []aurora.Event{{
 			ID:   "evt_sub_updated",
 			Type: "customer.subscription.updated",
-			Raw: []byte(`{"id":"sub_1","customer":{"id":"cus_1"},"status":"past_due",` +
-				`"cancel_at_period_end":true,"items":{"data":[{"current_period_end":4102444800}]}}`),
+			Raw: []byte(`{"id":"sub_1","customer":{"id":"cus_stale"},"status":"active",` +
+				`"cancel_at_period_end":false,"items":{"data":[{"current_period_end":1}]}}`),
 		}},
 	})
 	dbfx.Insert(t, "aurora_subscription", testutil.Cols{
@@ -1980,6 +2003,45 @@ func TestStripeWebhookDoesNotReactivateAfterOutOfOrderDeletion(t *testing.T) {
 	}
 	if bal, err := testHandler.Credit.Balance(context.Background(), parseUUID(testUserID)); err != nil || bal != 0 {
 		t.Fatalf("balance after stale completion = %d, err=%v, want 0", bal, err)
+	}
+}
+
+func TestStripeWebhookDoesNotReactivateFromSameSecondUpdateAfterDeletion(t *testing.T) {
+	creditTestReset(t)
+	auroraSubscriptionTestReset(t)
+	installAuroraPayments(t, &fakePayments{
+		subscriptionStatus: "active",
+		periodEnd:          time.Now().Add(30 * 24 * time.Hour).UTC(),
+		events: []aurora.Event{
+			{
+				ID:      "evt_delete_same_second",
+				Type:    "customer.subscription.deleted",
+				Created: 20,
+				Raw:     []byte(`{"id":"sub_same_second","customer":{"id":"cus_1"},"status":"canceled"}`),
+			},
+			{
+				ID:      "evt_update_same_second",
+				Type:    "customer.subscription.updated",
+				Created: 20,
+				Raw: []byte(`{"id":"sub_same_second","customer":{"id":"cus_1"},"status":"active",` +
+					`"items":{"data":[{"current_period_end":4102444800}]}}`),
+			},
+		},
+	})
+	dbfx.Insert(t, "aurora_subscription", testutil.Cols{
+		"user_id": testUserID, "tier": "creator", "status": "active",
+		"stripe_subscription_id": "sub_same_second",
+	})
+
+	postStripeWebhook(t, `{"type":"customer.subscription.deleted"}`, http.StatusOK)
+	postStripeWebhook(t, `{"type":"customer.subscription.updated"}`, http.StatusOK)
+
+	_, status, _ := auroraSubscriptionRow(t)
+	if status != "canceled" {
+		t.Fatalf("status after same-second deletion and stale update = %q, want canceled", status)
+	}
+	if bal, err := testHandler.Credit.Balance(context.Background(), parseUUID(testUserID)); err != nil || bal != 0 {
+		t.Fatalf("balance after same-second stale update = %d, err=%v, want 0", bal, err)
 	}
 }
 
