@@ -1,6 +1,9 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { isSupportedLocale, resolveLocaleFromSignals } from "./locale-routing";
+import {
+  isSupportedLocale,
+  resolveLocaleFromSignals,
+} from "./locale-routing";
 
 describe("locale routing", () => {
   it("accepts only app-supported locale identifiers", () => {

@@ -5,7 +5,7 @@ import {
   isSupportedLocale,
   MULTICA_LOCALE_HEADER,
   resolveLocaleFromSignals,
-} from "./locale-routing";
+} from "@multica/core/i18n/locale-routing";
 
 /**
  * The locale of the incoming request, resolved once per request and shared

@@ -11,9 +11,9 @@ import { WebScrollRestorationProvider } from "@/platform/scroll-restoration";
 import {
   setLoggedInCookie,
   clearLoggedInCookie,
-} from "@/features/auth/auth-cookie";
-import { detectWebOS } from "@/platform/client-os";
-import { useUserLocaleSyncEnabled } from "@/platform/user-locale-sync";
+} from "@multica/nextjs/auth-cookie";
+import { detectWebOS } from "@multica/nextjs/client-os";
+import { useUserLocaleSyncEnabled } from "@multica/nextjs/use-user-locale-sync-enabled";
 
 // Legacy token in localStorage → keep this session in token mode so users who
 // logged in before the cookie-auth migration stay authed. They migrate to

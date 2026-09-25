@@ -11,7 +11,7 @@ import { NoAccessPage } from "@multica/views/workspace/no-access-page";
 import { WelcomeAfterOnboarding } from "@multica/views/workspace/welcome-after-onboarding";
 import { MulticaIcon } from "@multica/ui/components/common/multica-icon";
 import { useWorkspaceSeen } from "@multica/views/workspace/use-workspace-seen";
-import { workspaceSlugFromPathname } from "@/lib/workspace-slug-from-pathname";
+import { workspaceSlugFromPathname } from "@multica/core/workspace/workspace-slug-from-pathname";
 
 export default function WorkspaceLayout({
   children,

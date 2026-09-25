@@ -7,7 +7,7 @@ vi.mock("next/navigation", () => ({
   usePathname: () => route.pathname,
 }));
 
-import { useUserLocaleSyncEnabled } from "./user-locale-sync";
+import { useUserLocaleSyncEnabled } from "./use-user-locale-sync-enabled";
 
 describe("useUserLocaleSyncEnabled", () => {
   beforeEach(() => {

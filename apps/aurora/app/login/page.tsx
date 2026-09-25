@@ -11,7 +11,7 @@ import {
 } from "@multica/core/workspace/queries";
 import type { Workspace } from "@multica/core/types";
 import { LoginPage, beginGoogleOAuthFlow } from "@multica/views/auth";
-import { setLoggedInCookie } from "@/features/auth/auth-cookie";
+import { setLoggedInCookie } from "@multica/nextjs/auth-cookie";
 import { resolveAuroraDestination } from "@/lib/routes";
 import { NoWorkspaceNotice } from "@/components/no-workspace-notice";
 

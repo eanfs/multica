@@ -246,7 +246,8 @@ describe("CallbackPage", () => {
     expect(mockPush).not.toHaveBeenCalled();
   });
 
-  // The response matrix lives in callback-error.test.ts; this covers page wiring.
+  // The response matrix lives in @multica/core/auth/callback-error.test.ts;
+  // this covers page wiring.
   it("does not turn a provider failure into a user diagnosis even if it carries a known code", async () => {
     mockLoginWithGoogle.mockRejectedValue(
       new ApiError("internal provider detail", 502, "Bad Gateway", {

@@ -3,7 +3,7 @@ import { LOCALE_COOKIE } from "@multica/core/i18n";
 import {
   MULTICA_LOCALE_HEADER,
   resolveLocaleFromSignals,
-} from "./lib/locale-routing";
+} from "@multica/core/i18n/locale-routing";
 import { runtimeRewriteDestination } from "./config/runtime-urls";
 import { isOfficialMarketingHost } from "./lib/public-host";
 

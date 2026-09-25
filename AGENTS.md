@@ -16,13 +16,15 @@ Multica is a task management platform where people and agents collaborate on iss
 | `packages/core/` | Headless logic, API client, Query hooks, shared Zustand stores. No UI libraries, `react-dom`, `localStorage`, or `process.env`; use `StorageAdapter` for persistence. |
 | `packages/ui/` | UI primitives and shared styles. No business logic or `@multica/core` imports. |
 | `packages/views/` | Shared web/desktop pages and business components. No store definitions, `next/*`, or `react-router-dom`; use `NavigationAdapter`, `useNavigation()`, and `<AppLink>`. |
-| `apps/web/` | Next.js routes/layouts and web-only UI. Framework APIs stay here; shared navigation adapters live in `apps/web/platform/`. |
+| `packages/nextjs/` | Shared Next.js/browser app-shell helpers for web and Aurora. May depend on `@multica/core` and `next/*`; no business UI or app-specific behavior. |
+| `apps/web/` | Next.js routes/layouts and web-only UI. App-specific framework integration stays here; shared Next.js app-shell helpers live in `packages/nextjs/`. |
+| `apps/aurora/` | Next.js Aurora client: owns routes and Aurora-only UI/wiring; shares platform helpers through `packages/nextjs/`. |
 | `apps/desktop/` | Electron and desktop-only UI/state. Application navigation goes through `apps/desktop/src/renderer/src/platform/`. |
 | `apps/mobile/` | Independent Expo/React Native client: owns UI, state, hooks, providers, i18n, build, and release. Shares core types and pure utilities, including platform-independent schemas. |
 | `apps/docs/` | Fumadocs documentation site |
 
-- Dependency direction is `views -> core + ui`; core and ui remain independent. Shared packages export raw TypeScript compiled by consuming apps.
-- Extract logic used by both web and desktop into the appropriate shared package. Keep framework/Electron APIs in the app layer; inject platform-specific UI through props/slots.
+- Dependency direction is `views -> core + ui` and `nextjs -> core`; core and ui remain independent. Shared packages export raw TypeScript compiled by consuming apps.
+- Extract logic used by more than one app into the appropriate shared package: platform-independent logic belongs in `packages/core/`, while shared Next.js/browser app-shell helpers belong in `packages/nextjs/`. Keep app-specific framework and Electron APIs in the app layer; inject platform-specific UI through props/slots.
 - Wire shared features into both web routes and the desktop router or overlay. Reuse existing guards/providers such as `DashboardGuard` in `packages/views/layout/`.
 - Each workspace declares its directly imported external dependencies. Use `catalog:` for shared dependencies; mobile pins Expo/React Native dependencies in its own manifest.
 

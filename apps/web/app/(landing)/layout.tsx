@@ -1,6 +1,6 @@
 import { Instrument_Serif } from "next/font/google";
 import { LocaleProvider } from "@/features/landing/i18n";
-import { getRequestLocale } from "@/lib/request-locale";
+import { getRequestLocale } from "@multica/nextjs/request-locale";
 
 // Instrument Serif is the landing display face and is Latin-only. The full
 // `--font-serif` stack (Instrument Serif + the per-locale CJK serif tail) is

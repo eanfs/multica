@@ -31,11 +31,13 @@ monorepo 的包边界是硬约束：
 | `packages/core` | 仅平台无关基础库 | `react-dom`、`localStorage`、`process.env`、`next/*`、UI 库 |
 | `packages/ui` | 无业务依赖 | `@multica/core`、业务逻辑 |
 | `packages/views` | `core/`、`ui/` | `next/*`、`react-router-dom`、stores |
+| `packages/nextjs` | `core/`、`next/*` | `react-router-dom`、electron、其他 app |
 | `apps/web/platform/` | `next/*` | 其他 app |
+| `apps/aurora/platform/` | `next/*` | 其他 app |
 | `apps/desktop/.../platform/` | `react-router-dom`、electron | 其他 app |
 | `apps/mobile/` | `@multica/core` 的类型和纯函数 | Web/Desktop 的 React 页面、store 和平台实现 |
 
-Web 和 Desktop 都有的逻辑，**必须**抽到共享包。"小段重复"也不算例外。Mobile 拥有独立的 UI、数据层和发布流程，只共享类型与纯函数。
+两个 app 都有的逻辑，**必须**抽到共享包。"小段重复"也不算例外。Web 和 Aurora 共享与框架无关的逻辑走 `packages/core`，依赖 `next/*` 的辅助函数走 `packages/nextjs`。Mobile 拥有独立的 UI、数据层和发布流程，只共享类型与纯函数。
 
 ### 文件与组件
 

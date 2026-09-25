@@ -33,11 +33,13 @@ The monorepo enforces strict package boundaries:
 | `packages/core` | nothing app-specific | `react-dom`, `localStorage`, `process.env`, `next/*`, UI libraries |
 | `packages/ui` | nothing | `@multica/core`, business logic |
 | `packages/views` | `core/`, `ui/` | `next/*`, `react-router-dom`, stores |
+| `packages/nextjs` | `core/`, `next/*` | `react-router-dom`, electron, other apps |
 | `apps/web/platform/` | `next/*` | other apps |
+| `apps/aurora/platform/` | `next/*` | other apps |
 | `apps/desktop/.../platform/` | `react-router-dom`, electron | other apps |
 | `apps/mobile/` | types and pure functions from `@multica/core` | Web/Desktop React pages, stores, and platform implementations |
 
-If logic appears in both apps, it MUST be extracted to a shared package. There are no exceptions for "small" duplication. Mobile owns a separate UI, data layer, and release process; it shares only types and pure functions.
+If logic appears in both apps, it MUST be extracted to a shared package. There are no exceptions for "small" duplication. Web and Aurora share framework-agnostic logic through `packages/core` and helpers built on `next/*` through `packages/nextjs`. Mobile owns a separate UI, data layer, and release process; it shares only types and pure functions.
 
 ### Files and components
 

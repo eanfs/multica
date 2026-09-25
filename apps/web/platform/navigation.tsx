@@ -6,7 +6,7 @@ import {
   NavigationProvider,
   type NavigationAdapter,
 } from "@multica/views/navigation";
-import { canGoBackInApp } from "./in-app-history";
+import { canGoBackInApp } from "@multica/nextjs/in-app-history";
 
 /**
  * Web half of the `multica:navigate` bridge — the event shared content
