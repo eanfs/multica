@@ -1,11 +1,11 @@
 import { AuroraBilling } from "@multica/views/aurora";
 
 /**
- * Balance and credit activity.
+ * Plan, balance and credit activity.
  *
- * `topUpHref` is withheld for the same reason as on the directory page: the
- * checkout route arrives with Plan 5. Without it the entry renders disabled
- * with the reason, which is the honest state until it exists.
+ * Checkout is started from the page itself: the view builds the Stripe return
+ * URLs from the navigation adapter's app origin and this route's workspace
+ * slug, so the app layer has no route to wire up.
  */
 export default function BillingPage() {
   return <AuroraBilling />;

@@ -70,14 +70,70 @@
     "title": "积分",
     "balance_title": "可用积分",
     "top_up": "充值",
-    "top_up_placeholder": "积分购买将随订阅一起提供。",
     "transactions_title": "积分明细",
     "transactions_empty_title": "暂无记录",
     "transactions_empty_description": "积分变动会显示在这里。",
     "load_failed_title": "无法加载积分",
     "amount_positive": "+{{amount}}",
     "amount_negative": "−{{amount}}",
-    "balance_after": "变动后余额：{{amount}}"
+    "balance_after": "变动后余额：{{amount}}",
+    "subscription": {
+      "title": "套餐",
+      "tiers": {
+        "free": {
+          "name": "免费版",
+          "price": "$0",
+          "summary": "每月 200 积分"
+        },
+        "creator": {
+          "name": "创作者版",
+          "price": "$9.90/月",
+          "summary": "每月 3,000 积分"
+        },
+        "pro": {
+          "name": "专业版",
+          "price": "$29/月",
+          "summary": "每月 12,000 积分"
+        },
+        "unknown": {
+          "name": "未知套餐",
+          "price": "",
+          "summary": ""
+        }
+      },
+      "status": {
+        "active": "生效中",
+        "past_due": "待付款",
+        "canceled": "已取消",
+        "unknown": "未知"
+      },
+      "renews_on": "{{date}} 续费",
+      "cancel_scheduled": "到期后结束。",
+      "usage_label": "本月生成次数",
+      "usage_value": "{{used}} / {{limit}}",
+      "subscribe": "订阅"
+    },
+    "topup": {
+      "title": "购买积分",
+      "empty": "当前没有可购买的积分包。",
+      "pack": "{{credits}} 积分 · {{price}}",
+      "packs": {
+        "t5": {
+          "price": "$5"
+        },
+        "t20": {
+          "price": "$20"
+        },
+        "other": {
+          "price": ""
+        }
+      }
+    },
+    "checkout": {
+      "failed": "无法发起购买，请重试。",
+      "already_subscribed": "你已经有订阅了。",
+      "unavailable": "该实例未开通支付。"
+    }
   },
   "workspace": {
     "unavailable_title": "工作区不可用",

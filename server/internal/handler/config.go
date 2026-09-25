@@ -10,6 +10,11 @@ import (
 	"github.com/multica-ai/multica/server/internal/featureflags"
 )
 
+// AppConfig is the public, anonymous-callable configuration shape. Every field
+// is listed explicitly, which is what keeps the server-only settings on
+// handler.Config out of it: the Stripe secret key and webhook secret (Plan 5)
+// can move money and prove an event's origin, so they are deliberately absent
+// from this struct rather than filtered out of it.
 type AppConfig struct {
 	CdnDomain string `json:"cdn_domain"`
 	// CdnSigned tells clients that the CDN domain above serves PRIVATE

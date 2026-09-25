@@ -70,14 +70,70 @@
     "title": "Crédits",
     "balance_title": "Crédits disponibles",
     "top_up": "Recharger",
-    "top_up_placeholder": "L'achat de crédits arrivera avec les abonnements.",
     "transactions_title": "Activité",
     "transactions_empty_title": "Aucune activité",
     "transactions_empty_description": "Les mouvements de crédits apparaissent ici.",
     "load_failed_title": "Impossible de charger vos crédits",
     "amount_positive": "+{{amount}}",
     "amount_negative": "−{{amount}}",
-    "balance_after": "Solde après : {{amount}}"
+    "balance_after": "Solde après : {{amount}}",
+    "subscription": {
+      "title": "Forfait",
+      "tiers": {
+        "free": {
+          "name": "Gratuit",
+          "price": "$0",
+          "summary": "200 crédits par mois"
+        },
+        "creator": {
+          "name": "Créateur",
+          "price": "$9,90/mois",
+          "summary": "3 000 crédits par mois"
+        },
+        "pro": {
+          "name": "Pro",
+          "price": "$29/mois",
+          "summary": "12 000 crédits par mois"
+        },
+        "unknown": {
+          "name": "Forfait inconnu",
+          "price": "",
+          "summary": ""
+        }
+      },
+      "status": {
+        "active": "Actif",
+        "past_due": "Paiement en attente",
+        "canceled": "Annulé",
+        "unknown": "Inconnu"
+      },
+      "renews_on": "Renouvellement le {{date}}",
+      "cancel_scheduled": "Se termine à la fin de la période.",
+      "usage_label": "Générations ce mois-ci",
+      "usage_value": "{{used}} sur {{limit}}",
+      "subscribe": "S'abonner"
+    },
+    "topup": {
+      "title": "Acheter des crédits",
+      "empty": "Aucun pack de crédits en vente.",
+      "pack": "{{credits}} crédits · {{price}}",
+      "packs": {
+        "t5": {
+          "price": "$5"
+        },
+        "t20": {
+          "price": "$20"
+        },
+        "other": {
+          "price": ""
+        }
+      }
+    },
+    "checkout": {
+      "failed": "Impossible de lancer l'achat. Réessayez.",
+      "already_subscribed": "Vous avez déjà un abonnement.",
+      "unavailable": "Les paiements ne sont pas disponibles sur cette instance."
+    }
   },
   "workspace": {
     "unavailable_title": "Cet espace de travail n'est pas disponible",

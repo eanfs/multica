@@ -61,3 +61,25 @@ export const AURORA_GENERATION_POLL_MS = 3_000;
 export function isAuroraGenerationTerminal(status: string | undefined): boolean {
   return status === "completed" || status === "failed";
 }
+
+/**
+ * Body of `POST /api/aurora/billing/checkout`.
+ *
+ * The return URLs are the client's to build: it knows its own origin and the
+ * workspace slug route (`/<slug>/billing`), and the API host is not a page the
+ * user can be sent back to. The server only checks that they are http(s)
+ * absolute URLs.
+ */
+export interface CreateAuroraCheckoutRequest {
+  tier: string;
+  billingCycle: "monthly" | "yearly";
+  successUrl: string;
+  cancelUrl: string;
+}
+
+/** Body of `POST /api/aurora/billing/topup/checkout`. */
+export interface CreateAuroraTopupCheckoutRequest {
+  topupId: string;
+  successUrl: string;
+  cancelUrl: string;
+}

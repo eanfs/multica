@@ -3,9 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   auroraAssetSchema,
   auroraBalanceSchema,
+  auroraCheckoutResponseSchema,
   auroraGenerationDetailSchema,
   auroraGenerationSchema,
   auroraSkillsSchema,
+  auroraSubscriptionSchema,
+  auroraTopupsSchema,
   auroraTransactionsSchema,
 } from "./schema";
 
@@ -136,5 +139,78 @@ describe("auroraTransactionsSchema", () => {
     expect(res.transactions[0]?.balanceAfterMicro).toBe(0);
     expect(res.transactions[0]?.reference).toBe("");
     expect(res.transactions[0]?.createdAt).toBe("");
+  });
+});
+
+describe("auroraSubscriptionSchema", () => {
+  it("defaults every field so a degraded read still renders a plan", () => {
+    // The plan card is the first thing the billing screen draws; a body that
+    // predates the endpoint must produce a free plan, not a blank card.
+    const res = auroraSubscriptionSchema.parse({});
+
+    expect(res.tier).toBe("free");
+    expect(res.status).toBe("");
+    expect(res.currentPeriodEnd).toBeNull();
+    expect(res.cancelAtPeriodEnd).toBe(false);
+    expect(res.limits).toEqual({ generationsPerMonth: 10, concurrency: 1 });
+    expect(res.usage).toEqual({
+      generationsUsedThisMonth: 0,
+      activeGenerations: 0,
+    });
+  });
+
+  it("keeps a plan and its usage as they arrive", () => {
+    const res = auroraSubscriptionSchema.parse({
+      tier: "creator",
+      status: "active",
+      currentPeriodEnd: "2026-10-24T00:00:00Z",
+      cancelAtPeriodEnd: true,
+      limits: { generationsPerMonth: 30, concurrency: 2 },
+      usage: { generationsUsedThisMonth: 12, activeGenerations: 1 },
+    });
+
+    expect(res.tier).toBe("creator");
+    expect(res.currentPeriodEnd).toBe("2026-10-24T00:00:00Z");
+    expect(res.limits.generationsPerMonth).toBe(30);
+    expect(res.usage.generationsUsedThisMonth).toBe(12);
+  });
+
+  it("keeps a status this build has never seen", () => {
+    // The server sends the status as a plain string; a new one must reach the
+    // screen so its label mapping can fall back, not fail the parse.
+    const res = auroraSubscriptionSchema.parse({ status: "paused" });
+
+    expect(res.status).toBe("paused");
+  });
+});
+
+describe("auroraTopupsSchema", () => {
+  it("defaults a missing list to empty", () => {
+    expect(auroraTopupsSchema.parse({}).topups).toEqual([]);
+  });
+
+  it("reads the packs", () => {
+    const res = auroraTopupsSchema.parse({
+      topups: [{ id: "t5", credits: 5000 }],
+    });
+
+    expect(res.topups[0]?.id).toBe("t5");
+    expect(res.topups[0]?.credits).toBe(5000);
+  });
+});
+
+describe("auroraCheckoutResponseSchema", () => {
+  it("rejects a body with no checkout URL", () => {
+    // No default here on purpose: an empty URL would navigate the user back to
+    // the page they are already on, as if the purchase had completed.
+    expect(auroraCheckoutResponseSchema.safeParse({}).success).toBe(false);
+  });
+
+  it("reads the URL the browser is sent to", () => {
+    expect(
+      auroraCheckoutResponseSchema.parse({
+        checkoutUrl: "https://checkout.stripe.com/c/test",
+      }).checkoutUrl,
+    ).toBe("https://checkout.stripe.com/c/test");
   });
 });

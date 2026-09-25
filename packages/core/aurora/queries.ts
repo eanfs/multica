@@ -3,9 +3,11 @@ import { useWorkspaceId } from "../hooks";
 import {
   getAuroraBalance,
   getAuroraGeneration,
+  getAuroraSubscription,
   listAuroraAssets,
   listAuroraGenerations,
   listAuroraSkills,
+  listAuroraTopups,
   listAuroraTransactions,
 } from "./api";
 import {
@@ -55,6 +57,15 @@ export const auroraWalletKeys = {
   all: () => ["aurora", "wallet"] as const,
   balance: () => [...auroraWalletKeys.all(), "balance"] as const,
   transactions: () => [...auroraWalletKeys.all(), "transactions"] as const,
+  /**
+   * The plan and the packs on sale, also user-scoped and also exempt from the
+   * `wsId` rule: a subscription belongs to the account, not to the workspace
+   * the screen is open in, and the server reads the caller rather than
+   * X-Workspace-ID. Keying them on `wsId` would refetch identical data on every
+   * workspace switch — the same reason the wallet keys above live here.
+   */
+  subscription: () => [...auroraWalletKeys.all(), "subscription"] as const,
+  topups: () => [...auroraWalletKeys.all(), "topups"] as const,
 };
 
 // The cache default is `staleTime: Infinity` (packages/core/query-client.ts),
@@ -138,6 +149,29 @@ export function auroraTransactionsOptions() {
   });
 }
 
+export function auroraSubscriptionOptions() {
+  return queryOptions({
+    queryKey: auroraWalletKeys.subscription(),
+    queryFn: () => getAuroraSubscription(),
+    // The plan moves when a checkout completes — which happens on another
+    // origin, in the Stripe-hosted page — so the screen cannot rely on a
+    // mutation invalidation to pick the change up. A short stale-time is what
+    // makes the return trip from checkout show the new plan without a manual
+    // reload, without polling for a change that is usually not coming.
+    staleTime: 30 * 1000,
+  });
+}
+
+export function auroraTopupsOptions() {
+  return queryOptions({
+    queryKey: auroraWalletKeys.topups(),
+    queryFn: () => listAuroraTopups(),
+    // The catalog is deployment configuration and does not move while the app
+    // is open.
+    staleTime: Infinity,
+  });
+}
+
 // The hooks below resolve the workspace themselves instead of taking it: every
 // Aurora surface renders inside the `[workspaceSlug]` layout, which is what
 // establishes the current workspace, so there is no case in which a caller has
@@ -176,4 +210,14 @@ export function useAuroraBalance() {
 /** The caller's ledger, newest first. */
 export function useAuroraTransactions() {
   return useQuery(auroraTransactionsOptions());
+}
+
+/** The caller's plan, its limits and this month's usage. */
+export function useAuroraSubscription() {
+  return useQuery(auroraSubscriptionOptions());
+}
+
+/** The credit packs this deployment sells. */
+export function useAuroraTopups() {
+  return useQuery(auroraTopupsOptions());
 }

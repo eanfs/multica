@@ -4,21 +4,26 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/storage"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/stripe/stripe-go/v86"
 )
 
 // maxAuroraGenerationBodyBytes caps the request body for generation creation.
@@ -31,6 +36,18 @@ const maxAuroraGenerationBodyBytes = 256 * 1024
 // the amount derived with this same constant, so one write reverses the other
 // exactly.
 const microCreditsPerCredit = 1_000_000
+
+// Stripe Checkout Sessions expire after at most 24 hours. Keep the local intent
+// for an extra hour so request latency or modest clock skew cannot let a new
+// checkout replace one Stripe may still complete.
+const auroraCheckoutIntentTTL = 25 * time.Hour
+
+var (
+	errAuroraMonthlyGenerationLimit = errors.New("monthly generation limit reached")
+	errAuroraConcurrencyLimit       = errors.New("concurrency limit reached")
+	errAuroraAllowanceUnavailable   = errors.New("monthly allowance unavailable")
+	errAuroraSubscriptionConflict   = errors.New("subscription already exists")
+)
 
 // ListAuroraSkills returns the full catalog, including unavailable phase-2 skills.
 // The router requires authentication and workspace membership.
@@ -115,23 +132,24 @@ func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Lazy seed so the enqueue below always has an execution carrier. owner_id
-	// references "user", and the caller is a real member, so the caller's id
-	// satisfies the FK (in the personal-space MVP it is the workspace owner,
-	// mirroring the Mika system-agent precedent).
-	if err := h.ensureAuroraSystemAgents(r.Context(), workspaceID, userUUID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to prepare workspace agents")
-		return
-	}
-
-	row, err := h.Queries.CreateAuroraGeneration(r.Context(), db.CreateAuroraGenerationParams{
-		WorkspaceID: workspaceID,
-		UserID:      userUUID,
-		SkillID:     req.SkillID,
-		Prompt:      req.Prompt,
-	})
+	// Serialize the entitlement decision and queued-row insertion per user. The
+	// row itself occupies concurrency before its task id is attached, closing the
+	// check-then-act race between simultaneous requests.
+	row, err := h.createAuroraGenerationWithEntitlement(
+		r.Context(), userUUID, workspaceID, req.SkillID, req.Prompt,
+	)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create generation")
+		switch {
+		case errors.Is(err, errAuroraMonthlyGenerationLimit):
+			writeError(w, http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, errAuroraConcurrencyLimit):
+			writeError(w, http.StatusTooManyRequests, err.Error())
+		case errors.Is(err, errAuroraAllowanceUnavailable):
+			writeError(w, http.StatusServiceUnavailable, errAuroraAllowanceUnavailable.Error())
+		default:
+			slog.Error("failed to create aurora generation", "user_id", userID, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to create generation")
+		}
 		return
 	}
 
@@ -189,6 +207,89 @@ func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request)
 		Status:          updated.Status,
 		CreditsReserved: updated.CreditsReserved,
 	}})
+}
+
+// createAuroraGenerationWithEntitlement owns the atomic entitlement boundary.
+// A transaction-scoped advisory lock serializes all creates for one user; the
+// counters and queued-row insertion then share one transaction, so concurrent
+// requests cannot both observe spare capacity and consume the same slot.
+func (h *Handler) createAuroraGenerationWithEntitlement(
+	ctx context.Context,
+	userID, workspaceID pgtype.UUID,
+	skillID, prompt string,
+) (db.AuroraGeneration, error) {
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return db.AuroraGeneration{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx,
+		"SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+		"aurora-entitlement:"+uuidToString(userID),
+	); err != nil {
+		return db.AuroraGeneration{}, err
+	}
+	qtx := h.Queries.WithTx(tx)
+	limits, err := aurora.LimitsForUser(ctx, qtx, h.Tiers, userID)
+	if err != nil {
+		return db.AuroraGeneration{}, fmt.Errorf("load limits: %w", err)
+	}
+	usedThisMonth, err := qtx.CountGenerationsThisMonth(ctx, userID)
+	if err != nil {
+		return db.AuroraGeneration{}, fmt.Errorf("load monthly usage: %w", err)
+	}
+	if usedThisMonth >= int64(limits.GenerationsPerMonth) {
+		return db.AuroraGeneration{}, errAuroraMonthlyGenerationLimit
+	}
+	activeGenerations, err := qtx.CountActiveGenerations(ctx, userID)
+	if err != nil {
+		return db.AuroraGeneration{}, fmt.Errorf("load active usage: %w", err)
+	}
+	if activeGenerations >= int64(limits.Concurrency) {
+		return db.AuroraGeneration{}, errAuroraConcurrencyLimit
+	}
+
+	// Seed only after both gates pass; a rejected request must not create system
+	// agents. The seeder has its own workspace-scoped transaction and advisory
+	// lock, independent from this user's entitlement lock.
+	if err := h.ensureAuroraSystemAgents(ctx, workspaceID, userID); err != nil {
+		return db.AuroraGeneration{}, fmt.Errorf("prepare workspace agents: %w", err)
+	}
+	if limits.Tier == "free" {
+		// The allowance must exist before Reserve runs. Unlike the previous
+		// best-effort path, an infrastructure failure remains a 503 rather than
+		// masquerading as an insufficient-credit 402.
+		if err := h.ensureFreeMonthlyGrant(ctx, userID); err != nil {
+			return db.AuroraGeneration{}, fmt.Errorf("%w: %v", errAuroraAllowanceUnavailable, err)
+		}
+	}
+
+	row, err := qtx.CreateAuroraGeneration(ctx, db.CreateAuroraGenerationParams{
+		WorkspaceID: workspaceID,
+		UserID:      userID,
+		SkillID:     skillID,
+		Prompt:      prompt,
+	})
+	if err != nil {
+		return db.AuroraGeneration{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return db.AuroraGeneration{}, err
+	}
+	return row, nil
+}
+
+// ensureFreeMonthlyGrant tops the user's natural-month allowance up to the Free
+// tier. The CreditService serializes this with paid webhook/settlement grants,
+// so a same-month upgrade receives only the difference and a late Free request
+// cannot add credits after the paid allowance.
+func (h *Handler) ensureFreeMonthlyGrant(ctx context.Context, userID pgtype.UUID) error {
+	wsID, err := h.Queries.GetPersonalWorkspaceForUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	return h.Credit.EnsureMonthlyAllowance(ctx, userID, wsID, h.Tiers.FreeMonthlyMicro(), time.Now())
 }
 
 // ensureAuroraSystemAgents serialises the idempotent system-agent seed behind a
@@ -783,4 +884,637 @@ func (h *Handler) DeleteAuroraAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
+// Billing — checkout, the Stripe webhook, and the subscription read
+// (Plan 5 Tasks 3 and 7)
+// ---------------------------------------------------------------------------
+
+// CreateAuroraCheckout starts a subscription checkout for the caller.
+//
+// Fail-closed by construction: with no configured payment provider the
+// endpoint answers 503 rather than letting a client believe it bought
+// something, and a tier whose price id is unset is a 503 too, because the
+// alternative is charging whatever price the default happens to be.
+func (h *Handler) CreateAuroraCheckout(w http.ResponseWriter, r *http.Request) {
+	if h.Payments == nil {
+		writeError(w, http.StatusServiceUnavailable, "payments not configured")
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	userUUID, ok := parseUUIDOrBadRequest(w, userID, "user_id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Tier         string `json:"tier"`
+		BillingCycle string `json:"billingCycle"`
+		SuccessURL   string `json:"successUrl"`
+		CancelURL    string `json:"cancelUrl"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	// The client owns the return URLs (it knows its own origin and the
+	// workspace slug route /<slug>/billing); the API host must not be used.
+	if !validCheckoutURL(req.SuccessURL) || !validCheckoutURL(req.CancelURL) {
+		writeError(w, http.StatusBadRequest, "successUrl and cancelUrl must be http(s) URLs")
+		return
+	}
+	tier, ok := h.Tiers.Lookup(req.Tier)
+	if !ok || tier.Tier == "free" {
+		writeError(w, http.StatusBadRequest, "unknown tier")
+		return
+	}
+	var priceID string
+	switch req.BillingCycle {
+	case "monthly":
+		priceID = tier.StripePriceMonthly
+	case "yearly":
+		priceID = tier.StripePriceYearly
+	default:
+		// Billing period changes what Stripe charges, so an unknown value is
+		// never safe to coerce to the monthly default.
+		writeError(w, http.StatusBadRequest, "billingCycle must be monthly or yearly")
+		return
+	}
+	if priceID == "" {
+		writeError(w, http.StatusServiceUnavailable, "tier price not configured")
+		return
+	}
+	checkoutID, err := h.beginAuroraSubscriptionCheckout(
+		r.Context(), userUUID, tier.Tier, req.BillingCycle,
+	)
+	if err != nil {
+		if errors.Is(err, errAuroraSubscriptionConflict) {
+			writeError(w, http.StatusConflict, errAuroraSubscriptionConflict.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to start checkout")
+		return
+	}
+	checkoutURL, err := h.Payments.CreateSubscriptionCheckout(r.Context(), priceID,
+		req.SuccessURL, req.CancelURL, userID, tier.Tier, checkoutID)
+	if err != nil {
+		slog.Error("failed to create aurora subscription checkout", "tier", tier.Tier, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to create checkout")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"checkoutUrl": checkoutURL})
+}
+
+// beginAuroraSubscriptionCheckout persists or reuses one pending checkout per
+// user before any Stripe request leaves the process. The user advisory lock
+// closes the two-tab race; Stripe's idempotency key closes retries after commit.
+func (h *Handler) beginAuroraSubscriptionCheckout(
+	ctx context.Context,
+	userID pgtype.UUID,
+	tier, billingCycle string,
+) (string, error) {
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx,
+		"SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+		"aurora-subscription:"+uuidToString(userID),
+	); err != nil {
+		return "", err
+	}
+
+	qtx := h.Queries.WithTx(tx)
+	sub, err := qtx.GetAuroraSubscriptionByUser(ctx, userID)
+	switch {
+	case err == nil && sub.Status == "pending":
+		fresh := sub.UpdatedAt.Valid && time.Since(sub.UpdatedAt.Time) < auroraCheckoutIntentTTL
+		sameProduct := sub.Tier == tier && sub.CheckoutBillingCycle.Valid && sub.CheckoutBillingCycle.String == billingCycle
+		if fresh && sameProduct && sub.CheckoutIdempotencyKey.Valid && sub.CheckoutIdempotencyKey.String != "" {
+			if err := tx.Commit(ctx); err != nil {
+				return "", err
+			}
+			return sub.CheckoutIdempotencyKey.String, nil
+		}
+		if fresh {
+			return "", errAuroraSubscriptionConflict
+		}
+	case err == nil && sub.Status != "canceled":
+		// Active, past_due, and unknown future states all fail closed. Only a
+		// canceled plan or an expired pending intent may start another checkout.
+		return "", errAuroraSubscriptionConflict
+	case err != nil && !errors.Is(err, pgx.ErrNoRows):
+		return "", err
+	}
+
+	checkoutID := "aurora-sub-" + uuid.NewString()
+	if _, err := qtx.StartAuroraSubscriptionCheckout(ctx, db.StartAuroraSubscriptionCheckoutParams{
+		UserID:                 userID,
+		Tier:                   tier,
+		CheckoutIdempotencyKey: strToText(checkoutID),
+		CheckoutBillingCycle:   strToText(billingCycle),
+	}); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return checkoutID, nil
+}
+
+// validCheckoutURL accepts http(s) absolute URLs only — the only shapes the
+// frontend will pass; anything else (javascript:, relative, empty) is rejected.
+func validCheckoutURL(u string) bool {
+	parsed, err := url.Parse(u)
+	return err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http") && parsed.Host != ""
+}
+
+// CreateAuroraTopupCheckout starts a one-time credit purchase. Same
+// fail-closed shape as the subscription checkout.
+func (h *Handler) CreateAuroraTopupCheckout(w http.ResponseWriter, r *http.Request) {
+	if h.Payments == nil {
+		writeError(w, http.StatusServiceUnavailable, "payments not configured")
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		TopupID    string `json:"topupId"`
+		SuccessURL string `json:"successUrl"`
+		CancelURL  string `json:"cancelUrl"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if !validCheckoutURL(req.SuccessURL) || !validCheckoutURL(req.CancelURL) {
+		writeError(w, http.StatusBadRequest, "successUrl and cancelUrl must be http(s) URLs")
+		return
+	}
+	topup, ok := h.Tiers.LookupTopup(req.TopupID)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "unknown topup")
+		return
+	}
+	if topup.PriceID == "" {
+		writeError(w, http.StatusServiceUnavailable, "topup price not configured")
+		return
+	}
+	checkoutURL, err := h.Payments.CreateTopupCheckout(r.Context(), topup.PriceID,
+		req.SuccessURL, req.CancelURL, userID, topup.ID)
+	if err != nil {
+		slog.Error("failed to create aurora topup checkout", "topup_id", topup.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to create checkout")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"checkoutUrl": checkoutURL})
+}
+
+// StripeWebhook receives Stripe's billing events. It is mounted on the public
+// route group — Stripe cannot hold a session cookie — so the signature is the
+// only thing authenticating the request, and it is verified before the body is
+// read as anything but bytes.
+func (h *Handler) StripeWebhook(w http.ResponseWriter, r *http.Request) {
+	if h.Payments == nil {
+		writeError(w, http.StatusServiceUnavailable, "payments not configured")
+		return
+	}
+	// Match the existing public Stripe ingress: reject abusive senders before
+	// reading or hashing a body, and reject requests that cannot be Stripe at all.
+	if h.WebhookIPRateLimiter != nil {
+		if ip := h.clientIPForRateLimit(r); ip != "" && !h.WebhookIPRateLimiter.Allow(r.Context(), ip) {
+			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
+	}
+	if len(r.Header.Values(stripeSignatureHeader)) == 0 {
+		writeError(w, http.StatusUnauthorized, "missing Stripe-Signature header")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxStripeWebhookBodySize)
+	payload, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body is too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	event, err := h.Payments.ConstructEvent(payload, r.Header.Get(stripeSignatureHeader))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid signature")
+		return
+	}
+	if err := h.handleStripeEvent(r.Context(), event); err != nil {
+		// A failure here is retryable by Stripe (a transient database error,
+		// say), so it must not be acked — the ledger's idempotency keys make
+		// the retry safe.
+		slog.Error("stripe webhook handling failed", "event_id", event.ID, "type", event.Type, "error", err)
+		writeError(w, http.StatusInternalServerError, "webhook failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"received": true})
+}
+
+// handleStripeEvent routes a verified Stripe event to the right ledger write.
+// Every write is idempotent: subscriptions upsert by user_id, grants key on the
+// month (subscriptions) or the Checkout Session id (topups).
+//
+// Bad metadata is logged and acked (a nil error): retrying cannot fix a
+// permanently-malformed event, and a non-2xx would make Stripe redeliver it
+// forever. The metadata userId is request-boundary input — it arrives from a
+// third party — so it is parsed with util.ParseUUID, not the panicking
+// parseUUID the handler's own trusted round-trips use.
+func (h *Handler) handleStripeEvent(ctx context.Context, ev aurora.Event) error {
+	switch ev.Type {
+	case string(stripe.EventTypeCheckoutSessionCompleted),
+		string(stripe.EventTypeCheckoutSessionAsyncPaymentSucceeded):
+		var session stripe.CheckoutSession
+		if err := json.Unmarshal(ev.Raw, &session); err != nil {
+			return err
+		}
+		userUUID, err := util.ParseUUID(session.Metadata["userId"])
+		if err != nil {
+			slog.Error("stripe event with invalid userId metadata", "event_id", ev.ID)
+			return nil // ack: retrying cannot fix bad metadata
+		}
+		// checkout.session.completed can precede payment for delayed methods.
+		// Fulfil only a paid/no-payment-required session; the later async success
+		// event enters this same path and uses the session id for idempotency.
+		if !checkoutSessionPaid(&session) {
+			return nil
+		}
+		if session.Mode == stripe.CheckoutSessionModePayment {
+			return h.handleTopupCompleted(ctx, ev, &session, userUUID)
+		}
+		return h.handleSubscriptionCheckoutCompleted(ctx, ev, &session, userUUID)
+	case string(stripe.EventTypeCustomerSubscriptionUpdated):
+		return h.handleSubscriptionUpsert(ctx, ev)
+	case string(stripe.EventTypeCustomerSubscriptionDeleted):
+		return h.handleSubscriptionDeleted(ctx, ev)
+	default:
+		// Unknown event types are ignored: Stripe sends far more than this
+		// product consumes, and a 4xx would make it retry them forever.
+		return nil
+	}
+}
+
+func checkoutSessionPaid(session *stripe.CheckoutSession) bool {
+	if session == nil {
+		return false
+	}
+	return session.PaymentStatus == stripe.CheckoutSessionPaymentStatusPaid ||
+		session.PaymentStatus == stripe.CheckoutSessionPaymentStatusNoPaymentRequired
+}
+
+// handleTopupCompleted credits a one-time purchase, keyed by the Stripe
+// Checkout Session id. completed and async_payment_succeeded are separate event
+// ids for the same delayed purchase, so the event id cannot be the grant key.
+// Topups never expire and stay out of the monthly expiry sum.
+func (h *Handler) handleTopupCompleted(ctx context.Context, ev aurora.Event, session *stripe.CheckoutSession, userUUID pgtype.UUID) error {
+	if session.ID == "" {
+		return errors.New("stripe topup event without a checkout session id")
+	}
+	topup, ok := h.Tiers.LookupTopup(session.Metadata["topupId"])
+	if !ok {
+		return fmt.Errorf("stripe topup event %s has unknown topupId %q", ev.ID, session.Metadata["topupId"])
+	}
+	wsID, err := h.Queries.GetPersonalWorkspaceForUser(ctx, userUUID)
+	if err != nil {
+		return err
+	}
+	return h.Credit.Grant(ctx, userUUID, wsID, topup.Credits*microCreditsPerCredit, aurora.LedgerKindTopup, session.ID)
+}
+
+// handleSubscriptionCheckoutCompleted reconciles the paid Checkout Session with
+// its durable pending intent, reads Stripe's canonical subscription state, and
+// grants the allowance only when that state is active. Legacy sessions created
+// before checkout intents existed are accepted when they carry no checkoutId.
+func (h *Handler) handleSubscriptionCheckoutCompleted(ctx context.Context, ev aurora.Event, session *stripe.CheckoutSession, userUUID pgtype.UUID) error {
+	tier, ok := h.Tiers.Lookup(session.Metadata["tier"])
+	if !ok || tier.Tier == "free" {
+		return fmt.Errorf("stripe subscription event %s has unknown tier %q", ev.ID, session.Metadata["tier"])
+	}
+	if session.Subscription == nil || session.Subscription.ID == "" {
+		return errors.New("stripe subscription event without a subscription")
+	}
+
+	checkoutID := session.Metadata["checkoutId"]
+	if checkoutID != "" {
+		existing, err := h.Queries.GetAuroraSubscriptionByUser(ctx, userUUID)
+		if err != nil {
+			return fmt.Errorf("load subscription checkout intent: %w", err)
+		}
+		pendingMatches := existing.Status == "pending" &&
+			existing.Tier == tier.Tier &&
+			existing.CheckoutIdempotencyKey.Valid &&
+			existing.CheckoutIdempotencyKey.String == checkoutID
+		sameSubscription := existing.StripeSubscriptionID.Valid &&
+			existing.StripeSubscriptionID.String == session.Subscription.ID
+		if !pendingMatches && !sameSubscription {
+			return fmt.Errorf("stripe checkout %s does not match the pending subscription", checkoutID)
+		}
+		if sameSubscription && existing.StripeEventCreatedAt > ev.Created {
+			return nil // a newer lifecycle event already settled this subscription
+		}
+	}
+
+	state, err := h.Payments.GetSubscriptionState(ctx, session.Subscription.ID)
+	if err != nil {
+		return err
+	}
+	customerID := stripeCustomerID(session)
+	if state.CustomerID != "" {
+		customerID = &state.CustomerID
+	}
+	status := stripeSubscriptionStatus(stripe.SubscriptionStatus(state.Status))
+	applied, err := h.upsertAuroraSubscriptionEvent(ctx, db.UpsertAuroraSubscriptionParams{
+		UserID:               userUUID,
+		Tier:                 tier.Tier,
+		Status:               status,
+		StripeCustomerID:     ptrToText(customerID),
+		StripeSubscriptionID: ptrToText(&session.Subscription.ID),
+		CurrentPeriodEnd:     pgtype.Timestamptz{Time: state.CurrentPeriodEnd, Valid: true},
+		CancelAtPeriodEnd:    state.CancelAtPeriodEnd,
+		StripeEventCreatedAt: ev.Created,
+	})
+	if err != nil || !applied || status != "active" {
+		return err
+	}
+	return h.grantSubscriptionAllowance(ctx, userUUID, tier)
+}
+
+// resolveSubscriptionLifecycleOwner finds an existing Stripe subscription row,
+// or attributes an early lifecycle event through metadata copied onto the
+// Subscription by Checkout. The latter closes deleted/updated-before-completed
+// delivery races without accepting arbitrary third-party subscription ids.
+func (h *Handler) resolveSubscriptionLifecycleOwner(
+	ctx context.Context,
+	ev aurora.Event,
+	sub *stripe.Subscription,
+) (db.AuroraSubscription, bool, error) {
+	existing, err := h.Queries.GetAuroraSubscriptionByStripeID(ctx, ptrToText(&sub.ID))
+	if err == nil {
+		return existing, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return db.AuroraSubscription{}, false, err
+	}
+
+	checkoutID := sub.Metadata["checkoutId"]
+	userID, parseErr := util.ParseUUID(sub.Metadata["userId"])
+	if checkoutID == "" || parseErr != nil {
+		slog.Warn("stripe lifecycle event for an unknown subscription", "event_id", ev.ID, "subscription_id", sub.ID)
+		return db.AuroraSubscription{}, false, nil
+	}
+	pending, err := h.Queries.GetAuroraSubscriptionByUser(ctx, userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("stripe lifecycle event has no pending subscription", "event_id", ev.ID, "subscription_id", sub.ID)
+			return db.AuroraSubscription{}, false, nil
+		}
+		return db.AuroraSubscription{}, false, err
+	}
+	if pending.Status != "pending" ||
+		!pending.CheckoutIdempotencyKey.Valid ||
+		pending.CheckoutIdempotencyKey.String != checkoutID ||
+		pending.Tier != sub.Metadata["tier"] {
+		return db.AuroraSubscription{}, false, fmt.Errorf("stripe lifecycle event does not match pending checkout %s", checkoutID)
+	}
+	return pending, true, nil
+}
+
+func (h *Handler) handleSubscriptionUpsert(ctx context.Context, ev aurora.Event) error {
+	var sub stripe.Subscription
+	if err := json.Unmarshal(ev.Raw, &sub); err != nil {
+		return err
+	}
+	existing, ok, err := h.resolveSubscriptionLifecycleOwner(ctx, ev, &sub)
+	if err != nil || !ok {
+		return err
+	}
+	state, err := h.Payments.GetSubscriptionState(ctx, sub.ID)
+	if err != nil {
+		return err
+	}
+	periodEnd := existing.CurrentPeriodEnd
+	if !state.CurrentPeriodEnd.IsZero() {
+		periodEnd = pgtype.Timestamptz{Time: state.CurrentPeriodEnd, Valid: true}
+	}
+	customerID := stripeCustomerIDFromSubscription(&sub)
+	if state.CustomerID != "" {
+		customerID = &state.CustomerID
+	}
+	status := stripeSubscriptionStatus(stripe.SubscriptionStatus(state.Status))
+	applied, err := h.upsertAuroraSubscriptionEvent(ctx, db.UpsertAuroraSubscriptionParams{
+		UserID:               existing.UserID,
+		Tier:                 existing.Tier,
+		Status:               status,
+		StripeCustomerID:     ptrToText(customerID),
+		StripeSubscriptionID: ptrToText(&sub.ID),
+		CurrentPeriodEnd:     periodEnd,
+		CancelAtPeriodEnd:    state.CancelAtPeriodEnd,
+		StripeEventCreatedAt: ev.Created,
+	})
+	if err != nil || !applied || status != "active" {
+		return err
+	}
+	tier, found := h.Tiers.Lookup(existing.Tier)
+	if !found || tier.Tier == "free" {
+		return fmt.Errorf("unknown subscription tier %q", existing.Tier)
+	}
+	return h.grantSubscriptionAllowance(ctx, existing.UserID, tier)
+}
+
+// handleSubscriptionDeleted marks the subscription canceled. Already-granted
+// credits stay spendable until their monthly window expires — there is no
+// clawback, which is the documented MVP semantic.
+func (h *Handler) handleSubscriptionDeleted(ctx context.Context, ev aurora.Event) error {
+	var sub stripe.Subscription
+	if err := json.Unmarshal(ev.Raw, &sub); err != nil {
+		return err
+	}
+	existing, ok, err := h.resolveSubscriptionLifecycleOwner(ctx, ev, &sub)
+	if err != nil || !ok {
+		return err
+	}
+	_, err = h.upsertAuroraSubscriptionEvent(ctx, db.UpsertAuroraSubscriptionParams{
+		UserID:               existing.UserID,
+		Tier:                 existing.Tier,
+		Status:               "canceled",
+		StripeCustomerID:     ptrToText(stripeCustomerIDFromSubscription(&sub)),
+		StripeSubscriptionID: ptrToText(&sub.ID),
+		CurrentPeriodEnd:     existing.CurrentPeriodEnd,
+		CancelAtPeriodEnd:    false,
+		StripeEventCreatedAt: ev.Created,
+	})
+	return err
+}
+
+// upsertAuroraSubscriptionEvent reports false when SQL rejected a stale event.
+func (h *Handler) upsertAuroraSubscriptionEvent(ctx context.Context, params db.UpsertAuroraSubscriptionParams) (bool, error) {
+	_, err := h.Queries.UpsertAuroraSubscription(ctx, params)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (h *Handler) grantSubscriptionAllowance(ctx context.Context, userID pgtype.UUID, tier aurora.Tier) error {
+	wsID, err := h.Queries.GetPersonalWorkspaceForUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	return h.Credit.EnsureMonthlyAllowance(ctx, userID, wsID, tier.MonthlyCreditsMicro(), time.Now())
+}
+
+// stripeSubscriptionStatus maps Stripe's lifecycle onto the three states this
+// product stores. Anything that is not in good standing becomes "past_due" and
+// therefore stops granting; the entitlement gate already treats a non-active
+// row as the free tier, so a past-due user keeps working on free limits rather
+// than losing access outright.
+func stripeSubscriptionStatus(status stripe.SubscriptionStatus) string {
+	switch status {
+	case stripe.SubscriptionStatusActive, stripe.SubscriptionStatusTrialing:
+		return "active"
+	case stripe.SubscriptionStatusCanceled:
+		return "canceled"
+	default:
+		return "past_due"
+	}
+}
+
+// stripeCustomerID reads the customer id off a checkout session, which carries
+// an expanded customer object rather than a bare id.
+func stripeCustomerID(session *stripe.CheckoutSession) *string {
+	if session == nil || session.Customer == nil || session.Customer.ID == "" {
+		return nil
+	}
+	id := session.Customer.ID
+	return &id
+}
+
+// stripeCustomerIDFromSubscription is stripeCustomerID for a subscription
+// object, whose customer is a bare id string.
+func stripeCustomerIDFromSubscription(sub *stripe.Subscription) *string {
+	if sub == nil || sub.Customer == nil || sub.Customer.ID == "" {
+		return nil
+	}
+	id := sub.Customer.ID
+	return &id
+}
+
+// AuroraSubscriptionLimits is the caller's effective entitlement: the gates the
+// server actually applies, from the tier catalog.
+type AuroraSubscriptionLimits struct {
+	GenerationsPerMonth int `json:"generationsPerMonth"`
+	Concurrency         int `json:"concurrency"`
+}
+
+// AuroraSubscriptionUsage is how much of the month's allowance the caller has
+// spent, so the plan screen can show a progress bar rather than a bare number.
+type AuroraSubscriptionUsage struct {
+	GenerationsUsedThisMonth int64 `json:"generationsUsedThisMonth"`
+	ActiveGenerations        int64 `json:"activeGenerations"`
+}
+
+// AuroraSubscriptionResponse is the plan screen's whole state.
+//
+// Tier is the *effective* tier — the one Limits carries — not the tier named on
+// a subscription row. The two differ for a canceled or past-due plan, and a
+// response that named the stored tier beside free-tier limits would describe a
+// plan the user does not have. Status is the stored subscription status, empty
+// when there is no row at all, which is what tells a canceled subscriber apart
+// from one who never subscribed.
+type AuroraSubscriptionResponse struct {
+	Tier              string                   `json:"tier"`
+	Status            string                   `json:"status"`
+	CurrentPeriodEnd  *string                  `json:"currentPeriodEnd"`
+	CancelAtPeriodEnd bool                     `json:"cancelAtPeriodEnd"`
+	Limits            AuroraSubscriptionLimits `json:"limits"`
+	Usage             AuroraSubscriptionUsage  `json:"usage"`
+}
+
+// GetAuroraSubscription reports the caller's plan, its limits and this month's
+// usage. Like the other billing reads it is account-scoped: the plan belongs to
+// the user, not to the workspace the request is made from.
+func (h *Handler) GetAuroraSubscription(w http.ResponseWriter, r *http.Request) {
+	userUUID, ok := auroraBillingUser(w, r)
+	if !ok {
+		return
+	}
+	limits, err := aurora.LimitsForUser(r.Context(), h.Queries, h.Tiers, userUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load subscription")
+		return
+	}
+	usedThisMonth, err := h.Queries.CountGenerationsThisMonth(r.Context(), userUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load usage")
+		return
+	}
+	activeGenerations, err := h.Queries.CountActiveGenerations(r.Context(), userUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load usage")
+		return
+	}
+
+	response := AuroraSubscriptionResponse{
+		Tier: limits.Tier,
+		Limits: AuroraSubscriptionLimits{
+			GenerationsPerMonth: limits.GenerationsPerMonth,
+			Concurrency:         limits.Concurrency,
+		},
+		Usage: AuroraSubscriptionUsage{
+			GenerationsUsedThisMonth: usedThisMonth,
+			ActiveGenerations:        activeGenerations,
+		},
+	}
+
+	sub, err := h.Queries.GetAuroraSubscriptionByUser(r.Context(), userUUID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// No plan row: the free tier with no period. Not an error — a user who
+		// has never subscribed is the common case.
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "failed to load subscription")
+		return
+	default:
+		response.Status = sub.Status
+		response.CancelAtPeriodEnd = sub.CancelAtPeriodEnd
+		if sub.CurrentPeriodEnd.Valid {
+			end := sub.CurrentPeriodEnd.Time.UTC().Format(time.RFC3339Nano)
+			response.CurrentPeriodEnd = &end
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"subscription": response})
+}
+
+// AuroraTopupResponse is one purchasable credit pack as the plan screen lists
+// it. The Stripe price id is deliberately absent: it is deployment
+// configuration, the client only ever passes the id back, and leaking it would
+// let a caller probe which Stripe mode the server is in.
+type AuroraTopupResponse struct {
+	ID      string `json:"id"`
+	Credits int64  `json:"credits"`
+}
+
+// ListAuroraTopups returns the credit packs this deployment sells, in catalog
+// order.
+func (h *Handler) ListAuroraTopups(w http.ResponseWriter, r *http.Request) {
+	topups := make([]AuroraTopupResponse, 0, len(h.Tiers.Topups))
+	for _, topup := range h.Tiers.Topups {
+		topups = append(topups, AuroraTopupResponse{ID: topup.ID, Credits: topup.Credits})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"topups": topups})
 }

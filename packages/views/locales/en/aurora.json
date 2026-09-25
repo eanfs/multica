@@ -70,14 +70,70 @@
     "title": "Credits",
     "balance_title": "Available credits",
     "top_up": "Top up",
-    "top_up_placeholder": "Buying credits arrives with subscriptions.",
     "transactions_title": "Activity",
     "transactions_empty_title": "No activity yet",
     "transactions_empty_description": "Credit changes appear here.",
     "load_failed_title": "Could not load your credits",
     "amount_positive": "+{{amount}}",
     "amount_negative": "−{{amount}}",
-    "balance_after": "Balance after: {{amount}}"
+    "balance_after": "Balance after: {{amount}}",
+    "subscription": {
+      "title": "Plan",
+      "tiers": {
+        "free": {
+          "name": "Free",
+          "price": "$0",
+          "summary": "200 credits a month"
+        },
+        "creator": {
+          "name": "Creator",
+          "price": "$9.90/mo",
+          "summary": "3,000 credits a month"
+        },
+        "pro": {
+          "name": "Pro",
+          "price": "$29/mo",
+          "summary": "12,000 credits a month"
+        },
+        "unknown": {
+          "name": "Unknown plan",
+          "price": "",
+          "summary": ""
+        }
+      },
+      "status": {
+        "active": "Active",
+        "past_due": "Payment due",
+        "canceled": "Canceled",
+        "unknown": "Unknown"
+      },
+      "renews_on": "Renews {{date}}",
+      "cancel_scheduled": "Ends at the end of the period.",
+      "usage_label": "Generations this month",
+      "usage_value": "{{used}} of {{limit}}",
+      "subscribe": "Subscribe"
+    },
+    "topup": {
+      "title": "Buy credits",
+      "empty": "No credit packs are on sale.",
+      "pack": "{{credits}} credits · {{price}}",
+      "packs": {
+        "t5": {
+          "price": "$5"
+        },
+        "t20": {
+          "price": "$20"
+        },
+        "other": {
+          "price": ""
+        }
+      }
+    },
+    "checkout": {
+      "failed": "Could not start the purchase. Try again.",
+      "already_subscribed": "You already have a subscription.",
+      "unavailable": "Payments are not available on this instance."
+    }
   },
   "workspace": {
     "unavailable_title": "This workspace isn't available",

@@ -155,6 +155,33 @@ type Config struct {
 	// it in constant time; a wrong or missing token is a 401. Empty disables
 	// the endpoint. Populated from AURORA_SANDBOX_TOKEN.
 	AuroraSandboxToken string
+
+	// StripeSecretKey and StripeWebhookSecret configure Aurora billing (Plan 5
+	// Task 2). Both are server-side only and must never reach AppConfig: the
+	// secret key can charge the account and the webhook secret is what proves
+	// an event came from Stripe. Either one empty leaves the payment provider
+	// nil, which makes every billing endpoint fail closed with 503 rather than
+	// accept a checkout it cannot charge.
+	//   - StripeSecretKey     -> STRIPE_SECRET_KEY
+	//   - StripeWebhookSecret -> STRIPE_WEBHOOK_SECRET
+	StripeSecretKey     string
+	StripeWebhookSecret string
+	// AuroraStripePrice* map a tier or topup to its Stripe price id. Test and
+	// live modes use different ids, so they are configuration rather than
+	// constants; an empty id makes that specific checkout fail closed with 503
+	// instead of charging whatever price happens to be default.
+	//   - AuroraStripePriceCreatorMonthly -> AURORA_STRIPE_PRICE_CREATOR_MONTHLY
+	//   - AuroraStripePriceCreatorYearly  -> AURORA_STRIPE_PRICE_CREATOR_YEARLY
+	//   - AuroraStripePriceProMonthly     -> AURORA_STRIPE_PRICE_PRO_MONTHLY
+	//   - AuroraStripePriceProYearly      -> AURORA_STRIPE_PRICE_PRO_YEARLY
+	//   - AuroraStripePriceTopup5         -> AURORA_STRIPE_PRICE_TOPUP_5
+	//   - AuroraStripePriceTopup20        -> AURORA_STRIPE_PRICE_TOPUP_20
+	AuroraStripePriceCreatorMonthly string
+	AuroraStripePriceCreatorYearly  string
+	AuroraStripePriceProMonthly     string
+	AuroraStripePriceProYearly      string
+	AuroraStripePriceTopup5         string
+	AuroraStripePriceTopup20        string
 }
 
 type cloudRuntimeProxy interface {
@@ -219,6 +246,13 @@ type Handler struct {
 	// blocklist plus local image screening); a vendor screening API replaces the
 	// implementation, not the call sites.
 	Moderation aurora.Moderator
+	// Payments is Aurora's Stripe surface. Nil when the deployment has no Stripe
+	// keys, which every billing endpoint reads as "payments disabled" and
+	// answers 503 — never as "free". Tests substitute a fake.
+	Payments aurora.PaymentProvider
+	// Tiers is Aurora's product catalog: what each plan grants and what it
+	// limits. Built once from config, so the numbers have a single source.
+	Tiers *aurora.TierCatalog
 	// Entitlements supplies workspace-scoped commercial gates. A nil provider
 	// preserves self-hosted behavior without extra reads.
 	Entitlements entitlement.Provider
@@ -484,23 +518,40 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 	// one accounting instance.
 	creditSvc := aurora.NewCreditService(queries, txStarter)
 	taskSvc.Credit = creditSvc
+	// NewStripeProvider returns a concrete pointer so callers that need the
+	// real implementation can use it directly. Do not assign a nil concrete
+	// pointer to the interface field: that would make Payments itself non-nil
+	// and defeat every fail-closed `h.Payments == nil` guard.
+	var payments aurora.PaymentProvider
+	if stripeProvider := aurora.NewStripeProvider(cfg.StripeSecretKey, cfg.StripeWebhookSecret); stripeProvider != nil {
+		payments = stripeProvider
+	}
 	h := &Handler{
-		Queries:                      queries,
-		ReadSelector:                 dbreader.NewPrimaryOnly(queries),
-		DB:                           executor,
-		TxStarter:                    txStarter,
-		Hub:                          hub,
-		DaemonHub:                    daemonHub,
-		DaemonProfileRefresh:         daemonProfileRefresh,
-		DaemonWorkspaceRefresh:       daemonWorkspaceRefresh,
-		DaemonRuntimeGone:            daemonRuntimeGone,
-		Bus:                          bus,
-		TaskService:                  taskSvc,
-		PluginService:                service.NewPluginService(queries, txStarter),
-		IssueService:                 service.NewIssueService(queries, txStarter, bus, analyticsClient, taskSvc),
-		AutopilotService:             service.NewAutopilotService(queries, txStarter, bus, taskSvc),
-		Credit:                       creditSvc,
-		Moderation:                   aurora.NewDefaultModerator(),
+		Queries:                queries,
+		ReadSelector:           dbreader.NewPrimaryOnly(queries),
+		DB:                     executor,
+		TxStarter:              txStarter,
+		Hub:                    hub,
+		DaemonHub:              daemonHub,
+		DaemonProfileRefresh:   daemonProfileRefresh,
+		DaemonWorkspaceRefresh: daemonWorkspaceRefresh,
+		DaemonRuntimeGone:      daemonRuntimeGone,
+		Bus:                    bus,
+		TaskService:            taskSvc,
+		PluginService:          service.NewPluginService(queries, txStarter),
+		IssueService:           service.NewIssueService(queries, txStarter, bus, analyticsClient, taskSvc),
+		AutopilotService:       service.NewAutopilotService(queries, txStarter, bus, taskSvc),
+		Credit:                 creditSvc,
+		Moderation:             aurora.NewDefaultModerator(),
+		Payments:               payments,
+		Tiers: aurora.NewTierCatalog(
+			cfg.AuroraStripePriceCreatorMonthly,
+			cfg.AuroraStripePriceCreatorYearly,
+			cfg.AuroraStripePriceProMonthly,
+			cfg.AuroraStripePriceProYearly,
+			cfg.AuroraStripePriceTopup5,
+			cfg.AuroraStripePriceTopup20,
+		),
 		EmailService:                 emailService,
 		UpdateStore:                  NewInMemoryUpdateStore(),
 		ModelListStore:               NewInMemoryModelListStore(),

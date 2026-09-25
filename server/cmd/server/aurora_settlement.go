@@ -1,0 +1,41 @@
+package main
+
+import (
+	"context"
+	"log/slog"
+	"time"
+
+	"github.com/multica-ai/multica/server/internal/aurora"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
+)
+
+// auroraSettlementInterval is how often the monthly settlement re-runs. A day
+// is far finer than the month it settles: the loop is not what defines the
+// window (RunMonthlySettlement derives that from the clock), so running it
+// often only means a missed 1st is noticed sooner.
+const auroraSettlementInterval = 24 * time.Hour
+
+// startAuroraSettlement runs Aurora's monthly credit settlement. It runs once
+// at startup and then daily; every run is idempotent via month-scoped ledger
+// references, so a missed tick or a restart across the 1st self-heals on the
+// next run. Failures are logged and retried on the next tick rather than
+// stopping the loop — a settlement that stops silently would leave paying
+// users ungranted, which is worse than a loud, repeated failure.
+func startAuroraSettlement(ctx context.Context, queries *db.Queries, credit *aurora.CreditService, tiers *aurora.TierCatalog) {
+	run := func() {
+		if err := aurora.RunMonthlySettlement(ctx, queries, credit, tiers, time.Now()); err != nil {
+			slog.Error("aurora monthly settlement failed", "error", err)
+		}
+	}
+	run()
+	ticker := time.NewTicker(auroraSettlementInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
+	}
+}

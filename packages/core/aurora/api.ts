@@ -3,22 +3,31 @@ import { parseWithFallback } from "../api/schema";
 import {
   auroraAssetsSchema,
   auroraBalanceSchema,
+  auroraCheckoutResponseSchema,
   auroraGenerationDetailSchema,
   auroraGenerationResponseSchema,
   auroraGenerationsSchema,
   auroraSkillsSchema,
+  auroraSubscriptionResponseSchema,
+  auroraSubscriptionSchema,
+  auroraTopupsSchema,
   auroraTransactionsSchema,
   type AuroraAsset,
   type AuroraBalance,
+  type AuroraCheckout,
   type AuroraGeneration,
   type AuroraGenerationDetail,
   type AuroraSkill,
+  type AuroraSubscription,
+  type AuroraTopup,
   type AuroraTransaction,
 } from "./schema";
 import type {
   AuroraAssetsParams,
   AuroraListParams,
+  CreateAuroraCheckoutRequest,
   CreateAuroraGenerationRequest,
+  CreateAuroraTopupCheckoutRequest,
 } from "./types";
 
 /**
@@ -40,6 +49,10 @@ const AURORA_GENERATIONS_PATH = "/api/aurora/generations";
 const AURORA_ASSETS_PATH = "/api/aurora/assets";
 const AURORA_BALANCE_PATH = "/api/aurora/billing/balance";
 const AURORA_TRANSACTIONS_PATH = "/api/aurora/billing/transactions";
+const AURORA_SUBSCRIPTION_PATH = "/api/aurora/billing/subscription";
+const AURORA_TOPUPS_PATH = "/api/aurora/billing/topups";
+const AURORA_CHECKOUT_PATH = "/api/aurora/billing/checkout";
+const AURORA_TOPUP_CHECKOUT_PATH = "/api/aurora/billing/topup/checkout";
 
 // The label `parseWithFallback` logs, built from the path it describes so the
 // two cannot drift. The detail route carries its `{id}` placeholder rather than
@@ -51,6 +64,10 @@ const CREATE_GENERATION_ENDPOINT = `POST ${AURORA_GENERATIONS_PATH}`;
 const ASSETS_ENDPOINT = `GET ${AURORA_ASSETS_PATH}`;
 const BALANCE_ENDPOINT = `GET ${AURORA_BALANCE_PATH}`;
 const TRANSACTIONS_ENDPOINT = `GET ${AURORA_TRANSACTIONS_PATH}`;
+const SUBSCRIPTION_ENDPOINT = `GET ${AURORA_SUBSCRIPTION_PATH}`;
+const TOPUPS_ENDPOINT = `GET ${AURORA_TOPUPS_PATH}`;
+const CHECKOUT_ENDPOINT = `POST ${AURORA_CHECKOUT_PATH}`;
+const TOPUP_CHECKOUT_ENDPOINT = `POST ${AURORA_TOPUP_CHECKOUT_PATH}`;
 
 /**
  * Renders the list params the server understands as a URL suffix — `""` when
@@ -162,6 +179,71 @@ export function parseAuroraTransactions(data: unknown): AuroraTransaction[] {
   ).transactions;
 }
 
+/**
+ * The caller's plan.
+ *
+ * Optional fields still receive schema defaults for compatibility with older
+ * servers, but a body that cannot identify a subscription at all is not safe to
+ * turn into Free: this screen can start a real recurring purchase. The unique
+ * fallback object lets us retain parseWithFallback's boundary diagnostics while
+ * promoting degradation to a visible query error.
+ */
+export function parseAuroraSubscription(data: unknown): AuroraSubscription {
+  const fallback = { subscription: auroraSubscriptionSchema.parse({}) };
+  const parsed = parseWithFallback<{ subscription: AuroraSubscription }>(
+    data,
+    auroraSubscriptionResponseSchema,
+    fallback,
+    { endpoint: SUBSCRIPTION_ENDPOINT },
+  );
+  if (parsed === fallback) throw new Error("invalid subscription response");
+  return parsed.subscription;
+}
+
+/** The purchasable credit packs; an unreadable catalog is a visible error. */
+export function parseAuroraTopups(data: unknown): AuroraTopup[] {
+  const fallback: { topups: AuroraTopup[] } = { topups: [] };
+  const parsed = parseWithFallback<{ topups: AuroraTopup[] }>(
+    data,
+    auroraTopupsSchema,
+    fallback,
+    { endpoint: TOPUPS_ENDPOINT },
+  );
+  if (parsed === fallback) throw new Error("invalid topup response");
+  return parsed.topups;
+}
+
+/**
+ * The validated HTTPS checkout URL from a started purchase.
+ *
+ * A malformed response throws: checkout is a command, and silently returning a
+ * placeholder would leave the button with neither navigation nor an error.
+ */
+export function parseAuroraCheckout(data: unknown): string {
+  return parseCheckoutUrl(data, CHECKOUT_ENDPOINT);
+}
+
+/** The same body shape, logged under the topup endpoint it came from. */
+export function parseAuroraTopupCheckout(data: unknown): string {
+  return parseCheckoutUrl(data, TOPUP_CHECKOUT_ENDPOINT);
+}
+
+function parseCheckoutUrl(data: unknown, endpoint: string): string {
+  const parsed = parseWithFallback<AuroraCheckout | null>(
+    data,
+    auroraCheckoutResponseSchema,
+    null,
+    { endpoint },
+  );
+  if (!parsed) {
+    // A checkout is a command, not a readable projection: treating a malformed
+    // 200 body as a successful null result leaves the button with no navigation
+    // and no error. Throw so the mutation enters its visible failure state.
+    throw new Error("invalid checkout response");
+  }
+  return parsed.checkoutUrl;
+}
+
 // ---------------------------------------------------------------------------
 // Requests
 // ---------------------------------------------------------------------------
@@ -250,6 +332,47 @@ export async function listAuroraTransactions(): Promise<AuroraTransaction[]> {
   );
 }
 
+/** The caller's plan and this month's usage. Every workspace shows the same. */
+export async function getAuroraSubscription(): Promise<AuroraSubscription> {
+  return parseAuroraSubscription(
+    await api.requestJson(AURORA_SUBSCRIPTION_PATH),
+  );
+}
+
+/** The credit packs this deployment sells. */
+export async function listAuroraTopups(): Promise<AuroraTopup[]> {
+  return parseAuroraTopups(await api.requestJson(AURORA_TOPUPS_PATH));
+}
+
+/**
+ * Starts a subscription checkout and returns the URL to send the browser to.
+ *
+ * Throws `ApiError` with 409 when the caller already has a live subscription,
+ * and 503 when the deployment has no Stripe configuration — neither is a state
+ * the client can retry its way out of, so the caller reports it rather than
+ * retrying.
+ */
+export async function createAuroraCheckout(
+  request: CreateAuroraCheckoutRequest,
+): Promise<string> {
+  const raw = await api.requestJson(AURORA_CHECKOUT_PATH, {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+  return parseAuroraCheckout(raw);
+}
+
+/** Starts a one-time credit purchase and returns the checkout URL. */
+export async function createAuroraTopupCheckout(
+  request: CreateAuroraTopupCheckoutRequest,
+): Promise<string> {
+  const raw = await api.requestJson(AURORA_TOPUP_CHECKOUT_PATH, {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+  return parseAuroraTopupCheckout(raw);
+}
+
 // ---------------------------------------------------------------------------
 // Error classification
 // ---------------------------------------------------------------------------
@@ -272,4 +395,22 @@ export function isAuroraInsufficientCreditsError(error: unknown): boolean {
  */
 export function isAuroraRateLimitError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 429;
+}
+
+/**
+ * 409: a checkout was refused because the caller already has an active or
+ * past-due subscription. Retrying cannot succeed, and the plan screen says why
+ * rather than reporting a generic failure.
+ */
+export function isAuroraCheckoutConflictError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409;
+}
+
+/**
+ * 503: this deployment has no payment provider or no price for the requested
+ * plan. Not retryable, and not the user's fault — the screen says payments are
+ * unavailable rather than asking them to try again.
+ */
+export function isAuroraPaymentsUnavailableError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 503;
 }

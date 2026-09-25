@@ -4,11 +4,16 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, setApiInstance } from "../api";
 import type { ApiClient } from "../api/client";
 import { isAuroraInsufficientCreditsError } from "./api";
-import { useCreateAuroraGeneration, useDeleteAuroraAsset } from "./mutations";
+import {
+  useCreateAuroraCheckout,
+  useCreateAuroraGeneration,
+  useCreateAuroraTopupCheckout,
+  useDeleteAuroraAsset,
+} from "./mutations";
 import { auroraKeys, auroraWalletKeys } from "./queries";
 import type { AuroraAsset } from "./schema";
 
@@ -27,6 +32,17 @@ function wrapper(qc: QueryClient) {
   return function Wrapper({ children }: { children: ReactNode }) {
     return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
   };
+}
+
+/**
+ * jsdom cannot navigate, and the checkout mutations exist to do exactly that:
+ * replacing `location` keeps the destination observable and stops jsdom from
+ * logging "Not implemented: navigation" for every checkout test.
+ */
+function stubNavigation() {
+  const assign = vi.fn();
+  vi.stubGlobal("location", { assign });
+  return assign;
 }
 
 function newClient() {
@@ -149,5 +165,105 @@ describe("useDeleteAuroraAsset", () => {
     expect(keys).toContain(JSON.stringify(auroraKeys.assets("ws-1")));
     // The same asset is listed inside its generation's detail.
     expect(keys).toContain(JSON.stringify(auroraKeys.generations("ws-1")));
+  });
+});
+
+describe("useCreateAuroraCheckout", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns the checkout URL without performing browser navigation", async () => {
+    setApiInstance({
+      requestJson: vi.fn(async () => ({
+        checkoutUrl: "https://checkout.stripe.com/c/1",
+      })),
+    } as unknown as ApiClient);
+    const assign = stubNavigation();
+    const { result } = renderHook(() => useCreateAuroraCheckout(), {
+      wrapper: wrapper(newClient()),
+    });
+
+    let checkoutUrl: string | undefined;
+    await act(async () => {
+      checkoutUrl = await result.current.mutateAsync({
+        tier: "creator",
+        billingCycle: "monthly",
+        successUrl: "https://app.example.com/acme/billing?checkout=success",
+        cancelUrl: "https://app.example.com/acme/billing?checkout=cancel",
+      });
+    });
+
+    expect(checkoutUrl).toBe("https://checkout.stripe.com/c/1");
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it("posts the plan and refreshes the plan and the wallet", async () => {
+    // The purchase completes on Stripe's origin, so this client never sees the
+    // webhook that grants the credits: the invalidation is what makes the
+    // return trip re-read both.
+    const requestJson = vi.fn(async () => ({
+      checkoutUrl: "https://checkout.stripe.com/c/1",
+    }));
+    setApiInstance({ requestJson } as unknown as ApiClient);
+    stubNavigation();
+    const qc = newClient();
+    const invalidate = vi.spyOn(qc, "invalidateQueries");
+    const { result } = renderHook(() => useCreateAuroraCheckout(), {
+      wrapper: wrapper(qc),
+    });
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        tier: "creator",
+        billingCycle: "monthly",
+        successUrl: "https://app.example.com/acme/billing?checkout=success",
+        cancelUrl: "https://app.example.com/acme/billing?checkout=cancel",
+      });
+    });
+
+    expect(requestJson).toHaveBeenCalledWith(
+      "/api/aurora/billing/checkout",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const keys = invalidatedKeys(invalidate);
+    expect(keys).toContain(JSON.stringify(auroraWalletKeys.subscription()));
+    expect(keys).toContain(JSON.stringify(auroraWalletKeys.balance()));
+  });
+});
+
+describe("useCreateAuroraTopupCheckout", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("posts the pack and refreshes only the wallet", async () => {
+    const requestJson = vi.fn(async () => ({
+      checkoutUrl: "https://checkout.stripe.com/c/2",
+    }));
+    setApiInstance({ requestJson } as unknown as ApiClient);
+    stubNavigation();
+    const qc = newClient();
+    const invalidate = vi.spyOn(qc, "invalidateQueries");
+    const { result } = renderHook(() => useCreateAuroraTopupCheckout(), {
+      wrapper: wrapper(qc),
+    });
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        topupId: "t5",
+        successUrl: "https://app.example.com/acme/billing?checkout=success",
+        cancelUrl: "https://app.example.com/acme/billing?checkout=cancel",
+      });
+    });
+
+    expect(requestJson).toHaveBeenCalledWith(
+      "/api/aurora/billing/topup/checkout",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const keys = invalidatedKeys(invalidate);
+    expect(keys).toContain(JSON.stringify(auroraWalletKeys.balance()));
+    // A top-up buys credits, not a plan.
+    expect(keys).not.toContain(JSON.stringify(auroraWalletKeys.subscription()));
   });
 });

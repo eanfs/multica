@@ -1,8 +1,17 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useWorkspaceId } from "../hooks";
-import { createAuroraGeneration, deleteAuroraAsset } from "./api";
+import {
+  createAuroraCheckout,
+  createAuroraGeneration,
+  createAuroraTopupCheckout,
+  deleteAuroraAsset,
+} from "./api";
 import { auroraKeys, auroraWalletKeys } from "./queries";
-import type { CreateAuroraGenerationRequest } from "./types";
+import type {
+  CreateAuroraCheckoutRequest,
+  CreateAuroraGenerationRequest,
+  CreateAuroraTopupCheckoutRequest,
+} from "./types";
 
 /**
  * Enqueues one generation.
@@ -50,6 +59,50 @@ export function useDeleteAuroraAsset() {
       qc.invalidateQueries({ queryKey: auroraKeys.assets(wsId) });
       // The same asset is listed inside its generation's detail.
       qc.invalidateQueries({ queryKey: auroraKeys.generations(wsId) });
+    },
+  });
+}
+
+/**
+ * Starts a subscription checkout.
+ *
+ * Core returns the validated checkout URL but deliberately does not navigate:
+ * external navigation is platform behavior (web same-tab vs Electron shell),
+ * so the view hands this result to its platform adapter.
+ *
+ * On success the wallet and the plan are invalidated. The purchase completes on
+ * Stripe's origin, so this client will not see the webhook that grants the
+ * credits — the invalidation is what makes the return trip re-read both.
+ *
+ * A 409 (a live subscription already exists) and a 503 (no Stripe
+ * configuration) are left to the caller: neither is retryable, and the screen
+ * has copy for both.
+ */
+export function useCreateAuroraCheckout() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (request: CreateAuroraCheckoutRequest) =>
+      createAuroraCheckout(request),
+    onSettled: () => {
+      // The plan the card names, and the wallet — the webhook grants the first
+      // month's credits, so both move. The pack catalogue does not, so it is
+      // left alone.
+      qc.invalidateQueries({ queryKey: auroraWalletKeys.subscription() });
+      qc.invalidateQueries({ queryKey: auroraWalletKeys.balance() });
+    },
+  });
+}
+
+/** Starts a one-time credit purchase. Same shape as the subscription one. */
+export function useCreateAuroraTopupCheckout() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (request: CreateAuroraTopupCheckoutRequest) =>
+      createAuroraTopupCheckout(request),
+    onSettled: () => {
+      // Only the wallet moves: a top-up buys credits, not a plan.
+      qc.invalidateQueries({ queryKey: auroraWalletKeys.balance() });
+      qc.invalidateQueries({ queryKey: auroraWalletKeys.transactions() });
     },
   });
 }
