@@ -15,14 +15,15 @@ import {
  * global Multica route — `/onboarding`, `/workspaces/new` — and a workspace can
  * never be named one (creation rejects reserved slugs).
  *
- * Redirecting them matters beyond stray URLs. Shared core relocates away from a
- * lost workspace with a full-page `window.location.assign` to one of those
- * paths (`resolvePostAuthDestination` in `packages/core/paths/resolve.ts`,
- * called from `realtime/use-realtime-sync.ts` when the current workspace is
- * deleted elsewhere or the user is removed from it). Aurora serves none of
- * them, and an Aurora-only account has `onboarded_at == null` — the
- * questionnaire is a Multica-web flow — so the `/onboarding` branch is the
- * common one. The root resolves to the workspace the user still has.
+ * This is a net for stray URLs: a bookmark, an external link, or a typed path.
+ * It used to carry more weight than that. Shared core relocated away from a
+ * lost workspace with a full-page `window.location.assign` to one of these
+ * paths, and an Aurora-only account (`onboarded_at == null` — the
+ * questionnaire is a Multica-web flow) took the `/onboarding` branch every
+ * time. Core now asks the app where to go instead
+ * (`setWorkspaceDestinationResolver`, registered in
+ * `platform/workspace-destination.ts`), so that relocation no longer arrives
+ * here. The root resolves to the workspace the user still has.
  */
 const APP_ROOT_SEGMENTS = new Set(["login", "auth"]);
 
