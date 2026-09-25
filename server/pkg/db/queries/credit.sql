@@ -5,6 +5,10 @@ SELECT available_micro FROM credit_balance WHERE user_id = $1;
 INSERT INTO credit_balance (user_id, available_micro) VALUES ($1, 0)
 ON CONFLICT (user_id) DO NOTHING;
 
+-- name: LockCreditBalance :one
+-- Serializes allowance top-ups for one user before reading their monthly grants.
+SELECT available_micro FROM credit_balance WHERE user_id = $1 FOR UPDATE;
+
 -- name: DeductCreditBalance :one
 UPDATE credit_balance
 SET available_micro = available_micro - sqlc.arg('amount_micro'), updated_at = now()
@@ -42,6 +46,12 @@ SELECT coalesce(sum(amount_micro), 0)::bigint
 FROM credit_ledger
 WHERE user_id = sqlc.arg(user_id) AND kind = ANY(sqlc.arg(kinds)::text[])
   AND created_at >= sqlc.arg(from_ts) AND created_at < sqlc.arg(to_ts);
+
+-- name: SumMonthlyGrantByReference :one
+-- All top-ups toward one natural month's allowance share the same reference.
+SELECT coalesce(sum(amount_micro), 0)::bigint
+FROM credit_ledger
+WHERE user_id = $1 AND kind = 'adjustment' AND reference = $2;
 
 -- name: SumMonthlyGrantInWindow :one
 -- Monthly "sub:" grants only — signup bonuses and topups never expire, so the

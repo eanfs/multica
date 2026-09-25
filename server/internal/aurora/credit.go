@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -85,6 +87,61 @@ func (s *CreditService) Grant(ctx context.Context, userID, workspaceID pgtype.UU
 		return fmt.Errorf("grant amount must be positive, got %d", amountMicro)
 	}
 	return s.adjust(ctx, userID, workspaceID, amountMicro, kind, "grant:"+reference, reference)
+}
+
+// EnsureMonthlyAllowance makes the total monthly subscription grants for a
+// user equal at least targetMicro. Free and paid tiers call the same primitive:
+// a same-month upgrade therefore grants only the difference, while a late Free
+// request after a paid grant is a no-op. The credit_balance row lock serializes
+// competing webhook, settlement, and lazy-Free calls for the same user.
+func (s *CreditService) EnsureMonthlyAllowance(ctx context.Context, userID, workspaceID pgtype.UUID, targetMicro int64, now time.Time) error {
+	if targetMicro <= 0 {
+		return fmt.Errorf("monthly allowance must be positive, got %d", targetMicro)
+	}
+	reference := fmt.Sprintf("sub:%s:%s", util.UUIDToString(userID), now.UTC().Format("2006-01"))
+
+	tx, err := s.tx.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	qtx := s.queries.WithTx(tx)
+	if err := qtx.EnsureCreditBalance(ctx, userID); err != nil {
+		return err
+	}
+	if _, err := qtx.LockCreditBalance(ctx, userID); err != nil {
+		return err
+	}
+	granted, err := qtx.SumMonthlyGrantByReference(ctx, db.SumMonthlyGrantByReferenceParams{
+		UserID: userID, Reference: reference,
+	})
+	if err != nil {
+		return err
+	}
+	if granted >= targetMicro {
+		return tx.Commit(ctx)
+	}
+
+	delta := targetMicro - granted
+	balanceAfter, err := qtx.CreditCreditBalance(ctx, db.CreditCreditBalanceParams{
+		UserID: userID, AmountMicro: delta,
+	})
+	if err != nil {
+		return err
+	}
+	idempotencyKey := fmt.Sprintf("grant:%s:allowance:%d", reference, targetMicro)
+	if _, err := qtx.InsertCreditLedger(ctx, db.InsertCreditLedgerParams{
+		UserID: userID, WorkspaceID: workspaceID, Kind: LedgerKindAdjustment,
+		AmountMicro: delta, BalanceAfterMicro: balanceAfter,
+		Reference: reference, IdempotencyKey: idempotencyKey,
+	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("monthly allowance idempotency collision for %s", reference)
+		}
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // Expire deducts the unused remainder of a monthly grant, recording an

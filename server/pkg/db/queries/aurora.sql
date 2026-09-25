@@ -71,13 +71,16 @@ SELECT count(*) FROM aurora_generation
 WHERE user_id = $1 AND created_at >= date_trunc('month', now());
 
 -- name: CountActiveGenerations :one
--- Concurrency entitlement usage (Plan 5 Task 6). A generation is in flight
--- while its task row is in any non-terminal state; the list mirrors the
--- statuses the runtime sweeper treats as live work.
+-- Concurrency entitlement usage (Plan 5 Task 6). A newly-created queued row
+-- occupies capacity before its task id is attached; once attached, the task's
+-- non-terminal state remains authoritative.
 SELECT count(*) FROM aurora_generation g
-JOIN agent_task_queue t ON t.id = g.task_id
+LEFT JOIN agent_task_queue t ON t.id = g.task_id
 WHERE g.user_id = $1
-  AND t.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred');
+  AND (
+    (g.task_id IS NULL AND g.status = 'queued')
+    OR t.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+  );
 
 -- name: GetPersonalWorkspaceForUser :one
 -- The workspace a user-scoped credit write is attributed to. Aurora's ledger

@@ -13,14 +13,17 @@ import (
 
 const countActiveGenerations = `-- name: CountActiveGenerations :one
 SELECT count(*) FROM aurora_generation g
-JOIN agent_task_queue t ON t.id = g.task_id
+LEFT JOIN agent_task_queue t ON t.id = g.task_id
 WHERE g.user_id = $1
-  AND t.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+  AND (
+    (g.task_id IS NULL AND g.status = 'queued')
+    OR t.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+  )
 `
 
-// Concurrency entitlement usage (Plan 5 Task 6). A generation is in flight
-// while its task row is in any non-terminal state; the list mirrors the
-// statuses the runtime sweeper treats as live work.
+// Concurrency entitlement usage (Plan 5 Task 6). A newly-created queued row
+// occupies capacity before its task id is attached; once attached, the task's
+// non-terminal state remains authoritative.
 func (q *Queries) CountActiveGenerations(ctx context.Context, userID pgtype.UUID) (int64, error) {
 	row := q.db.QueryRow(ctx, countActiveGenerations, userID)
 	var count int64

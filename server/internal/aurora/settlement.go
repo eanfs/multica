@@ -30,19 +30,23 @@ import (
 // (entitlement.go), so their grant expires the same way.
 func RunMonthlySettlement(ctx context.Context, q *db.Queries, credit *CreditService, tiers *TierCatalog, now time.Time) error {
 	now = now.UTC()
-	windowStart := now.AddDate(0, -1, 0)
-	windowMonth := windowStart.Format("2006-01")
+	currentMonthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	previousMonthStart := currentMonthStart.AddDate(0, -1, 0)
+	previousMonth := previousMonthStart.Format("2006-01")
 
-	// Phase 1: expire unused monthly grants.
+	// Phase 1: expire the previous natural month's unused grants. The end is
+	// the first instant of this month, not `now`: this loop runs every day, and
+	// a rolling one-month window on (say) September 24 would include September's
+	// own grant and expire it before the month ended.
 	recipients, err := q.ListMonthlyGrantRecipients(ctx, db.ListMonthlyGrantRecipientsParams{
-		FromTs: pgtype.Timestamptz{Time: windowStart, Valid: true},
-		ToTs:   pgtype.Timestamptz{Time: now, Valid: true},
+		FromTs: pgtype.Timestamptz{Time: previousMonthStart, Valid: true},
+		ToTs:   pgtype.Timestamptz{Time: currentMonthStart, Valid: true},
 	})
 	if err != nil {
 		return err
 	}
 	for _, userID := range recipients {
-		if err := expireUserMonth(ctx, q, credit, userID, windowStart, now, windowMonth); err != nil {
+		if err := expireUserMonth(ctx, q, credit, userID, previousMonthStart, currentMonthStart, previousMonth); err != nil {
 			// Known deviation: if the tick was missed and the user already spent
 			// below the grant amount, Expire returns ErrInsufficientCredits and
 			// this user is skipped — the leftover stays. Never over-deduct, never
@@ -56,7 +60,6 @@ func RunMonthlySettlement(ctx context.Context, q *db.Queries, credit *CreditServ
 	if err != nil {
 		return err
 	}
-	thisMonth := now.Format("2006-01")
 	for _, sub := range subs {
 		tier, ok := tiers.Lookup(sub.Tier)
 		if !ok || tier.MonthlyCreditsMicro() <= 0 {
@@ -68,8 +71,7 @@ func RunMonthlySettlement(ctx context.Context, q *db.Queries, credit *CreditServ
 			slog.Warn("aurora monthly grant skipped for user", "user_id", util.UUIDToString(sub.UserID), "error", err)
 			continue
 		}
-		if err := credit.Grant(ctx, sub.UserID, wsID, tier.MonthlyCreditsMicro(), LedgerKindAdjustment,
-			fmt.Sprintf("sub:%s:%s", util.UUIDToString(sub.UserID), thisMonth)); err != nil {
+		if err := credit.EnsureMonthlyAllowance(ctx, sub.UserID, wsID, tier.MonthlyCreditsMicro(), now); err != nil {
 			slog.Warn("aurora monthly grant skipped for user", "user_id", util.UUIDToString(sub.UserID), "error", err)
 		}
 	}

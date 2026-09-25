@@ -19,6 +19,15 @@ func settlementTiers() *aurora.TierCatalog {
 	return aurora.NewTierCatalog("", "", "", "", "", "")
 }
 
+// naturalMonthStarts returns the UTC boundaries the settlement must use. Tests
+// seed inside the previous calendar month rather than inside a rolling
+// `now-1 month` window, because the production loop runs every day.
+func naturalMonthStarts(now time.Time) (previous, current time.Time) {
+	now = now.UTC()
+	current = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	return current.AddDate(0, -1, 0), current
+}
+
 // seedMonthlyGrant writes the "sub:<userID>:<YYYY-MM>" adjustment a grant
 // produces, at a chosen time. The reference shape is the contract the expiry
 // phase keys on (reference LIKE 'sub:%').
@@ -63,7 +72,7 @@ func TestRunMonthlySettlementExpiresAndGrants(t *testing.T) {
 	user := newAuroraTestUser(t, pool)
 	ws := newAuroraTestWorkspace(t, pool, user)
 	now := time.Now().UTC().Truncate(time.Second)
-	windowStart := now.AddDate(0, -1, 0)
+	windowStart, _ := naturalMonthStarts(now)
 
 	// Last month: a 1000-micro grant, 600 spent, so 400 is left over.
 	seedMonthlyGrant(t, pool, user, ws, 1000, windowStart.Add(time.Hour))
@@ -90,6 +99,35 @@ func TestRunMonthlySettlementExpiresAndGrants(t *testing.T) {
 	}
 }
 
+func TestRunMonthlySettlementUsesNaturalMonthBoundaries(t *testing.T) {
+	svc, pool := newTestCreditService(t)
+	user := newAuroraTestUser(t, pool)
+	ws := newAuroraTestWorkspace(t, pool, user)
+	now := time.Now().UTC().Truncate(time.Second)
+	previousStart, currentStart := naturalMonthStarts(now)
+
+	// The previous calendar month has 600 micro left. This month already has a
+	// separate 700-micro grant. A daily settlement run in the middle of the
+	// month must expire only the 600; a rolling now-1-month window would include
+	// the current grant and expire it early.
+	seedMonthlyGrant(t, pool, user, ws, 1000, previousStart.Add(time.Hour))
+	seedCreditLedgerRow(t, pool, user, ws, aurora.LedgerKindDeduction, -400,
+		"gen-"+uuid.NewString(), "seed-spend-"+uuid.NewString(), previousStart.Add(2*time.Hour))
+	seedMonthlyGrant(t, pool, user, ws, 700, currentStart.Add(time.Hour))
+	seedCreditBalance(t, pool, user, 1300)
+
+	if err := aurora.RunMonthlySettlement(context.Background(), db.New(pool), svc, settlementTiers(), now); err != nil {
+		t.Fatalf("RunMonthlySettlement: %v", err)
+	}
+
+	if count, sum := ledgerCountAndSum(t, pool, user, aurora.LedgerKindExpire); count != 1 || sum != -600 {
+		t.Fatalf("expire rows = %d summing %d, want 1 row summing -600", count, sum)
+	}
+	if bal := creditBalanceOf(t, pool, user); bal != 700 {
+		t.Fatalf("balance = %d, want this month's 700-micro grant untouched", bal)
+	}
+}
+
 // The loop is not bound to the 1st: it runs on every tick, and a tick that
 // lands on the 2nd (a restart, a missed schedule) still settles.
 func TestRunMonthlySettlementCatchUpAfterMissedFirst(t *testing.T) {
@@ -99,9 +137,10 @@ func TestRunMonthlySettlementCatchUpAfterMissedFirst(t *testing.T) {
 	// The clock the loop runs at is a day past the 1st. The rows it writes are
 	// stamped with the database's clock, not this one, so the assertions below
 	// bound the grant window by the real clock, not by `now`.
-	now := time.Now().UTC().Truncate(time.Second).Add(24 * time.Hour)
+	_, currentMonthStart := naturalMonthStarts(time.Now())
+	now := currentMonthStart.Add(36 * time.Hour) // the 2nd at noon UTC
 	grantedSince := time.Now().UTC().Add(-time.Minute)
-	windowStart := now.AddDate(0, -1, 0)
+	windowStart, _ := naturalMonthStarts(now)
 
 	seedMonthlyGrant(t, pool, user, ws, 1000, windowStart.Add(time.Hour))
 	seedCreditLedgerRow(t, pool, user, ws, aurora.LedgerKindDeduction, -600,
@@ -129,7 +168,7 @@ func TestRunMonthlySettlementDoesNotExpireSignupBonusOrTopup(t *testing.T) {
 	user := newAuroraTestUser(t, pool)
 	ws := newAuroraTestWorkspace(t, pool, user)
 	now := time.Now().UTC().Truncate(time.Second)
-	windowStart := now.AddDate(0, -1, 0)
+	windowStart, _ := naturalMonthStarts(now)
 
 	seedCreditLedgerRow(t, pool, user, ws, aurora.LedgerKindAdjustment, 500,
 		"signup:"+util.UUIDToString(user), "seed-signup-"+uuid.NewString(), windowStart.Add(time.Hour))
@@ -158,7 +197,7 @@ func TestRunMonthlySettlementSkipsFailingUser(t *testing.T) {
 	healthyWS := newAuroraTestWorkspace(t, pool, healthy)
 	broken := newAuroraTestUser(t, pool) // no workspace, so no owner membership
 	now := time.Now().UTC().Truncate(time.Second)
-	windowStart := now.AddDate(0, -1, 0)
+	windowStart, _ := naturalMonthStarts(now)
 
 	seedMonthlyGrant(t, pool, healthy, healthyWS, 1000, windowStart.Add(time.Hour))
 	seedCreditBalance(t, pool, healthy, 1000)
@@ -186,7 +225,7 @@ func TestRunMonthlySettlementIdempotent(t *testing.T) {
 	user := newAuroraTestUser(t, pool)
 	ws := newAuroraTestWorkspace(t, pool, user)
 	now := time.Now().UTC().Truncate(time.Second)
-	windowStart := now.AddDate(0, -1, 0)
+	windowStart, _ := naturalMonthStarts(now)
 
 	seedMonthlyGrant(t, pool, user, ws, 1000, windowStart.Add(time.Hour))
 	seedCreditBalance(t, pool, user, 1000)

@@ -9,22 +9,29 @@ import (
 	"github.com/stripe/stripe-go/v86/webhook"
 )
 
-// Event is the minimal Stripe event shape handlers depend on. ID is the
-// Stripe event id — the idempotency key for topup grants. Raw carries the
-// type-specific object JSON (checkout session or subscription), which the
-// handler unmarshals into the stripe-go type for that event.
+// Event is the minimal Stripe event shape handlers depend on. Created orders
+// lifecycle updates; Raw carries the type-specific object JSON (checkout session
+// or subscription), which the handler unmarshals for that event.
 type Event struct {
-	ID   string
-	Type string
-	Raw  []byte
+	ID      string
+	Type    string
+	Created int64
+	Raw     []byte
+}
+
+type SubscriptionState struct {
+	Status            string
+	CustomerID        string
+	CurrentPeriodEnd  time.Time
+	CancelAtPeriodEnd bool
 }
 
 // PaymentProvider is the narrow Stripe surface Aurora needs. Handlers depend
 // on this interface; tests use a fake. The real implementation wraps stripe-go.
 type PaymentProvider interface {
-	CreateSubscriptionCheckout(ctx context.Context, priceID, successURL, cancelURL, userID, tier string) (url string, err error)
+	CreateSubscriptionCheckout(ctx context.Context, priceID, successURL, cancelURL, userID, tier, checkoutID string) (url string, err error)
 	CreateTopupCheckout(ctx context.Context, priceID, successURL, cancelURL, userID, topupID string) (url string, err error)
-	GetSubscriptionPeriodEnd(ctx context.Context, subscriptionID string) (time.Time, error)
+	GetSubscriptionState(ctx context.Context, subscriptionID string) (SubscriptionState, error)
 	ConstructEvent(payload []byte, sigHeader string) (Event, error)
 }
 
@@ -51,16 +58,21 @@ func NewStripeProvider(secretKey, webhookSecret string) *StripeProvider {
 	}
 }
 
-func (p *StripeProvider) CreateSubscriptionCheckout(ctx context.Context, priceID, successURL, cancelURL, userID, tier string) (string, error) {
-	session, err := p.client.V1CheckoutSessions.Create(ctx, &stripe.CheckoutSessionCreateParams{
+func (p *StripeProvider) CreateSubscriptionCheckout(ctx context.Context, priceID, successURL, cancelURL, userID, tier, checkoutID string) (string, error) {
+	metadata := map[string]string{"userId": userID, "tier": tier, "checkoutId": checkoutID}
+	params := &stripe.CheckoutSessionCreateParams{
 		Mode:       stripe.String(stripe.CheckoutSessionModeSubscription),
 		LineItems:  []*stripe.CheckoutSessionCreateLineItemParams{{Price: stripe.String(priceID), Quantity: stripe.Int64(1)}},
 		SuccessURL: stripe.String(successURL),
 		CancelURL:  stripe.String(cancelURL),
-		// The webhook is the only thing that learns who paid: the client
-		// returns to its own route, and the session id is not ours to trust.
-		Metadata: map[string]string{"userId": userID, "tier": tier},
-	})
+		// Session metadata attributes checkout completion; SubscriptionData copies
+		// it onto lifecycle events, allowing an out-of-order update/delete event to
+		// reconcile the pending local intent without waiting for completion first.
+		Metadata:         metadata,
+		SubscriptionData: &stripe.CheckoutSessionCreateSubscriptionDataParams{Metadata: metadata},
+	}
+	params.SetIdempotencyKey(checkoutID)
+	session, err := p.client.V1CheckoutSessions.Create(ctx, params)
 	if err != nil {
 		return "", err
 	}
@@ -84,16 +96,15 @@ func (p *StripeProvider) CreateTopupCheckout(ctx context.Context, priceID, succe
 	return session.URL, nil
 }
 
-// GetSubscriptionPeriodEnd reads the subscription's current billing period
-// end. Stripe moved `current_period_end` off the subscription onto its items
-// (a subscription can now bill several items on different cycles), so the
-// latest item period is the subscription's period — the whole-plan checkout
-// this product sells has exactly one item, and taking the max is what keeps
-// the answer right if that ever stops being true.
-func (p *StripeProvider) GetSubscriptionPeriodEnd(ctx context.Context, subscriptionID string) (time.Time, error) {
+// GetSubscriptionState reads Stripe's canonical lifecycle and billing period.
+// Stripe moved current_period_end off the subscription onto its items (a
+// subscription can now bill several items on different cycles), so the latest
+// item period is the subscription's period. Aurora sells exactly one item, and
+// taking the max remains correct if that changes.
+func (p *StripeProvider) GetSubscriptionState(ctx context.Context, subscriptionID string) (SubscriptionState, error) {
 	sub, err := p.client.V1Subscriptions.Retrieve(ctx, subscriptionID, &stripe.SubscriptionRetrieveParams{})
 	if err != nil {
-		return time.Time{}, err
+		return SubscriptionState{}, err
 	}
 	var end int64
 	if sub.Items != nil {
@@ -107,9 +118,17 @@ func (p *StripeProvider) GetSubscriptionPeriodEnd(ctx context.Context, subscript
 		// A period-less subscription would otherwise be stored as the epoch,
 		// which the monthly grant scan reads as "long expired" — a silent
 		// downgrade instead of a visible failure.
-		return time.Time{}, fmt.Errorf("subscription %s has no current period end", subscriptionID)
+		return SubscriptionState{}, fmt.Errorf("subscription %s has no current period end", subscriptionID)
 	}
-	return time.Unix(end, 0).UTC(), nil
+	state := SubscriptionState{
+		Status:            string(sub.Status),
+		CurrentPeriodEnd:  time.Unix(end, 0).UTC(),
+		CancelAtPeriodEnd: sub.CancelAtPeriodEnd,
+	}
+	if sub.Customer != nil {
+		state.CustomerID = sub.Customer.ID
+	}
+	return state, nil
 }
 
 // ConstructEvent verifies the webhook signature and returns the minimal event
@@ -123,5 +142,5 @@ func (p *StripeProvider) ConstructEvent(payload []byte, sigHeader string) (Event
 	if event.Data != nil {
 		raw = event.Data.Raw
 	}
-	return Event{ID: event.ID, Type: string(event.Type), Raw: raw}, nil
+	return Event{ID: event.ID, Type: string(event.Type), Created: event.Created, Raw: raw}, nil
 }

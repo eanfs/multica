@@ -189,6 +189,18 @@ func (q *Queries) ListMonthlyGrantRecipients(ctx context.Context, arg ListMonthl
 	return items, nil
 }
 
+const lockCreditBalance = `-- name: LockCreditBalance :one
+SELECT available_micro FROM credit_balance WHERE user_id = $1 FOR UPDATE
+`
+
+// Serializes allowance top-ups for one user before reading their monthly grants.
+func (q *Queries) LockCreditBalance(ctx context.Context, userID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, lockCreditBalance, userID)
+	var available_micro int64
+	err := row.Scan(&available_micro)
+	return available_micro, err
+}
+
 const sumCreditLedgerInWindow = `-- name: SumCreditLedgerInWindow :one
 SELECT coalesce(sum(amount_micro), 0)::bigint
 FROM credit_ledger
@@ -214,6 +226,25 @@ func (q *Queries) SumCreditLedgerInWindow(ctx context.Context, arg SumCreditLedg
 		arg.FromTs,
 		arg.ToTs,
 	)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const sumMonthlyGrantByReference = `-- name: SumMonthlyGrantByReference :one
+SELECT coalesce(sum(amount_micro), 0)::bigint
+FROM credit_ledger
+WHERE user_id = $1 AND kind = 'adjustment' AND reference = $2
+`
+
+type SumMonthlyGrantByReferenceParams struct {
+	UserID    pgtype.UUID `json:"user_id"`
+	Reference string      `json:"reference"`
+}
+
+// All top-ups toward one natural month's allowance share the same reference.
+func (q *Queries) SumMonthlyGrantByReference(ctx context.Context, arg SumMonthlyGrantByReferenceParams) (int64, error) {
+	row := q.db.QueryRow(ctx, sumMonthlyGrantByReference, arg.UserID, arg.Reference)
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err

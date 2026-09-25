@@ -518,27 +518,32 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 	// one accounting instance.
 	creditSvc := aurora.NewCreditService(queries, txStarter)
 	taskSvc.Credit = creditSvc
+	// NewStripeProvider returns a concrete pointer so callers that need the
+	// real implementation can use it directly. Do not assign a nil concrete
+	// pointer to the interface field: that would make Payments itself non-nil
+	// and defeat every fail-closed `h.Payments == nil` guard.
+	var payments aurora.PaymentProvider
+	if stripeProvider := aurora.NewStripeProvider(cfg.StripeSecretKey, cfg.StripeWebhookSecret); stripeProvider != nil {
+		payments = stripeProvider
+	}
 	h := &Handler{
-		Queries:                      queries,
-		ReadSelector:                 dbreader.NewPrimaryOnly(queries),
-		DB:                           executor,
-		TxStarter:                    txStarter,
-		Hub:                          hub,
-		DaemonHub:                    daemonHub,
-		DaemonProfileRefresh:         daemonProfileRefresh,
-		DaemonWorkspaceRefresh:       daemonWorkspaceRefresh,
-		DaemonRuntimeGone:            daemonRuntimeGone,
-		Bus:                          bus,
-		TaskService:                  taskSvc,
-		PluginService:                service.NewPluginService(queries, txStarter),
-		IssueService:                 service.NewIssueService(queries, txStarter, bus, analyticsClient, taskSvc),
-		AutopilotService:             service.NewAutopilotService(queries, txStarter, bus, taskSvc),
-		Credit:                       creditSvc,
-		Moderation:                   aurora.NewDefaultModerator(),
-		Payments: aurora.NewStripeProvider(
-			cfg.StripeSecretKey,
-			cfg.StripeWebhookSecret,
-		),
+		Queries:                queries,
+		ReadSelector:           dbreader.NewPrimaryOnly(queries),
+		DB:                     executor,
+		TxStarter:              txStarter,
+		Hub:                    hub,
+		DaemonHub:              daemonHub,
+		DaemonProfileRefresh:   daemonProfileRefresh,
+		DaemonWorkspaceRefresh: daemonWorkspaceRefresh,
+		DaemonRuntimeGone:      daemonRuntimeGone,
+		Bus:                    bus,
+		TaskService:            taskSvc,
+		PluginService:          service.NewPluginService(queries, txStarter),
+		IssueService:           service.NewIssueService(queries, txStarter, bus, analyticsClient, taskSvc),
+		AutopilotService:       service.NewAutopilotService(queries, txStarter, bus, taskSvc),
+		Credit:                 creditSvc,
+		Moderation:             aurora.NewDefaultModerator(),
+		Payments:               payments,
 		Tiers: aurora.NewTierCatalog(
 			cfg.AuroraStripePriceCreatorMonthly,
 			cfg.AuroraStripePriceCreatorYearly,

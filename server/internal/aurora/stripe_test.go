@@ -45,15 +45,14 @@ func TestConstructEventRejectsSignatureFromAnotherSecret(t *testing.T) {
 	}
 }
 
-// The round trip is what proves the provider hands the handler the id and the
-// raw object: Event.ID is the topup idempotency key and Raw is what the
-// handler unmarshals, so a provider that dropped either would break billing in
-// a way no signature test would catch.
+// The round trip is what proves the provider hands the handler the event's
+// identity, ordering timestamp, and raw object. The handler uses those fields
+// for idempotency, stale-event rejection, and object decoding respectively.
 func TestConstructEventRoundTrip(t *testing.T) {
 	// A real Stripe body carries `object: "event"` and the API version of the
 	// endpoint that sent it; stripe-go rejects a body without them before the
 	// handler ever sees it, so the fixture has to look like the real thing.
-	payload := []byte(`{"id":"evt_1","object":"event","api_version":"` + stripe.APIVersion + `","type":"checkout.session.completed","data":{"object":{"id":"cs_1","mode":"payment"}}}`)
+	payload := []byte(`{"id":"evt_1","object":"event","api_version":"` + stripe.APIVersion + `","created":1720000000,"type":"checkout.session.completed","data":{"object":{"id":"cs_1","mode":"payment"}}}`)
 	signed := webhook.GenerateTestSignedPayload(&webhook.UnsignedPayload{
 		Payload:   payload,
 		Secret:    "whsec_test",
@@ -70,6 +69,9 @@ func TestConstructEventRoundTrip(t *testing.T) {
 	}
 	if event.Type != "checkout.session.completed" {
 		t.Fatalf("event type = %q, want checkout.session.completed", event.Type)
+	}
+	if event.Created != 1720000000 {
+		t.Fatalf("event created = %d, want 1720000000", event.Created)
 	}
 	var object struct {
 		ID   string `json:"id"`

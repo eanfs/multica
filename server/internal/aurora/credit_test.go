@@ -95,6 +95,51 @@ func creditBalanceOf(t *testing.T, pool *pgxpool.Pool, userID pgtype.UUID) int64
 	return balance
 }
 
+func TestEnsureMonthlyAllowanceTopsUpToTheHighestTier(t *testing.T) {
+	svc, pool := newTestCreditService(t)
+	user := newAuroraTestUser(t, pool)
+	ws := newAuroraTestWorkspace(t, pool, user)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := svc.EnsureMonthlyAllowance(ctx, user, ws, 200, now); err != nil {
+		t.Fatalf("free EnsureMonthlyAllowance: %v", err)
+	}
+	if err := svc.EnsureMonthlyAllowance(ctx, user, ws, 3000, now); err != nil {
+		t.Fatalf("creator EnsureMonthlyAllowance: %v", err)
+	}
+	// Upgrading in the same month grants only the difference. Granting the full
+	// paid amount after the Free allowance would produce 3,200 instead.
+	if bal := creditBalanceOf(t, pool, user); bal != 3000 {
+		t.Fatalf("balance after same-month upgrade = %d, want 3000", bal)
+	}
+
+	if err := svc.EnsureMonthlyAllowance(ctx, user, ws, 3000, now); err != nil {
+		t.Fatalf("creator retry: %v", err)
+	}
+	if bal := creditBalanceOf(t, pool, user); bal != 3000 {
+		t.Fatalf("balance after retry = %d, want 3000", bal)
+	}
+}
+
+func TestEnsureMonthlyAllowanceNeverDowngradesTheMonth(t *testing.T) {
+	svc, pool := newTestCreditService(t)
+	user := newAuroraTestUser(t, pool)
+	ws := newAuroraTestWorkspace(t, pool, user)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := svc.EnsureMonthlyAllowance(ctx, user, ws, 3000, now); err != nil {
+		t.Fatalf("creator EnsureMonthlyAllowance: %v", err)
+	}
+	if err := svc.EnsureMonthlyAllowance(ctx, user, ws, 200, now); err != nil {
+		t.Fatalf("late free EnsureMonthlyAllowance: %v", err)
+	}
+	if bal := creditBalanceOf(t, pool, user); bal != 3000 {
+		t.Fatalf("balance after lower allowance = %d, want 3000", bal)
+	}
+}
+
 func TestExpireIsIdempotent(t *testing.T) {
 	svc, pool := newTestCreditService(t)
 	user := newAuroraTestUser(t, pool)

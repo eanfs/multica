@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1312,9 +1314,14 @@ func TestAuroraAssetDeleteKeepsRowWhenObjectDeleteFails(t *testing.T) {
 // come from a queue the test fills, so a test can drive an event sequence
 // without a signing secret or a real payload.
 type fakePayments struct {
-	checkoutURL string
-	periodEnd   time.Time
-	events      []aurora.Event
+	checkoutURL        string
+	periodEnd          time.Time
+	subscriptionStatus string
+	cancelAtPeriodEnd  bool
+	events             []aurora.Event
+	// subscriptionCheckoutKeys records the stable key the handler asks Stripe to
+	// use, so tests can prove retries cannot create a second subscription.
+	subscriptionCheckoutKeys []string
 	// checkoutErr, when set, is what both checkout methods return instead of a
 	// URL — the shape of a Stripe outage.
 	checkoutErr error
@@ -1323,7 +1330,8 @@ type fakePayments struct {
 	eventErr error
 }
 
-func (f *fakePayments) CreateSubscriptionCheckout(ctx context.Context, priceID, successURL, cancelURL, userID, tier string) (string, error) {
+func (f *fakePayments) CreateSubscriptionCheckout(ctx context.Context, priceID, successURL, cancelURL, userID, tier, checkoutID string) (string, error) {
+	f.subscriptionCheckoutKeys = append(f.subscriptionCheckoutKeys, checkoutID)
 	if f.checkoutErr != nil {
 		return "", f.checkoutErr
 	}
@@ -1337,8 +1345,16 @@ func (f *fakePayments) CreateTopupCheckout(ctx context.Context, priceID, success
 	return f.checkoutURL, nil
 }
 
-func (f *fakePayments) GetSubscriptionPeriodEnd(ctx context.Context, subscriptionID string) (time.Time, error) {
-	return f.periodEnd, nil
+func (f *fakePayments) GetSubscriptionState(ctx context.Context, subscriptionID string) (aurora.SubscriptionState, error) {
+	status := f.subscriptionStatus
+	if status == "" {
+		status = "active"
+	}
+	return aurora.SubscriptionState{
+		Status:            status,
+		CurrentPeriodEnd:  f.periodEnd,
+		CancelAtPeriodEnd: f.cancelAtPeriodEnd,
+	}, nil
 }
 
 func (f *fakePayments) ConstructEvent(payload []byte, sigHeader string) (aurora.Event, error) {
@@ -1439,6 +1455,25 @@ func TestCreateSubscriptionCheckout(t *testing.T) {
 	}
 }
 
+func TestCreateSubscriptionCheckoutReusesPendingIntent(t *testing.T) {
+	auroraSubscriptionTestReset(t)
+	fp := &fakePayments{checkoutURL: "https://checkout.stripe.com/c/test"}
+	installAuroraPayments(t, fp)
+
+	for range 2 {
+		req := newRequest(http.MethodPost, "/api/aurora/billing/checkout", checkoutBody(map[string]string{
+			"tier": "creator", "billingCycle": "monthly",
+		}))
+		testutil.Call(t, testHandler.CreateAuroraCheckout, req).Want(http.StatusOK)
+	}
+	if len(fp.subscriptionCheckoutKeys) != 2 {
+		t.Fatalf("Stripe checkout calls = %d, want 2 retries", len(fp.subscriptionCheckoutKeys))
+	}
+	if fp.subscriptionCheckoutKeys[0] == "" || fp.subscriptionCheckoutKeys[0] != fp.subscriptionCheckoutKeys[1] {
+		t.Fatalf("checkout idempotency keys = %q, want one stable non-empty key", fp.subscriptionCheckoutKeys)
+	}
+}
+
 func TestCreateSubscriptionCheckoutRequiresReturnURLs(t *testing.T) {
 	installAuroraPayments(t, &fakePayments{checkoutURL: "https://checkout.stripe.com/c/test"})
 	for name, body := range map[string]map[string]string{
@@ -1477,6 +1512,17 @@ func TestCreateSubscriptionCheckoutRejectsUnknownTier(t *testing.T) {
 	}
 }
 
+func TestCreateSubscriptionCheckoutRejectsUnknownBillingCycle(t *testing.T) {
+	auroraSubscriptionTestReset(t)
+	installAuroraPayments(t, &fakePayments{checkoutURL: "https://checkout.stripe.com/c/test"})
+	for _, cycle := range []string{"", "month", "weekly"} {
+		req := newRequest(http.MethodPost, "/api/aurora/billing/checkout", checkoutBody(map[string]string{
+			"tier": "creator", "billingCycle": cycle,
+		}))
+		testutil.Call(t, testHandler.CreateAuroraCheckout, req).Want(http.StatusBadRequest)
+	}
+}
+
 // A tier whose price id is not configured fails closed rather than charging
 // whatever price Stripe's default happens to be.
 func TestCreateSubscriptionCheckoutRejectsUnconfiguredPrice(t *testing.T) {
@@ -1501,6 +1547,19 @@ func TestCreateSubscriptionCheckoutRejectsActiveSubscription(t *testing.T) {
 	installAuroraPayments(t, &fakePayments{checkoutURL: "https://checkout.stripe.com/c/test"})
 	dbfx.Insert(t, "aurora_subscription", testutil.Cols{
 		"user_id": testUserID, "tier": "creator", "status": "active",
+	})
+
+	req := newRequest(http.MethodPost, "/api/aurora/billing/checkout", checkoutBody(map[string]string{
+		"tier": "pro", "billingCycle": "monthly",
+	}))
+	testutil.Call(t, testHandler.CreateAuroraCheckout, req).Want(http.StatusConflict)
+}
+
+func TestCreateSubscriptionCheckoutRejectsUnknownSubscriptionState(t *testing.T) {
+	auroraSubscriptionTestReset(t)
+	installAuroraPayments(t, &fakePayments{checkoutURL: "https://checkout.stripe.com/c/test"})
+	dbfx.Insert(t, "aurora_subscription", testutil.Cols{
+		"user_id": testUserID, "tier": "creator", "status": "paused",
 	})
 
 	req := newRequest(http.MethodPost, "/api/aurora/billing/checkout", checkoutBody(map[string]string{
@@ -1590,6 +1649,27 @@ func TestStripeWebhookFailsClosedWithoutPayments(t *testing.T) {
 	postStripeWebhook(t, `{"type":"checkout.session.completed"}`, http.StatusServiceUnavailable)
 }
 
+func TestStripeWebhookRejectsMissingSignatureBeforeVerification(t *testing.T) {
+	installAuroraPayments(t, &fakePayments{
+		events: []aurora.Event{{ID: "evt_unreachable", Type: "invoice.paid"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/aurora/billing/stripe/webhook", strings.NewReader(`{}`))
+	testutil.Call(t, testHandler.StripeWebhook, req).Want(http.StatusUnauthorized)
+}
+
+func TestStripeWebhookRejectsOversizedBody(t *testing.T) {
+	installAuroraPayments(t, &fakePayments{
+		events: []aurora.Event{{ID: "evt_unreachable", Type: "invoice.paid"}},
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/aurora/billing/stripe/webhook",
+		strings.NewReader(strings.Repeat("x", maxStripeWebhookBodySize+1)),
+	)
+	req.Header.Set(stripeSignatureHeader, "t=1,v1=fake")
+	testutil.Call(t, testHandler.StripeWebhook, req).Want(http.StatusRequestEntityTooLarge)
+}
+
 // A subscription checkout persists the plan and grants the first month
 // immediately, so the buyer can generate without waiting for the settlement
 // loop.
@@ -1602,7 +1682,7 @@ func TestStripeWebhookSubscriptionCompleted(t *testing.T) {
 		events: []aurora.Event{{
 			ID:   "evt_sub_1",
 			Type: "checkout.session.completed",
-			Raw: []byte(`{"id":"cs_1","mode":"subscription","customer":{"id":"cus_1"},` +
+			Raw: []byte(`{"id":"cs_1","mode":"subscription","payment_status":"paid","customer":{"id":"cus_1"},` +
 				`"subscription":{"id":"sub_1"},"metadata":{"userId":"` + testUserID + `","tier":"creator"}}`),
 		}},
 	})
@@ -1625,14 +1705,76 @@ func TestStripeWebhookSubscriptionCompleted(t *testing.T) {
 	}
 }
 
-// A topup credits the wallet keyed by the Stripe event id, so a redelivery of
-// the same event is a no-op rather than a second purchase.
+func TestStripeWebhookSubscriptionCompletedUsesCanonicalStatus(t *testing.T) {
+	creditTestReset(t)
+	auroraSubscriptionTestReset(t)
+	fp := &fakePayments{
+		checkoutURL:        "https://checkout.stripe.com/c/state",
+		periodEnd:          time.Now().Add(30 * 24 * time.Hour).UTC(),
+		subscriptionStatus: "past_due",
+	}
+	installAuroraPayments(t, fp)
+	req := newRequest(http.MethodPost, "/api/aurora/billing/checkout", checkoutBody(map[string]string{
+		"tier": "creator", "billingCycle": "monthly",
+	}))
+	testutil.Call(t, testHandler.CreateAuroraCheckout, req).Want(http.StatusOK)
+	checkoutID := fp.subscriptionCheckoutKeys[0]
+	fp.events = []aurora.Event{{
+		ID:      "evt_sub_past_due",
+		Type:    "checkout.session.completed",
+		Created: 10,
+		Raw: []byte(`{"id":"cs_state","mode":"subscription","payment_status":"paid",` +
+			`"customer":{"id":"cus_1"},"subscription":{"id":"sub_state"},` +
+			`"metadata":{"userId":"` + testUserID + `","tier":"creator","checkoutId":"` + checkoutID + `"}}`),
+	}}
+
+	postStripeWebhook(t, `{"type":"checkout.session.completed"}`, http.StatusOK)
+
+	_, status, _ := auroraSubscriptionRow(t)
+	if status != "past_due" {
+		t.Fatalf("subscription status = %q, want provider's canonical past_due", status)
+	}
+	if bal, err := testHandler.Credit.Balance(context.Background(), parseUUID(testUserID)); err != nil || bal != 0 {
+		t.Fatalf("past-due checkout balance = %d, err=%v, want no allowance", bal, err)
+	}
+}
+
+func TestStripeWebhookSubscriptionCompletedTopsUpFreeAllowance(t *testing.T) {
+	creditTestReset(t)
+	auroraSubscriptionTestReset(t)
+	userID := parseUUID(testUserID)
+	if err := testHandler.ensureFreeMonthlyGrant(context.Background(), userID); err != nil {
+		t.Fatalf("ensureFreeMonthlyGrant: %v", err)
+	}
+	installAuroraPayments(t, &fakePayments{
+		periodEnd: time.Now().Add(30 * 24 * time.Hour).UTC(),
+		events: []aurora.Event{{
+			ID:   "evt_sub_after_free",
+			Type: "checkout.session.completed",
+			Raw: []byte(`{"id":"cs_after_free","mode":"subscription","payment_status":"paid","customer":{"id":"cus_1"},` +
+				`"subscription":{"id":"sub_after_free"},"metadata":{"userId":"` + testUserID + `","tier":"creator"}}`),
+		}},
+	})
+
+	postStripeWebhook(t, `{"type":"checkout.session.completed"}`, http.StatusOK)
+
+	bal, err := testHandler.Credit.Balance(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if want := int64(3000) * microCreditsPerCredit; bal != want {
+		t.Fatalf("balance after Free-to-Creator upgrade = %d, want %d", bal, want)
+	}
+}
+
+// A topup credits the wallet keyed by the Stripe Checkout Session id, so a
+// redelivery of the same purchase is a no-op rather than a second credit.
 func TestStripeWebhookTopupCompleted(t *testing.T) {
 	creditTestReset(t)
 	event := aurora.Event{
 		ID:   "evt_topup_1",
 		Type: "checkout.session.completed",
-		Raw:  []byte(`{"id":"cs_2","mode":"payment","metadata":{"userId":"` + testUserID + `","topupId":"t5"}}`),
+		Raw:  []byte(`{"id":"cs_2","mode":"payment","payment_status":"paid","metadata":{"userId":"` + testUserID + `","topupId":"t5"}}`),
 	}
 	installAuroraPayments(t, &fakePayments{events: []aurora.Event{event, event}})
 
@@ -1655,6 +1797,57 @@ func TestStripeWebhookTopupCompleted(t *testing.T) {
 	if replayed != bal {
 		t.Fatalf("replayed topup changed the balance: before=%d after=%d", bal, replayed)
 	}
+}
+
+func TestStripeWebhookTopupWaitsForDelayedPayment(t *testing.T) {
+	creditTestReset(t)
+	metadata := `"metadata":{"userId":"` + testUserID + `","topupId":"t5"}`
+	installAuroraPayments(t, &fakePayments{events: []aurora.Event{
+		{
+			ID:   "evt_topup_unpaid",
+			Type: "checkout.session.completed",
+			Raw:  []byte(`{"id":"cs_delayed","mode":"payment","payment_status":"unpaid",` + metadata + `}`),
+		},
+		{
+			ID:   "evt_topup_paid",
+			Type: "checkout.session.async_payment_succeeded",
+			Raw:  []byte(`{"id":"cs_delayed","mode":"payment","payment_status":"paid",` + metadata + `}`),
+		},
+		{
+			ID:   "evt_topup_paid_late",
+			Type: "checkout.session.completed",
+			Raw:  []byte(`{"id":"cs_delayed","mode":"payment","payment_status":"paid",` + metadata + `}`),
+		},
+	}})
+
+	postStripeWebhook(t, `{"type":"checkout.session.completed"}`, http.StatusOK)
+	if bal, err := testHandler.Credit.Balance(context.Background(), parseUUID(testUserID)); err != nil || bal != 0 {
+		t.Fatalf("balance before delayed payment = %d, err=%v, want 0", bal, err)
+	}
+
+	postStripeWebhook(t, `{"type":"checkout.session.async_payment_succeeded"}`, http.StatusOK)
+	want := int64(5000) * microCreditsPerCredit
+	if bal, err := testHandler.Credit.Balance(context.Background(), parseUUID(testUserID)); err != nil || bal != want {
+		t.Fatalf("balance after delayed payment = %d, err=%v, want %d", bal, err, want)
+	}
+
+	// A second paid event for the same Checkout Session is the same purchase,
+	// even though Stripe assigned it a different event id.
+	postStripeWebhook(t, `{"type":"checkout.session.completed"}`, http.StatusOK)
+	if bal, err := testHandler.Credit.Balance(context.Background(), parseUUID(testUserID)); err != nil || bal != want {
+		t.Fatalf("balance after duplicate paid event = %d, err=%v, want %d", bal, err, want)
+	}
+}
+
+func TestStripeWebhookRetriesPaidUnknownCatalogItem(t *testing.T) {
+	installAuroraPayments(t, &fakePayments{events: []aurora.Event{{
+		ID:   "evt_unknown_topup",
+		Type: "checkout.session.completed",
+		Raw: []byte(`{"id":"cs_unknown","mode":"payment","payment_status":"paid",` +
+			`"metadata":{"userId":"` + testUserID + `","topupId":"retired-pack"}}`),
+	}}})
+
+	postStripeWebhook(t, `{"type":"checkout.session.completed"}`, http.StatusInternalServerError)
 }
 
 // The userId in an event's metadata arrives from a third party. A malformed one
@@ -1746,6 +1939,50 @@ func TestStripeWebhookSubscriptionDeleted(t *testing.T) {
 	}
 }
 
+func TestStripeWebhookDoesNotReactivateAfterOutOfOrderDeletion(t *testing.T) {
+	creditTestReset(t)
+	auroraSubscriptionTestReset(t)
+	fp := &fakePayments{
+		checkoutURL: "https://checkout.stripe.com/c/order",
+		periodEnd:   time.Now().Add(30 * 24 * time.Hour).UTC(),
+	}
+	installAuroraPayments(t, fp)
+	req := newRequest(http.MethodPost, "/api/aurora/billing/checkout", checkoutBody(map[string]string{
+		"tier": "creator", "billingCycle": "monthly",
+	}))
+	testutil.Call(t, testHandler.CreateAuroraCheckout, req).Want(http.StatusOK)
+	checkoutID := fp.subscriptionCheckoutKeys[0]
+
+	fp.events = []aurora.Event{
+		{
+			ID:      "evt_delete_newer",
+			Type:    "customer.subscription.deleted",
+			Created: 20,
+			Raw: []byte(`{"id":"sub_ordered","customer":{"id":"cus_1"},"status":"canceled",` +
+				`"metadata":{"userId":"` + testUserID + `","tier":"creator","checkoutId":"` + checkoutID + `"}}`),
+		},
+		{
+			ID:      "evt_checkout_older",
+			Type:    "checkout.session.completed",
+			Created: 10,
+			Raw: []byte(`{"id":"cs_ordered","mode":"subscription","payment_status":"paid",` +
+				`"customer":{"id":"cus_1"},"subscription":{"id":"sub_ordered"},` +
+				`"metadata":{"userId":"` + testUserID + `","tier":"creator","checkoutId":"` + checkoutID + `"}}`),
+		},
+	}
+
+	postStripeWebhook(t, `{"type":"customer.subscription.deleted"}`, http.StatusOK)
+	postStripeWebhook(t, `{"type":"checkout.session.completed"}`, http.StatusOK)
+
+	_, status, _ := auroraSubscriptionRow(t)
+	if status != "canceled" {
+		t.Fatalf("status after newer deletion then older completion = %q, want canceled", status)
+	}
+	if bal, err := testHandler.Credit.Balance(context.Background(), parseUUID(testUserID)); err != nil || bal != 0 {
+		t.Fatalf("balance after stale completion = %d, err=%v, want 0", bal, err)
+	}
+}
+
 // Stripe sends far more event types than this product consumes. An unhandled
 // one must be acked, not a 4xx that makes Stripe redeliver it forever.
 func TestStripeWebhookIgnoresUnknownEventType(t *testing.T) {
@@ -1772,6 +2009,47 @@ func seedAuroraGenerationForUser(t *testing.T, userID string) string {
 		"prompt":       "seeded for an entitlement test",
 		"status":       "completed",
 	})
+}
+
+func TestCreateAuroraGenerationWithEntitlementSerializesConcurrentRequests(t *testing.T) {
+	creditTestReset(t)
+	auroraSubscriptionTestReset(t)
+	auroraGenerationsTestReset(t)
+
+	start := make(chan struct{})
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = testHandler.createAuroraGenerationWithEntitlement(
+				context.Background(),
+				parseUUID(testUserID),
+				parseUUID(testWorkspaceID),
+				"xhs-image",
+				fmt.Sprintf("concurrent entitlement request %d", i),
+			)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	var succeeded, limited int
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, errAuroraConcurrencyLimit):
+			limited++
+		default:
+			t.Fatalf("concurrent create returned unexpected error: %v", err)
+		}
+	}
+	if succeeded != 1 || limited != 1 {
+		t.Fatalf("concurrent creates: succeeded=%d limited=%d, want 1/1", succeeded, limited)
+	}
 }
 
 // The monthly cap is a hard stop: the eleventh generation in a month is refused
@@ -2060,5 +2338,15 @@ func TestListAuroraTopupsHidesPriceIDs(t *testing.T) {
 	response := testutil.Call(t, testHandler.ListAuroraTopups, req).Want(http.StatusOK)
 	if body := response.Text(); strings.Contains(body, "price_secret") {
 		t.Fatalf("topup response leaks a price id: %s", body)
+	}
+}
+
+// NewStripeProvider returns a concrete *StripeProvider, so assigning its nil
+// result straight to the PaymentProvider interface would create a non-nil
+// interface carrying a nil pointer. The handler's 503 guards test the interface
+// itself; this pins the wiring to a genuine nil when Stripe is disabled.
+func TestNewHandlerLeavesPaymentsNilWithoutStripeSecrets(t *testing.T) {
+	if testHandler.Payments != nil {
+		t.Fatalf("Payments = %#v without Stripe secrets, want a nil interface", testHandler.Payments)
 	}
 }
