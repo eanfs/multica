@@ -19,6 +19,7 @@ import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { Spinner } from "@multica/ui/components/ui/spinner";
 import {
   auroraAssetDownloadPath,
+  isAuroraDegraded,
   isAuroraGenerationTerminal,
   useAuroraAssets,
   useAuroraGenerations,
@@ -55,23 +56,27 @@ export function WorksList() {
   const [pendingDelete, setPendingDelete] = useState<AuroraAsset | null>(null);
   const [deleteFailed, setDeleteFailed] = useState(false);
 
-  const generations = generationsQuery.data ?? [];
-  const assets = assetsQuery.data ?? [];
+  const generations = generationsQuery.data?.value ?? [];
+  const assets = assetsQuery.data?.value ?? [];
+  const skills = skillsQuery.data?.value;
 
   // The catalog is the only place a generation's `skillId` becomes a name. It
   // is the same query the directory reads, so it is already in the cache when
   // the user arrives here.
   const skillNames = useMemo(
-    () => skillDisplayNamesById(skillsQuery.data ?? [], locale),
-    [skillsQuery.data, locale],
+    () => skillDisplayNamesById(skills ?? [], locale),
+    [skills, locale],
   );
 
   // Whether an unresolved `skillId` means "the catalog dropped this entry" or
   // "the catalog never loaded". Without the distinction a failed catalog request
   // stamped "Unknown skill" on every row — a screenful of assertions the client
-  // had no basis for. Billing resolves names the same way and stays silent
-  // instead, which is what a row with nothing to say should do.
-  const catalogLoaded = skillsQuery.data !== undefined;
+  // had no basis for. A degraded catalog is the same case: it parses to an empty
+  // list, which resolves the query without ever having read the catalog. Billing
+  // resolves names the same way and stays silent instead, which is what a row
+  // with nothing to say should do.
+  const catalogLoaded =
+    skills !== undefined && !isAuroraDegraded(skillsQuery.data);
 
   async function confirmDelete() {
     const asset = pendingDelete;
@@ -95,9 +100,16 @@ export function WorksList() {
   }
 
   const isLoading = generationsQuery.isPending || assetsQuery.isPending;
+  // A read the schema rejected is a load failure even though the query
+  // resolved: it left `[]` behind, and "nothing here" is a claim the client
+  // never read. A *failed* read is only fatal when it left nothing behind — a
+  // background refetch that dropped over rows already in cache is a stale list,
+  // and replacing a readable one with an error card is the worse trade.
   const loadFailed =
-    (generationsQuery.isError && generations.length === 0) ||
-    (assetsQuery.isError && assets.length === 0);
+    ((generationsQuery.isError || isAuroraDegraded(generationsQuery.data)) &&
+      generations.length === 0) ||
+    ((assetsQuery.isError || isAuroraDegraded(assetsQuery.data)) &&
+      assets.length === 0);
 
   return (
     <div className="flex h-full min-h-0 flex-col">

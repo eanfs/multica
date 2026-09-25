@@ -1,5 +1,9 @@
 import { ApiError, api } from "../api";
-import { parseWithFallback } from "../api/schema";
+import {
+  parseWithFallback,
+  parseWithFallbackResult,
+  type ParseResult,
+} from "../api/schema";
 import {
   auroraAssetsSchema,
   auroraBalanceSchema,
@@ -39,9 +43,19 @@ import type {
  * shared client still owns the transport: `api.requestJson` carries the auth
  * and CSRF headers, the CSRF retry, the 401 path and the structured `ApiError`.
  *
- * Each `parseAurora*` below is the schema plus its fallback, so a malformed
+ * Each read `parseAurora*` below is the schema plus its fallback, so a malformed
  * body degrades to an empty list, a zero balance, or `null` for a single
- * entity — never a thrown parse error and never a blank screen.
+ * entity — never a thrown parse error and never a blank screen. Each of those
+ * returns that fallback *with* `degraded: true` rather than as a bare value: a
+ * fallback is a placeholder, but "0 credits" and "no skills" are claims, and a
+ * caller cannot tell a corrupted body from a genuinely empty one without the
+ * flag. See `isAuroraDegraded`.
+ *
+ * The purchase-boundary parsers — `parseAuroraSubscription`,
+ * `parseAuroraTopups`, `parseAuroraCheckout` and `parseAuroraTopupCheckout` —
+ * are deliberately the exception: a corrupted body there throws so it becomes a
+ * visible query or mutation error rather than a placeholder a reader could act
+ * on.
  */
 
 const AURORA_SKILLS_PATH = "/api/aurora/skills";
@@ -90,18 +104,21 @@ function querySuffix(
 // ---------------------------------------------------------------------------
 
 // Each fallback is built at the call site rather than shared as a module
-// constant: `parseWithFallback` returns the fallback by reference, so one
-// shared array would be aliased by every degraded cache entry — and a single
-// in-place mutation of any of them would corrupt all the others.
+// constant: the parser returns the fallback by reference, so one shared array
+// would be aliased by every degraded cache entry — and a single in-place
+// mutation of any of them would corrupt all the others.
 
 /** The skill catalog, or an empty directory when the body is unreadable. */
-export function parseAuroraSkills(data: unknown): AuroraSkill[] {
-  return parseWithFallback<{ skills: AuroraSkill[] }>(
+export function parseAuroraSkills(
+  data: unknown,
+): ParseResult<AuroraSkill[]> {
+  const parsed = parseWithFallbackResult<{ skills: AuroraSkill[] }>(
     data,
     auroraSkillsSchema,
     { skills: [] },
     { endpoint: SKILLS_ENDPOINT },
-  ).skills;
+  );
+  return { value: parsed.value.skills, degraded: parsed.degraded };
 }
 
 /**
@@ -114,54 +131,54 @@ export function parseAuroraSkills(data: unknown): AuroraSkill[] {
  */
 export function parseAuroraGeneration(
   data: unknown,
-): AuroraGeneration | null {
-  return (
-    parseWithFallback<{ generation: AuroraGeneration } | null>(
-      data,
-      auroraGenerationResponseSchema,
-      null,
-      { endpoint: CREATE_GENERATION_ENDPOINT },
-    )?.generation ?? null
-  );
+): ParseResult<AuroraGeneration | null> {
+  const parsed = parseWithFallbackResult<{
+    generation: AuroraGeneration;
+  } | null>(data, auroraGenerationResponseSchema, null, {
+    endpoint: CREATE_GENERATION_ENDPOINT,
+  });
+  return { value: parsed.value?.generation ?? null, degraded: parsed.degraded };
 }
 
 /** One page of the workspace's generations, or an empty list. */
-export function parseAuroraGenerations(data: unknown): AuroraGeneration[] {
-  return parseWithFallback<{ generations: AuroraGeneration[] }>(
+export function parseAuroraGenerations(
+  data: unknown,
+): ParseResult<AuroraGeneration[]> {
+  const parsed = parseWithFallbackResult<{ generations: AuroraGeneration[] }>(
     data,
     auroraGenerationsSchema,
     { generations: [] },
     { endpoint: GENERATIONS_ENDPOINT },
-  ).generations;
+  );
+  return { value: parsed.value.generations, degraded: parsed.degraded };
 }
 
 /** One generation with its assets, or null when the body is unreadable. */
 export function parseAuroraGenerationDetail(
   data: unknown,
-): AuroraGenerationDetail | null {
-  return (
-    parseWithFallback<{ generation: AuroraGenerationDetail } | null>(
-      data,
-      auroraGenerationDetailSchema,
-      null,
-      { endpoint: GENERATION_ENDPOINT },
-    )?.generation ?? null
-  );
+): ParseResult<AuroraGenerationDetail | null> {
+  const parsed = parseWithFallbackResult<{
+    generation: AuroraGenerationDetail;
+  } | null>(data, auroraGenerationDetailSchema, null, {
+    endpoint: GENERATION_ENDPOINT,
+  });
+  return { value: parsed.value?.generation ?? null, degraded: parsed.degraded };
 }
 
 /** The workspace's asset library, or an empty library. */
-export function parseAuroraAssets(data: unknown): AuroraAsset[] {
-  return parseWithFallback<{ assets: AuroraAsset[] }>(
+export function parseAuroraAssets(data: unknown): ParseResult<AuroraAsset[]> {
+  const parsed = parseWithFallbackResult<{ assets: AuroraAsset[] }>(
     data,
     auroraAssetsSchema,
     { assets: [] },
     { endpoint: ASSETS_ENDPOINT },
-  ).assets;
+  );
+  return { value: parsed.value.assets, degraded: parsed.degraded };
 }
 
 /** The caller's wallet, or a zero balance the next refetch will correct. */
-export function parseAuroraBalance(data: unknown): AuroraBalance {
-  return parseWithFallback<AuroraBalance>(
+export function parseAuroraBalance(data: unknown): ParseResult<AuroraBalance> {
+  return parseWithFallbackResult<AuroraBalance>(
     data,
     auroraBalanceSchema,
     { availableMicro: 0 },
@@ -170,13 +187,15 @@ export function parseAuroraBalance(data: unknown): AuroraBalance {
 }
 
 /** The caller's ledger, newest first, or an empty ledger. */
-export function parseAuroraTransactions(data: unknown): AuroraTransaction[] {
-  return parseWithFallback<{ transactions: AuroraTransaction[] }>(
-    data,
-    auroraTransactionsSchema,
-    { transactions: [] },
-    { endpoint: TRANSACTIONS_ENDPOINT },
-  ).transactions;
+export function parseAuroraTransactions(
+  data: unknown,
+): ParseResult<AuroraTransaction[]> {
+  const parsed = parseWithFallbackResult<{
+    transactions: AuroraTransaction[];
+  }>(data, auroraTransactionsSchema, { transactions: [] }, {
+    endpoint: TRANSACTIONS_ENDPOINT,
+  });
+  return { value: parsed.value.transactions, degraded: parsed.degraded };
 }
 
 /**
@@ -249,7 +268,7 @@ function parseCheckoutUrl(data: unknown, endpoint: string): string {
 // ---------------------------------------------------------------------------
 
 /** The catalog, including the phase-2 skills that cannot be run yet. */
-export async function listAuroraSkills(): Promise<AuroraSkill[]> {
+export async function listAuroraSkills(): Promise<ParseResult<AuroraSkill[]>> {
   return parseAuroraSkills(await api.requestJson(AURORA_SKILLS_PATH));
 }
 
@@ -263,7 +282,7 @@ export async function listAuroraSkills(): Promise<AuroraSkill[]> {
  */
 export async function createAuroraGeneration(
   request: CreateAuroraGenerationRequest,
-): Promise<AuroraGeneration | null> {
+): Promise<ParseResult<AuroraGeneration | null>> {
   const raw = await api.requestJson(AURORA_GENERATIONS_PATH, {
     method: "POST",
     body: JSON.stringify(request),
@@ -274,7 +293,7 @@ export async function createAuroraGeneration(
 /** The workspace's generations, newest first. */
 export async function listAuroraGenerations(
   params?: AuroraListParams,
-): Promise<AuroraGeneration[]> {
+): Promise<ParseResult<AuroraGeneration[]>> {
   const raw = await api.requestJson(
     `${AURORA_GENERATIONS_PATH}${querySuffix(params)}`,
   );
@@ -284,7 +303,7 @@ export async function listAuroraGenerations(
 /** One generation with its assets — the progress screen's polling source. */
 export async function getAuroraGeneration(
   id: string,
-): Promise<AuroraGenerationDetail | null> {
+): Promise<ParseResult<AuroraGenerationDetail | null>> {
   const raw = await api.requestJson(
     `${AURORA_GENERATIONS_PATH}/${encodeURIComponent(id)}`,
   );
@@ -294,7 +313,7 @@ export async function getAuroraGeneration(
 /** The workspace's content library, optionally narrowed to one generation. */
 export async function listAuroraAssets(
   params?: AuroraAssetsParams,
-): Promise<AuroraAsset[]> {
+): Promise<ParseResult<AuroraAsset[]>> {
   const raw = await api.requestJson(
     `${AURORA_ASSETS_PATH}${querySuffix(params)}`,
   );
@@ -321,12 +340,14 @@ export function auroraAssetDownloadPath(assetId: string): string {
 }
 
 /** The caller's wallet. Every workspace shows the same balance. */
-export async function getAuroraBalance(): Promise<AuroraBalance> {
+export async function getAuroraBalance(): Promise<ParseResult<AuroraBalance>> {
   return parseAuroraBalance(await api.requestJson(AURORA_BALANCE_PATH));
 }
 
 /** The caller's ledger, newest first. */
-export async function listAuroraTransactions(): Promise<AuroraTransaction[]> {
+export async function listAuroraTransactions(): Promise<
+  ParseResult<AuroraTransaction[]>
+> {
   return parseAuroraTransactions(
     await api.requestJson(AURORA_TRANSACTIONS_PATH),
   );
@@ -413,4 +434,23 @@ export function isAuroraCheckoutConflictError(error: unknown): boolean {
  */
 export function isAuroraPaymentsUnavailableError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 503;
+}
+
+/**
+ * A read the server answered 2xx to, with a body the schema rejected.
+ *
+ * The query is not in an error state — nothing threw — so a view that branches
+ * on `isError` alone would render the fallback as if it were the response: an
+ * empty directory, an empty library, or a wallet holding 0. Reading this
+ * alongside `isError` is what makes a corrupted body a load failure rather
+ * than an empty state. Takes `undefined` because a query that has not resolved
+ * yet has no payload to judge.
+ *
+ * The `schemaLogger` warning is still the diagnostic trail for *why* the body
+ * failed; this only says that it did.
+ */
+export function isAuroraDegraded(
+  payload: ParseResult<unknown> | undefined,
+): boolean {
+  return payload?.degraded === true;
 }

@@ -10,6 +10,7 @@ import {
   deleteAuroraAsset,
   getAuroraSubscription,
   isAuroraCheckoutConflictError,
+  isAuroraDegraded,
   isAuroraInsufficientCreditsError,
   isAuroraPaymentsUnavailableError,
   isAuroraRateLimitError,
@@ -60,14 +61,18 @@ describe("parseAuroraSkills", () => {
       ],
     });
 
-    expect(skills).toHaveLength(1);
-    expect(skills[0]?.nameEn).toBe("Poster");
-    expect(skills[0]?.credits).toBe(760);
+    expect(skills.degraded).toBe(false);
+    expect(skills.value).toHaveLength(1);
+    expect(skills.value[0]?.nameEn).toBe("Poster");
+    expect(skills.value[0]?.credits).toBe(760);
   });
 
-  it("degrades a non-array body to an empty directory", () => {
-    expect(parseAuroraSkills({ skills: "not-an-array" })).toEqual([]);
-    expect(parseAuroraSkills(null)).toEqual([]);
+  it("degrades a non-array body to an empty directory, flagged as degraded", () => {
+    expect(parseAuroraSkills({ skills: "not-an-array" })).toEqual({
+      value: [],
+      degraded: true,
+    });
+    expect(parseAuroraSkills(null)).toEqual({ value: [], degraded: true });
   });
 
   it("degrades an entry missing a required field to an empty directory", () => {
@@ -77,19 +82,33 @@ describe("parseAuroraSkills", () => {
       parseAuroraSkills({
         skills: [{ id: "poster", name: "海报制作", category: "image" }],
       }),
-    ).toEqual([]);
+    ).toEqual({ value: [], degraded: true });
+  });
+
+  it("tells a degraded catalog apart from an empty one (GH #55)", () => {
+    // The directory renders "no skills" for both without the flag, and only one
+    // of them is a fact.
+    const empty = parseAuroraSkills({ skills: [] });
+    const degraded = parseAuroraSkills({ skills: "not-an-array" });
+
+    expect(empty.value).toEqual(degraded.value);
+    expect(isAuroraDegraded(empty)).toBe(false);
+    expect(isAuroraDegraded(degraded)).toBe(true);
   });
 });
 
 describe("parseAuroraGenerations", () => {
-  it("degrades a non-array body to an empty list", () => {
-    expect(parseAuroraGenerations({ generations: 42 })).toEqual([]);
+  it("degrades a non-array body to an empty list, flagged as degraded", () => {
+    expect(parseAuroraGenerations({ generations: 42 })).toEqual({
+      value: [],
+      degraded: true,
+    });
   });
 });
 
 describe("parseAuroraGeneration", () => {
   it("unwraps the create response", () => {
-    const generation = parseAuroraGeneration({
+    const parsed = parseAuroraGeneration({
       generation: {
         id: "gen-1",
         skillId: "poster",
@@ -99,15 +118,23 @@ describe("parseAuroraGeneration", () => {
       },
     });
 
-    expect(generation?.id).toBe("gen-1");
-    expect(generation?.creditsReserved).toBe(760);
+    expect(parsed.degraded).toBe(false);
+    expect(parsed.value?.id).toBe("gen-1");
+    expect(parsed.value?.creditsReserved).toBe(760);
   });
 
   it("reads an unreadable body as null rather than an empty generation", () => {
     // A placeholder id here would send the composer to a detail screen for a
-    // generation that does not exist.
-    expect(parseAuroraGeneration({ generation: { id: "gen-1" } })).toBeNull();
-    expect(parseAuroraGeneration("not-an-object")).toBeNull();
+    // generation that does not exist. `degraded` is what the composer turns into
+    // "check My works before starting another" instead of a retry.
+    expect(parseAuroraGeneration({ generation: { id: "gen-1" } })).toEqual({
+      value: null,
+      degraded: true,
+    });
+    expect(parseAuroraGeneration("not-an-object")).toEqual({
+      value: null,
+      degraded: true,
+    });
   });
 });
 
@@ -133,26 +160,33 @@ describe("parseAuroraGenerationDetail", () => {
       },
     });
 
-    expect(detail?.status).toBe("completed");
-    expect(detail?.assets).toHaveLength(1);
-    expect(detail?.assets[0]?.mediaUrl).toBe("https://cdn.example/a.png");
+    expect(detail.degraded).toBe(false);
+    expect(detail.value?.status).toBe("completed");
+    expect(detail.value?.assets).toHaveLength(1);
+    expect(detail.value?.assets[0]?.mediaUrl).toBe("https://cdn.example/a.png");
   });
 
-  it("reads an unreadable body as null", () => {
-    expect(parseAuroraGenerationDetail({ generation: "not-an-object" })).toBeNull();
+  it("reads an unreadable body as a degraded null", () => {
+    expect(
+      parseAuroraGenerationDetail({ generation: "not-an-object" }),
+    ).toEqual({ value: null, degraded: true });
   });
 });
 
 describe("parseAuroraAssets", () => {
-  it("degrades a non-array body to an empty library", () => {
-    expect(parseAuroraAssets({ assets: "not-an-array" })).toEqual([]);
+  it("degrades a non-array body to an empty library, flagged as degraded", () => {
+    expect(parseAuroraAssets({ assets: "not-an-array" })).toEqual({
+      value: [],
+      degraded: true,
+    });
   });
 });
 
 describe("parseAuroraBalance and parseAuroraTransactions", () => {
   it("reads the wallet and the ledger", () => {
     expect(parseAuroraBalance({ availableMicro: 12_000_000 })).toEqual({
-      availableMicro: 12_000_000,
+      value: { availableMicro: 12_000_000 },
+      degraded: false,
     });
     expect(
       parseAuroraTransactions({
@@ -166,13 +200,31 @@ describe("parseAuroraBalance and parseAuroraTransactions", () => {
             createdAt: "2026-09-22T00:00:00Z",
           },
         ],
-      }),
+      }).value,
     ).toHaveLength(1);
   });
 
   it("degrades unreadable bodies to zero and to an empty ledger", () => {
-    expect(parseAuroraBalance("not-an-object").availableMicro).toBe(0);
-    expect(parseAuroraTransactions({ transactions: 7 })).toEqual([]);
+    expect(parseAuroraBalance("not-an-object").value.availableMicro).toBe(0);
+    expect(parseAuroraTransactions({ transactions: 7 }).value).toEqual([]);
+  });
+
+  it("flags a degraded wallet so its 0 cannot be read as a real balance", () => {
+    // The sharpest case in GH #55: a corrupted body parses to a *number*, and
+    // the billing screen printed it as "0 credits" — a claim that sends the user
+    // to top up against a figure the client never read.
+    const broke = parseAuroraBalance({ availableMicro: 0 });
+    const degraded = parseAuroraBalance("not-an-object");
+
+    expect(degraded.value).toEqual(broke.value);
+    expect(isAuroraDegraded(broke)).toBe(false);
+    expect(isAuroraDegraded(degraded)).toBe(true);
+  });
+
+  it("treats a missing payload as not degraded", () => {
+    // A query that has not resolved has no payload to judge; the caller reads
+    // that as pending, not as a corrupted body.
+    expect(isAuroraDegraded(undefined)).toBe(false);
   });
 });
 

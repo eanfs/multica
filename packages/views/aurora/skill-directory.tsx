@@ -12,7 +12,11 @@ import {
   TabsTrigger,
 } from "@multica/ui/components/ui/tabs";
 import { cn } from "@multica/ui/lib/utils";
-import { useAuroraSkills, type AuroraSkill } from "@multica/core/aurora";
+import {
+  isAuroraDegraded,
+  useAuroraSkills,
+  type AuroraSkill,
+} from "@multica/core/aurora";
 import {
   CollectionPageHeader,
   CollectionPageState,
@@ -65,7 +69,7 @@ export function SkillDirectory({
   const [category, setCategory] = useState<string>(AURORA_CATEGORY_ALL);
   const [selected, setSelected] = useState<AuroraSkill | null>(null);
 
-  const skills = skillsQuery.data ?? EMPTY_SKILLS;
+  const skills = skillsQuery.data?.value ?? EMPTY_SKILLS;
 
   // One tab per category the catalog actually uses, in catalog order, rather
   // than a fixed list: a category a newer server adds gets a tab without a
@@ -81,6 +85,12 @@ export function SkillDirectory({
   );
 
   const hasCatalog = skills.length > 0;
+  // A body the schema rejected is not an empty catalog. It parses to `[]` and
+  // resolves the query, so `isError` alone would render the empty state — "the
+  // directory is empty" is a claim the client never read. Both outcomes take
+  // the failure branch; only the one that left rows behind keeps them.
+  const catalogUnreadable =
+    skillsQuery.isError || isAuroraDegraded(skillsQuery.data);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -124,7 +134,7 @@ export function SkillDirectory({
         >
           {skillsQuery.isPending ? (
             <DirectorySkeleton />
-          ) : skillsQuery.isError && !hasCatalog ? (
+          ) : catalogUnreadable && !hasCatalog ? (
             <AuroraLoadFailed
               title={t(($) => $.directory.load_failed_title)}
               onRetry={() => void skillsQuery.refetch()}

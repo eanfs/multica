@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { noopLogger } from "../logger";
 import { ApiClient, ApiError } from "./client";
-import { parseWithFallback } from "./schema";
+import {
+  parseWithFallback,
+  parseWithFallbackResult,
+  setSchemaLogger,
+} from "./schema";
 
 // Helper: stub fetch with a single JSON response. Status defaults to 200.
 function stubFetchJson(body: unknown, status = 200) {
@@ -1129,6 +1134,81 @@ describe("parseWithFallback", () => {
     const fallback = { id: "fallback" };
     const out = parseWithFallback(null, schema, fallback, opts);
     expect(out).toBe(fallback);
+  });
+});
+
+// The degrading sibling (GH #55). The tests above are the guarantee that adding
+// it changed nothing for the callers that only want a value; these are the
+// guarantee that a caller which must not mistake corruption for an empty
+// response has something to branch on.
+describe("parseWithFallbackResult", () => {
+  const opts = { endpoint: "TEST /unit" };
+  const schema = z.object({ id: z.string() });
+
+  afterEach(() => {
+    setSchemaLogger(noopLogger);
+  });
+
+  it("reports a readable body as not degraded", () => {
+    expect(
+      parseWithFallbackResult({ id: "x" }, schema, { id: "fallback" }, opts),
+    ).toEqual({ value: { id: "x" }, degraded: false });
+  });
+
+  it("reports the fallback itself as degraded, by reference", () => {
+    const fallback = { id: "fallback" };
+
+    const out = parseWithFallbackResult({ id: 123 }, schema, fallback, opts);
+
+    // By reference, for the reason the module documents: one shared fallback
+    // array would be aliased by every degraded cache entry.
+    expect(out.value).toBe(fallback);
+    expect(out.degraded).toBe(true);
+  });
+
+  it("tells a body that failed validation apart from one that is genuinely empty", () => {
+    // Both carry an empty list. Only the flag says which one the client read.
+    const listSchema = z.object({ ids: z.array(z.string()) });
+    const empty = parseWithFallbackResult(
+      { ids: [] },
+      listSchema,
+      { ids: [] as string[] },
+      opts,
+    );
+    const degraded = parseWithFallbackResult(
+      null,
+      listSchema,
+      { ids: [] as string[] },
+      opts,
+    );
+
+    expect(empty.value).toEqual(degraded.value);
+    expect(empty.degraded).toBe(false);
+    expect(degraded.degraded).toBe(true);
+  });
+
+  it("keeps the endpoint warning as the diagnostic trail", () => {
+    const warn = vi.fn();
+    setSchemaLogger({ ...noopLogger, warn });
+
+    parseWithFallbackResult({ id: 123 }, schema, { id: "fallback" }, opts);
+
+    expect(warn).toHaveBeenCalledWith(
+      "API response failed schema validation: TEST /unit",
+      expect.objectContaining({
+        endpoint: "TEST /unit",
+        received: { id: 123 },
+      }),
+    );
+  });
+
+  it("stays silent when the body parsed", () => {
+    const warn = vi.fn();
+    setSchemaLogger({ ...noopLogger, warn });
+
+    parseWithFallbackResult({ id: "x" }, schema, { id: "fallback" }, opts);
+
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 

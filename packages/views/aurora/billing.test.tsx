@@ -138,6 +138,14 @@ function subscribeButtonFor(plan: string): HTMLElement {
   return button;
 }
 
+/**
+ * A resolved read, shaped the way `parseAurora*` hands it to the query: the
+ * payload plus whether the body behind it was readable.
+ */
+function read<T>(value: T, degraded = false) {
+  return { data: { value, degraded }, isPending: false };
+}
+
 describe("AuroraBilling", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -146,19 +154,19 @@ describe("AuroraBilling", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.balance.mockReturnValue({
-      data: { availableMicro: 1000 * MICRO },
-      isPending: false,
+      ...read({ availableMicro: 1000 * MICRO }),
       // The error state's retry re-runs both reads, so the wallet needs one too
       // even in the cases that never reach it.
       refetch: vi.fn(),
     });
+    // The error state's retry re-runs the ledger read too, so the ledger needs
+    // a refetch even in the cases that never reach it.
     mocks.transactions.mockReturnValue({
-      data: [transaction()],
-      isPending: false,
+      ...read([transaction()]),
       refetch: vi.fn(),
     });
-    mocks.generations.mockReturnValue({ data: [GENERATION], isPending: false });
-    mocks.skills.mockReturnValue({ data: [POSTER], isPending: false });
+    mocks.generations.mockReturnValue(read([GENERATION]));
+    mocks.skills.mockReturnValue(read([POSTER]));
     mocks.subscription.mockReturnValue({
       data: subscription(),
       isPending: false,
@@ -196,17 +204,16 @@ describe("AuroraBilling", () => {
   it("falls back to the kind's label when the reference is not a generation", () => {
     // Grants and subscription purchases key their rows with their own
     // references (`signup:`, `sub:`), which no catalog can resolve.
-    mocks.transactions.mockReturnValue({
-      data: [
+    mocks.transactions.mockReturnValue(
+      read([
         transaction({
           id: "txn-2",
           kind: "topup",
           amountMicro: 500 * MICRO,
           reference: "signup:2026-09",
         }),
-      ],
-      isPending: false,
-    });
+      ]),
+    );
 
     renderBilling();
 
@@ -215,10 +222,9 @@ describe("AuroraBilling", () => {
   });
 
   it("labels a ledger kind this build has never seen", () => {
-    mocks.transactions.mockReturnValue({
-      data: [transaction({ kind: "chargeback", reference: "unknown:1" })],
-      isPending: false,
-    });
+    mocks.transactions.mockReturnValue(
+      read([transaction({ kind: "chargeback", reference: "unknown:1" })]),
+    );
 
     renderBilling();
 
@@ -226,11 +232,35 @@ describe("AuroraBilling", () => {
   });
 
   it("offers the empty copy before the wallet has moved", () => {
-    mocks.transactions.mockReturnValue({ data: [], isPending: false });
+    mocks.transactions.mockReturnValue(read([]));
 
     renderBilling();
 
     expect(screen.getByText("No activity yet")).toBeInTheDocument();
+  });
+
+  it("reports a corrupted balance as a failed load rather than 0 credits", () => {
+    // GH #55, the sharpest case: a malformed body parses to `availableMicro: 0`,
+    // which resolves the query and used to render as "0 credits" — a statement
+    // about the user's wallet that invites a top-up or a support ticket.
+    mocks.balance.mockReturnValue(
+      read({ availableMicro: 0 }, true),
+    );
+
+    renderBilling();
+
+    expect(screen.getByText("Could not load your credits")).toBeInTheDocument();
+    expect(screen.queryByText("0")).not.toBeInTheDocument();
+    expect(screen.queryByText("Available credits")).not.toBeInTheDocument();
+  });
+
+  it("reports a corrupted ledger as a failed load rather than an empty one", () => {
+    mocks.transactions.mockReturnValue(read([], true));
+
+    renderBilling();
+
+    expect(screen.getByText("Could not load your credits")).toBeInTheDocument();
+    expect(screen.queryByText("No activity yet")).not.toBeInTheDocument();
   });
 
   it("reports a failed load rather than an empty ledger", async () => {
@@ -259,8 +289,7 @@ describe("AuroraBilling", () => {
     // left nothing behind. Replacing a readable balance and ledger with an
     // error card because one background refetch dropped is the worse trade.
     mocks.transactions.mockReturnValue({
-      data: [transaction()],
-      isPending: false,
+      ...read([transaction()]),
       isError: true,
       refetch: vi.fn(),
     });
@@ -315,13 +344,11 @@ describe("AuroraBilling", () => {
     const transactionsRefetch = vi.fn();
     const subscriptionRefetch = vi.fn();
     mocks.balance.mockReturnValue({
-      data: { availableMicro: 1000 * MICRO },
-      isPending: false,
+      ...read({ availableMicro: 1000 * MICRO }),
       refetch: balanceRefetch,
     });
     mocks.transactions.mockReturnValue({
-      data: [transaction()],
-      isPending: false,
+      ...read([transaction()]),
       refetch: transactionsRefetch,
     });
     mocks.subscription.mockReturnValue({
