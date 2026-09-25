@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { renderHook } from "@testing-library/react";
+import { render, renderHook } from "@testing-library/react";
+import type { ReactNode } from "react";
 import {
   resolveWorkspaceDestination,
   setWorkspaceDestinationResolver,
@@ -33,8 +34,9 @@ describe("resolveAuroraWorkspaceDestination", () => {
 
   it("sends an account with no workspace to the screen that explains it", () => {
     // Aurora serves no workspace-creation route, so the alternative to
-    // core's /workspaces/new is /login, where NoWorkspaceNotice offers the
-    // sign-in that opens the personal workspace again.
+    // core's /workspaces/new is /login, where NoWorkspaceNotice explains the
+    // state and offers a log-out button; the next sign-in reopens the
+    // personal workspace.
     expect(
       resolveAuroraWorkspaceDestination({
         workspaces: [],
@@ -70,5 +72,35 @@ describe("useAuroraWorkspaceDestination", () => {
         hasOnboarded: true,
       }),
     ).toBe("/acme/issues");
+  });
+
+  it("registers during render, so a render-time reader sees the app route on the first paint", () => {
+    // Regression: shared views (InvitePage) derive an href from the
+    // module-global resolver while rendering. React runs child effects before
+    // parent effects, so an effect-only registration would leave that child's
+    // first render on core's Multica default. Capture the value at render time
+    // — no waitFor, no extra effect flush — and assert the child saw Aurora.
+    let childSaw: string | null = null;
+
+    function Child() {
+      childSaw = resolveWorkspaceDestination({
+        workspaces: [workspace("acme")],
+        hasOnboarded: true,
+      });
+      return null;
+    }
+
+    function Shell({ children }: { children: ReactNode }) {
+      useAuroraWorkspaceDestination();
+      return <>{children}</>;
+    }
+
+    render(
+      <Shell>
+        <Child />
+      </Shell>,
+    );
+
+    expect(childSaw).toBe("/acme/skills");
   });
 });

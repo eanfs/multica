@@ -263,7 +263,7 @@ git commit -m "feat(aurora): Next.js app wiring for skill directory, works and b
 | 处 | 偏离 | 原因 |
 | --- | --- | --- |
 | Task 2 | i18n 为**五语**（en/zh-Hans/ko/ja/**fr**） | `parity.test.ts` 强制要求全部已注册 locale；计划写的是四语 |
-| Task 3 | `resolvePostAuthDestination` 不可覆盖 | 共享 core 硬编码 Multica 专属路由且无注入点，见 #56 |
+| Task 3 | `resolvePostAuthDestination` 不可覆盖 | 共享 core 硬编码 Multica 专属路由且无注入点，见 #56。**已修复**：core 增加 `resolveWorkspaceDestination` / `setWorkspaceDestinationResolver` 注入点，`apps/aurora` 经 `useAuroraWorkspaceDestination` 注册自己的目的地（PR #83） |
 
 ### 已知后续项（已跟踪，不在此修复）
 

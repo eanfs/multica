@@ -82,7 +82,8 @@ let workspaceDestinationResolver: WorkspaceDestinationResolver | null = null;
  * default resolver returns. Call it from the app shell at startup; pass `null`
  * to go back to the default.
  *
- * Mirrors the NavigationAdapter pattern: the shared layer owns when the
+ * Same module-global seam as `setCurrentWorkspace` and
+ * `registerSystemNotificationClickHandler`: the shared layer owns when the
  * decision is made, the app owns what the answer is.
  */
 export function setWorkspaceDestinationResolver(
