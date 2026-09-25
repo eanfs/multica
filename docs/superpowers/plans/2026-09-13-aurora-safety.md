@@ -33,8 +33,8 @@
   - `type Moderator interface { ScreenPrompt(ctx context.Context, text string) (Decision, error); ScreenAsset(ctx context.Context, mediaURL, kind string) (Decision, error) }`
   - `func NewDefaultModerator() Moderator` —— 违禁词表（中英双语，仓库内常量，加载自 `server/internal/aurora/blocked_terms.json`）+ 图片 NSFW 本地检测（MVP 用本地模型推理，如 opennsfw2；实现时确认 Go 侧可用的本地方案，不引入外部服务）；`kind` 为 video 时 MVP 只做文件名/URL 与元数据校验（帧级审核二期）。
 
-- [ ] **Step 1: 写测试**（违禁词中英命中/边界/大小写；`Decision.Allowed=false` 时 Reason 非空；未知异常 → fail-closed；NSFW 检测用固定样本图——测试夹具放 `server/internal/aurora/testdata/`）
-- [ ] **Step 2: 实现 + 跑测试 + Commit**
+- [x] **Step 1: 写测试**（违禁词中英命中/边界/大小写；`Decision.Allowed=false` 时 Reason 非空；未知异常 → fail-closed；NSFW 检测用固定样本图——测试夹具放 `server/internal/aurora/testdata/`）
+- [x] **Step 2: 实现 + 跑测试 + Commit**
 
 ```bash
 cd server && go test ./internal/aurora/ -run TestModerator
@@ -57,8 +57,8 @@ git commit -m "feat(aurora): moderation adapter with keyword and NSFW defaults"
 - **prompt 前置**：`CreateAuroraGeneration` 在插行前 `ScreenPrompt` → `Allowed=false` → `422` + 记录 `moderation_log`（generation 不落行，`generation_id` 记 NULL 或记请求 hash——实现时择一并在注释说明）；adapter 报错 → `500`（fail-closed）。
 - **asset 后置**：Plan 3 Task 4 回写前对每个产物 `ScreenAsset` → 未过 → 任务判 `failed`（`error='moderation blocked'`）+ `Refund` + asset 不落库 + 记 `moderation_log`。
 
-- [ ] **Step 1: 写失败测试**（违禁 prompt → 422 + log 落行；正常 prompt → 201；后置：blocked 产物 → generation failed + 退款 + 无 asset 行）
-- [ ] **Step 2: 实现 + 跑测试 + Commit**
+- [x] **Step 1: 写失败测试**（违禁 prompt → 422 + log 落行；正常 prompt → 201；后置：blocked 产物 → generation failed + 退款 + 无 asset 行）
+- [x] **Step 2: 实现 + 跑测试 + Commit**
 
 ```bash
 cd server && go test ./internal/handler/ -run TestAuroraModeration
@@ -83,19 +83,19 @@ git commit -m "feat(aurora): wire moderation into generation create and completi
 
 ## 执行交接
 
-完成顺序：Plan 3.5 → Plan 4 → 本计划（可在 Plan 4 之后、上线前完成；Task 1 可随时先行）→ Plan 5（订阅 + Stripe + 权益门禁 enforcement，`2026-09-13-aurora-subscriptions-payments.md`，已编写）。
+Implementation order completed: Plan 3.5 → Plan 4 → this plan → Plan 5 (`2026-09-13-aurora-subscriptions-payments.md`). Remaining work is limited to the deferred items above.
 
 ---
 
-## 实现状态（2026-09-24 记录）
+## Implementation status (2026-09-25)
 
-**Task 1 与 Task 2 已实现**（#63 / #65，迁移 `510`–`511`，原计划的 `459` 按实际顺延）。
+**Tasks 1 and 2 are complete and merged in PR #75** (tickets #63 and #65; migrations `510`–`511`, renumbered from the plan's original `459`).
 
-- **Task 1** —— 默认 adapter 是仓库内中英双语违禁词表（`blocked_terms.json`，ASCII 词按整词匹配以免 `rape` 命中 `grape`，CJK 词按子串匹配）+ 本地图片肤色启发式检测（纯 Go、无外部服务、无模型权重）。视频在 MVP 只校验容器，其余类型只校验 URL。
-- **Task 2** —— 接入点是 `CreateAuroraGeneration`（prompt 前置审核：拒绝时 `422` + 审计行，且不 seed agent、不 reserve、不落 generation 行）与 `ReportTaskArtifacts`（产物后置审核：拒绝时 generation 判 `failed` + 退款 + 不落 asset 行 + 审计行）。`fail-closed` 是硬线：adapter 报错一律按拒绝处理并记录。
+- **Task 1** — the default adapter uses the repository-owned bilingual blocklist (`blocked_terms.json`; whole-word matching for ASCII terms and substring matching for CJK terms) plus local, pure-Go image screening. Video screening validates the container at the MVP stage; other asset kinds validate the URL.
+- **Task 2** — prompt pre-screening runs in `CreateAuroraGeneration` before any agent seeding, credit reservation, or generation insert. Asset post-screening runs in `ReportTaskArtifacts` before `CreateAuroraAsset`; blocked output fails the generation, refunds the reservation, writes no asset row, and records the moderation decision. Adapter errors fail closed.
 
-> **回写文件与计划不符（已按实际实现）。** 计划写的是 `server/internal/service/aurora_completion.go`，那是 Plan 3 落地前的预期；实际回写路径是 `server/internal/handler/aurora_artifact.go` 的 `ReportTaskArtifacts`，它是 `CreateAuroraAsset` 的唯一调用点。后置审核必须落在写行之前才能满足「asset 不落库」，因此接在那里而不是 `aurora_completion.go`。
+> **Writeback file differs from the plan's forecast.** The plan named `server/internal/service/aurora_completion.go` before Plan 3 had landed. The actual writeback path is `ReportTaskArtifacts` in `server/internal/handler/aurora_artifact.go`, the sole caller of `CreateAuroraAsset`, so post-screening is wired there before the asset insert.
 
-**Deferred 部分未变**：供应商审核 API、视频帧级审核、权益门禁 `GateAurora*`（self-host 下 fail-open 已核实）、审核复核 UI。
+**The local entitlement portion is also complete through Plan 5 Task 6** (PR #77, story #62): `aurora.LimitsForUser` enforces monthly generation and concurrency limits from `TierCatalog`, including serialized Free-tier monthly allowance grants. Cloud `GateAurora*` integration remains deferred because self-hosted entitlement still fails open without a cloud BaseURL.
 
-**Plan 5 仍未开始**，其迁移序号同样需要在动手前按合并时 `server/migrations` 最新重排（本计划原假设 `459`，实际顺延到 `510`/`511`）。
+The other deferred items are unchanged: a vendor moderation adapter, frame-level video moderation, and a moderation review/appeals UI.
