@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -150,4 +151,402 @@ func TestAuroraSandboxNodeUniquenessAndConsumption(t *testing.T) {
 			t.Fatalf("expired consume = %v, want no rows", err)
 		}
 	})
+}
+
+// validSandboxImageDigest is a well-formed image reference: the registry host,
+// the repository, and a 64-character lowercase sha256 digest.
+var validSandboxImageDigest = "ghcr.io/eanfs/multica-aurora@sha256:" + strings.Repeat("a", 64)
+
+// newSandboxEnrollmentService wires the service under test on the fixture pool.
+// now is injected so token lifetimes and expiry are asserted exactly.
+func newSandboxEnrollmentService(t *testing.T, pool *pgxpool.Pool, now func() time.Time) (*aurora.SandboxEnrollmentService, *db.Queries) {
+	t.Helper()
+	q := db.New(pool)
+	return aurora.NewSandboxEnrollmentService(pool, q, now), q
+}
+
+// sandboxNodeByWorkspace loads the workspace's single node row, failing the
+// test when it is missing.
+func sandboxNodeByWorkspace(t *testing.T, pool *pgxpool.Pool, ws pgtype.UUID) db.AuroraSandboxNode {
+	t.Helper()
+	node, err := db.New(pool).GetAuroraSandboxNodeByWorkspace(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("get sandbox node: %v", err)
+	}
+	return node
+}
+
+func TestSandboxEnrollmentIssueCreatesStartingNode(t *testing.T) {
+	pool := auroraTestPool(t)
+	q := db.New(pool)
+	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
+	ctx := context.Background()
+	current := time.Now().UTC().Truncate(time.Microsecond)
+	svc, _ := newSandboxEnrollmentService(t, pool, func() time.Time { return current })
+
+	issued, err := svc.Issue(ctx, ws, runtimeID, validSandboxImageDigest)
+	if err != nil {
+		t.Fatalf("issue enrollment: %v", err)
+	}
+	if issued.Identity.WorkspaceID != ws {
+		t.Errorf("issued workspace = %v, want %v", issued.Identity.WorkspaceID, ws)
+	}
+	if issued.Identity.RuntimeID != runtimeID {
+		t.Errorf("issued runtime = %v, want %v", issued.Identity.RuntimeID, runtimeID)
+	}
+	if !issued.Identity.NodeID.Valid {
+		t.Error("issued node id is NULL")
+	}
+	wantDaemonID := "aurora-" + util.UUIDToString(issued.Identity.NodeID)
+	if issued.Identity.DaemonID != wantDaemonID {
+		t.Errorf("issued daemon id = %q, want %q", issued.Identity.DaemonID, wantDaemonID)
+	}
+	if !strings.HasPrefix(issued.Token, "mse_") || len(issued.Token) != len("mse_")+40 {
+		t.Errorf("issued token %q is not mse_ + 40 hex chars", issued.Token)
+	}
+	if want := current.Add(5 * time.Minute); !issued.ExpiresAt.Equal(want) {
+		t.Errorf("issued expiry = %v, want %v", issued.ExpiresAt, want)
+	}
+
+	node := sandboxNodeByWorkspace(t, pool, ws)
+	if node.State != "starting" {
+		t.Errorf("node state = %q, want starting", node.State)
+	}
+	if node.ID != issued.Identity.NodeID {
+		t.Errorf("stored node id = %v, want %v", node.ID, issued.Identity.NodeID)
+	}
+	if !node.EnrollmentTokenHash.Valid || node.EnrollmentTokenHash.String != auth.HashToken(issued.Token) {
+		t.Errorf("stored enrollment hash = %+v, want the issued token's hash", node.EnrollmentTokenHash)
+	}
+	if !node.EnrollmentExpiresAt.Valid || !node.EnrollmentExpiresAt.Time.Equal(issued.ExpiresAt) {
+		t.Errorf("stored expiry = %+v, want %v", node.EnrollmentExpiresAt, issued.ExpiresAt)
+	}
+	if node.StartedAt.Valid {
+		t.Error("a freshly issued node already has started_at")
+	}
+
+	t.Run("rejects an active node without minting a second token", func(t *testing.T) {
+		wsActive, rtActive := newSandboxNodeWorkspace(t, q, pool)
+		activeSvc, _ := newSandboxEnrollmentService(t, pool, func() time.Time { return current })
+		active, err := activeSvc.Issue(ctx, wsActive, rtActive, validSandboxImageDigest)
+		if err != nil {
+			t.Fatalf("issue active enrollment: %v", err)
+		}
+		if _, _, err := activeSvc.Consume(ctx, active.Token); err != nil {
+			t.Fatalf("consume to activate: %v", err)
+		}
+		if _, err := activeSvc.Issue(ctx, wsActive, rtActive, validSandboxImageDigest); !errors.Is(err, aurora.ErrSandboxNodeAlreadyActive) {
+			t.Fatalf("issue on online node = %v, want ErrSandboxNodeAlreadyActive", err)
+		}
+		if node := sandboxNodeByWorkspace(t, pool, wsActive); node.EnrollmentTokenHash.Valid {
+			t.Error("online node was re-armed with a second secret")
+		}
+
+		if _, err := q.MarkAuroraSandboxNodeDraining(ctx, db.MarkAuroraSandboxNodeDrainingParams{
+			WorkspaceID: wsActive,
+			DaemonID:    active.Identity.DaemonID,
+		}); err != nil {
+			t.Fatalf("mark draining: %v", err)
+		}
+		if _, err := activeSvc.Issue(ctx, wsActive, rtActive, validSandboxImageDigest); !errors.Is(err, aurora.ErrSandboxNodeAlreadyActive) {
+			t.Fatalf("issue on draining node = %v, want ErrSandboxNodeAlreadyActive", err)
+		}
+	})
+
+	t.Run("rejects a malformed image reference", func(t *testing.T) {
+		wsBad, rtBad := newSandboxNodeWorkspace(t, q, pool)
+		badSvc, _ := newSandboxEnrollmentService(t, pool, func() time.Time { return current })
+		for _, digest := range []string{
+			"ghcr.io/eanfs/multica-aurora:latest",
+			"ghcr.io/eanfs/multica-aurora@sha256:" + strings.Repeat("A", 64),
+			"ghcr.io/eanfs/multica-aurora@sha256:" + strings.Repeat("a", 63),
+			"ghcr.io/eanfs/multica-aurora@sha512:" + strings.Repeat("a", 64),
+			"ghcr.io/eanfs/multica-aurora@sha256:" + strings.Repeat("a", 64) + "x",
+		} {
+			if _, err := badSvc.Issue(ctx, wsBad, rtBad, digest); err == nil {
+				t.Errorf("Issue accepted malformed image reference %q", digest)
+			}
+		}
+		if _, err := q.GetAuroraSandboxNodeByWorkspace(ctx, wsBad); !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("malformed image reference left a node row: %v", err)
+		}
+	})
+}
+
+func TestSandboxEnrollmentIssueRotatesStoppedNode(t *testing.T) {
+	pool := auroraTestPool(t)
+	q := db.New(pool)
+	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
+	ctx := context.Background()
+	current := time.Now().UTC().Truncate(time.Microsecond)
+	svc, _ := newSandboxEnrollmentService(t, pool, func() time.Time { return current })
+
+	first, err := svc.Issue(ctx, ws, runtimeID, validSandboxImageDigest)
+	if err != nil {
+		t.Fatalf("first issue: %v", err)
+	}
+	// Simulate a node whose previous launch stopped, leaving the lifecycle
+	// markers a real stop writes.
+	if _, err := q.MarkAuroraSandboxNodeStopped(ctx, db.MarkAuroraSandboxNodeStoppedParams{
+		WorkspaceID: ws,
+		DaemonID:    first.Identity.DaemonID,
+	}); err != nil {
+		t.Fatalf("mark stopped: %v", err)
+	}
+	var priorStoppedAt pgtype.Timestamptz
+	if err := pool.QueryRow(ctx,
+		`UPDATE aurora_sandbox_node
+		 SET started_at = now(), stopped_at = now(), drain_started_at = now(),
+		     backend_node_id = $2, failure_reason = 'previous launch failed'
+		 WHERE workspace_id = $1
+		 RETURNING stopped_at`,
+		ws, "backend-node-1").Scan(&priorStoppedAt); err != nil {
+		t.Fatalf("seed stopped lifecycle markers: %v", err)
+	}
+
+	second, err := svc.Issue(ctx, ws, runtimeID, validSandboxImageDigest)
+	if err != nil {
+		t.Fatalf("rotate issue: %v", err)
+	}
+	if second.Token == first.Token {
+		t.Error("rotation reused the previous enrollment secret")
+	}
+	if second.Identity != first.Identity {
+		t.Errorf("rotation changed node identity: got %+v, want %+v", second.Identity, first.Identity)
+	}
+	if want := current.Add(5 * time.Minute); !second.ExpiresAt.Equal(want) {
+		t.Errorf("rotated expiry = %v, want %v", second.ExpiresAt, want)
+	}
+
+	node := sandboxNodeByWorkspace(t, pool, ws)
+	if node.State != "starting" {
+		t.Errorf("rotated state = %q, want starting", node.State)
+	}
+	if node.ID != first.Identity.NodeID || node.DaemonID != first.Identity.DaemonID || node.RuntimeID != runtimeID {
+		t.Errorf("rotation changed node identity: node=%+v", node)
+	}
+	if !node.EnrollmentTokenHash.Valid || node.EnrollmentTokenHash.String != auth.HashToken(second.Token) {
+		t.Errorf("rotated enrollment hash = %+v, want the new secret's hash", node.EnrollmentTokenHash)
+	}
+	if node.StartedAt.Valid {
+		t.Error("rotation did not clear the previous launch's started_at")
+	}
+	if node.StoppedAt.Valid {
+		t.Error("rotation did not clear stopped_at")
+	}
+	if node.DrainStartedAt.Valid {
+		t.Error("rotation did not clear drain_started_at")
+	}
+	if node.BackendNodeID.Valid {
+		t.Error("rotation did not clear backend_node_id")
+	}
+	if node.FailureReason.Valid {
+		t.Error("rotation did not clear failure_reason")
+	}
+	if node.EnrollmentConsumedAt.Valid {
+		t.Error("rotation did not clear enrollment_consumed_at")
+	}
+
+	// The rotated secret starts a brand-new launch: its started_at is stamped
+	// after the previous stop rather than reused from the previous launch.
+	if _, _, err := svc.Consume(ctx, second.Token); err != nil {
+		t.Fatalf("consume rotated secret: %v", err)
+	}
+	node = sandboxNodeByWorkspace(t, pool, ws)
+	if !node.StartedAt.Valid {
+		t.Fatal("consumed node has no started_at")
+	}
+	if priorStoppedAt.Valid && node.StartedAt.Time.Before(priorStoppedAt.Time) {
+		t.Errorf("new launch started_at %v is before the prior stop %v", node.StartedAt.Time, priorStoppedAt.Time)
+	}
+}
+
+func TestSandboxEnrollmentConsumeMintsScopedDaemonTokenAndBindsRuntime(t *testing.T) {
+	pool := auroraTestPool(t)
+	q := db.New(pool)
+	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
+	ctx := context.Background()
+	current := time.Now().UTC().Truncate(time.Microsecond)
+	svc, _ := newSandboxEnrollmentService(t, pool, func() time.Time { return current })
+
+	issued, err := svc.Issue(ctx, ws, runtimeID, validSandboxImageDigest)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+
+	consumed, bound, err := svc.Consume(ctx, issued.Token)
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if consumed.Identity != issued.Identity {
+		t.Errorf("consumed identity = %+v, want %+v", consumed.Identity, issued.Identity)
+	}
+	if !strings.HasPrefix(consumed.DaemonToken, "mdt_") || len(consumed.DaemonToken) != len("mdt_")+40 {
+		t.Errorf("daemon token %q is not mdt_ + 40 hex chars", consumed.DaemonToken)
+	}
+	if want := current.Add(8 * time.Hour); !consumed.DaemonTokenExpiresAt.Equal(want) {
+		t.Errorf("daemon token expiry = %v, want %v", consumed.DaemonTokenExpiresAt, want)
+	}
+
+	stored, err := q.GetDaemonTokenByHash(ctx, auth.HashToken(consumed.DaemonToken))
+	if err != nil {
+		t.Fatalf("load stored daemon token: %v", err)
+	}
+	if stored.WorkspaceID != ws {
+		t.Errorf("stored daemon token workspace = %v, want %v", stored.WorkspaceID, ws)
+	}
+	if stored.DaemonID != consumed.Identity.DaemonID {
+		t.Errorf("stored daemon token daemon = %q, want %q", stored.DaemonID, consumed.Identity.DaemonID)
+	}
+	if !stored.ExpiresAt.Valid || !stored.ExpiresAt.Time.Equal(consumed.DaemonTokenExpiresAt) {
+		t.Errorf("stored daemon expiry = %+v, want %v", stored.ExpiresAt, consumed.DaemonTokenExpiresAt)
+	}
+
+	if bound.ID != runtimeID {
+		t.Errorf("bound runtime = %v, want %v", bound.ID, runtimeID)
+	}
+	if bound.Provider != "aurora_managed" {
+		t.Errorf("bound runtime provider = %q, want aurora_managed", bound.Provider)
+	}
+	if !bound.DaemonID.Valid || bound.DaemonID.String != consumed.Identity.DaemonID {
+		t.Errorf("bound runtime daemon = %+v, want %q", bound.DaemonID, consumed.Identity.DaemonID)
+	}
+	if bound.Status != "online" {
+		t.Errorf("bound runtime status = %q, want online", bound.Status)
+	}
+
+	persisted, err := q.GetAuroraManagedRuntime(ctx, db.GetAuroraManagedRuntimeParams{
+		WorkspaceID: ws,
+		Provider:    "aurora_managed",
+	})
+	if err != nil {
+		t.Fatalf("load managed runtime: %v", err)
+	}
+	if persisted.Provider != "aurora_managed" {
+		t.Errorf("persisted provider = %q, want aurora_managed", persisted.Provider)
+	}
+
+	node := sandboxNodeByWorkspace(t, pool, ws)
+	if node.State != "online" {
+		t.Errorf("consumed node state = %q, want online", node.State)
+	}
+	if node.EnrollmentTokenHash.Valid {
+		t.Error("consumed node retained an enrollment hash")
+	}
+	if !node.StartedAt.Valid {
+		t.Error("consumed node has no started_at")
+	}
+
+	t.Run("rejects malformed tokens", func(t *testing.T) {
+		for _, token := range []string{
+			"",
+			"mse_",
+			"mdt_" + strings.Repeat("a", 40),
+			"mse_" + strings.Repeat("A", 40),
+			"mse_" + strings.Repeat("a", 39),
+		} {
+			if _, _, err := svc.Consume(ctx, token); !errors.Is(err, aurora.ErrInvalidManagedEnrollment) {
+				t.Errorf("Consume(%q) = %v, want ErrInvalidManagedEnrollment", token, err)
+			}
+		}
+	})
+}
+
+func TestSandboxEnrollmentConsumeRejectsExpiredToken(t *testing.T) {
+	pool := auroraTestPool(t)
+	q := db.New(pool)
+	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
+	ctx := context.Background()
+	// An enrollment minted an hour ago expired five minutes after it was
+	// issued, so the stored secret is already dead when Consume runs.
+	current := time.Now().UTC().Truncate(time.Microsecond).Add(-time.Hour)
+	svc, _ := newSandboxEnrollmentService(t, pool, func() time.Time { return current })
+
+	issued, err := svc.Issue(ctx, ws, runtimeID, validSandboxImageDigest)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	if _, _, err := svc.Consume(ctx, issued.Token); !errors.Is(err, aurora.ErrInvalidManagedEnrollment) {
+		t.Fatalf("consume expired = %v, want ErrInvalidManagedEnrollment", err)
+	}
+	node := sandboxNodeByWorkspace(t, pool, ws)
+	if node.State != "starting" {
+		t.Errorf("expired consume changed state to %q, want starting", node.State)
+	}
+	if node.EnrollmentConsumedAt.Valid {
+		t.Error("expired consume marked the secret consumed")
+	}
+	if !node.EnrollmentTokenHash.Valid || node.EnrollmentTokenHash.String != auth.HashToken(issued.Token) {
+		t.Error("expired consume cleared the enrollment hash")
+	}
+}
+
+func TestSandboxEnrollmentConsumeRejectsReplay(t *testing.T) {
+	pool := auroraTestPool(t)
+	q := db.New(pool)
+	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
+	ctx := context.Background()
+	current := time.Now().UTC().Truncate(time.Microsecond)
+	svc, _ := newSandboxEnrollmentService(t, pool, func() time.Time { return current })
+
+	issued, err := svc.Issue(ctx, ws, runtimeID, validSandboxImageDigest)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	if _, _, err := svc.Consume(ctx, issued.Token); err != nil {
+		t.Fatalf("first consume: %v", err)
+	}
+	if _, _, err := svc.Consume(ctx, issued.Token); !errors.Is(err, aurora.ErrInvalidManagedEnrollment) {
+		t.Fatalf("replay consume = %v, want ErrInvalidManagedEnrollment", err)
+	}
+
+	var tokens int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM daemon_token WHERE workspace_id = $1`, ws).Scan(&tokens); err != nil {
+		t.Fatalf("count daemon tokens: %v", err)
+	}
+	if tokens != 1 {
+		t.Errorf("daemon token count = %d, want 1 (replay must not mint another)", tokens)
+	}
+}
+
+func TestSandboxEnrollmentConsumeRollsBackWhenRuntimeBindingFails(t *testing.T) {
+	pool := auroraTestPool(t)
+	q := db.New(pool)
+	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
+	ctx := context.Background()
+	current := time.Now().UTC().Truncate(time.Microsecond)
+	svc, _ := newSandboxEnrollmentService(t, pool, func() time.Time { return current })
+
+	issued, err := svc.Issue(ctx, ws, runtimeID, validSandboxImageDigest)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	// Break the carrier invariant the bind predicate checks. The enrollment
+	// UPDATE still matches, so only a rolled-back transaction can leave the
+	// node starting with its secret intact and no daemon token behind.
+	if _, err := pool.Exec(ctx, `UPDATE agent_runtime SET provider = 'user_managed' WHERE id = $1`, runtimeID); err != nil {
+		t.Fatalf("break managed runtime: %v", err)
+	}
+
+	if _, _, err := svc.Consume(ctx, issued.Token); err == nil {
+		t.Fatal("consume with an unbindable runtime succeeded")
+	}
+
+	node := sandboxNodeByWorkspace(t, pool, ws)
+	if node.State != "starting" {
+		t.Errorf("rollback left state = %q, want starting", node.State)
+	}
+	if !node.EnrollmentTokenHash.Valid || node.EnrollmentTokenHash.String != auth.HashToken(issued.Token) {
+		t.Error("rollback lost the enrollment secret")
+	}
+	if node.EnrollmentConsumedAt.Valid {
+		t.Error("rollback left the secret marked consumed")
+	}
+	var tokens int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM daemon_token WHERE workspace_id = $1`, ws).Scan(&tokens); err != nil {
+		t.Fatalf("count daemon tokens: %v", err)
+	}
+	if tokens != 0 {
+		t.Errorf("daemon token count = %d, want 0 after rollback", tokens)
+	}
 }
