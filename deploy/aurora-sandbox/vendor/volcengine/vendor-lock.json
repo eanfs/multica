@@ -1,0 +1,140 @@
+{
+  "schema": "com.multica.aurora.volcengine-vendor-lock",
+  "version": 1,
+  "reviewer": "lirichen",
+  "security_policy_version": "aurora-sandbox-skill-runtime/v1",
+  "tree_hash_algorithm": "sha256 over sorted files of writeHashPart(path), writeHashPart('sha256:'+fileSha256), writeHashPart(content); writeHashPart is len(bytes)+':'+value+'\\n' (server/pkg/skillbundle/hash.go)",
+  "skills": {
+    "byted-ark-seedance-skill": {
+      "skill_id": "byted-ark-seedance-skill",
+      "package_name": "byted-ark-seedance-skill",
+      "declared_version": "5.0.0",
+      "spdx_license": "MIT",
+      "vendored": false,
+      "license": {
+        "path": "byted-ark-seedance-skill/LICENSE.upstream",
+        "sha256": null,
+        "status": "blocked",
+        "reason": "The upstream Seedance package ships no LICENSE file; only the SKILL.md frontmatter declares MIT. The exact MIT text/copyright for Seedance 5.0.0 must be obtained from the Volcengine source owner and passed with --seedance-license before this tree may be vendored or embedded in an image."
+      },
+      "patches": [
+        {
+          "path": "patches/0001-seedance-broker-adapter.patch",
+          "sha256": "sha256:7c8220cdd0cb60a5d08aac98563b59fe4aef76e531c8ccfcae30c868d4125bae",
+          "applies": true
+        }
+      ]
+    },
+    "byted-ark-seedream-skill": {
+      "skill_id": "byted-ark-seedream-skill",
+      "package_name": "ark-agentplan-seedream-skill",
+      "declared_version": "4.0.0",
+      "spdx_license": "MIT",
+      "vendored": true,
+      "license": {
+        "path": "byted-ark-seedream-skill/references/LICENSE",
+        "sha256": "sha256:8a32047e9ee5270ab9f49e5d293b650bc0253e05bff2d81787b3276ea0d75935",
+        "status": "verified"
+      },
+      "whole_tree_sha256": "sha256:aac297142496fe2f07f3c4d9a8d792110c5bad871a515f72b1374bbde3a1fc0d",
+      "files": [
+        {
+          "path": "byted-ark-seedream-skill/SKILL.md",
+          "bytes": 7207,
+          "mode": "0644",
+          "sha256": "sha256:bffad4a9a8dfe59ef719d44a559757088a3e7685544ea880da6ac4daa7f50e0b"
+        },
+        {
+          "path": "byted-ark-seedream-skill/package.json",
+          "bytes": 302,
+          "mode": "0644",
+          "sha256": "sha256:61c4d741a4c018cd8c5b6d4fa76343ab469fd436495d3cff341faaeafb6f2ce6"
+        },
+        {
+          "path": "byted-ark-seedream-skill/references/CONFIG.md",
+          "bytes": 4046,
+          "mode": "0644",
+          "sha256": "sha256:cde7ebda68d4fb3fce9577b6a981be29b018a45aa61e860ef1888488e662ed4e"
+        },
+        {
+          "path": "byted-ark-seedream-skill/references/DEVELOPER.md",
+          "bytes": 4891,
+          "mode": "0644",
+          "sha256": "sha256:b6ac81d8d27a3d105c8d4f0e624de911224bc7a911417f83b39da22152642525"
+        },
+        {
+          "path": "byted-ark-seedream-skill/references/EXAMPLES.md",
+          "bytes": 1864,
+          "mode": "0644",
+          "sha256": "sha256:d4f3b9a9e0d2c2f76e39b1bb44e1ebd98d39656c42b75b8328bceb29baea9082"
+        },
+        {
+          "path": "byted-ark-seedream-skill/references/INSTALL.md",
+          "bytes": 6072,
+          "mode": "0644",
+          "sha256": "sha256:16df1bab1a6c867e7db369069e0ea28fe18a0f589b4029f1a63d7738ece35fdd"
+        },
+        {
+          "path": "byted-ark-seedream-skill/references/LICENSE",
+          "bytes": 1079,
+          "mode": "0644",
+          "sha256": "sha256:8a32047e9ee5270ab9f49e5d293b650bc0253e05bff2d81787b3276ea0d75935"
+        },
+        {
+          "path": "byted-ark-seedream-skill/references/MODELS.md",
+          "bytes": 4012,
+          "mode": "0644",
+          "sha256": "sha256:5fad0234467430498df2b2c7891c12a77277fd9a37e85304b44cfb4348b511fa"
+        },
+        {
+          "path": "byted-ark-seedream-skill/references/README.md",
+          "bytes": 1092,
+          "mode": "0644",
+          "sha256": "sha256:1c70b30ba977ec201b1468ec904d94e93b23722a8f88d438ed150fd2371611c2"
+        },
+        {
+          "path": "byted-ark-seedream-skill/references/VERSION",
+          "bytes": 6,
+          "mode": "0644",
+          "sha256": "sha256:e1d49c569ae09b2ede16e2d83820a3809b35eb6c44c13ba9b5330598d6b8f43c"
+        },
+        {
+          "path": "byted-ark-seedream-skill/scripts/generate.js",
+          "bytes": 44145,
+          "mode": "0644",
+          "sha256": "sha256:41ea49a9bd23ba0bac81b35f434fd96527ecd2f5bdf8ecba9d5a41a6eaa23072"
+        },
+        {
+          "path": "byted-ark-seedream-skill/scripts/model-routing.js",
+          "bytes": 9128,
+          "mode": "0644",
+          "sha256": "sha256:fcb5c2f5ff23dd5b905686293868d36c517edf52fbccf92e4b46b68c56f21ebf"
+        },
+        {
+          "path": "byted-ark-seedream-skill/tests/mock-api.cjs",
+          "bytes": 1352,
+          "mode": "0644",
+          "sha256": "sha256:383d1d057d982ac9cf2f3aa99178432282521b83b09e6aa7af76b8aed49a02d4"
+        },
+        {
+          "path": "byted-ark-seedream-skill/tests/model-routing.test.js",
+          "bytes": 5756,
+          "mode": "0644",
+          "sha256": "sha256:2f2862ceb011c335301d3e21e110edba32d9ba84a0c459d0496db13c24e04064"
+        }
+      ],
+      "patches": [
+        {
+          "path": "patches/0002-seedream-broker-adapter.patch",
+          "sha256": "sha256:2f3038ff8393770daf7e44b3c265a76d9bddbdc5f852a4bf435c2b62693dd800",
+          "applies": true
+        },
+        {
+          "path": "patches/0003-seedream-fail-closed-cli.patch",
+          "sha256": "sha256:535bc8f14cca58e7ab0ba2ee81d9b9ccf79c813857e5c0e322835d01810ee730",
+          "applies": true
+        }
+      ]
+    }
+  }
+}

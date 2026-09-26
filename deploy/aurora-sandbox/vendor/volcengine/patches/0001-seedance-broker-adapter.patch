@@ -1,0 +1,350 @@
+diff --git a/byted-ark-seedance-skill/scripts/seedance-broker.js b/byted-ark-seedance-skill/scripts/seedance-broker.js
+new file mode 100644
+index 0000000..5aaf30c
+--- /dev/null
++++ b/byted-ark-seedance-skill/scripts/seedance-broker.js
+@@ -0,0 +1,344 @@
++'use strict';
++
++// Hardened, broker-only Seedance adapter added by the Multica Aurora hardening
++// patch series. The untouched upstream CLI is never the sandbox entrypoint: this
++// module is the only supported surface for byted-ark-seedance-skill and never
++// accepts an API base, callback, payload/task file, arbitrary path, preference or
++// credential save. It returns narrow provider descriptors and never downloads
++// provider output URLs.
++//
++// Node built-ins only.
++
++const crypto = require('node:crypto');
++const fs = require('node:fs');
++const path = require('node:path');
++
++const PRODUCER_ID = 'byted-ark-seedance-skill';
++const PRODUCER_VERSION = '5.0.0';
++const API_ORIGIN = 'https://ark.cn-beijing.volces.com';
++const CREATE_PATH = '/api/plan/v3/contents/generations/tasks';
++const TASK_PATH = function (taskId) {
++  return '/api/plan/v3/contents/generations/tasks/' + encodeURIComponent(taskId);
++};
++
++// The plan's Seedance allowlist. The audited 1.5 alias is intentionally omitted
++// because its declared name maps inconsistently to a 1.0 backend ID.
++const ALLOWED_MODELS = Object.freeze([
++  'doubao-seedance-2.0',
++  'doubao-seedance-2.0-fast',
++  'doubao-seedance-2.0-mini',
++  'doubao-seedance-2.5',
++]);
++const MODEL_ALIASES = Object.freeze({
++  'doubao-seedance-2-0-260128': 'doubao-seedance-2.0',
++});
++
++const DISABLED_INPUT_KEYS = Object.freeze([
++  'callback',
++  'callbackUrl',
++  'callback_url',
++  'payloadFile',
++  'payload_file',
++  'taskFile',
++  'task_file',
++  'preference',
++  'preferences',
++  'savedPreference',
++  'baseUrl',
++  'base_url',
++  'apiKey',
++  'api_key',
++  'saveApiKey',
++  'save_api_key',
++  'list',
++  'delete',
++  'taskList',
++  'downloadDir',
++  'download_dir',
++  'userOverrides',
++]);
++
++const MAX_RESPONSE_BYTES = 1 * 1024 * 1024;
++const MAX_SSE_BYTES = 4 * 1024 * 1024;
++const MAX_DATA_URI_BYTES = 25 * 1024 * 1024;
++const MAX_PROMPT_CHARS = 3000;
++const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
++const MIN_POLL_INTERVAL_MS = 1000;
++const MAX_POLL_INTERVAL_MS = 60000;
++const TASK_ID_RE = /^cgt-[A-Za-z0-9-]{1,150}$/;
++const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
++
++function assertApiOrigin(raw) {
++  let url;
++  try {
++    url = new URL(raw);
++  } catch (error) {
++    throw new Error('invalid Ark API origin');
++  }
++  if (
++    url.protocol !== 'https:' ||
++    url.host !== 'ark.cn-beijing.volces.com' ||
++    url.pathname !== '/' ||
++    url.port ||
++    url.search ||
++    url.hash ||
++    url.username ||
++    url.password
++  ) {
++    throw new Error('Ark origin must be exactly https://ark.cn-beijing.volces.com with no port/query/fragment/userinfo');
++  }
++  return API_ORIGIN;
++}
++
++function readBrokerApiKey(env) {
++  const key = env ? env.ARK_API_KEY : undefined;
++  if (typeof key !== 'string' || !key.startsWith('ark-') || key.length < 8) {
++    throw new Error('broker-supplied ARK_API_KEY required; argv, generic env names and workstation config are rejected');
++  }
++  return key.trim();
++}
++
++function assertTaskId(value) {
++  if (typeof value !== 'string' || !TASK_ID_RE.test(value)) throw new Error('invalid Seedance task id');
++  return value;
++}
++
++function assertModel(value) {
++  if (typeof value !== 'string') throw new Error('model is required');
++  const resolved = MODEL_ALIASES[value] || value;
++  if (!ALLOWED_MODELS.includes(resolved)) throw new Error('model is not on the Aurora Seedance allowlist');
++  return resolved;
++}
++
++function hasOwn(value, key) {
++  return Object.prototype.hasOwnProperty.call(value, key);
++}
++
++function assertNoDisabledInputs(input) {
++  for (const key of DISABLED_INPUT_KEYS) {
++    if (hasOwn(input, key) && input[key] !== undefined) throw new Error('disabled Seedance input: ' + key);
++  }
++}
++
++function redactString(value) {
++  return value
++    .replace(/ark-[A-Za-z0-9._-]{4,}/g, 'ark-[redacted]')
++    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [redacted]')
++    .replace(/data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+/gi, '[data-uri-redacted]')
++    .replace(
++      /([?&](?:X-Amz-Signature|Signature|Expires|OSSAccessKeyId|security-token)=)[^&\s]+/gi,
++      '$1[redacted]',
++    );
++}
++
++function sanitizeValue(value, depth) {
++  const level = depth || 0;
++  if (level > 8) return '[truncated]';
++  if (typeof value === 'string') return redactString(value);
++  if (Array.isArray(value)) return value.map(function (item) { return sanitizeValue(item, level + 1); });
++  if (value && typeof value === 'object') {
++    const out = {};
++    for (const key of Object.keys(value)) {
++      if (/^(api[_-]?key|authorization|password|secret|token)$/i.test(key)) out[key] = '[redacted]';
++      else out[key] = sanitizeValue(value[key], level + 1);
++    }
++    return out;
++  }
++  return value;
++}
++
++function machineJson(value) {
++  return JSON.stringify(sanitizeValue(value));
++}
++
++function assertDataUri(value, label) {
++  if (typeof value !== 'string' || !/^data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+$/i.test(value)) {
++    throw new Error(label + ' accepts only broker-authorized base64 data URIs');
++  }
++  if (Buffer.byteLength(value, 'utf8') > MAX_DATA_URI_BYTES) throw new Error(label + ' exceeds the Data URI size cap');
++  return value;
++}
++
++async function boundedText(response, maxBytes) {
++  const headerValue = response && response.headers && response.headers.get ? response.headers.get('content-length') : null;
++  const declared = Number(headerValue);
++  if (Number.isFinite(declared) && declared > maxBytes) throw new Error('Ark response exceeds the buffer cap');
++  if (!response.body || typeof response.body.getReader !== 'function') {
++    const text = await response.text();
++    if (Buffer.byteLength(text, 'utf8') > maxBytes) throw new Error('Ark response exceeds the buffer cap');
++    return text;
++  }
++  const reader = response.body.getReader();
++  const chunks = [];
++  let total = 0;
++  for (;;) {
++    const next = await reader.read();
++    if (next.done) break;
++    total += next.value.byteLength;
++    if (total > maxBytes) throw new Error('Ark response exceeds the buffer cap');
++    chunks.push(Buffer.from(next.value));
++  }
++  return Buffer.concat(chunks).toString('utf8');
++}
++
++async function requestJson(fetchImpl, url, init, maxBytes) {
++  assertApiOrigin(url.origin);
++  const response = await fetchImpl(url.href, init);
++  const text = await boundedText(response, maxBytes);
++  if (!response.ok) {
++    throw new Error('Ark request failed with status ' + response.status + ': ' + redactString(text.slice(0, 512)));
++  }
++  try {
++    return JSON.parse(text);
++  } catch (error) {
++    throw new Error('Ark response was not JSON');
++  }
++}
++
++function buildCreateBody(input) {
++  if (!input || typeof input !== 'object') throw new Error('input is required');
++  assertNoDisabledInputs(input);
++  const model = assertModel(input.model);
++  if (typeof input.prompt !== 'string' || input.prompt.trim().length === 0) throw new Error('prompt is required');
++  if (input.prompt.length > MAX_PROMPT_CHARS) throw new Error('prompt exceeds the character cap');
++  const body = { model: model, content: [{ type: 'text', text: input.prompt }] };
++  const media = [
++    ['imageUrls', 'image_url'],
++    ['videoUrls', 'video_url'],
++    ['audioUrls', 'audio_url'],
++  ];
++  for (const pair of media) {
++    const field = pair[0];
++    const type = pair[1];
++    const values = input[field];
++    if (values === undefined) continue;
++    if (!Array.isArray(values) || values.length > 30) throw new Error('invalid ' + field);
++    for (const value of values) {
++      body.content.push({ type: type, [type]: { url: assertDataUri(value, field) } });
++    }
++  }
++  for (const key of ['duration', 'ratio', 'resolution', 'output_format', 'omni_reference_task_type']) {
++    if (input[key] !== undefined) body[key] = input[key];
++  }
++  return body;
++}
++
++function taskStateDir(taskDir, taskId) {
++  assertTaskId(taskId);
++  const base = path.resolve(taskDir);
++  const dir = path.resolve(base, taskId);
++  if (dir !== base && !dir.startsWith(base + path.sep)) throw new Error('task id escapes the task directory');
++  return dir;
++}
++
++function uuidFilename(extension) {
++  const suffix = extension.startsWith('.') ? extension : '.' + extension;
++  const name = crypto.randomUUID() + suffix;
++  if (!UUID_RE.test(name.slice(0, 36))) throw new Error('failed to allocate a UUID filename');
++  return name;
++}
++
++function writePrivateJson(file, value) {
++  fs.mkdirSync(path.dirname(file), { recursive: true });
++  fs.writeFileSync(file, machineJson(value) + '\n', { mode: 0o600 });
++  fs.chmodSync(file, 0o600);
++  return file;
++}
++
++function providerDescriptor(task) {
++  const content = task && task.content ? task.content : {};
++  const outputs = [];
++  if (content.video_url) outputs.push({ kind: 'video', url: content.video_url });
++  if (content.last_frame_url) outputs.push({ kind: 'image', url: content.last_frame_url });
++  for (const item of Array.isArray(content.videos) ? content.videos : []) {
++    if (item && item.url) outputs.push({ kind: 'video', url: item.url });
++  }
++  return {
++    provider: 'volcengine-agentplan',
++    model: (task && task.model) || null,
++    external_id: (task && task.id) || null,
++    status: (task && task.status) || 'unknown',
++    outputs: outputs,
++  };
++}
++
++function producerMetadata(treeSha256) {
++  return { id: PRODUCER_ID, version: PRODUCER_VERSION, tree_sha256: treeSha256 || null };
++}
++
++async function createTask(options) {
++  const env = options.env;
++  const fetchImpl = options.fetchImpl;
++  const apiKey = readBrokerApiKey(env);
++  const body = buildCreateBody(options.input);
++  if (typeof fetchImpl !== 'function') throw new Error('fetch implementation is required');
++  const response = await requestJson(
++    fetchImpl,
++    new URL(CREATE_PATH, API_ORIGIN),
++    { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + apiKey }, body: JSON.stringify(body) },
++    MAX_RESPONSE_BYTES,
++  );
++  const taskId = response ? response.id : undefined;
++  assertTaskId(taskId);
++  return providerDescriptor(response);
++}
++
++async function pollTask(options) {
++  const env = options.env;
++  const fetchImpl = options.fetchImpl;
++  const taskId = assertTaskId(options.taskId);
++  readBrokerApiKey(env);
++  if (typeof fetchImpl !== 'function') throw new Error('fetch implementation is required');
++  const pollIntervalMs = options.pollIntervalMs === undefined ? 5000 : options.pollIntervalMs;
++  if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < MIN_POLL_INTERVAL_MS || pollIntervalMs > MAX_POLL_INTERVAL_MS) {
++    throw new Error('invalid poll interval');
++  }
++  const timeoutMs = options.timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : options.timeoutMs;
++  const now = options.now || Date.now;
++  const sleep = options.sleep || function (ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); };
++  const deadline = now() + timeoutMs;
++  for (;;) {
++    const task = await requestJson(
++      fetchImpl,
++      new URL(TASK_PATH(taskId), API_ORIGIN),
++      { method: 'GET', headers: { authorization: 'Bearer ' + readBrokerApiKey(env) } },
++      MAX_RESPONSE_BYTES,
++    );
++    if (task && (task.status === 'failed' || task.status === 'expired' || task.status === 'cancelled')) {
++      throw new Error('Seedance task ended as ' + task.status);
++    }
++    if (task && task.status === 'succeeded') {
++      const descriptor = providerDescriptor(task);
++      if (descriptor.outputs.length === 0) throw new Error('Seedance task succeeded without output');
++      return descriptor;
++    }
++    if (now() >= deadline) throw new Error('Seedance task timed out before producing output');
++    await sleep(pollIntervalMs);
++  }
++}
++
++module.exports = {
++  API_ORIGIN: API_ORIGIN,
++  ALLOWED_MODELS: ALLOWED_MODELS,
++  PRODUCER_ID: PRODUCER_ID,
++  PRODUCER_VERSION: PRODUCER_VERSION,
++  MAX_RESPONSE_BYTES: MAX_RESPONSE_BYTES,
++  MAX_SSE_BYTES: MAX_SSE_BYTES,
++  MAX_DATA_URI_BYTES: MAX_DATA_URI_BYTES,
++  MAX_PROMPT_CHARS: MAX_PROMPT_CHARS,
++  assertApiOrigin: assertApiOrigin,
++  readBrokerApiKey: readBrokerApiKey,
++  assertTaskId: assertTaskId,
++  assertModel: assertModel,
++  sanitizeValue: sanitizeValue,
++  machineJson: machineJson,
++  boundedText: boundedText,
++  buildCreateBody: buildCreateBody,
++  taskStateDir: taskStateDir,
++  uuidFilename: uuidFilename,
++  writePrivateJson: writePrivateJson,
++  providerDescriptor: providerDescriptor,
++  producerMetadata: producerMetadata,
++  createTask: createTask,
++  pollTask: pollTask,
++};

@@ -1,0 +1,15 @@
+diff --git a/byted-ark-seedream-skill/scripts/generate.js b/byted-ark-seedream-skill/scripts/generate.js
+index 34ab78d..298f85f 100644
+--- a/byted-ark-seedream-skill/scripts/generate.js
++++ b/byted-ark-seedream-skill/scripts/generate.js
+@@ -1285,4 +1285,9 @@ async function main() {
+   }
+ }
+ 
+-if (require.main === module) main();
++if (require.main === module) {
++  // Hardened by Multica Aurora: the raw upstream CLI is never exposed to the
++  // model. Sandbox execution goes through scripts/seedream-broker.js.
++  console.error('direct Seedream CLI execution is disabled; use the Multica Aurora broker adapter');
++  process.exit(2);
++}
