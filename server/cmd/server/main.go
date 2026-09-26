@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/aurora"
+	"github.com/multica-ai/multica/server/internal/aurorafleet"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/database"
@@ -671,6 +672,10 @@ func main() {
 	// the workspace- and daemon-scoped mdt_ credential a managed daemon runs on.
 	// Built from the primary pool; tests inject their own service.
 	h.SandboxEnrollment = aurora.NewSandboxEnrollmentService(pool, queries, nil)
+	// Aurora sandbox autoprovisioning: make the workspace node accepted by the
+	// fleet before a generation reserves credits. Nil when the fleet is not
+	// configured, which makes generation creation fail closed.
+	h.SandboxManager = newWorkspaceSandboxManager(pool, queries)
 
 	var replicaQueries *db.Queries
 	if replicaPool != nil {
@@ -946,4 +951,29 @@ func main() {
 		},
 	}.run()
 	slog.Info("server stopped")
+}
+
+// newWorkspaceSandboxManager builds the Aurora autoprovisioning manager from
+// environment configuration. It returns nil — the fail-closed default — unless
+// the fleet URL, the control-token file, and the digest-pinned sandbox image
+// are all present and the client accepts them. A nil manager makes generation
+// creation answer 503 with aurora_runtime_unavailable before any reservation;
+// the catalog and library endpoints are unaffected.
+func newWorkspaceSandboxManager(pool *pgxpool.Pool, queries *db.Queries) aurora.WorkspaceSandboxManager {
+	fleetURL := strings.TrimSpace(os.Getenv("AURORA_FLEET_URL"))
+	tokenFile := strings.TrimSpace(os.Getenv("AURORA_FLEET_CONTROL_TOKEN_FILE"))
+	image := strings.TrimSpace(os.Getenv("AURORA_SANDBOX_IMAGE"))
+	if fleetURL == "" || tokenFile == "" || image == "" {
+		slog.Info("aurora sandbox autoprovisioning disabled",
+			"fleet_url_set", fleetURL != "",
+			"control_token_file_set", tokenFile != "",
+			"sandbox_image_set", image != "")
+		return nil
+	}
+	client, err := aurorafleet.NewControlClient(fleetURL, tokenFile)
+	if err != nil {
+		slog.Error("aurora fleet control client disabled", "error", err)
+		return nil
+	}
+	return aurora.NewSandboxManager(queries, pool, client, image, nil)
 }

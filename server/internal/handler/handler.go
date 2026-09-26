@@ -259,6 +259,11 @@ type Handler struct {
 	// the enroll endpoint then fails closed rather than falling back to a shared
 	// token.
 	SandboxEnrollment *aurora.SandboxEnrollmentService
+	// SandboxManager makes a workspace sandbox accepted by the fleet before a
+	// generation reserves credits (Plan B Task 4). Nil when the deployment has
+	// no usable fleet client; generation creation then fails closed with
+	// aurora_runtime_unavailable instead of queueing work no sandbox can run.
+	SandboxManager aurora.WorkspaceSandboxManager
 	// Entitlements supplies workspace-scoped commercial gates. A nil provider
 	// preserves self-hosted behavior without extra reads.
 	Entitlements entitlement.Provider

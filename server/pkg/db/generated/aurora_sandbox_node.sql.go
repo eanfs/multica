@@ -180,6 +180,53 @@ func (q *Queries) CreateAuroraSandboxNode(ctx context.Context, arg CreateAuroraS
 	return i, err
 }
 
+const failAuroraSandboxNode = `-- name: FailAuroraSandboxNode :one
+UPDATE aurora_sandbox_node
+SET state = 'failed',
+    failure_reason = $2,
+    enrollment_token_hash = NULL,
+    enrollment_expires_at = NULL,
+    enrollment_consumed_at = NULL,
+    backend_node_id = NULL,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $3 AND state = 'starting'
+RETURNING id, workspace_id, runtime_id, daemon_id, backend_node_id, image_digest, state, enrollment_token_hash, enrollment_expires_at, enrollment_consumed_at, last_active_at, drain_started_at, started_at, stopped_at, failure_reason, created_at, updated_at
+`
+
+type FailAuroraSandboxNodeParams struct {
+	ID            pgtype.UUID `json:"id"`
+	FailureReason pgtype.Text `json:"failure_reason"`
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+}
+
+// Marks a starting node failed after its fleet ensure call failed and clears
+// every enrollment and backend field so the row cannot present a live secret.
+// The state predicate keeps a node the daemon already consumed untouched.
+func (q *Queries) FailAuroraSandboxNode(ctx context.Context, arg FailAuroraSandboxNodeParams) (AuroraSandboxNode, error) {
+	row := q.db.QueryRow(ctx, failAuroraSandboxNode, arg.ID, arg.FailureReason, arg.WorkspaceID)
+	var i AuroraSandboxNode
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.RuntimeID,
+		&i.DaemonID,
+		&i.BackendNodeID,
+		&i.ImageDigest,
+		&i.State,
+		&i.EnrollmentTokenHash,
+		&i.EnrollmentExpiresAt,
+		&i.EnrollmentConsumedAt,
+		&i.LastActiveAt,
+		&i.DrainStartedAt,
+		&i.StartedAt,
+		&i.StoppedAt,
+		&i.FailureReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getAuroraSandboxNodeByWorkspace = `-- name: GetAuroraSandboxNodeByWorkspace :one
 SELECT id, workspace_id, runtime_id, daemon_id, backend_node_id, image_digest, state, enrollment_token_hash, enrollment_expires_at, enrollment_consumed_at, last_active_at, drain_started_at, started_at, stopped_at, failure_reason, created_at, updated_at FROM aurora_sandbox_node
 WHERE workspace_id = $1
@@ -402,6 +449,69 @@ func (q *Queries) MarkAuroraSandboxNodeStopped(ctx context.Context, arg MarkAuro
 	return i, err
 }
 
+const reArmAuroraSandboxNode = `-- name: ReArmAuroraSandboxNode :one
+UPDATE aurora_sandbox_node
+SET runtime_id = $2,
+    image_digest = $3,
+    enrollment_token_hash = $4,
+    enrollment_expires_at = $5,
+    enrollment_consumed_at = NULL,
+    state = 'starting',
+    started_at = NULL,
+    stopped_at = NULL,
+    drain_started_at = NULL,
+    backend_node_id = NULL,
+    failure_reason = NULL,
+    updated_at = now()
+WHERE workspace_id = $1
+RETURNING id, workspace_id, runtime_id, daemon_id, backend_node_id, image_digest, state, enrollment_token_hash, enrollment_expires_at, enrollment_consumed_at, last_active_at, drain_started_at, started_at, stopped_at, failure_reason, created_at, updated_at
+`
+
+type ReArmAuroraSandboxNodeParams struct {
+	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
+	RuntimeID           pgtype.UUID        `json:"runtime_id"`
+	ImageDigest         string             `json:"image_digest"`
+	EnrollmentTokenHash pgtype.Text        `json:"enrollment_token_hash"`
+	EnrollmentExpiresAt pgtype.Timestamptz `json:"enrollment_expires_at"`
+}
+
+// Re-arms the workspace's single node with a fresh single-use enrollment and
+// adopts the runtime and image the server is configured for. Autoprovisioning
+// uses it when no live node exists, the node stopped or failed, its enrollment
+// went stale, or its image digest no longer matches the deployed image. The
+// workspace and node identity survive; Consume rebinds the runtime through the
+// daemon id this row keeps.
+func (q *Queries) ReArmAuroraSandboxNode(ctx context.Context, arg ReArmAuroraSandboxNodeParams) (AuroraSandboxNode, error) {
+	row := q.db.QueryRow(ctx, reArmAuroraSandboxNode,
+		arg.WorkspaceID,
+		arg.RuntimeID,
+		arg.ImageDigest,
+		arg.EnrollmentTokenHash,
+		arg.EnrollmentExpiresAt,
+	)
+	var i AuroraSandboxNode
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.RuntimeID,
+		&i.DaemonID,
+		&i.BackendNodeID,
+		&i.ImageDigest,
+		&i.State,
+		&i.EnrollmentTokenHash,
+		&i.EnrollmentExpiresAt,
+		&i.EnrollmentConsumedAt,
+		&i.LastActiveAt,
+		&i.DrainStartedAt,
+		&i.StartedAt,
+		&i.StoppedAt,
+		&i.FailureReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const releaseAuroraManagedRuntime = `-- name: ReleaseAuroraManagedRuntime :exec
 UPDATE agent_runtime
 SET status = 'offline',
@@ -455,6 +565,46 @@ type RotateAuroraSandboxEnrollmentParams struct {
 // and the row returns to 'starting'; node/runtime/daemon identity is preserved.
 func (q *Queries) RotateAuroraSandboxEnrollment(ctx context.Context, arg RotateAuroraSandboxEnrollmentParams) (AuroraSandboxNode, error) {
 	row := q.db.QueryRow(ctx, rotateAuroraSandboxEnrollment, arg.WorkspaceID, arg.EnrollmentTokenHash, arg.EnrollmentExpiresAt)
+	var i AuroraSandboxNode
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.RuntimeID,
+		&i.DaemonID,
+		&i.BackendNodeID,
+		&i.ImageDigest,
+		&i.State,
+		&i.EnrollmentTokenHash,
+		&i.EnrollmentExpiresAt,
+		&i.EnrollmentConsumedAt,
+		&i.LastActiveAt,
+		&i.DrainStartedAt,
+		&i.StartedAt,
+		&i.StoppedAt,
+		&i.FailureReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const setAuroraSandboxNodeBackend = `-- name: SetAuroraSandboxNodeBackend :one
+UPDATE aurora_sandbox_node
+SET backend_node_id = $2, updated_at = now()
+WHERE id = $1 AND workspace_id = $3
+RETURNING id, workspace_id, runtime_id, daemon_id, backend_node_id, image_digest, state, enrollment_token_hash, enrollment_expires_at, enrollment_consumed_at, last_active_at, drain_started_at, started_at, stopped_at, failure_reason, created_at, updated_at
+`
+
+type SetAuroraSandboxNodeBackendParams struct {
+	ID            pgtype.UUID `json:"id"`
+	BackendNodeID pgtype.Text `json:"backend_node_id"`
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+}
+
+// Records the fleet backend node id an ensure call returned. It is a late
+// informational write, so it binds by id and workspace only.
+func (q *Queries) SetAuroraSandboxNodeBackend(ctx context.Context, arg SetAuroraSandboxNodeBackendParams) (AuroraSandboxNode, error) {
+	row := q.db.QueryRow(ctx, setAuroraSandboxNodeBackend, arg.ID, arg.BackendNodeID, arg.WorkspaceID)
 	var i AuroraSandboxNode
 	err := row.Scan(
 		&i.ID,

@@ -148,3 +148,49 @@ WHERE state IN ('starting', 'online', 'draining')
   AND (last_active_at < $1 OR created_at < $2)
 ORDER BY created_at ASC, id ASC
 LIMIT $3;
+
+-- name: ReArmAuroraSandboxNode :one
+-- Re-arms the workspace's single node with a fresh single-use enrollment and
+-- adopts the runtime and image the server is configured for. Autoprovisioning
+-- uses it when no live node exists, the node stopped or failed, its enrollment
+-- went stale, or its image digest no longer matches the deployed image. The
+-- workspace and node identity survive; Consume rebinds the runtime through the
+-- daemon id this row keeps.
+UPDATE aurora_sandbox_node
+SET runtime_id = $2,
+    image_digest = $3,
+    enrollment_token_hash = $4,
+    enrollment_expires_at = $5,
+    enrollment_consumed_at = NULL,
+    state = 'starting',
+    started_at = NULL,
+    stopped_at = NULL,
+    drain_started_at = NULL,
+    backend_node_id = NULL,
+    failure_reason = NULL,
+    updated_at = now()
+WHERE workspace_id = $1
+RETURNING *;
+
+-- name: SetAuroraSandboxNodeBackend :one
+-- Records the fleet backend node id an ensure call returned. It is a late
+-- informational write, so it binds by id and workspace only.
+UPDATE aurora_sandbox_node
+SET backend_node_id = $2, updated_at = now()
+WHERE id = $1 AND workspace_id = $3
+RETURNING *;
+
+-- name: FailAuroraSandboxNode :one
+-- Marks a starting node failed after its fleet ensure call failed and clears
+-- every enrollment and backend field so the row cannot present a live secret.
+-- The state predicate keeps a node the daemon already consumed untouched.
+UPDATE aurora_sandbox_node
+SET state = 'failed',
+    failure_reason = $2,
+    enrollment_token_hash = NULL,
+    enrollment_expires_at = NULL,
+    enrollment_consumed_at = NULL,
+    backend_node_id = NULL,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $3 AND state = 'starting'
+RETURNING *;
