@@ -181,7 +181,11 @@ func TestAuroraSurfaceDeniesGeneralPurposeTools(t *testing.T) {
 		"Task", "TodoWrite",
 	}
 
-	for _, skill := range []string{"poster", "resume", "video-captions"} {
+	for _, entry := range aurora.Catalog() {
+		if !entry.Available {
+			continue
+		}
+		skill := entry.ID
 		task := auroraTaskForSkill(skill)
 		// Context-supplied tool lists must never widen the surface: the agent
 		// record carries an arbitrary MCP server, a skill body that instructs
@@ -224,5 +228,53 @@ func TestAuroraSurfaceDeniesGeneralPurposeTools(t *testing.T) {
 	}
 	if _, err := auroraToolSurface(auroraTaskForSkill(""), "claude"); err == nil {
 		t.Fatal("missing Aurora skill must fail closed")
+	}
+}
+
+// auroraCanonicalBrokerMethods is the reviewed MCP method set the sandbox
+// broker registers (deploy/aurora-sandbox/runtime/src/server.mjs). The Go
+// execution policy must name only these methods: the stored workflow brief is
+// model-facing, so a policy tool the broker does not expose would make the
+// route unrunnable even though every surface assertion above still passed.
+var auroraCanonicalBrokerMethods = []string{
+	"aurora.seedream_generate",
+	"aurora.seedance_generate",
+	"aurora.openai_image",
+	"aurora.volc_asr_transcribe",
+	"aurora.read_document",
+	"aurora.id_photo",
+	"aurora.render_video_captions",
+	"aurora.render_resume",
+	"aurora.write_text_artifact",
+}
+
+// TestAuroraSurfaceToolsAreCanonicalBrokerMethods pins the cross-component
+// contract: every tool the Go policy requires is a method the Node broker
+// actually registers, so the workflow brief and the narrowed surface name a
+// callable tool.
+func TestAuroraSurfaceToolsAreCanonicalBrokerMethods(t *testing.T) {
+	t.Parallel()
+
+	seen := map[string]bool{}
+	for _, entry := range aurora.Catalog() {
+		if !entry.Available {
+			continue
+		}
+		policy, ok := aurora.ExecutionPolicy(entry.ID)
+		if !ok {
+			t.Fatalf("ExecutionPolicy(%q) not found", entry.ID)
+		}
+		if len(policy.RequiredTools) == 0 {
+			t.Fatalf("ExecutionPolicy(%q) declares no required tools", entry.ID)
+		}
+		for _, tool := range policy.RequiredTools {
+			if !slices.Contains(auroraCanonicalBrokerMethods, tool) {
+				t.Errorf("ExecutionPolicy(%q) requires %q, which the broker does not register", entry.ID, tool)
+			}
+			seen[tool] = true
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("no execution policy declares required tools")
 	}
 }

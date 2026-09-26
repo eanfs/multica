@@ -9,11 +9,12 @@ The xhs-copy skill writes social copy from a written request.
 
 ## Steps
 
-1. Call aurora.render_text_artifact with prompt and the supplied document text when present.
+1. When document_id is present, call aurora.read_document with document_id.
+2. Call aurora.write_text_artifact with prompt and the supplied document text when present.
 
 ## Required outputs
 
-- One primary text artifact identifier returned by aurora.render_text_artifact.
+- One primary text artifact identifier returned by aurora.write_text_artifact.
 
 ## Failure behavior
 

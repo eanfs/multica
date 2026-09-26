@@ -9,11 +9,11 @@ The id-photo skill turns one supplied portrait into an identification photo.
 
 ## Steps
 
-1. Call aurora.id_photo_transform with prompt and image_id.
+1. Call aurora.id_photo with prompt and image_id.
 
 ## Required outputs
 
-- One primary image artifact identifier returned by aurora.id_photo_transform.
+- One primary image artifact identifier returned by aurora.id_photo.
 
 ## Failure behavior
 

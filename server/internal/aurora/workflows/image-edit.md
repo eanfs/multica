@@ -9,11 +9,11 @@ The image-edit skill applies a written instruction to one to four supplied image
 
 ## Steps
 
-1. Call aurora.openai_edit_image with prompt and image_ids.
+1. Call aurora.openai_image with prompt and image_ids.
 
 ## Required outputs
 
-- One or more primary image artifact identifiers returned by aurora.openai_edit_image.
+- One or more primary image artifact identifiers returned by aurora.openai_image.
 
 ## Failure behavior
 

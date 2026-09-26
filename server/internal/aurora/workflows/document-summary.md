@@ -10,11 +10,11 @@ The document-summary skill summarises one supplied document.
 ## Steps
 
 1. Call aurora.read_document with document_id.
-2. Call aurora.render_text_artifact with prompt and the returned document text.
+2. Call aurora.write_text_artifact with prompt and the returned document text.
 
 ## Required outputs
 
-- One primary text artifact identifier returned by aurora.render_text_artifact.
+- One primary text artifact identifier returned by aurora.write_text_artifact.
 
 ## Failure behavior
 
