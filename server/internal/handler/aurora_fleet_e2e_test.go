@@ -2,7 +2,11 @@ package handler
 
 import (
 	"context"
+	"encoding/hex"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/aurorafleet"
@@ -49,24 +53,37 @@ func TestAuroraFleetProvisionToClaim(t *testing.T) {
 		testPool.Exec(ctx, `DELETE FROM aurora_sandbox_node WHERE workspace_id = $1`, testWorkspaceID)
 	})
 
-	// Provision an empty node. The controller injects the server URL the daemon
-	// dials; the enrollment secret itself is delivered out of band by the
-	// control plane, not baked into the node's environment.
-	backend := aurorafleet.NewMemoryBackend()
-	ctrl := aurorafleet.NewController(aurorafleet.Config{
-		Backend:      backend,
-		SandboxImage: "aurora-sandbox:latest",
-		ServerURL:    "http://multica.internal",
-	})
-	node := testutil.Decode[struct {
-		ID string `json:"id"`
-	}](t, ctrl.Handler().ServeHTTP,
-		testutil.JSONRequest(http.MethodPost, "/api/v1/nodes", map[string]string{"name": "sandbox-0"}), http.StatusCreated)
-	if node.ID == "" {
-		t.Fatal("provisioned node has no id")
+	// Ensure the workspace node through the authenticated internal API. The
+	// request carries identity only; the controller stages the enrollment
+	// secret into a 0400 host file and hands the backend its path.
+	tokenRaw := []byte(strings.Repeat("m", 32))
+	tokenFile := filepath.Join(t.TempDir(), "control-token")
+	if err := os.WriteFile(tokenFile, []byte(hex.EncodeToString(tokenRaw)), 0o400); err != nil {
+		t.Fatalf("write control token file: %v", err)
 	}
-	if env := backend.NodeEnv(node.ID); env[aurorafleet.EnvServerURL] != "http://multica.internal" {
-		t.Fatalf("injected server url = %q, want %q", env[aurorafleet.EnvServerURL], "http://multica.internal")
+	auth, err := aurorafleet.LoadControlAuth(tokenFile)
+	if err != nil {
+		t.Fatalf("load control auth: %v", err)
+	}
+	backend := aurorafleet.NewMemoryBackend()
+	ctrl := aurorafleet.NewController(aurorafleet.Config{Backend: backend, Auth: auth, SecretRoot: t.TempDir()})
+	nodeID := "01933e60-0000-7d4e-9f01-2a3b4c5d6e01"
+	node := testutil.Decode[struct {
+		ID    string `json:"id"`
+		State string `json:"state"`
+	}](t, ctrl.Handler().ServeHTTP,
+		testutil.WithHeaders(
+			testutil.JSONRequest(http.MethodPut, "/internal/v1/workspace-nodes/"+nodeID, aurorafleet.EnsureRequest{
+				NodeID:          nodeID,
+				WorkspaceID:     testWorkspaceID,
+				RuntimeID:       runtimeID,
+				DaemonID:        "01933e60-0000-7d4e-9f01-2a3b4c5d6e02",
+				EnrollmentToken: "mse_0123456789abcdef0123456789abcdef01234567",
+			}),
+			"Authorization", "Bearer "+string(tokenRaw),
+		), http.StatusOK)
+	if node.ID != nodeID || node.State != aurorafleet.StateOnline {
+		t.Fatalf("ensured node = %+v, want %s online", node, nodeID)
 	}
 
 	// The sandbox daemon exchanges the workspace-scoped enrollment secret for

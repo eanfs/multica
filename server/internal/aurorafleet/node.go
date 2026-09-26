@@ -1,43 +1,22 @@
 package aurorafleet
 
-import "time"
-
-// now returns the current UTC time truncated to microsecond precision, the
-// granularity node timestamps are stored and compared at.
-func now() time.Time {
-	return time.Now().UTC().Truncate(time.Microsecond)
-}
-
-// Status is a node lifecycle state. The vocabulary matches the cloud-runtime
-// statuses the frontend already keys off, scoped to what a self-host container
-// fleet can actually report (no EC2 launch/pending semantics).
-type Status string
-
+// Node lifecycle states reported in Node.State. The vocabulary matches the
+// workspace fleet lifecycle the server-side manager reconciles.
 const (
-	// StatusProvisioning is a node whose container has been created but is not
-	// yet accepting work.
-	StatusProvisioning Status = "provisioning"
-	// StatusRunning is a healthy node ready to claim tasks.
-	StatusRunning Status = "running"
-	// StatusStopped is a node whose container exists but is not running.
-	StatusStopped Status = "stopped"
-	// StatusRebooting is a node mid-restart.
-	StatusRebooting Status = "rebooting"
-	// StatusTerminating is a node being torn down.
-	StatusTerminating Status = "terminating"
-	// StatusError is a node whose container failed.
-	StatusError Status = "error"
+	// StateStarting is a node whose containers exist but are not yet healthy.
+	StateStarting = "starting"
+	// StateOnline is a healthy node ready to claim tasks on its runtime.
+	StateOnline = "online"
+	// StateDraining is a node finishing its current task before teardown.
+	StateDraining = "draining"
+	// StateFailed is a node whose containers failed.
+	StateFailed = "failed"
+	// StateStopped is a node torn down but still known to the fleet.
+	StateStopped = "stopped"
 )
 
-// Node is a single sandbox node in the fleet. ID is the backend's native
-// identifier (a Docker container id for the Docker backend) and is opaque to
-// callers; it is what the action endpoints address.
-type Node struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Image     string            `json:"image"`
-	Status    Status            `json:"status"`
-	Labels    map[string]string `json:"labels,omitempty"`
-	CreatedAt time.Time         `json:"created_at"`
-	UpdatedAt time.Time         `json:"updated_at"`
-}
+// Node health values reported in Node.Health.
+const (
+	HealthHealthy   = "healthy"
+	HealthUnhealthy = "unhealthy"
+)
