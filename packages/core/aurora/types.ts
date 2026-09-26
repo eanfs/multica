@@ -10,10 +10,29 @@
  * poll keys on.
  */
 
+/**
+ * One attachment constraint on a skill, as served under `attachment_rules`.
+ *
+ * The server counts every kind listed in one rule together, so `transcription`
+ * is one rule over `["audio", "video"]` with a max of 1.
+ */
+export interface AuroraSkillAttachmentRule {
+  /** Attachment kinds this rule accepts: image | document | audio | video. */
+  kinds: string[];
+  /** Minimum number of accepted files; 0 means optional. */
+  min: number;
+  /** Maximum number of accepted files. */
+  max: number;
+  /** Per-file size cap in bytes. */
+  maxBytes: number;
+}
+
 /** Body of `POST /api/aurora/generations`. */
 export interface CreateAuroraGenerationRequest {
   skillId: string;
   prompt: string;
+  /** Ids of already-uploaded workspace attachments, in the skill's kinds. */
+  attachmentIds?: string[];
 }
 
 /**

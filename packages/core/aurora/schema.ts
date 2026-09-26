@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AuroraSkillAttachmentRule } from "./types";
 
 /**
  * Wire schemas for the Aurora API (`server/internal/handler/aurora.go`,
@@ -21,6 +22,13 @@ import { z } from "zod";
  * rest of the API is camelCase; the transform maps it to `nameEn` so consumers
  * see one naming convention.
  */
+const auroraSkillAttachmentRuleSchema = z.object({
+  kinds: z.array(z.string()).default([]),
+  min: z.number().default(0),
+  max: z.number().default(0),
+  max_bytes: z.number().default(0),
+});
+
 export const auroraSkillSchema = z
   .object({
     id: z.string(),
@@ -33,8 +41,25 @@ export const auroraSkillSchema = z
     featured: z.boolean().default(false),
     /** false = a phase-2 skill: listed, but not yet runnable. */
     available: z.boolean().default(true),
+    /**
+     * The skill's parsed input rules. Defaulted to an empty array so a server
+     * that predates the field still parses: the composer then renders no file
+     * input rather than guessing a rule set.
+     */
+    attachment_rules: z.array(auroraSkillAttachmentRuleSchema).default([]),
   })
-  .transform(({ name_en, ...skill }) => ({ ...skill, nameEn: name_en }));
+  .transform(({ name_en, attachment_rules, ...skill }) => ({
+    ...skill,
+    nameEn: name_en,
+    attachments: attachment_rules.map(
+      (rule): AuroraSkillAttachmentRule => ({
+        kinds: rule.kinds,
+        min: rule.min,
+        max: rule.max,
+        maxBytes: rule.max_bytes,
+      }),
+    ),
+  }));
 export type AuroraSkill = z.infer<typeof auroraSkillSchema>;
 
 export const auroraSkillsSchema = z.object({
