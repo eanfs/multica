@@ -1,42 +1,69 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/aurora"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
-// AuroraArtifactPayload is one content artifact the sandbox daemon produced and
-// uploaded to storage for a completed generation. name is the original file
-// name (kept on the wire for the daemon and future surfaces; aurora_asset has
-// no name column, so it is not persisted). mediaURL is the uploaded object's
-// URL; format is the file format (e.g. "png", "mp4", "pdf").
+// errAuroraAssetConflict marks an upsert that matched an existing asset with a
+// different hash or metadata. The report fails closed rather than overwriting a
+// committed deliverable.
+var errAuroraAssetConflict = errors.New("aurora: asset conflicts with an existing row")
+
+// AuroraArtifactPayload is one staged content artifact the sandbox daemon
+// produced and reported for a completed generation. StagingID names the object
+// the task-token upload/import endpoints minted; the server resolves the
+// storage URL and object ownership from it, so no caller-supplied URL is ever
+// trusted. Name/kind/role/format/mime/size/sha256/metadata are the manifest
+// identity and are re-validated against the staging row before any asset write.
 type AuroraArtifactPayload struct {
-	Name     string `json:"name"`
-	MediaURL string `json:"media_url"`
-	Format   string `json:"format"`
+	ManifestArtifactID string         `json:"manifest_artifact_id"`
+	StagingID          string         `json:"staging_id"`
+	Name               string         `json:"name"`
+	Kind               string         `json:"kind"`
+	Role               string         `json:"role"`
+	Format             string         `json:"format"`
+	MIMEType           string         `json:"mime_type"`
+	SizeBytes          int64          `json:"size_bytes"`
+	SHA256             string         `json:"sha256"`
+	Metadata           map[string]any `json:"metadata,omitempty"`
+}
+
+// normalizedAuroraReportArtifact is a validated payload bound to its staging
+// row and resolved storage URL.
+type normalizedAuroraReportArtifact struct {
+	payload   AuroraArtifactPayload
+	staging   db.AuroraArtifactStaging
+	objectURL string
 }
 
 // ReportTaskArtifacts records the artifacts a completed Aurora task produced.
-// It is the out-of-band channel Plan 3 Task 4 introduces — the daemon uploads
-// the workdir output to storage, then reports this structured list here (the
-// same ReportTaskUsage-style daemon channel) before reporting the task
-// complete. The daemon treats any non-2xx response as a report failure and
-// fails the task, so a write error here must not be swallowed.
+// The daemon reports only staging ids, after it has validated the broker-written
+// manifest and uploaded the local files through Task 6's staging endpoint. The
+// report is all-or-nothing and idempotent:
 //
-// This is also the artifact half of Plan safety: every reported artifact is
-// screened here, before any row is written, and a rejected one fails the
-// generation with the reservation refunded instead of being stored. Screening
-// on the completion path rather than after the fact is what makes "no asset
-// row" true rather than approximately true.
+//   - every reported artifact is matched against a staging row owned by the
+//     same task/generation/workspace, and the manifest metadata must match the
+//     row exactly;
+//   - every stored object is moderated before any row is written;
+//   - one transaction upserts every asset by (generation_id,
+//     manifest_artifact_id), marks the reported staging rows committed, and
+//     rejects an existing row with a different hash or metadata;
+//   - if moderation or the transaction fails, the uncommitted storage objects
+//     are deleted and the generation is failed and refunded exactly once.
 func (h *Handler) ReportTaskArtifacts(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskId")
 	task, ok := h.requireDaemonTaskAccess(w, r, taskID)
@@ -51,6 +78,10 @@ func (h *Handler) ReportTaskArtifacts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if len(req.Artifacts) == 0 {
+		writeError(w, http.StatusBadRequest, "artifacts are required")
+		return
+	}
 
 	gen, err := h.Queries.GetAuroraGenerationByTaskID(r.Context(), task.ID)
 	if err != nil {
@@ -61,62 +92,358 @@ func (h *Handler) ReportTaskArtifacts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load generation")
 		return
 	}
-	entry, ok := aurora.Lookup(gen.SkillID)
-	if !ok {
+	if _, ok := aurora.Lookup(gen.SkillID); !ok {
 		// A generation always references a catalog skill; a missing entry is a
 		// data inconsistency. Fail rather than write assets with an empty kind.
 		writeError(w, http.StatusInternalServerError, "unknown skill")
 		return
 	}
 
-	// Screen the whole batch before writing any row. An artifact the moderator
-	// rejects must not leave its siblings stored: the generation is about to be
-	// failed, and a library that still shows output from it would contradict
-	// the generation's own status.
-	screened := make([]db.CreateAuroraAssetParams, 0, len(req.Artifacts))
-	for _, a := range req.Artifacts {
-		if a.MediaURL == "" {
-			writeError(w, http.StatusBadRequest, "artifact missing media_url")
+	payloads, ok := h.validateAuroraReportBatch(w, gen.SkillID, req.Artifacts)
+	if !ok {
+		return
+	}
+
+	if h.Storage == nil {
+		writeFeatureDisabled(w, "aurora_artifact_storage_not_configured", "artifact storage not configured")
+		return
+	}
+	stagingRows, err := h.listAuroraArtifactStaging(r.Context(), task.ID, gen.ID, gen.WorkspaceID)
+	if err != nil {
+		slog.Error("aurora artifact staging load failed", "generation_id", uuidToString(gen.ID), "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load staged artifacts")
+		return
+	}
+	stagingByID := make(map[string]db.AuroraArtifactStaging, len(stagingRows))
+	for _, row := range stagingRows {
+		stagingByID[uuidToString(row.ID)] = row
+	}
+
+	bound := make([]normalizedAuroraReportArtifact, 0, len(payloads))
+	for _, payload := range payloads {
+		row, found := stagingByID[payload.StagingID]
+		if !found {
+			writeError(w, http.StatusBadRequest, "unknown staging artifact")
 			return
 		}
-		kind, ok := aurora.AssetKind(entry, a.Format)
-		if !ok {
-			writeError(w, http.StatusBadRequest, "unlisted artifact format")
+		if !auroraStagingMatchesPayload(row, payload) {
+			writeError(w, http.StatusBadRequest, "artifact metadata does not match its staged object")
 			return
 		}
-		decision, err := h.Moderation.ScreenAsset(r.Context(), a.MediaURL, kind)
+		bound = append(bound, normalizedAuroraReportArtifact{
+			payload:   payload,
+			staging:   row,
+			objectURL: h.Storage.ObjectURL(row.StorageKey),
+		})
+	}
+
+	// Screen every stored object before writing a single row. An artifact the
+	// moderator rejects must not leave its siblings stored: the generation is
+	// about to be failed, and a library that still showed output from it would
+	// contradict the generation's own status.
+	for _, artifact := range bound {
+		decision, err := h.Moderation.ScreenAsset(r.Context(), artifact.objectURL, artifact.payload.Kind)
 		if err != nil {
-			// Fail closed: an artifact that could not be inspected is not
-			// stored, and the task fails rather than completing with output
-			// nobody screened (spec §10 red line).
-			slog.Error("aurora asset moderation failed",
-				"generation_id", uuidToString(gen.ID), "error", err)
+			slog.Error("aurora asset moderation failed", "generation_id", uuidToString(gen.ID), "error", err)
+			h.deleteUncommittedAuroraStaging(r.Context(), stagingRows)
 			h.blockGenerationForModeration(r.Context(), gen, "moderation adapter error: "+err.Error())
 			writeError(w, http.StatusInternalServerError, "content moderation unavailable")
 			return
 		}
 		if !decision.Allowed {
+			h.deleteUncommittedAuroraStaging(r.Context(), stagingRows)
 			h.blockGenerationForModeration(r.Context(), gen, decision.Reason)
 			writeError(w, http.StatusUnprocessableEntity, decision.Reason)
 			return
 		}
-		screened = append(screened, db.CreateAuroraAssetParams{
-			GenerationID: gen.ID,
-			WorkspaceID:  gen.WorkspaceID,
-			Kind:         kind,
-			MediaUrl:     pgtype.Text{String: a.MediaURL, Valid: true},
-			Format:       pgtype.Text{String: a.Format, Valid: a.Format != ""},
-		})
 	}
 
-	for _, params := range screened {
-		if _, err := h.Queries.CreateAuroraAsset(r.Context(), params); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to record artifact")
+	if err := h.commitAuroraArtifacts(r.Context(), gen, bound); err != nil {
+		h.deleteUncommittedAuroraStaging(r.Context(), stagingRows)
+		if errors.Is(err, errAuroraAssetConflict) {
+			h.failGenerationAndRefund(r.Context(), gen.UserID, gen.WorkspaceID, gen.ID, gen.CreditsReserved, "artifact conflict")
+			writeError(w, http.StatusConflict, "artifact conflicts with an existing asset")
 			return
 		}
+		slog.Error("aurora artifact report transaction failed", "generation_id", uuidToString(gen.ID), "error", err)
+		h.failGenerationAndRefund(r.Context(), gen.UserID, gen.WorkspaceID, gen.ID, gen.CreditsReserved, "artifact commit failed")
+		writeError(w, http.StatusInternalServerError, "failed to record artifacts")
+		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"recorded": len(req.Artifacts)})
+	writeJSON(w, http.StatusOK, map[string]any{"recorded": len(bound)})
+}
+
+// validateAuroraReportBatch enforces the server-owned artifact policy over the
+// whole batch before any storage or DB read: unique identities, accepted
+// kind/format/MIME, bounded size, a valid staging id, and exactly the outputs
+// the skill may produce (including a primary one).
+func (h *Handler) validateAuroraReportBatch(w http.ResponseWriter, skillID string, artifacts []AuroraArtifactPayload) ([]AuroraArtifactPayload, bool) {
+	policy, ok := aurora.ExecutionPolicy(skillID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "unknown skill")
+		return nil, false
+	}
+	if len(artifacts) > 20 {
+		writeError(w, http.StatusBadRequest, "too many artifacts")
+		return nil, false
+	}
+	ids := make(map[string]bool, len(artifacts))
+	stagingIDs := make(map[string]bool, len(artifacts))
+	hasPrimary := false
+	normalized := make([]AuroraArtifactPayload, 0, len(artifacts))
+
+	for _, artifact := range artifacts {
+		artifact.ManifestArtifactID = strings.TrimSpace(artifact.ManifestArtifactID)
+		artifact.StagingID = strings.TrimSpace(artifact.StagingID)
+		artifact.Name = strings.TrimSpace(artifact.Name)
+		artifact.Kind = strings.ToLower(strings.TrimSpace(artifact.Kind))
+		artifact.Role = strings.ToLower(strings.TrimSpace(artifact.Role))
+		artifact.Format = strings.ToLower(strings.TrimSpace(artifact.Format))
+		artifact.MIMEType = normalizeArtifactMIME(artifact.MIMEType)
+
+		if !auroraArtifactIDPattern.MatchString(artifact.ManifestArtifactID) || ids[artifact.ManifestArtifactID] {
+			writeError(w, http.StatusBadRequest, "invalid or duplicate manifest artifact id")
+			return nil, false
+		}
+		ids[artifact.ManifestArtifactID] = true
+		if _, err := util.ParseUUID(artifact.StagingID); err != nil || stagingIDs[artifact.StagingID] {
+			writeError(w, http.StatusBadRequest, "invalid or duplicate staging id")
+			return nil, false
+		}
+		stagingIDs[artifact.StagingID] = true
+		if !auroraArtifactNamePattern.MatchString(artifact.Name) || strings.Contains(artifact.Name, "..") {
+			writeError(w, http.StatusBadRequest, "invalid artifact name")
+			return nil, false
+		}
+		if !auroraArtifactRoles[artifact.Role] {
+			writeError(w, http.StatusBadRequest, "invalid artifact role")
+			return nil, false
+		}
+		spec, ok := auroraArtifactKinds[artifact.Kind]
+		if !ok {
+			writeError(w, http.StatusBadRequest, "unsupported artifact kind")
+			return nil, false
+		}
+		formatKind, ok := auroraArtifactFormatKinds[artifact.Format]
+		if !ok || formatKind != artifact.Kind {
+			writeError(w, http.StatusBadRequest, "artifact format does not match its kind")
+			return nil, false
+		}
+		if !auroraArtifactReportExtensionMatches(artifact.Name, artifact.Kind) {
+			writeError(w, http.StatusBadRequest, "artifact name extension does not match its kind")
+			return nil, false
+		}
+		if !slices.Contains(policy.OutputKinds, artifact.Kind) {
+			writeError(w, http.StatusBadRequest, "artifact kind is not produced by this skill")
+			return nil, false
+		}
+		if !slices.Contains(spec.MIMEs, artifact.MIMEType) {
+			writeError(w, http.StatusUnsupportedMediaType, "unsupported artifact MIME type")
+			return nil, false
+		}
+		if artifact.SizeBytes < 0 || artifact.SizeBytes > spec.MaxBytes {
+			writeError(w, http.StatusRequestEntityTooLarge, "artifact exceeds the per-kind size limit")
+			return nil, false
+		}
+		digest, ok := normalizeAuroraArtifactDigest(artifact.SHA256)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "invalid artifact sha256")
+			return nil, false
+		}
+		artifact.SHA256 = digest
+		if artifact.Metadata == nil {
+			artifact.Metadata = map[string]any{}
+		}
+		if encoded, err := json.Marshal(artifact.Metadata); err != nil || len(encoded) > auroraArtifactMaxMetadataBytes {
+			writeError(w, http.StatusBadRequest, "artifact metadata is too large")
+			return nil, false
+		}
+		if artifact.Role == "primary" && slices.Contains(policy.OutputKinds, artifact.Kind) {
+			hasPrimary = true
+		}
+		normalized = append(normalized, artifact)
+	}
+	if !hasPrimary {
+		writeError(w, http.StatusBadRequest, "a primary artifact matching the skill output is required")
+		return nil, false
+	}
+	return normalized, true
+}
+
+// listAuroraArtifactStaging loads every staging row a report may name, scoped to
+// the task, generation, and workspace on the verified daemon token.
+func (h *Handler) listAuroraArtifactStaging(ctx context.Context, taskID, generationID, workspaceID pgtype.UUID) ([]db.AuroraArtifactStaging, error) {
+	rows, err := h.DB.Query(ctx, `
+		SELECT id, task_id, generation_id, workspace_id, manifest_artifact_id, storage_key, name,
+		       kind, role, format, mime_type, size_bytes, sha256, metadata, source_type, status,
+		       created_at, updated_at
+		FROM aurora_artifact_staging
+		WHERE task_id = $1 AND generation_id = $2 AND workspace_id = $3 AND status <> 'deleted'
+		ORDER BY created_at ASC`, taskID, generationID, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var staging []db.AuroraArtifactStaging
+	for rows.Next() {
+		var row db.AuroraArtifactStaging
+		if err := rows.Scan(
+			&row.ID, &row.TaskID, &row.GenerationID, &row.WorkspaceID, &row.ManifestArtifactID,
+			&row.StorageKey, &row.Name, &row.Kind, &row.Role, &row.Format, &row.MimeType,
+			&row.SizeBytes, &row.Sha256, &row.Metadata, &row.SourceType, &row.Status,
+			&row.CreatedAt, &row.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		staging = append(staging, row)
+	}
+	return staging, rows.Err()
+}
+
+// auroraStagingMatchesPayload proves the reported manifest identity is exactly
+// what the object was staged as. Provider imports leave manifest id/role/format
+// NULL until the report assigns them, so those three compare only when present.
+func auroraStagingMatchesPayload(row db.AuroraArtifactStaging, payload AuroraArtifactPayload) bool {
+	if row.Name != payload.Name || row.Kind != payload.Kind {
+		return false
+	}
+	if row.MimeType != payload.MIMEType || row.SizeBytes != payload.SizeBytes || row.Sha256 != payload.SHA256 {
+		return false
+	}
+	if row.ManifestArtifactID.Valid && row.ManifestArtifactID.String != payload.ManifestArtifactID {
+		return false
+	}
+	if row.Role.Valid && row.Role.String != payload.Role {
+		return false
+	}
+	if row.Format.Valid && row.Format.String != payload.Format {
+		return false
+	}
+	return auroraMetadataEqual(row.Metadata, payload.Metadata)
+}
+
+func auroraMetadataEqual(stored []byte, reported map[string]any) bool {
+	var storedMap map[string]any
+	if len(bytes.TrimSpace(stored)) == 0 {
+		storedMap = map[string]any{}
+	} else if err := json.Unmarshal(stored, &storedMap); err != nil {
+		return false
+	}
+	if reported == nil {
+		reported = map[string]any{}
+	}
+	storedJSON, err := json.Marshal(storedMap)
+	if err != nil {
+		return false
+	}
+	reportedJSON, err := json.Marshal(reported)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(storedJSON, reportedJSON)
+}
+
+// commitAuroraArtifacts writes every asset and marks the reported staging rows
+// committed in one transaction. An upsert that finds an existing row with a
+// different hash or metadata returns errAuroraAssetConflict and rolls the whole
+// batch back.
+func (h *Handler) commitAuroraArtifacts(ctx context.Context, gen db.AuroraGeneration, artifacts []normalizedAuroraReportArtifact) error {
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	for _, artifact := range artifacts {
+		metadata, err := json.Marshal(artifact.payload.Metadata)
+		if err != nil {
+			return err
+		}
+		var assetID pgtype.UUID
+		err = tx.QueryRow(ctx, `
+			INSERT INTO aurora_asset (
+				generation_id, workspace_id, kind, media_url, format, manifest_artifact_id,
+				name, mime_type, size_bytes, sha256, role, metadata
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			ON CONFLICT (generation_id, manifest_artifact_id) WHERE manifest_artifact_id IS NOT NULL
+			DO UPDATE SET metadata = aurora_asset.metadata
+			WHERE aurora_asset.sha256 = EXCLUDED.sha256 AND aurora_asset.metadata = EXCLUDED.metadata
+			RETURNING id`,
+			gen.ID, gen.WorkspaceID, artifact.payload.Kind,
+			pgtype.Text{String: artifact.objectURL, Valid: artifact.objectURL != ""},
+			pgtype.Text{String: artifact.payload.Format, Valid: artifact.payload.Format != ""},
+			pgtype.Text{String: artifact.payload.ManifestArtifactID, Valid: true},
+			pgtype.Text{String: artifact.payload.Name, Valid: true},
+			pgtype.Text{String: artifact.payload.MIMEType, Valid: true},
+			pgtype.Int8{Int64: artifact.payload.SizeBytes, Valid: true},
+			pgtype.Text{String: artifact.payload.SHA256, Valid: true},
+			pgtype.Text{String: artifact.payload.Role, Valid: artifact.payload.Role != ""},
+			metadata,
+		).Scan(&assetID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errAuroraAssetConflict
+		}
+		if err != nil {
+			return err
+		}
+
+		tag, err := tx.Exec(ctx, `
+			UPDATE aurora_artifact_staging
+			SET status = 'committed',
+			    manifest_artifact_id = COALESCE(manifest_artifact_id, $2),
+			    role = COALESCE(role, $3),
+			    format = COALESCE(format, $4),
+			    updated_at = now()
+			WHERE id = $1 AND task_id = $5 AND generation_id = $6 AND workspace_id = $7 AND status <> 'deleted'`,
+			artifact.staging.ID, artifact.payload.ManifestArtifactID, artifact.payload.Role,
+			artifact.payload.Format, artifact.staging.TaskID, artifact.staging.GenerationID,
+			artifact.staging.WorkspaceID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return errors.New("aurora: staging row disappeared before commit")
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// deleteUncommittedAuroraStaging removes the storage objects of staging rows
+// that were never committed. Committed rows are left alone: their assets are
+// durable, and a retry must not destroy them.
+func (h *Handler) deleteUncommittedAuroraStaging(ctx context.Context, rows []db.AuroraArtifactStaging) {
+	if h.Storage == nil {
+		return
+	}
+	for _, row := range rows {
+		if row.Status == "committed" {
+			continue
+		}
+		if err := h.Storage.DeleteObject(ctx, row.StorageKey); err != nil {
+			slog.Error("failed to delete uncommitted aurora staging object", "key", row.StorageKey, "error", err)
+		}
+	}
+}
+
+// auroraArtifactReportExtensionMatches proves the declared name carries the
+// extension its kind implies, so a report cannot label a video as a PNG.
+func auroraArtifactReportExtensionMatches(name, kind string) bool {
+	dot := strings.LastIndexByte(name, '.')
+	if dot <= 0 || dot == len(name)-1 {
+		return false
+	}
+	extensionKind, ok := auroraArtifactFormatKinds[strings.ToLower(name[dot+1:])]
+	return ok && extensionKind == kind
+}
+
+func normalizeAuroraArtifactDigest(raw string) (string, bool) {
+	match := auroraArtifactSHA256Regex.FindStringSubmatch(strings.ToLower(strings.TrimSpace(raw)))
+	if match == nil {
+		return "", false
+	}
+	return "sha256:" + match[1], true
 }
 
 // blockGenerationForModeration fails a generation whose artifact did not pass

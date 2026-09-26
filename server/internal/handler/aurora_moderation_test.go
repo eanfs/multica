@@ -243,24 +243,27 @@ func TestAuroraModerationFailsClosedWhenPromptScreenErrors(t *testing.T) {
 // TestAuroraModerationBlocksUnsafeArtifact is the completion half: an artifact
 // the moderator rejects is never stored, the generation fails with the
 // documented reason, and the reservation is refunded.
+// TestAuroraModerationBlocksUnsafeArtifact is the completion half: an artifact
+// the moderator rejects is never stored, its staged object is deleted, the
+// generation fails with the documented reason, and the reservation is refunded.
 func TestAuroraModerationBlocksUnsafeArtifact(t *testing.T) {
 	creditTestReset(t)
 	resetAuroraGenerations(t)
 	resetAuroraModerationLog(t)
 
+	store := &artifactTestStorage{}
+	withArtifactStorage(t, store)
 	moderator := &stubModerator{assetDecision: aurora.Decision{Allowed: false, Reason: "image is explicit"}}
 	withAuroraModeration(t, moderator)
 
 	const reservedMicro = 620_000_000
 	generationID, taskID := runningAuroraGeneration(t, reservedMicro)
+	staged := seedAuroraStaging(t, store, taskID, generationID, "primary-1", "out.png", "primary", []byte("\x89PNG\r\n\x1a\n\x00\x00"), "{}")
 
-	req := newDaemonTokenRequest(http.MethodPost, "/api/daemon/tasks/"+taskID+"/artifacts",
-		map[string]any{"artifacts": []map[string]string{
-			{"name": "out.png", "media_url": "https://cdn.example/obj/1", "format": "png"},
-		}}, testWorkspaceID, "aurora-moderation-daemon")
-	req = withURLParam(req, "taskId", taskID)
-
-	testutil.Call(t, testHandler.ReportTaskArtifacts, req).Want(http.StatusUnprocessableEntity)
+	got := reportAuroraArtifacts(t, taskID, staged.payload("primary"))
+	if got.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("report status = %d, want 422: %s", got.Code, got.Body.String())
+	}
 
 	// The kind the catalog derived is what the moderator was asked about: a
 	// screen that inspects the wrong surface would pass every other assertion.
@@ -271,9 +274,13 @@ func TestAuroraModerationBlocksUnsafeArtifact(t *testing.T) {
 	assertAuroraGenerationFailedForModeration(t, generationID, reservedMicro)
 
 	// No asset row: the screen runs before the insert, which is the whole point
-	// of post-screening rather than deleting afterwards.
+	// of post-screening rather than deleting afterwards. The rejected object is
+	// deleted so the batch leaves nothing behind.
 	if n := dbfx.Count(t, `SELECT count(*) FROM aurora_asset WHERE generation_id = $1`, generationID); n != 0 {
 		t.Fatalf("asset rows for a rejected artifact = %d, want 0", n)
+	}
+	if len(store.deleted) == 0 {
+		t.Error("rejected staging object was not deleted")
 	}
 
 	rows := auroraModerationLogRows(t)
@@ -300,19 +307,19 @@ func TestAuroraModerationFailsClosedWhenAssetScreenErrors(t *testing.T) {
 	resetAuroraGenerations(t)
 	resetAuroraModerationLog(t)
 
+	store := &artifactTestStorage{}
+	withArtifactStorage(t, store)
 	moderator := &stubModerator{assetErr: errors.New("screening service unreachable")}
 	withAuroraModeration(t, moderator)
 
 	const reservedMicro = 620_000_000
 	generationID, taskID := runningAuroraGeneration(t, reservedMicro)
+	staged := seedAuroraStaging(t, store, taskID, generationID, "primary-1", "out.png", "primary", []byte("\x89PNG\r\n\x1a\n\x00\x00"), "{}")
 
-	req := newDaemonTokenRequest(http.MethodPost, "/api/daemon/tasks/"+taskID+"/artifacts",
-		map[string]any{"artifacts": []map[string]string{
-			{"name": "out.png", "media_url": "https://cdn.example/obj/1", "format": "png"},
-		}}, testWorkspaceID, "aurora-moderation-daemon")
-	req = withURLParam(req, "taskId", taskID)
-
-	testutil.Call(t, testHandler.ReportTaskArtifacts, req).Want(http.StatusInternalServerError)
+	got := reportAuroraArtifacts(t, taskID, staged.payload("primary"))
+	if got.Code != http.StatusInternalServerError {
+		t.Fatalf("report status = %d, want 500: %s", got.Code, got.Body.String())
+	}
 
 	assertAuroraGenerationFailedForModeration(t, generationID, reservedMicro)
 
@@ -337,26 +344,29 @@ func TestAuroraModerationRejectsBeforeStoringAnyArtifact(t *testing.T) {
 	resetAuroraGenerations(t)
 	resetAuroraModerationLog(t)
 
-	moderator := &stubModerator{blockAssetURL: "obj/2"}
+	store := &artifactTestStorage{}
+	withArtifactStorage(t, store)
+	moderator := &stubModerator{blockAssetURL: "second.png"}
 	withAuroraModeration(t, moderator)
 
 	const reservedMicro = 620_000_000
 	generationID, taskID := runningAuroraGeneration(t, reservedMicro)
+	first := seedAuroraStaging(t, store, taskID, generationID, "primary-1", "first.png", "primary", []byte("\x89PNG\r\n\x1a\n\x00\x00"), "{}")
+	second := seedAuroraStaging(t, store, taskID, generationID, "secondary-1", "second.png", "supporting", []byte("\x89PNG\r\n\x1a\n\x00\x01"), "{}")
 
-	req := newDaemonTokenRequest(http.MethodPost, "/api/daemon/tasks/"+taskID+"/artifacts",
-		map[string]any{"artifacts": []map[string]string{
-			{"name": "first.png", "media_url": "https://cdn.example/obj/1", "format": "png"},
-			{"name": "second.png", "media_url": "https://cdn.example/obj/2", "format": "png"},
-		}}, testWorkspaceID, "aurora-moderation-daemon")
-	req = withURLParam(req, "taskId", taskID)
-
-	testutil.Call(t, testHandler.ReportTaskArtifacts, req).Want(http.StatusUnprocessableEntity)
+	got := reportAuroraArtifacts(t, taskID, first.payload("primary"), second.payload("supporting"))
+	if got.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("report status = %d, want 422: %s", got.Code, got.Body.String())
+	}
 
 	if moderator.assetCalls != 2 {
 		t.Fatalf("ScreenAsset calls = %d, want 2 (the whole batch is screened before any row is written)", moderator.assetCalls)
 	}
 	if n := dbfx.Count(t, `SELECT count(*) FROM aurora_asset WHERE generation_id = $1`, generationID); n != 0 {
 		t.Fatalf("asset rows after a rejected batch = %d, want 0 (including the artifact that passed)", n)
+	}
+	if len(store.deleted) < 2 {
+		t.Errorf("deleted objects = %d, want both uncommitted objects removed", len(store.deleted))
 	}
 }
 

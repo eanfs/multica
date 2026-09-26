@@ -213,14 +213,14 @@ type CoalescedCommentData struct {
 
 // AgentData holds agent details returned by the claim endpoint.
 type AgentData struct {
-	ID                    string                     `json:"id"`
-	Name                  string                     `json:"name"`
-	Instructions          string                     `json:"instructions"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Instructions string `json:"instructions"`
 	// SystemKey is the agent's stable product identity: "mika" for the built-in
 	// Chief of Staff, "aurora:<skillID>" for Aurora's workspace system agents.
 	// The daemon reads it to apply system-agent execution policy (e.g. the
 	// sandbox tool-surface narrowing). Empty for ordinary user agents.
-	SystemKey string `json:"system_key,omitempty"`
+	SystemKey             string                     `json:"system_key,omitempty"`
 	Skills                []SkillData                `json:"skills,omitempty"`
 	SkillRefs             []SkillRefData             `json:"skill_refs,omitempty"`
 	CustomEnv             map[string]string          `json:"custom_env,omitempty"`
@@ -324,20 +324,33 @@ type TaskResult struct {
 	// precisely when the abandoned id would otherwise stay selectable.
 	RetiredSessionID string           `json:"-"`
 	Usage            []TaskUsageEntry `json:"usage,omitempty"` // per-model token usage
-	// Artifacts are the content assets a completed Aurora task produced, already
-	// uploaded to storage by the runner (media generation is wired in Plan 3 Task
-	// 6). Populated only on completed runs; empty for every non-Aurora task. The
-	// daemon reports them out-of-band before the terminal callback so the server
-	// can write aurora_asset rows — the artifact is the deliverable, so a failed
-	// report fails the task.
+	// Artifacts are the content assets a completed Aurora task produced. The
+	// daemon collects them from the broker manifest, uploads each local file
+	// through the task-owned staging endpoint, and reports only staging ids
+	// (Plan C Task 7). Populated only on completed runs; empty for every
+	// non-Aurora task. The daemon reports them out-of-band before the terminal
+	// callback so the server can commit aurora_asset rows — the artifact is the
+	// deliverable, so a failed report fails the task.
 	Artifacts []TaskArtifact `json:"-"`
 }
 
-// TaskArtifact is one uploaded content asset a completed task produced.
+// TaskArtifact is one validated, server-staged content asset a completed task
+// produced. The daemon never supplies a storage URL: the server resolves the
+// object and its ownership from StagingID, which the task-token upload/import
+// endpoints minted. The remaining fields are the manifest identity and the
+// facts the daemon re-derived from the local file (or the staging response for
+// a provider import).
 type TaskArtifact struct {
-	Name     string `json:"name"`
-	MediaURL string `json:"media_url"`
-	Format   string `json:"format,omitempty"`
+	ManifestArtifactID string         `json:"manifest_artifact_id"`
+	StagingID          string         `json:"staging_id"`
+	Name               string         `json:"name"`
+	Kind               string         `json:"kind"`
+	Role               string         `json:"role"`
+	Format             string         `json:"format"`
+	MIMEType           string         `json:"mime_type"`
+	SizeBytes          int64          `json:"size_bytes"`
+	SHA256             string         `json:"sha256"`
+	Metadata           map[string]any `json:"metadata,omitempty"`
 }
 
 // PluginHookTool is one agent-trigger plugin hook, as the agent will see it.
