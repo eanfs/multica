@@ -5815,6 +5815,11 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 	ctx = withTaskPhaseRecorder(ctx, phaseRecorder)
 	phaseRecorder.Mark(taskPhaseClaimed)
 	defer phaseRecorder.Mark(taskPhaseFinished)
+	if isAuroraTask(task) {
+		// The sandbox input/output mounts are per-run. Remove them after the
+		// terminal report so the next task never sees this one's bytes.
+		defer cleanAuroraSandboxIO()
+	}
 	agentName := "agent"
 	if task.Agent != nil {
 		agentName = task.Agent.Name
@@ -5991,6 +5996,9 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		return
 	}
 
+	if isAuroraTask(task) {
+		d.attachAuroraArtifacts(ctx, task, &result, taskLog)
+	}
 	d.reportTaskResult(ctx, task.ID, result, taskLog)
 
 	// Write GC metadata after the task finishes so the periodic GC loop
@@ -6295,6 +6303,51 @@ func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Tas
 	}
 	taskLog.Info("local_directory: lock acquired")
 	return release, false
+}
+
+// attachAuroraArtifacts is the manifest half of the Aurora completion order:
+// after the agent process has exited successfully, collect and validate the
+// broker-written manifest, upload every local file through Task 6's staging
+// endpoint, and populate result.Artifacts so reportTaskResult reports them
+// before the terminal completion. A missing/invalid manifest or any upload
+// failure demotes the run to a blocked failure, which the existing completion
+// path turns into a refund.
+func (d *Daemon) attachAuroraArtifacts(ctx context.Context, task Task, result *TaskResult, taskLog *slog.Logger) {
+	if result == nil || result.Status != "completed" {
+		return
+	}
+	skillID, ok := auroraSkillID(task)
+	if !ok {
+		result.Status = "blocked"
+		result.Comment = "aurora task has no skill identity"
+		return
+	}
+	// Only a daemon running inside the managed sandbox has the broker's artifact
+	// mount. A daemon on a plain host has no artifact tree to validate (and no
+	// managed sandbox was provisioned), so there is nothing to stage; the
+	// server-side completion guard still fails a generation that reports no
+	// committed asset. Inside the sandbox, a missing or invalid manifest is a
+	// hard failure.
+	if _, statErr := os.Stat(auroraSandboxRoot); statErr != nil {
+		if errors.Is(statErr, os.ErrNotExist) {
+			return
+		}
+		result.Status = "blocked"
+		result.Comment = "artifact sandbox root is unavailable: " + statErr.Error()
+		return
+	}
+	artifacts, err := CollectAuroraArtifacts(ctx, auroraSandboxOutputRoot, task.ID, skillID, auroraManifestClientSink{
+		client:    d.client,
+		taskToken: task.AuthToken,
+		taskID:    task.ID,
+	})
+	if err != nil {
+		taskLog.Error("aurora artifact collection failed; failing task", "error", err)
+		result.Status = "blocked"
+		result.Comment = "artifact validation failed: " + err.Error()
+		return
+	}
+	result.Artifacts = artifacts
 }
 
 // reportTaskResult writes the final task disposition back to the server.

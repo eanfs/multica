@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -578,6 +580,98 @@ func (c *Client) ReportTaskArtifacts(ctx context.Context, taskID string, artifac
 	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/artifacts", taskID), map[string]any{
 		"artifacts": artifacts,
 	}, nil)
+}
+
+// auroraArtifactUploadResponse is the subset of Task 6's staging response the
+// daemon needs: the staging id the report will name.
+type auroraArtifactUploadResponse struct {
+	StagingID string `json:"staging_id"`
+}
+
+// UploadAuroraArtifact streams one validated local artifact into Task 6's
+// task-owned staging through the task-scoped token. It is the daemon's half of
+// the artifact flow: the manifest identified the file, the collector re-derived
+// its hash/size/MIME, and this call hands those facts to the server, which
+// re-validates and returns the staging id. Metadata fields precede the file part
+// because the server derives the per-kind cap before it reads the body.
+func (c *Client) UploadAuroraArtifact(ctx context.Context, taskToken, taskID string, upload AuroraArtifactUpload) (string, error) {
+	if taskToken == "" {
+		return "", errors.New("aurora artifact upload requires a task token")
+	}
+	reader, writer := io.Pipe()
+	multipartWriter := multipart.NewWriter(writer)
+	contentType := multipartWriter.FormDataContentType()
+	go func() {
+		writer.CloseWithError(writeAuroraArtifactMultipart(multipartWriter, upload))
+	}()
+
+	path := fmt.Sprintf("/api/agent/tasks/%s/aurora-artifacts/upload", url.PathEscape(taskID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, reader)
+	if err != nil {
+		_ = reader.CloseWithError(err)
+		return "", err
+	}
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+taskToken)
+	c.setIdentityHeaders(req)
+
+	// bundleClient has no fixed timeout: a 500 MiB video upload must be bounded
+	// by the caller's context, not the 30s control-plane deadline.
+	resp, err := c.bundleClient.Do(req)
+	if err != nil {
+		_ = reader.CloseWithError(err)
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", &requestError{Method: http.MethodPost, Path: path, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
+	}
+	var decoded auroraArtifactUploadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return "", err
+	}
+	if decoded.StagingID == "" {
+		return "", errors.New("aurora artifact upload response is missing a staging id")
+	}
+	return decoded.StagingID, nil
+}
+
+// writeAuroraArtifactMultipart writes the staging metadata then the file bytes
+// into one multipart body.
+func writeAuroraArtifactMultipart(writer *multipart.Writer, upload AuroraArtifactUpload) error {
+	metadata := upload.Metadata
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	encodedMetadata, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	fields := [][2]string{
+		{"manifest_artifact_id", upload.ManifestArtifactID},
+		{"name", upload.Name},
+		{"kind", upload.Kind},
+		{"role", upload.Role},
+		{"format", upload.Format},
+		{"mime_type", upload.MIMEType},
+		{"size_bytes", strconv.FormatInt(upload.SizeBytes, 10)},
+		{"sha256", upload.SHA256},
+		{"metadata", string(encodedMetadata)},
+	}
+	for _, field := range fields {
+		if err := writer.WriteField(field[0], field[1]); err != nil {
+			return err
+		}
+	}
+	part, err := writer.CreateFormFile("file", upload.Name)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(part, upload.Content); err != nil {
+		return err
+	}
+	return writer.Close()
 }
 
 func (c *Client) FailTask(ctx context.Context, taskID, errMsg, sessionID, workDir, branchName, failureReason string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string) error {

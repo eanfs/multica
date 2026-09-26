@@ -57,9 +57,33 @@ func (s *TaskService) settleableAuroraGeneration(ctx context.Context, taskID pgt
 // It is a best-effort, idempotent post-commit side effect: the credits were
 // already deducted at reservation, so a failure here leaves the wallet correct
 // and only the row status stale (re-armed by a daemon replay).
+//
+// The artifact is the deliverable, so a completion callback that arrives with
+// no committed asset is failed and refunded rather than charged. The daemon
+// already orders report-before-complete (Plan C Task 7); this is the server's
+// independent guard against a buggy or malicious reporter, and it keeps the
+// "successful provider process with no artifact fails" rule true even if that
+// ordering is bypassed.
 func (s *TaskService) settleAuroraOnCompleted(ctx context.Context, task db.AgentTaskQueue) {
 	gen, ok := s.settleableAuroraGeneration(ctx, task.ID)
 	if !ok {
+		return
+	}
+	assets, err := s.Queries.ListAuroraAssets(ctx, db.ListAuroraAssetsParams{
+		GenerationID: gen.ID,
+		WorkspaceID:  gen.WorkspaceID,
+		Limit:        1,
+		Offset:       0,
+	})
+	if err != nil {
+		// A read failure must not silently charge or refund: leave the
+		// generation non-terminal so a durable replay can settle it correctly.
+		slog.Warn("aurora settlement: load assets failed",
+			"generation_id", util.UUIDToString(gen.ID), "error", err)
+		return
+	}
+	if len(assets) == 0 {
+		s.settleAuroraOnFailed(ctx, task, "no artifact reported")
 		return
 	}
 	if _, err := s.Queries.UpdateAuroraGenerationTerminal(ctx, db.UpdateAuroraGenerationTerminalParams{

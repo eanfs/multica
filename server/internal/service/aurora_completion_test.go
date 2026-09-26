@@ -81,9 +81,29 @@ func auroraGenRow(t *testing.T, pool *pgxpool.Pool, id pgtype.UUID) db.AuroraGen
 	return gen
 }
 
+// seedAuroraAsset inserts the committed asset a completed generation must have
+// before settlement charges it.
+func seedAuroraAsset(t *testing.T, pool *pgxpool.Pool, generationID pgtype.UUID, workspaceID string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO aurora_asset (
+			generation_id, workspace_id, kind, media_url, format, manifest_artifact_id,
+			name, mime_type, size_bytes, sha256, role, metadata
+		) VALUES ($1, $2, 'image', 'https://cdn.example/out.png', 'png', 'primary-1',
+			'out.png', 'image/png', 12, 'sha256:' || repeat('a', 64), 'primary', '{}'::jsonb)`,
+		generationID, workspaceID); err != nil {
+		t.Fatalf("seed asset: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM aurora_asset WHERE generation_id = $1`, generationID)
+	})
+}
+
 func TestAuroraCompletionChargesReserved(t *testing.T) {
 	svc, pool, workspaceID, userID, agentID := newAuroraCompletionService(t)
 	genID, taskID := seedAuroraTask(t, pool, workspaceID, userID, agentID, 620_000_000)
+	seedAuroraAsset(t, pool, genID, workspaceID)
 
 	svc.settleAuroraOnCompleted(context.Background(), db.AgentTaskQueue{ID: taskID})
 
@@ -152,6 +172,44 @@ func TestAuroraCompletionFailureRefunds(t *testing.T) {
 	}
 	if bal != 1_000_000_000 {
 		t.Fatalf("balance after idempotent retry = %d, want 1000000000", bal)
+	}
+}
+
+// TestAuroraCompletionWithoutAssetsFails pins the server-side guard: a
+// completion callback with no committed asset is a failed, refunded run, not a
+// charge for nothing.
+func TestAuroraCompletionWithoutAssetsFails(t *testing.T) {
+	svc, pool, workspaceID, userID, agentID := newAuroraCompletionService(t)
+	ctx := context.Background()
+	user := util.MustParseUUID(userID)
+	ws := util.MustParseUUID(workspaceID)
+
+	if err := svc.Credit.Grant(ctx, user, ws, 1_000_000_000, aurora.LedgerKindAdjustment, "settle-noasset-seed-"+userID); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	genID, taskID := seedAuroraTask(t, pool, workspaceID, userID, agentID, 620_000_000)
+	if err := svc.Credit.Reserve(ctx, user, ws, 620_000_000, util.UUIDToString(genID)); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	svc.settleAuroraOnCompleted(ctx, db.AgentTaskQueue{ID: taskID})
+
+	gen := auroraGenRow(t, pool, genID)
+	if gen.Status != "failed" {
+		t.Fatalf("status = %q, want failed", gen.Status)
+	}
+	if !gen.Error.Valid || gen.Error.String != "no artifact reported" {
+		t.Fatalf("error = %q, want no artifact reported", gen.Error.String)
+	}
+	if gen.CreditsCharged != 0 {
+		t.Fatalf("credits_charged = %d, want 0", gen.CreditsCharged)
+	}
+	bal, err := svc.Credit.Balance(ctx, user)
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if bal != 1_000_000_000 {
+		t.Fatalf("balance after refund = %d, want 1000000000", bal)
 	}
 }
 
