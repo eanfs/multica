@@ -287,3 +287,87 @@ func TestEnsureWorkspaceNodeRollbackRemovesSecret(t *testing.T) {
 		}
 	}
 }
+
+// TestSiblingNodeNamesDerivesPolicySiblings covers the name derivation the
+// delete path depends on.
+func TestSiblingNodeNamesDerivesPolicySiblings(t *testing.T) {
+	proxy, network, ok := siblingNodeNames("aurora-sbx-0123456789abcdef")
+	if !ok || proxy != "aurora-egr-0123456789abcdef" || network != "aurora-ws-0123456789abcdef" {
+		t.Fatalf("siblingNodeNames = %q, %q, %v", proxy, network, ok)
+	}
+	for _, name := range []string{"", "aurora-sbx-", "some-other-container", "uuid"} {
+		if _, _, ok := siblingNodeNames(name); ok {
+			t.Errorf("siblingNodeNames(%q) accepted a non-sandbox name", name)
+		}
+	}
+}
+
+// deleteTestBackend builds a DockerBackend whose fake docker fails a direct
+// removal of the node UUID, answers the controlled-label lookup with sandbox,
+// and otherwise succeeds.
+func deleteTestBackend(t *testing.T, sandbox string) (*DockerBackend, string) {
+	t.Helper()
+	dir := t.TempDir()
+	record := filepath.Join(dir, "record")
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> \"$DOCKER_RECORD\"\n" +
+		"if [ \"$1\" = \"rm\" ] && [ \"$3\" = \"" + policyTestNodeID + "\" ]; then echo 'Error: No such container' >&2; exit 1; fi\n" +
+		"if [ \"$1\" = \"ps\" ]; then echo " + sandbox + "; exit 0; fi\n" +
+		"exit 0\n"
+	path := filepath.Join(dir, "docker")
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_RECORD", record)
+	b := NewDockerBackendWithPolicy(validTestPolicy(t))
+	b.dockerPath = path
+	return b, record
+}
+
+// TestDeleteWorkspaceNodeByNameRemovesNodeProxyAndNetwork asserts the delete
+// contract for the policy-derived backend node id the fleet reports.
+func TestDeleteWorkspaceNodeByNameRemovesNodeProxyAndNetwork(t *testing.T) {
+	b, record := deleteTestBackend(t, "aurora-sbx-cafecafecafecafe")
+	if err := b.DeleteWorkspaceNode(context.Background(), "aurora-sbx-cafecafecafecafe"); err != nil {
+		t.Fatalf("DeleteWorkspaceNode: %v", err)
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"rm -f aurora-sbx-cafecafecafecafe",
+		"rm -f aurora-egr-cafecafecafecafe",
+		"network rm aurora-ws-cafecafecafecafe",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("delete did not run %q:\n%s", want, data)
+		}
+	}
+}
+
+// TestDeleteWorkspaceNodeResolvesUUIDThroughLabel asserts a node UUID is
+// resolved through the controlled label before removal.
+func TestDeleteWorkspaceNodeResolvesUUIDThroughLabel(t *testing.T) {
+	b, record := deleteTestBackend(t, "aurora-sbx-0123456789abcdef")
+	if err := b.DeleteWorkspaceNode(context.Background(), policyTestNodeID); err != nil {
+		t.Fatalf("DeleteWorkspaceNode: %v", err)
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := string(data)
+	if !strings.Contains(joined, "--filter label=com.multica.aurora.node="+policyTestNodeID) {
+		t.Errorf("delete did not look the node up by its controlled label:\n%s", joined)
+	}
+	for _, want := range []string{
+		"rm -f aurora-sbx-0123456789abcdef",
+		"rm -f aurora-egr-0123456789abcdef",
+		"network rm aurora-ws-0123456789abcdef",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("delete did not run %q:\n%s", want, joined)
+		}
+	}
+}

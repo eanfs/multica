@@ -1,0 +1,9 @@
+# Fixture egress sidecar image for the Linux Docker security acceptance.
+#
+# This is deliberately not the release image: child plan D builds the
+# digest-pinned egress runtime. The build context must contain the pre-built
+# linux egress proxy binary at ./aurora-egress-proxy.
+FROM scratch
+COPY aurora-egress-proxy /usr/local/bin/aurora-egress-proxy
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/aurora-egress-proxy"]

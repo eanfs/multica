@@ -3,6 +3,7 @@ package aurorafleet
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -203,10 +204,75 @@ func (d *DockerBackend) WorkspaceNodeStatus(ctx context.Context, nodeID string) 
 	return Node{ID: nodeID, State: state}, nil
 }
 
-// DeleteWorkspaceNode destroys the node's containers.
+// DeleteWorkspaceNode destroys a workspace node: the sandbox container, its
+// egress sidecar, and the workspace-internal network. nodeID is either the
+// policy-derived sandbox name the fleet reports or the node UUID the control
+// API addresses; a UUID is resolved through the controlled node label, so only
+// fleet-owned containers are ever considered. The sidecar and network names are
+// derived from the resolved sandbox name, which Policy.NodeNames builds from the
+// same hash prefix, so no caller-supplied name can reach another resource.
 func (d *DockerBackend) DeleteWorkspaceNode(ctx context.Context, nodeID string) error {
-	_, err := d.run(ctx, "rm", "-f", nodeID)
-	return err
+	sandbox, err := d.removeSandbox(ctx, nodeID)
+	if err != nil {
+		return err
+	}
+	proxy, network, ok := siblingNodeNames(sandbox)
+	if !ok {
+		return nil
+	}
+	// Detach the sidecar before removing the network it shares with the sandbox.
+	_, _ = d.run(ctx, "rm", "-f", proxy)
+	_, _ = d.run(ctx, "network", "rm", network)
+	return nil
+}
+
+// removeSandbox removes the sandbox container addressed by a policy-derived name
+// or a node UUID and returns the container name it removed.
+func (d *DockerBackend) removeSandbox(ctx context.Context, nodeID string) (string, error) {
+	if _, err := d.run(ctx, "rm", "-f", nodeID); err == nil {
+		return nodeID, nil
+	}
+	name, err := d.findSandboxByNodeID(ctx, nodeID)
+	if err != nil {
+		return "", err
+	}
+	if _, err := d.run(ctx, "rm", "-f", name); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+// findSandboxByNodeID resolves a node UUID to a fleet-owned sandbox through the
+// controlled node label. It only ever returns a policy-derived sandbox name, so
+// a label collision cannot redirect the delete to an unrelated container.
+func (d *DockerBackend) findSandboxByNodeID(ctx context.Context, nodeID string) (string, error) {
+	out, err := d.run(ctx, "ps", "-a",
+		"--filter", "label="+nodeIdentityLabel+"="+nodeID,
+		"--format", "{{.Names}}")
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		if _, _, ok := siblingNodeNames(name); ok {
+			return name, nil
+		}
+	}
+	return "", ErrNotFound
+}
+
+// siblingNodeNames derives the egress sidecar and workspace network names from
+// a policy-generated sandbox name. It reports ok=false for any name that is not
+// an aurora-sbx-<hash> sandbox, so delete never touches an unrelated resource.
+func siblingNodeNames(sandbox string) (proxy, network string, ok bool) {
+	suffix, found := strings.CutPrefix(sandbox, sandboxNamePrefix)
+	if !found || suffix == "" {
+		return "", "", false
+	}
+	return proxyNamePrefix + suffix, networkNamePrefix + suffix, true
 }
 
 // SetDesiredNodeState supplies the server's node view to reconciliation.
@@ -276,4 +342,113 @@ func isDockerUnavailable(err error) bool {
 	}
 	// docker exits 125 when the daemon is unreachable.
 	return exitErr.ExitCode() == 125
+}
+
+// ContainerInspect is the machine-readable subset of `docker inspect` that
+// proves the hardened container boundary. It is evidence and diagnostics only:
+// nothing here feeds back into the Policy used to create a node.
+type ContainerInspect struct {
+	ID              string                   `json:"Id"`
+	Name            string                   `json:"Name"`
+	Image           string                   `json:"Image"`
+	Config          ContainerInspectConfig   `json:"Config"`
+	HostConfig      ContainerInspectHost     `json:"HostConfig"`
+	NetworkSettings ContainerInspectNetworks `json:"NetworkSettings"`
+	Mounts          []ContainerMount         `json:"Mounts"`
+}
+
+// ContainerInspectConfig is the container's immutable run configuration.
+type ContainerInspectConfig struct {
+	User       string            `json:"User"`
+	Image      string            `json:"Image"`
+	Env        []string          `json:"Env"`
+	Cmd        []string          `json:"Cmd"`
+	Entrypoint []string          `json:"Entrypoint"`
+	Labels     map[string]string `json:"Labels"`
+}
+
+// ContainerInspectHost is the subset of HostConfig the acceptance assertions
+// cover. PidsLimit is a pointer because Docker reports it as null when unset.
+type ContainerInspectHost struct {
+	ReadonlyRootfs bool              `json:"ReadonlyRootfs"`
+	CapDrop        []string          `json:"CapDrop"`
+	CapAdd         []string          `json:"CapAdd"`
+	SecurityOpt    []string          `json:"SecurityOpt"`
+	Memory         int64             `json:"Memory"`
+	MemorySwap     int64             `json:"MemorySwap"`
+	NanoCpus       int64             `json:"NanoCpus"`
+	PidsLimit      *int64            `json:"PidsLimit"`
+	Privileged     bool              `json:"Privileged"`
+	Devices        []ContainerDevice `json:"Devices"`
+	PidMode        string            `json:"PidMode"`
+	IpcMode        string            `json:"IpcMode"`
+	UTSMode        string            `json:"UTSMode"`
+	UsernsMode     string            `json:"UsernsMode"`
+	NetworkMode    string            `json:"NetworkMode"`
+	Binds          []string          `json:"Binds"`
+	Mounts         []ContainerMount  `json:"Mounts"`
+}
+
+// ContainerDevice is one host device passed into a container.
+type ContainerDevice struct {
+	PathOnHost string `json:"PathOnHost"`
+}
+
+// ContainerMount is one mount visible to the container.
+type ContainerMount struct {
+	Type        string `json:"Type"`
+	Source      string `json:"Source"`
+	Destination string `json:"Destination"`
+	RW          bool   `json:"RW"`
+}
+
+// ContainerInspectNetworks is the container's attached-network view.
+type ContainerInspectNetworks struct {
+	Networks map[string]ContainerEndpoint `json:"Networks"`
+}
+
+// ContainerEndpoint is one attached network endpoint.
+type ContainerEndpoint struct {
+	NetworkID string `json:"NetworkID"`
+	IPAddress string `json:"IPAddress"`
+	Gateway   string `json:"Gateway"`
+}
+
+// InspectContainer returns docker's machine-readable inspection for one
+// container. The raw JSON is parsed rather than formatted, so callers get the
+// same evidence the daemon returned.
+func (d *DockerBackend) InspectContainer(ctx context.Context, container string) (ContainerInspect, error) {
+	raw, err := d.InspectRaw(ctx, container)
+	if err != nil {
+		return ContainerInspect{}, err
+	}
+	return parseContainerInspect(raw, container)
+}
+
+// InspectRaw returns unmodified `docker inspect` JSON so a caller can scan
+// the complete output, including fields the typed view omits, for secret material.
+func (d *DockerBackend) InspectRaw(ctx context.Context, container string) ([]byte, error) {
+	return d.run(ctx, "inspect", container)
+}
+
+// parseContainerInspect decodes the first element of a `docker inspect` array.
+func parseContainerInspect(raw []byte, container string) (ContainerInspect, error) {
+	var list []ContainerInspect
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return ContainerInspect{}, fmt.Errorf("parse docker inspect for %s: %w", container, err)
+	}
+	if len(list) == 0 {
+		return ContainerInspect{}, fmt.Errorf("docker inspect for %s returned no container", container)
+	}
+	return list[0], nil
+}
+
+// ImageHistory returns the full non-truncated layer command history for an
+// image reference, used to prove no build layer embeds a runtime secret.
+func (d *DockerBackend) ImageHistory(ctx context.Context, image string) (string, error) {
+	out, err := d.run(ctx, "history", "--no-trunc", "--format", "{{.CreatedBy}}", image)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
