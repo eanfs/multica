@@ -105,12 +105,19 @@ export async function volcAsrTranscribe(broker, args) {
     const name = randomArtifactName(args.output_name, 0, '.txt');
     const target = outputPathFor(broker, name);
     writePrivateFile(target, transcript);
-    broker.manifest.addFile({ id: 'primary-1', path: target, name, kind: 'text', role: 'primary', format: 'txt', mimeType: 'text/plain' });
+    // video-captions chains ASR into the caption renderer: the transcript is a
+    // supporting artifact and the renderer publishes the final manifest with
+    // the primary video. transcription terminates at ASR, so its transcript is
+    // the primary output and is published immediately.
+    const intermediate = broker.context.skillId === 'video-captions';
+    const artifactId = intermediate ? 'transcript-1' : 'primary-1';
+    const role = intermediate ? 'transcript' : 'primary';
+    broker.manifest.addFile({ id: artifactId, path: target, name, kind: 'text', role, format: 'txt', mimeType: 'text/plain' });
     broker.manifest.setProviderRun({ provider: 'volcengine-asr', model, external_id: null });
     await broker.providerRun.finish(operation, 'succeeded');
-    broker.manifest.write();
+    if (!intermediate) broker.manifest.write();
     if (cleanup) cleanup();
-    return { tool: 'aurora.volc_asr_transcribe', operation, model, text: transcript, artifacts: [{ id: 'primary-1', kind: 'text', role: 'primary', name }] };
+    return { tool: 'aurora.volc_asr_transcribe', operation, model, text: transcript, artifacts: [{ id: artifactId, kind: 'text', role, name }] };
   } catch (error) {
     if (cleanup) cleanup();
     await broker.providerRun.finish(operation, 'failed', 'provider_failed');

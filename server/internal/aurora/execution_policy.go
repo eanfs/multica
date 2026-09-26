@@ -68,7 +68,7 @@ var executionPolicies = map[string]SkillExecutionPolicy{
 	"product-image": {
 		Route:         "openai-images",
 		Attachments:   imageConstraint(0, 4),
-		RequiredTools: []string{"aurora.openai_generate_image", "aurora.openai_edit_image"},
+		RequiredTools: []string{"aurora.openai_image"},
 	},
 	"text-image": {
 		Route:         "volcengine-seedream",
@@ -77,12 +77,12 @@ var executionPolicies = map[string]SkillExecutionPolicy{
 	"image-edit": {
 		Route:         "openai-images-edit",
 		Attachments:   imageConstraint(1, 4),
-		RequiredTools: []string{"aurora.openai_edit_image"},
+		RequiredTools: []string{"aurora.openai_image"},
 	},
 	"id-photo": {
 		Route:         "local-id-photo",
 		Attachments:   imageConstraint(1, 1),
-		RequiredTools: []string{"aurora.id_photo_transform"},
+		RequiredTools: []string{"aurora.id_photo"},
 	},
 	"image-video": {
 		Route:         "volcengine-seedance",
@@ -101,7 +101,7 @@ var executionPolicies = map[string]SkillExecutionPolicy{
 	"xhs-copy": {
 		Route:         "claude-text",
 		Attachments:   documentConstraint(0, 1),
-		RequiredTools: []string{"aurora.render_text_artifact"},
+		RequiredTools: []string{"aurora.read_document", "aurora.write_text_artifact"},
 	},
 	"resume": {
 		Route:         "claude-html-pdf",
@@ -111,7 +111,7 @@ var executionPolicies = map[string]SkillExecutionPolicy{
 	"document-summary": {
 		Route:         "claude-text",
 		Attachments:   documentConstraint(1, 1),
-		RequiredTools: []string{"aurora.read_document", "aurora.render_text_artifact"},
+		RequiredTools: []string{"aurora.read_document", "aurora.write_text_artifact"},
 	},
 	"transcription": {
 		Route:         "volcengine-asr",

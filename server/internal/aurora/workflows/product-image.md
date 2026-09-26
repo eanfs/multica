@@ -9,8 +9,8 @@ The product-image skill turns a written request and optional product references 
 
 ## Steps
 
-1. When image_ids is empty, call aurora.openai_generate_image with prompt.
-2. When image_ids is not empty, call aurora.openai_edit_image with prompt and image_ids.
+1. When image_ids is empty, call aurora.openai_image with prompt.
+2. When image_ids is not empty, call aurora.openai_image with prompt and image_ids.
 
 ## Required outputs
 

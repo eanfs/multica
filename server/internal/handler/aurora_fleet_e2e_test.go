@@ -9,8 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/aurorafleet"
 	"github.com/multica-ai/multica/server/internal/testutil"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 // TestAuroraFleetProvisionToClaim is the fleet acceptance test: a node
@@ -120,5 +123,47 @@ func TestAuroraFleetProvisionToClaim(t *testing.T) {
 		http.StatusOK)
 	if len(claim.Tasks) != 1 || claim.Tasks[0].ID != taskID {
 		t.Fatalf("claimed tasks = %+v, want task %s", claim.Tasks, taskID)
+	}
+
+	// Every available skill route is materialized on the fleet's managed
+	// runtime: the enrolled daemon's claim set therefore reaches each skill's
+	// system agent, not just the generic task above. This is the fleet-level
+	// half of "prove all 13 routes" — the handler matrix owns the lifecycle.
+	if err := aurora.EnsureSystemAgents(ctx, testHandler.Queries, parseUUID(testWorkspaceID), parseUUID(testUserID)); err != nil {
+		t.Fatalf("seed aurora system agents: %v", err)
+	}
+	names := make([]string, 0, len(aurora.Catalog()))
+	for _, entry := range aurora.Catalog() {
+		names = append(names, entry.Name)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE agent_id IN (SELECT id FROM agent WHERE workspace_id = $1 AND system_key LIKE 'aurora:%')`, testWorkspaceID)
+		testPool.Exec(ctx, `DELETE FROM agent_skill WHERE agent_id IN (SELECT id FROM agent WHERE workspace_id = $1 AND system_key LIKE 'aurora:%')`, testWorkspaceID)
+		testPool.Exec(ctx, `DELETE FROM agent WHERE workspace_id = $1 AND system_key LIKE 'aurora:%'`, testWorkspaceID)
+		testPool.Exec(ctx, `DELETE FROM skill WHERE workspace_id = $1 AND name = ANY($2::text[])`, testWorkspaceID, names)
+		testPool.Exec(ctx, `DELETE FROM agent_runtime WHERE workspace_id = $1 AND provider = 'aurora_managed'`, testWorkspaceID)
+	})
+	available := 0
+	for _, entry := range aurora.Catalog() {
+		if !entry.Available {
+			continue
+		}
+		available++
+		systemAgent, err := testHandler.Queries.GetAgentBySystemKey(ctx, db.GetAgentBySystemKeyParams{
+			WorkspaceID: parseUUID(testWorkspaceID),
+			SystemKey:   pgtype.Text{String: "aurora:" + entry.ID, Valid: true},
+		})
+		if err != nil {
+			t.Fatalf("load %s system agent: %v", entry.ID, err)
+		}
+		if systemAgent.RuntimeID != parseUUID(runtimeID) {
+			t.Fatalf("%s system agent runtime = %s, want the fleet runtime %s", entry.ID, uuidToString(systemAgent.RuntimeID), runtimeID)
+		}
+		if _, ok := aurora.Workflow(entry.ID); !ok {
+			t.Fatalf("skill %s has no reviewed workflow", entry.ID)
+		}
+	}
+	if available != 13 {
+		t.Fatalf("available skills = %d, want 13", available)
 	}
 }

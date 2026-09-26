@@ -235,8 +235,13 @@ func (h *Handler) validateAuroraReportBatch(w http.ResponseWriter, skillID strin
 			return nil, false
 		}
 		if !slices.Contains(policy.OutputKinds, artifact.Kind) {
-			writeError(w, http.StatusBadRequest, "artifact kind is not produced by this skill")
-			return nil, false
+			// A transcript is route metadata, not the skill's declared output:
+			// video-captions publishes the ASR transcript beside the primary
+			// video, and the catalog only advertises the video.
+			if artifact.Role != "transcript" || artifact.Kind != "text" {
+				writeError(w, http.StatusBadRequest, "artifact kind is not produced by this skill")
+				return nil, false
+			}
 		}
 		if !slices.Contains(spec.MIMEs, artifact.MIMEType) {
 			writeError(w, http.StatusUnsupportedMediaType, "unsupported artifact MIME type")

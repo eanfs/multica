@@ -2,7 +2,7 @@
 
 import fs from 'node:fs';
 import OpenAI from 'openai';
-import { OPENAI_BASE_URL, PROVIDER_RUN_OPERATIONS, assertToolAllowed, sanitizeError } from '../policy.mjs';
+import { LIMITS, OPENAI_BASE_URL, PROVIDER_RUN_OPERATIONS, assertToolAllowed, sanitizeError } from '../policy.mjs';
 import { attachmentList, outputPathFor, randomArtifactName, resolvePrompt, secretValue } from './common.mjs';
 
 function chooseMode(skillId, attachments) {
@@ -28,8 +28,10 @@ async function persistImages(broker, response, requestedName) {
     const id = index === 0 ? 'primary-1' : `image-${index + 1}`;
     const role = index === 0 ? 'primary' : 'supporting';
     const name = randomArtifactName(requestedName, index, '.png');
+    const bytes = Buffer.from(item.b64_json, 'base64');
+    if (bytes.length > LIMITS.maxImageBytes) throw new Error('OpenAI image exceeds the 25 MiB artifact cap');
     const target = outputPathFor(broker, name);
-    fs.writeFileSync(target, Buffer.from(item.b64_json, 'base64'), { mode: 0o600 });
+    fs.writeFileSync(target, bytes, { mode: 0o600 });
     broker.manifest.addFile({ id, path: target, name, kind: 'image', role, format: 'png', mimeType: 'image/png' });
     artifacts.push({ id, kind: 'image', role, name });
   }
