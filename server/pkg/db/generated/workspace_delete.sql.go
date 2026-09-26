@@ -323,6 +323,9 @@ deleted_aurora_sandbox_nodes AS (
 deleted_aurora_provider_runs AS (
     DELETE FROM aurora_provider_run WHERE workspace_id = $1
 ),
+deleted_aurora_artifact_stagings AS (
+    DELETE FROM aurora_artifact_staging WHERE workspace_id = $1
+),
 deleted_channel_outbound_cards AS (
     DELETE FROM channel_outbound_card_message
     WHERE chat_session_id IN (SELECT id FROM ws_sessions)
@@ -524,6 +527,9 @@ WHERE channel_media_pending_object.workspace_id = $1
 // they are swept here by workspace_id alongside the generation they belong to.
 // Their generation_id/task_id are application-level references, not
 // dependencies, so deletion order is not load-bearing.
+// Staged artifact objects are workspace-keyed leaf data with no FK. The object
+// in storage is removed by the staging cleanup path; the row goes with the
+// workspace whether it is still staged or already committed into an asset.
 // Same no-FK chore as chat_draft_restore above. Matched on workspace_id rather
 // than the session set because that column exists precisely so this statement
 // does not have to join through chat_session, which it deletes in this same CTE.

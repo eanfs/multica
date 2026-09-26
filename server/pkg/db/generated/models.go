@@ -203,14 +203,42 @@ type Attachment struct {
 	SourceContextID pgtype.UUID        `json:"source_context_id"`
 }
 
+type AuroraArtifactStaging struct {
+	ID                 pgtype.UUID        `json:"id"`
+	TaskID             pgtype.UUID        `json:"task_id"`
+	GenerationID       pgtype.UUID        `json:"generation_id"`
+	WorkspaceID        pgtype.UUID        `json:"workspace_id"`
+	ManifestArtifactID pgtype.Text        `json:"manifest_artifact_id"`
+	StorageKey         string             `json:"storage_key"`
+	Name               string             `json:"name"`
+	Kind               string             `json:"kind"`
+	Role               pgtype.Text        `json:"role"`
+	Format             pgtype.Text        `json:"format"`
+	MimeType           string             `json:"mime_type"`
+	SizeBytes          int64              `json:"size_bytes"`
+	Sha256             string             `json:"sha256"`
+	Metadata           []byte             `json:"metadata"`
+	SourceType         string             `json:"source_type"`
+	Status             string             `json:"status"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+}
+
 type AuroraAsset struct {
-	ID           pgtype.UUID        `json:"id"`
-	GenerationID pgtype.UUID        `json:"generation_id"`
-	WorkspaceID  pgtype.UUID        `json:"workspace_id"`
-	Kind         string             `json:"kind"`
-	MediaUrl     pgtype.Text        `json:"media_url"`
-	Format       pgtype.Text        `json:"format"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	ID                 pgtype.UUID        `json:"id"`
+	GenerationID       pgtype.UUID        `json:"generation_id"`
+	WorkspaceID        pgtype.UUID        `json:"workspace_id"`
+	Kind               string             `json:"kind"`
+	MediaUrl           pgtype.Text        `json:"media_url"`
+	Format             pgtype.Text        `json:"format"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	ManifestArtifactID pgtype.Text        `json:"manifest_artifact_id"`
+	Name               pgtype.Text        `json:"name"`
+	MimeType           pgtype.Text        `json:"mime_type"`
+	SizeBytes          pgtype.Int8        `json:"size_bytes"`
+	Sha256             pgtype.Text        `json:"sha256"`
+	Role               pgtype.Text        `json:"role"`
+	Metadata           []byte             `json:"metadata"`
 }
 
 type AuroraGeneration struct {

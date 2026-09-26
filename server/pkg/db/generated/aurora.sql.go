@@ -60,7 +60,8 @@ func (q *Queries) CountWorkspacesForUser(ctx context.Context, userID pgtype.UUID
 const createAuroraAsset = `-- name: CreateAuroraAsset :one
 INSERT INTO aurora_asset (generation_id, workspace_id, kind, media_url, format)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, generation_id, workspace_id, kind, media_url, format, created_at
+RETURNING id, generation_id, workspace_id, kind, media_url, format, created_at,
+          manifest_artifact_id, name, mime_type, size_bytes, sha256, role, metadata
 `
 
 type CreateAuroraAssetParams struct {
@@ -88,6 +89,13 @@ func (q *Queries) CreateAuroraAsset(ctx context.Context, arg CreateAuroraAssetPa
 		&i.MediaUrl,
 		&i.Format,
 		&i.CreatedAt,
+		&i.ManifestArtifactID,
+		&i.Name,
+		&i.MimeType,
+		&i.SizeBytes,
+		&i.Sha256,
+		&i.Role,
+		&i.Metadata,
 	)
 	return i, err
 }
@@ -150,7 +158,8 @@ func (q *Queries) DeleteAuroraAsset(ctx context.Context, arg DeleteAuroraAssetPa
 }
 
 const getAuroraAsset = `-- name: GetAuroraAsset :one
-SELECT id, generation_id, workspace_id, kind, media_url, format, created_at
+SELECT id, generation_id, workspace_id, kind, media_url, format, created_at,
+       manifest_artifact_id, name, mime_type, size_bytes, sha256, role, metadata
 FROM aurora_asset
 WHERE id = $1 AND workspace_id = $2
 `
@@ -171,6 +180,13 @@ func (q *Queries) GetAuroraAsset(ctx context.Context, arg GetAuroraAssetParams) 
 		&i.MediaUrl,
 		&i.Format,
 		&i.CreatedAt,
+		&i.ManifestArtifactID,
+		&i.Name,
+		&i.MimeType,
+		&i.SizeBytes,
+		&i.Sha256,
+		&i.Role,
+		&i.Metadata,
 	)
 	return i, err
 }
@@ -255,7 +271,8 @@ func (q *Queries) GetPersonalWorkspaceForUser(ctx context.Context, userID pgtype
 }
 
 const listAuroraAssets = `-- name: ListAuroraAssets :many
-SELECT id, generation_id, workspace_id, kind, media_url, format, created_at
+SELECT id, generation_id, workspace_id, kind, media_url, format, created_at,
+       manifest_artifact_id, name, mime_type, size_bytes, sha256, role, metadata
 FROM aurora_asset
 WHERE ($1::uuid IS NULL OR generation_id = $1::uuid)
   AND ($2::uuid IS NULL OR workspace_id = $2::uuid)
@@ -292,6 +309,13 @@ func (q *Queries) ListAuroraAssets(ctx context.Context, arg ListAuroraAssetsPara
 			&i.MediaUrl,
 			&i.Format,
 			&i.CreatedAt,
+			&i.ManifestArtifactID,
+			&i.Name,
+			&i.MimeType,
+			&i.SizeBytes,
+			&i.Sha256,
+			&i.Role,
+			&i.Metadata,
 		); err != nil {
 			return nil, err
 		}

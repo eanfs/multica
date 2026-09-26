@@ -118,88 +118,90 @@ func (p auroraProviderRunPolicy) allows(provider, operation, model string) bool 
 		slices.Contains(p.Models, model)
 }
 
-// auroraProviderRunScope is the verified task-token identity behind one call:
-// the token's task, the agent, and the workspace all agree, and the task is an
-// Aurora task whose generation is in the token's workspace.
-type auroraProviderRunScope struct {
+// auroraTaskScope is the verified task-token identity behind one task-token
+// request: the token's task, the agent, and the workspace all agree, and the
+// task is an Aurora task whose generation is in the token's workspace. The
+// provider-run and artifact-staging endpoints share it so the same identity
+// boundary guards every write.
+type auroraTaskScope struct {
 	taskID      pgtype.UUID
 	generation  db.AuroraGeneration
 	workspaceID pgtype.UUID
 }
 
-// auroraProviderRunScope validates the path task against the task-token
+// auroraTaskScope validates the path task against the task-token
 // identity the auth middleware stamped. The token alone is authoritative: the
 // middleware strips client-supplied X-Actor-Source / X-Agent-ID / X-Task-ID and
 // re-stamps them from the mat_ token row, so a request that did not authenticate
 // with a task token fails the X-Actor-Source check even if it forges the rest.
-func (h *Handler) auroraProviderRunScope(w http.ResponseWriter, r *http.Request) (auroraProviderRunScope, bool) {
+func (h *Handler) auroraTaskScope(w http.ResponseWriter, r *http.Request) (auroraTaskScope, bool) {
 	if r.Header.Get("X-Actor-Source") != "task_token" {
-		writeError(w, http.StatusForbidden, "provider runs are only available from within an agent task")
-		return auroraProviderRunScope{}, false
+		writeError(w, http.StatusForbidden, "aurora endpoints are only available from within an agent task")
+		return auroraTaskScope{}, false
 	}
 
 	pathTaskID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "taskID"), "taskID")
 	if !ok {
-		return auroraProviderRunScope{}, false
+		return auroraTaskScope{}, false
 	}
 	tokenTaskID, err := util.ParseUUID(r.Header.Get("X-Task-ID"))
 	if err != nil || tokenTaskID != pathTaskID {
 		writeError(w, http.StatusForbidden, "task identity does not match")
-		return auroraProviderRunScope{}, false
+		return auroraTaskScope{}, false
 	}
 	tokenAgentID, err := util.ParseUUID(r.Header.Get("X-Agent-ID"))
 	if err != nil {
 		writeError(w, http.StatusForbidden, "agent identity is missing")
-		return auroraProviderRunScope{}, false
+		return auroraTaskScope{}, false
 	}
 	tokenWorkspaceID, err := util.ParseUUID(r.Header.Get("X-Workspace-ID"))
 	if err != nil {
 		writeError(w, http.StatusForbidden, "workspace identity is missing")
-		return auroraProviderRunScope{}, false
+		return auroraTaskScope{}, false
 	}
 
 	task, err := h.Queries.GetAgentTask(r.Context(), pathTaskID)
 	if err != nil {
 		if isNotFound(err) {
 			writeError(w, http.StatusNotFound, "task not found")
-			return auroraProviderRunScope{}, false
+			return auroraTaskScope{}, false
 		}
 		writeError(w, http.StatusInternalServerError, "failed to load task")
-		return auroraProviderRunScope{}, false
+		return auroraTaskScope{}, false
 	}
 	if task.AgentID != tokenAgentID {
 		writeError(w, http.StatusForbidden, "task does not belong to this agent")
-		return auroraProviderRunScope{}, false
+		return auroraTaskScope{}, false
 	}
 	agent, err := h.Queries.GetAgent(r.Context(), task.AgentID)
 	if err != nil {
 		if isNotFound(err) {
 			writeError(w, http.StatusForbidden, "task agent is not in this workspace")
-			return auroraProviderRunScope{}, false
+			return auroraTaskScope{}, false
 		}
 		writeError(w, http.StatusInternalServerError, "failed to load task agent")
-		return auroraProviderRunScope{}, false
+		return auroraTaskScope{}, false
 	}
 	if agent.WorkspaceID != tokenWorkspaceID {
 		writeError(w, http.StatusForbidden, "task is not in this workspace")
-		return auroraProviderRunScope{}, false
+		return auroraTaskScope{}, false
 	}
 
 	generation, err := h.Queries.GetAuroraGenerationByTaskID(r.Context(), task.ID)
 	if err != nil {
 		if isNotFound(err) {
 			writeError(w, http.StatusForbidden, "task is not an Aurora task")
-			return auroraProviderRunScope{}, false
+			return auroraTaskScope{}, false
 		}
 		writeError(w, http.StatusInternalServerError, "failed to load Aurora generation")
-		return auroraProviderRunScope{}, false
+		return auroraTaskScope{}, false
 	}
 	if generation.WorkspaceID != tokenWorkspaceID {
 		writeError(w, http.StatusForbidden, "Aurora generation is not in this workspace")
-		return auroraProviderRunScope{}, false
+		return auroraTaskScope{}, false
 	}
 
-	return auroraProviderRunScope{taskID: task.ID, generation: generation, workspaceID: tokenWorkspaceID}, true
+	return auroraTaskScope{taskID: task.ID, generation: generation, workspaceID: tokenWorkspaceID}, true
 }
 
 // auroraProviderRunOperation reads and policy-checks the {operation} path
@@ -271,7 +273,7 @@ func newAuroraProviderRunResponse(run db.AuroraProviderRun, createAllowed bool) 
 // the run still creating with no external id freezes it as ambiguous, because
 // the first create may already have reached the provider.
 func (h *Handler) BeginAuroraProviderRun(w http.ResponseWriter, r *http.Request) {
-	scope, ok := h.auroraProviderRunScope(w, r)
+	scope, ok := h.auroraTaskScope(w, r)
 	if !ok {
 		return
 	}
@@ -365,7 +367,7 @@ func (h *Handler) BeginAuroraProviderRun(w http.ResponseWriter, r *http.Request)
 // RecordAuroraProviderRunExternal records the provider's external id exactly
 // once. The same id is an idempotent replay; a different id is refused.
 func (h *Handler) RecordAuroraProviderRunExternal(w http.ResponseWriter, r *http.Request) {
-	scope, ok := h.auroraProviderRunScope(w, r)
+	scope, ok := h.auroraTaskScope(w, r)
 	if !ok {
 		return
 	}
@@ -423,7 +425,7 @@ func (h *Handler) RecordAuroraProviderRunExternal(w http.ResponseWriter, r *http
 // the provider. A replay of the same terminal state is idempotent; any other
 // transition, including out of ambiguous, is refused.
 func (h *Handler) FinishAuroraProviderRun(w http.ResponseWriter, r *http.Request) {
-	scope, ok := h.auroraProviderRunScope(w, r)
+	scope, ok := h.auroraTaskScope(w, r)
 	if !ok {
 		return
 	}
@@ -482,7 +484,7 @@ func (h *Handler) FinishAuroraProviderRun(w http.ResponseWriter, r *http.Request
 // GetAuroraProviderRun returns the task's run so the broker can resume polling
 // an already-submitted provider operation.
 func (h *Handler) GetAuroraProviderRun(w http.ResponseWriter, r *http.Request) {
-	scope, ok := h.auroraProviderRunScope(w, r)
+	scope, ok := h.auroraTaskScope(w, r)
 	if !ok {
 		return
 	}

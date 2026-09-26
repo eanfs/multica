@@ -41,10 +41,12 @@ LIMIT $2 OFFSET $3;
 -- name: CreateAuroraAsset :one
 INSERT INTO aurora_asset (generation_id, workspace_id, kind, media_url, format)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, generation_id, workspace_id, kind, media_url, format, created_at;
+RETURNING id, generation_id, workspace_id, kind, media_url, format, created_at,
+          manifest_artifact_id, name, mime_type, size_bytes, sha256, role, metadata;
 
 -- name: ListAuroraAssets :many
-SELECT id, generation_id, workspace_id, kind, media_url, format, created_at
+SELECT id, generation_id, workspace_id, kind, media_url, format, created_at,
+       manifest_artifact_id, name, mime_type, size_bytes, sha256, role, metadata
 FROM aurora_asset
 WHERE (sqlc.narg('generation_id')::uuid IS NULL OR generation_id = sqlc.narg('generation_id')::uuid)
   AND (sqlc.narg('workspace_id')::uuid IS NULL OR workspace_id = sqlc.narg('workspace_id')::uuid)
@@ -52,7 +54,8 @@ ORDER BY created_at DESC
 LIMIT sqlc.arg('limit')::int OFFSET sqlc.arg('offset')::int;
 
 -- name: GetAuroraAsset :one
-SELECT id, generation_id, workspace_id, kind, media_url, format, created_at
+SELECT id, generation_id, workspace_id, kind, media_url, format, created_at,
+       manifest_artifact_id, name, mime_type, size_bytes, sha256, role, metadata
 FROM aurora_asset
 WHERE id = $1 AND workspace_id = $2;
 

@@ -1609,6 +1609,15 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			r.Get("/{operation}", h.GetAuroraProviderRun)
 		})
 
+		// Aurora task-owned artifact staging (Plan C Task 6). Same task-scoped
+		// mat_ token boundary as the provider-run routes above; a local file is
+		// streamed into storage, and a provider result URL is imported through
+		// the SSRF-safe client, both under the same identity check.
+		r.Route("/api/agent/tasks/{taskID}/aurora-artifacts", func(r chi.Router) {
+			r.Post("/upload", h.UploadAuroraArtifact)
+			r.Post("/import", h.ImportAuroraArtifact)
+		})
+
 		// Note (MUL-4309): the generic OpenAI-compatible passthrough endpoints
 		// (POST /api/llm/v1/chat/completions[/stream]) were intentionally
 		// removed. Exposing a general LLM proxy backed by the deployment's own
