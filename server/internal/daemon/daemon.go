@@ -7744,7 +7744,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// today) must not fall back to the default autonomous (bypass) mode.
 	var auroraSandbox *auroraSurface
 	if isAuroraTask(task) {
-		surface, err := auroraToolSurface(provider)
+		surface, err := auroraToolSurface(task, provider)
 		if err != nil {
 			return TaskResult{}, err
 		}
@@ -8765,9 +8765,15 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		execOpts.MaxTurns = auroraMaxTurns
 		execOpts.PermissionMode = auroraSandbox.permissionMode
 		execOpts.DisallowedTools = auroraSandbox.disallowed
+		// Aurora tasks never inherit agent-, task-, or plugin-supplied MCP
+		// configuration: generic MCP configuration is denied, and the reviewed
+		// broker config is injected by the managed sandbox path. An empty strict
+		// config keeps Claude from falling back to host-local MCP servers.
+		execOpts.McpConfig = json.RawMessage(`{"mcpServers":{}}`)
 		taskLog.Info("aurora sandbox policy applied",
 			"max_turns", execOpts.MaxTurns,
 			"permission_mode", execOpts.PermissionMode,
+			"allowed_tools", auroraSandbox.allowed,
 			"disallowed_tools", execOpts.DisallowedTools,
 		)
 	}

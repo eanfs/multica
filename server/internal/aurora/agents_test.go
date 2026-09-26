@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -93,6 +94,14 @@ func TestSystemAgentsMatchCatalog(t *testing.T) {
 		if d.Name == "" || d.Instructions == "" {
 			t.Errorf("system agent %q missing name or instructions", d.SkillID)
 		}
+		policy, ok := aurora.ExecutionPolicy(d.SkillID)
+		if !ok {
+			if len(d.RequiredTools) != 0 {
+				t.Errorf("unavailable system agent %q has required tools %v", d.SkillID, d.RequiredTools)
+			}
+		} else if !slices.Equal(d.RequiredTools, policy.RequiredTools) {
+			t.Errorf("system agent %q required tools = %v, want %v", d.SkillID, d.RequiredTools, policy.RequiredTools)
+		}
 		keys[d.SkillID] = true
 	}
 	for _, c := range cat {
@@ -121,6 +130,32 @@ func TestEnsureSystemAgents(t *testing.T) {
 		t.Fatalf("EnsureSystemAgents (retry): %v", err)
 	}
 	assertSeeded(t, ws)
+	assertSkillContentMatchesWorkflow(t, ws)
+}
+
+// assertSkillContentMatchesWorkflow proves the seed writes each available
+// skill's embedded brief to the skill row, and keeps the phase-2 placeholder
+// for unavailable skills, without ever reading a vendor SKILL.md.
+func assertSkillContentMatchesWorkflow(t *testing.T, ws pgtype.UUID) {
+	t.Helper()
+	ctx := context.Background()
+	for _, entry := range aurora.Catalog() {
+		var content string
+		if err := agentsTestPool.QueryRow(ctx,
+			`SELECT content FROM skill WHERE workspace_id = $1 AND name = $2`, ws, entry.Name).Scan(&content); err != nil {
+			t.Fatalf("load skill %q content: %v", entry.ID, err)
+		}
+		brief, ok := aurora.Workflow(entry.ID)
+		if !ok {
+			if brief != "" {
+				t.Errorf("Workflow(%q) = %q, want no brief", entry.ID, brief)
+			}
+			continue
+		}
+		if content != brief {
+			t.Errorf("skill %q content does not match the embedded workflow", entry.ID)
+		}
+	}
 }
 
 func assertSeeded(t *testing.T, ws pgtype.UUID) {
