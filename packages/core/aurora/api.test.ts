@@ -85,6 +85,36 @@ describe("parseAuroraSkills", () => {
     ).toEqual({ value: [], degraded: true });
   });
 
+  it("parses the policy's attachment rules and defaults them for an older server", () => {
+    const withRules = parseAuroraSkills({
+      skills: [
+        {
+          id: "poster",
+          name: "海报制作",
+          category: "image",
+          credits: 760,
+          attachment_rules: [
+            { kinds: ["image"], min: 0, max: 4, max_bytes: 26_214_400 },
+          ],
+        },
+      ],
+    });
+
+    expect(withRules.value[0]?.attachments).toEqual([
+      { kinds: ["image"], min: 0, max: 4, maxBytes: 26_214_400 },
+    ]);
+
+    // A server that predates the field must still parse: the composer treats an
+    // absent rule set as "this skill takes no attachments".
+    const withoutRules = parseAuroraSkills({
+      skills: [
+        { id: "text-image", name: "文字生成图片", category: "image", credits: 680 },
+      ],
+    });
+
+    expect(withoutRules.value[0]?.attachments).toEqual([]);
+  });
+
   it("tells a degraded catalog apart from an empty one (GH #55)", () => {
     // The directory renders "no skills" for both without the flag, and only one
     // of them is a fact.
@@ -319,15 +349,23 @@ describe("request paths", () => {
     expect(requests[0]?.path).toBe("/api/aurora/assets?generationId=gen-1");
   });
 
-  it("posts the composer's request body as JSON", async () => {
+  it("posts the composer's request body, including attachment ids, as JSON", async () => {
     const requests = installFakeClient({ generation: null });
 
-    await createAuroraGeneration({ skillId: "poster", prompt: "a cat" });
+    await createAuroraGeneration({
+      skillId: "poster",
+      prompt: "a cat",
+      attachmentIds: ["att-1", "att-2"],
+    });
 
     expect(requests[0]?.path).toBe("/api/aurora/generations");
     expect(requests[0]?.init?.method).toBe("POST");
     expect(requests[0]?.init?.body).toBe(
-      JSON.stringify({ skillId: "poster", prompt: "a cat" }),
+      JSON.stringify({
+        skillId: "poster",
+        prompt: "a cat",
+        attachmentIds: ["att-1", "att-2"],
+      }),
     );
   });
 

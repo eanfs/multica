@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
-import { CircleAlert, CreditCard, Sparkles } from "lucide-react";
+import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { CircleAlert, CreditCard, Sparkles, X } from "lucide-react";
 import {
   Alert,
   AlertAction,
@@ -10,6 +10,7 @@ import {
 } from "@multica/ui/components/ui/alert";
 import { Badge } from "@multica/ui/components/ui/badge";
 import { Button } from "@multica/ui/components/ui/button";
+import { Input } from "@multica/ui/components/ui/input";
 import { Label } from "@multica/ui/components/ui/label";
 import {
   Sheet,
@@ -31,10 +32,74 @@ import {
   useCreateAuroraGeneration,
   type AuroraSkill,
 } from "@multica/core/aurora";
+import { api } from "@multica/core/api";
+import { useFileUpload } from "@multica/core/hooks/use-file-upload";
 import { AppLink } from "../navigation";
 import { useLocale, useT } from "../i18n";
 import { formatCredits, formatMicroCredits } from "./format";
 import { generationStatusLabel, skillDisplayName } from "./labels";
+
+// The attachment kinds the composer can accept and the tokens the file dialog
+// filters on. Both derive from the parsed policy, so a new server-side rule
+// needs no client change. Document MIMEs are not listed in `accept` because
+// browsers disagree about `.md`; the extension tokens cover them.
+const ACCEPT_BY_KIND: Record<string, string[]> = {
+  image: ["image/png", "image/jpeg"],
+  document: [".txt", ".md", ".pdf", ".docx"],
+  audio: [".wav", ".mp3", ".ogg", ".opus"],
+  video: [".mp4", ".mov", ".webm"],
+};
+
+const DOCUMENT_MIMES = new Set([
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
+
+function acceptForKinds(kinds: string[]): string {
+  const tokens: string[] = [];
+  for (const kind of kinds) {
+    for (const token of ACCEPT_BY_KIND[kind] ?? []) {
+      if (!tokens.includes(token)) tokens.push(token);
+    }
+  }
+  return tokens.join(",");
+}
+
+// fileKind classifies a picked file the same way the server classifies a
+// stored attachment: by the browser's MIME first, then by extension when the
+// MIME is generic. Undefined means the policy has no rule for it.
+function fileKind(file: File): string | undefined {
+  const type = file.type.toLowerCase();
+  if (type.startsWith("image/")) return "image";
+  if (type.startsWith("audio/")) return "audio";
+  if (type.startsWith("video/")) return "video";
+  if (type.startsWith("text/") || DOCUMENT_MIMES.has(type)) return "document";
+
+  const name = file.name.toLowerCase();
+  if (/\.(png|jpe?g)$/.test(name)) return "image";
+  if (/\.(md|markdown|txt|pdf|docx)$/.test(name)) return "document";
+  if (/\.(wav|mp3|ogg|opus)$/.test(name)) return "audio";
+  if (/\.(mp4|mov|webm)$/.test(name)) return "video";
+  return undefined;
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+type AttachmentFailure = "unsupported" | "too_large" | "upload";
+
+/** One file the user picked, from selection through upload to submit. */
+interface PendingAttachment {
+  key: number;
+  name: string;
+  size: number;
+  status: "uploading" | "uploaded" | "failed";
+  attachmentId?: string;
+  failure?: AttachmentFailure;
+}
 
 /**
  * The task drawer: turn one skill into one generation and follow it to its
@@ -115,8 +180,11 @@ function ComposerBody({
   const { t } = useT("aurora");
   const locale = useLocale();
   const create = useCreateAuroraGeneration();
+  const { upload } = useFileUpload(api);
   const [prompt, setPrompt] = useState("");
   const [outcome, setOutcome] = useState<SubmitOutcome>({ kind: "idle" });
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const nextAttachmentKey = useRef(0);
 
   const generationId = outcome.kind === "started" ? outcome.generationId : "";
   const detail = useAuroraGenerationDetail(generationId);
@@ -126,7 +194,48 @@ function ComposerBody({
   // and not, as it would render otherwise, a progress line that never moves.
   const progressUnreadable = detail.isError || isAuroraDegraded(detail.data);
 
+  // The input policy comes from the parsed catalog response, never a second
+  // skill-id switch: the accept filter, the required count, and the per-file
+  // cap all derive from the same rules the server validates against.
+  const attachmentRules = skill.attachments ?? [];
+  const attachmentKinds = Array.from(
+    new Set(attachmentRules.flatMap((rule) => rule.kinds)),
+  );
+  const attachmentKindKey = [...attachmentKinds].sort().join("+");
+  const attachmentLabel =
+    attachmentKindKey === "document"
+      ? t(($) => $.composer.attachments_label_document)
+      : attachmentKindKey === "audio"
+        ? t(($) => $.composer.attachments_label_audio)
+        : attachmentKindKey === "video"
+          ? t(($) => $.composer.attachments_label_video)
+          : attachmentKindKey === "audio+video"
+            ? t(($) => $.composer.attachments_label_audio_video)
+            : t(($) => $.composer.attachments_label_image);
+  const accept = acceptForKinds(attachmentKinds);
+  const maxAttachments = attachmentRules.reduce(
+    (sum, rule) => sum + rule.max,
+    0,
+  );
+  const requiredAttachments = attachmentRules.reduce(
+    (sum, rule) => sum + rule.min,
+    0,
+  );
+
   const trimmedPrompt = prompt.trim();
+  // Only fully uploaded files can be submitted, and only once the policy's
+  // minimum is met. A pending or failed upload keeps submit disabled rather
+  // than sending a request the server would reject — or silently dropping a
+  // file the user believes is part of the generation.
+  const uploadedAttachmentIds = attachments.flatMap((item) =>
+    item.status === "uploaded" && item.attachmentId ? [item.attachmentId] : [],
+  );
+  const attachmentsBlocked = attachments.some(
+    (item) => item.status !== "uploaded",
+  );
+  const attachmentsReady =
+    !attachmentsBlocked && uploadedAttachmentIds.length >= requiredAttachments;
+
   // One submission per drawer. A second POST reserves the skill's credits a
   // second time, and the drawer is only showing one generation's progress — so
   // the button is spent once the server has accepted the first one. A *failed*
@@ -136,9 +245,84 @@ function ComposerBody({
   const canSubmit =
     skill.available &&
     trimmedPrompt.length > 0 &&
+    attachmentsReady &&
     !create.isPending &&
     outcome.kind !== "started" &&
     outcome.kind !== "unreadable";
+
+  // Pick files, upload each through the existing authenticated upload API, and
+  // keep the prompt and every successful selection on all failure paths.
+  async function handleAttachmentsPicked(
+    event: ChangeEvent<HTMLInputElement>,
+  ) {
+    const picked = Array.from(event.target.files ?? []);
+    // Reset so choosing the same file again still fires a change event.
+    event.target.value = "";
+    if (picked.length === 0) return;
+
+    const room = Math.max(0, maxAttachments - attachments.length);
+    for (const file of picked.slice(0, room)) {
+      const key = nextAttachmentKey.current++;
+      const kind = fileKind(file);
+      const rule = kind
+        ? attachmentRules.find((candidate) => candidate.kinds.includes(kind))
+        : undefined;
+      if (!kind || !rule) {
+        setAttachments((prev) => [
+          ...prev,
+          {
+            key,
+            name: file.name,
+            size: file.size,
+            status: "failed",
+            failure: "unsupported",
+          },
+        ]);
+        continue;
+      }
+      if (rule.maxBytes > 0 && file.size > rule.maxBytes) {
+        setAttachments((prev) => [
+          ...prev,
+          {
+            key,
+            name: file.name,
+            size: file.size,
+            status: "failed",
+            failure: "too_large",
+          },
+        ]);
+        continue;
+      }
+      setAttachments((prev) => [
+        ...prev,
+        { key, name: file.name, size: file.size, status: "uploading" },
+      ]);
+      try {
+        const result = await upload(file);
+        setAttachments((prev) =>
+          prev.map((item) =>
+            item.key === key
+              ? result?.id
+                ? { ...item, status: "uploaded", attachmentId: result.id }
+                : { ...item, status: "failed", failure: "upload" }
+              : item,
+          ),
+        );
+      } catch {
+        setAttachments((prev) =>
+          prev.map((item) =>
+            item.key === key
+              ? { ...item, status: "failed", failure: "upload" }
+              : item,
+          ),
+        );
+      }
+    }
+  }
+
+  function removeAttachment(key: number) {
+    setAttachments((prev) => prev.filter((item) => item.key !== key));
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -148,6 +332,7 @@ function ComposerBody({
       const created = await create.mutateAsync({
         skillId: skill.id,
         prompt: trimmedPrompt,
+        attachmentIds: uploadedAttachmentIds,
       });
       setOutcome(
         created.value
@@ -216,6 +401,56 @@ function ComposerBody({
           // work — so it is kept rather than cleared when the submit fails.
           disabled={!skill.available}
         />
+        {attachmentRules.length > 0 ? (
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="aurora-attachments">{attachmentLabel}</Label>
+            <Input
+              id="aurora-attachments"
+              type="file"
+              accept={accept}
+              multiple={maxAttachments > 1}
+              disabled={!skill.available}
+              onChange={(event) => void handleAttachmentsPicked(event)}
+            />
+            {attachments.length > 0 ? (
+              <ul className="flex flex-col gap-1">
+                {attachments.map((item) => (
+                  <li
+                    key={item.key}
+                    className="flex items-center gap-2 text-caption"
+                  >
+                    <span className="min-w-0 flex-1 truncate">{item.name}</span>
+                    <span className="shrink-0 text-muted-foreground">
+                      {formatFileSize(item.size)}
+                    </span>
+                    <span className="shrink-0 text-muted-foreground">
+                      {item.status === "uploading"
+                        ? t(($) => $.composer.attachment_uploading)
+                        : item.status === "uploaded"
+                          ? t(($) => $.composer.attachment_uploaded)
+                          : item.failure === "unsupported"
+                            ? t(($) => $.composer.attachment_unsupported)
+                            : item.failure === "too_large"
+                              ? t(($) => $.composer.attachment_too_large)
+                              : t(($) => $.composer.attachment_upload_failed)}
+                    </span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      aria-label={t(($) => $.composer.attachment_remove, {
+                        name: item.name,
+                      })}
+                      onClick={() => removeAttachment(item.key)}
+                    >
+                      <X aria-hidden="true" />
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        ) : null}
         <Button type="submit" disabled={!canSubmit} aria-busy={create.isPending}>
           {create.isPending ? <Spinner aria-hidden="true" /> : null}
           {create.isPending

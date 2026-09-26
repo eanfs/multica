@@ -18,6 +18,18 @@ const mocks = vi.hoisted(() => ({
   detail: vi.fn(),
   detailRefetch: vi.fn(),
   balance: vi.fn(),
+  upload: vi.fn(),
+}));
+
+// The upload hook is core's and is covered by its own suite; the composer's job
+// is to turn a picked file into an id and to gate submit on its state. `api` is
+// passed straight through to the mocked hook, so the real one never runs.
+vi.mock("@multica/core/hooks/use-file-upload", () => ({
+  useFileUpload: () => ({
+    upload: mocks.upload,
+    uploadWithToast: mocks.upload,
+    uploading: false,
+  }),
 }));
 
 vi.mock("@multica/core/aurora", async (importOriginal) => {
@@ -48,8 +60,27 @@ function skill(overrides: Partial<AuroraSkill> = {}): AuroraSkill {
     output: ["image"],
     featured: true,
     available: true,
+    attachments: [],
     ...overrides,
   };
+}
+
+const IMAGE_RULE = { kinds: ["image"], min: 0, max: 4, maxBytes: 25 << 20 };
+const REQUIRED_IMAGE_RULE = {
+  kinds: ["image"],
+  min: 1,
+  max: 1,
+  maxBytes: 25 << 20,
+};
+
+function fileInput(): HTMLInputElement {
+  const input = document.querySelector<HTMLInputElement>('input[type="file"]');
+  if (!input) throw new Error("file input not rendered");
+  return input;
+}
+
+function pickedFile(name = "reference.png", type = "image/png") {
+  return new File(["x"], name, { type });
 }
 
 function detail(
@@ -125,6 +156,7 @@ describe("GenerationComposer", () => {
     expect(mocks.create).toHaveBeenCalledWith({
       skillId: "poster",
       prompt: "a launch poster",
+      attachmentIds: [],
     });
     // The detail read is what the poll is attached to, so it must be asking
     // about the id the server just returned.
@@ -422,5 +454,148 @@ describe("GenerationComposer", () => {
     expect(
       screen.queryByRole("link", { name: "Top up" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("derives the image accept filter, label, and limit from the parsed policy", () => {
+    renderComposer({ skill: skill({ attachments: [IMAGE_RULE] }) });
+
+    expect(screen.getByLabelText("Reference images")).toBeInTheDocument();
+    expect(fileInput()).toHaveAttribute("accept", "image/png,image/jpeg");
+    expect(fileInput()).toHaveAttribute("multiple");
+  });
+
+  it("derives the document accept filter from the parsed policy", () => {
+    renderComposer({
+      skill: skill({
+        id: "document-summary",
+        attachments: [
+          { kinds: ["document"], min: 1, max: 1, maxBytes: 25 << 20 },
+        ],
+      }),
+    });
+
+    expect(screen.getByLabelText("Document")).toBeInTheDocument();
+    expect(fileInput()).toHaveAttribute("accept", ".txt,.md,.pdf,.docx");
+    expect(fileInput()).not.toHaveAttribute("multiple");
+  });
+
+  it("derives an audio-or-video accept filter from the parsed policy", () => {
+    renderComposer({
+      skill: skill({
+        id: "transcription",
+        attachments: [
+          { kinds: ["audio", "video"], min: 1, max: 1, maxBytes: 100 << 20 },
+        ],
+      }),
+    });
+
+    expect(screen.getByLabelText("Audio or video")).toBeInTheDocument();
+    expect(fileInput()).toHaveAttribute(
+      "accept",
+      ".wav,.mp3,.ogg,.opus,.mp4,.mov,.webm",
+    );
+  });
+
+  it("renders no attachment input for a skill the server declares takes none", () => {
+    renderComposer({});
+
+    expect(document.querySelector('input[type="file"]')).toBeNull();
+  });
+
+  it("keeps submit disabled until a required attachment is uploaded", async () => {
+    const user = userEvent.setup();
+    mocks.upload.mockResolvedValue({ id: "att-1" });
+    renderComposer({
+      skill: skill({ id: "image-edit", attachments: [REQUIRED_IMAGE_RULE] }),
+    });
+
+    const submit = screen.getByRole("button", { name: "Generate" });
+    await user.type(screen.getByLabelText("What should it make?"), "a poster");
+    expect(submit).toBeDisabled();
+
+    await user.upload(fileInput(), pickedFile());
+    expect(await screen.findByText("reference.png")).toBeInTheDocument();
+    expect(submit).toBeEnabled();
+  });
+
+  it("removes a selected file and re-disables a required submit", async () => {
+    const user = userEvent.setup();
+    mocks.upload.mockResolvedValue({ id: "att-1" });
+    renderComposer({
+      skill: skill({ id: "image-edit", attachments: [REQUIRED_IMAGE_RULE] }),
+    });
+
+    await user.type(screen.getByLabelText("What should it make?"), "a poster");
+    await user.upload(fileInput(), pickedFile());
+
+    const submit = screen.getByRole("button", { name: "Generate" });
+    expect(submit).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "Remove reference.png" }));
+
+    expect(screen.queryByText("reference.png")).not.toBeInTheDocument();
+    expect(submit).toBeDisabled();
+  });
+
+  it("keeps the prompt when an upload fails and leaves submit blocked", async () => {
+    const user = userEvent.setup();
+    mocks.upload.mockRejectedValue(new Error("storage down"));
+    renderComposer({
+      skill: skill({ id: "image-edit", attachments: [REQUIRED_IMAGE_RULE] }),
+    });
+
+    await user.type(screen.getByLabelText("What should it make?"), "a poster");
+    await user.upload(fileInput(), pickedFile());
+
+    expect(await screen.findByText("Upload failed.")).toBeInTheDocument();
+    expect(screen.getByLabelText("What should it make?")).toHaveValue("a poster");
+    expect(screen.getByRole("button", { name: "Generate" })).toBeDisabled();
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it("submits only the attachment ids that finished uploading", async () => {
+    const user = userEvent.setup();
+    mocks.create.mockResolvedValue(payload(detail()));
+    mocks.upload
+      .mockResolvedValueOnce({ id: "att-1" })
+      .mockRejectedValueOnce(new Error("storage down"));
+    renderComposer({ skill: skill({ attachments: [IMAGE_RULE] }) });
+
+    await user.type(screen.getByLabelText("What should it make?"), "a poster");
+    await user.upload(fileInput(), [
+      pickedFile("first.png"),
+      pickedFile("second.png"),
+    ]);
+
+    // The failed upload blocks submit, so it is removed before the retry.
+    await user.click(
+      await screen.findByRole("button", { name: "Remove second.png" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Generate" }));
+
+    expect(mocks.create).toHaveBeenCalledWith({
+      skillId: "poster",
+      prompt: "a poster",
+      attachmentIds: ["att-1"],
+    });
+  });
+
+  it("keeps successful selections when the submission fails", async () => {
+    const user = userEvent.setup();
+    mocks.create.mockRejectedValue(
+      new ApiError("server error", 500, "Server Error"),
+    );
+    mocks.upload.mockResolvedValue({ id: "att-1" });
+    renderComposer({ skill: skill({ attachments: [IMAGE_RULE] }) });
+
+    await user.type(screen.getByLabelText("What should it make?"), "a poster");
+    await user.upload(fileInput(), pickedFile());
+    await user.click(screen.getByRole("button", { name: "Generate" }));
+
+    expect(
+      await screen.findByText("Could not start the generation. Try again."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("reference.png")).toBeInTheDocument();
+    expect(screen.getByLabelText("What should it make?")).toHaveValue("a poster");
   });
 });

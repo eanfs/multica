@@ -63,6 +63,7 @@ const POSTER: AuroraSkill = {
   output: ["image"],
   featured: false,
   available: true,
+  attachments: [],
 };
 
 const GENERATION: AuroraGeneration = {

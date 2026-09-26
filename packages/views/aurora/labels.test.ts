@@ -20,6 +20,7 @@ function skill(overrides: Partial<AuroraSkill> = {}): AuroraSkill {
     output: ["image"],
     featured: true,
     available: true,
+    attachments: [],
     ...overrides,
   };
 }

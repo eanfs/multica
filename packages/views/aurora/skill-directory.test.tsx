@@ -60,6 +60,7 @@ const CATALOG: AuroraSkill[] = [
   output: ["image"],
   featured: false,
   available: true,
+  attachments: [],
 }));
 
 const UNAVAILABLE: AuroraSkill[] = [
@@ -73,6 +74,7 @@ const UNAVAILABLE: AuroraSkill[] = [
     output: ["video"],
     featured: false,
     available: false,
+    attachments: [],
   },
   {
     id: "ppt",
@@ -84,6 +86,7 @@ const UNAVAILABLE: AuroraSkill[] = [
     output: ["pptx"],
     featured: false,
     available: false,
+    attachments: [],
   },
   {
     id: "excel",
@@ -95,6 +98,7 @@ const UNAVAILABLE: AuroraSkill[] = [
     output: ["xlsx"],
     featured: false,
     available: false,
+    attachments: [],
   },
 ];
 

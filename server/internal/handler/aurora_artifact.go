@@ -79,7 +79,11 @@ func (h *Handler) ReportTaskArtifacts(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "artifact missing media_url")
 			return
 		}
-		kind := aurora.AssetKind(entry, a.Format)
+		kind, ok := aurora.AssetKind(entry, a.Format)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "unlisted artifact format")
+			return
+		}
 		decision, err := h.Moderation.ScreenAsset(r.Context(), a.MediaURL, kind)
 		if err != nil {
 			// Fail closed: an artifact that could not be inspected is not

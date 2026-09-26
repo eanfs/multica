@@ -32,6 +32,10 @@ import (
 // the TEXT column.
 const maxAuroraGenerationBodyBytes = 256 * 1024
 
+// maxAuroraAttachments caps one generation request's attachment list. The
+// widest skill (poster, xhs-image, product-image, image-edit) accepts four.
+const maxAuroraAttachments = 4
+
 // microCreditsPerCredit converts a catalog credit into the ledger's
 // micro-credit unit (1 credit = 1e6 micro). Reservation and refund both move
 // the amount derived with this same constant, so one write reverses the other
@@ -93,8 +97,9 @@ func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request)
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxAuroraGenerationBodyBytes)
 	var req struct {
-		SkillID string `json:"skillId"`
-		Prompt  string `json:"prompt"`
+		SkillID       string   `json:"skillId"`
+		Prompt        string   `json:"prompt"`
+		AttachmentIDs []string `json:"attachmentIds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var mbe *http.MaxBytesError
@@ -116,6 +121,24 @@ func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request)
 	}
 	if !entry.Available {
 		writeError(w, http.StatusBadRequest, "skill not available")
+		return
+	}
+
+	// Resolve and validate the skill's input attachments before moderation,
+	// provisioning, the generation insert, or any credit reservation. A
+	// rejected file must not create a sandbox, a row, or a charge.
+	attachmentIDs, ok := parseAuroraAttachmentIDs(w, req.AttachmentIDs)
+	if !ok {
+		return
+	}
+	if err := h.validateAuroraAttachments(r.Context(), workspaceID, userUUID, req.SkillID, attachmentIDs); err != nil {
+		var invalid auroraInputError
+		if errors.As(err, &invalid) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		slog.Error("failed to validate aurora attachments", "workspace_id", uuidToString(workspaceID), "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to validate attachments")
 		return
 	}
 
@@ -212,7 +235,7 @@ func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	task, err := h.TaskService.EnqueueQuickCreateTask(r.Context(), workspaceID, userUUID, agent.ID, pgtype.UUID{}, req.Prompt, "high", "", pgtype.UUID{}, pgtype.UUID{}, nil)
+	task, err := h.TaskService.EnqueueQuickCreateTask(r.Context(), workspaceID, userUUID, agent.ID, pgtype.UUID{}, req.Prompt, "high", "", pgtype.UUID{}, pgtype.UUID{}, attachmentIDs)
 	if err != nil {
 		h.failGenerationAndRefund(r.Context(), userUUID, workspaceID, row.ID, amountMicro, "enqueue failed")
 		writeError(w, http.StatusInternalServerError, "failed to enqueue generation")
@@ -238,6 +261,83 @@ func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request)
 		Status:          updated.Status,
 		CreditsReserved: updated.CreditsReserved,
 	}})
+}
+
+// auroraInputError marks an attachment rejection the caller caused. The
+// handler answers it with 400; a storage or query failure stays a 500.
+type auroraInputError struct{ message string }
+
+func (e auroraInputError) Error() string { return e.message }
+
+func invalidAuroraInput(format string, args ...any) error {
+	return auroraInputError{message: fmt.Sprintf(format, args...)}
+}
+
+// parseAuroraAttachmentIDs enforces the request-shape rules — at most four ids,
+// no duplicates, every id a UUID — before any row is read.
+func parseAuroraAttachmentIDs(w http.ResponseWriter, rawIDs []string) ([]pgtype.UUID, bool) {
+	if len(rawIDs) > maxAuroraAttachments {
+		writeError(w, http.StatusBadRequest, "at most four attachmentIds are allowed")
+		return nil, false
+	}
+	ids := make([]pgtype.UUID, 0, len(rawIDs))
+	seen := make(map[pgtype.UUID]struct{}, len(rawIDs))
+	for _, raw := range rawIDs {
+		id, ok := parseUUIDOrBadRequest(w, raw, "attachmentIds")
+		if !ok {
+			return nil, false
+		}
+		if _, duplicate := seen[id]; duplicate {
+			writeError(w, http.StatusBadRequest, "duplicate attachmentIds")
+			return nil, false
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids, true
+}
+
+// validateAuroraAttachments proves every requested id resolves to a row in this
+// workspace uploaded by this user, then applies the skill's input rules. It
+// reads only; it never provisions or writes.
+func (h *Handler) validateAuroraAttachments(ctx context.Context, workspaceID, userID pgtype.UUID, skillID string, ids []pgtype.UUID) error {
+	policy, ok := aurora.ExecutionPolicy(skillID)
+	if !ok {
+		return invalidAuroraInput("skill not available")
+	}
+	if len(ids) == 0 {
+		if err := aurora.ValidateSkillInputs(policy, nil); err != nil {
+			return invalidAuroraInput("%s", err)
+		}
+		return nil
+	}
+
+	rows, err := h.Queries.ListAttachmentsByIDs(ctx, db.ListAttachmentsByIDsParams{
+		AttachmentIds: ids,
+		WorkspaceID:   workspaceID,
+	})
+	if err != nil {
+		return fmt.Errorf("load attachments: %w", err)
+	}
+	byID := make(map[pgtype.UUID]db.Attachment, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	files := make([]db.Attachment, 0, len(ids))
+	for _, id := range ids {
+		row, found := byID[id]
+		if !found {
+			return invalidAuroraInput("attachment not found")
+		}
+		files = append(files, row)
+	}
+	if err := aurora.ValidateSkillAttachmentScope(files, workspaceID, userID); err != nil {
+		return invalidAuroraInput("%s", err)
+	}
+	if err := aurora.ValidateSkillInputs(policy, files); err != nil {
+		return invalidAuroraInput("%s", err)
+	}
+	return nil
 }
 
 // createAuroraGenerationWithEntitlement owns the atomic entitlement boundary.

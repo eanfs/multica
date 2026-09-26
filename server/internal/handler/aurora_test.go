@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -263,6 +264,149 @@ func TestCreateAuroraGenerationRejectsMalformedBody(t *testing.T) {
 	req.Header.Set("X-User-ID", testUserID)
 	req.Header.Set("X-Workspace-ID", testWorkspaceID)
 	testutil.Call(t, testHandler.CreateAuroraGeneration, req).Want(http.StatusBadRequest)
+}
+
+// insertAuroraAttachment writes one uploaded attachment row owned by owner in
+// the fixture workspace and returns its id. It stands in for the authenticated
+// upload path, which has its own tests.
+func insertAuroraAttachment(t *testing.T, filename, contentType string, size int64, owner string) string {
+	t.Helper()
+	return dbfx.Insert(t, "attachment", testutil.Cols{
+		"workspace_id":  testWorkspaceID,
+		"uploader_type": "member",
+		"uploader_id":   owner,
+		"filename":      filename,
+		"url":           "https://storage.test/" + filename,
+		"content_type":  contentType,
+		"size_bytes":    size,
+	})
+}
+
+// auroraTaskAttachmentIDs loads the attachment ids the handler stamped into the
+// enqueued quick-create task's context, and registers the task/row cleanup.
+func auroraTaskAttachmentIDs(t *testing.T, generationID string) []string {
+	t.Helper()
+	ctx := context.Background()
+	var taskID pgtype.UUID
+	if err := testPool.QueryRow(ctx, `SELECT task_id FROM aurora_generation WHERE id = $1`, generationID).Scan(&taskID); err != nil {
+		t.Fatalf("load generation task: %v", err)
+	}
+	if !taskID.Valid {
+		t.Fatalf("generation %s has no task id", generationID)
+	}
+	var raw []byte
+	if err := testPool.QueryRow(ctx, `SELECT context FROM agent_task_queue WHERE id = $1`, taskID).Scan(&raw); err != nil {
+		t.Fatalf("load task context: %v", err)
+	}
+	var payload struct {
+		AttachmentIDs []string `json:"attachment_ids"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal task context: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
+		testPool.Exec(context.Background(), `DELETE FROM aurora_generation WHERE id = $1`, generationID)
+	})
+	return payload.AttachmentIDs
+}
+
+// TestCreateAuroraGenerationAttachmentIDsReachEnqueue proves the validated ids
+// are handed to the enqueued task instead of the nil the handler passed before
+// attachment support existed.
+func TestCreateAuroraGenerationAttachmentIDsReachEnqueue(t *testing.T) {
+	creditTestReset(t)
+	cleanupAuroraSystemAgents(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	if err := testHandler.Credit.Grant(ctx, user, ws, 1_000_000_000, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
+	first := insertAuroraAttachment(t, "reference.png", "image/png", 2048, testUserID)
+	second := insertAuroraAttachment(t, "detail.jpeg", "image/jpeg", 4096, testUserID)
+
+	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]any{
+		"skillId":       "xhs-image",
+		"prompt":        "two references",
+		"attachmentIds": []string{first, second},
+	})
+	out := testutil.Decode[struct {
+		Generation struct {
+			ID string `json:"id"`
+		} `json:"generation"`
+	}](t, testHandler.CreateAuroraGeneration, req, http.StatusCreated)
+
+	ids := auroraTaskAttachmentIDs(t, out.Generation.ID)
+	if !reflect.DeepEqual(ids, []string{first, second}) {
+		t.Fatalf("task attachment_ids = %v, want %v", ids, []string{first, second})
+	}
+}
+
+// TestCreateAuroraGenerationAttachmentRejectedBeforeReserve proves a bad
+// attachment fails the request before the sandbox is ensured, a generation row
+// is written, or any credit is reserved.
+func TestCreateAuroraGenerationAttachmentRejectedBeforeReserve(t *testing.T) {
+	creditTestReset(t)
+	cleanupAuroraSystemAgents(t)
+
+	mgr := &fakeSandboxManager{}
+	withSandboxManager(t, mgr)
+
+	image := insertAuroraAttachment(t, "reference.png", "image/png", 2048, testUserID)
+	foreignOwner := insertAuroraAttachment(t, "not-mine.png", "image/png", 2048, "66666666-6666-6666-6666-666666666666")
+
+	otherWorkspace := dbfx.Insert(t, "workspace", testutil.Cols{
+		"name":         "Aurora attachment foreign workspace",
+		"slug":         "aurora-104-foreign-" + uuid.NewString(),
+		"description":  "Foreign workspace",
+		"issue_prefix": "FGN",
+	})
+	foreignWorkspace := dbfx.Insert(t, "attachment", testutil.Cols{
+		"workspace_id":  otherWorkspace,
+		"uploader_type": "member",
+		"uploader_id":   testUserID,
+		"filename":      "foreign.png",
+		"url":           "https://storage.test/foreign.png",
+		"content_type":  "image/png",
+		"size_bytes":    int64(2048),
+	})
+
+	tooMany := []string{image, uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()}
+
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{"foreign workspace file", map[string]any{"skillId": "poster", "prompt": "x", "attachmentIds": []string{foreignWorkspace}}},
+		{"foreign owner file", map[string]any{"skillId": "poster", "prompt": "x", "attachmentIds": []string{foreignOwner}}},
+		{"missing required file", map[string]any{"skillId": "document-summary", "prompt": "x"}},
+		{"more than four ids", map[string]any{"skillId": "poster", "prompt": "x", "attachmentIds": tooMany}},
+		{"duplicate ids", map[string]any{"skillId": "poster", "prompt": "x", "attachmentIds": []string{image, image}}},
+		{"malformed id", map[string]any{"skillId": "poster", "prompt": "x", "attachmentIds": []string{"not-a-uuid"}}},
+		{"unknown id", map[string]any{"skillId": "poster", "prompt": "x", "attachmentIds": []string{uuid.NewString()}}},
+	}
+
+	beforeGenerations := dbfx.Count(t, "SELECT count(*) FROM aurora_generation WHERE workspace_id = $1", testWorkspaceID)
+	beforeDeductions := dbfx.Count(t, "SELECT count(*) FROM credit_ledger WHERE user_id = $1 AND kind = $2", testUserID, aurora.LedgerKindDeduction)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			testutil.Call(t, testHandler.CreateAuroraGeneration, newRequest(http.MethodPost, "/api/aurora/generations", tc.body)).Want(http.StatusBadRequest)
+		})
+	}
+
+	if mgr.callCount() != 0 {
+		t.Fatalf("sandbox ensure calls = %d, want 0: rejected input reached provisioning", mgr.callCount())
+	}
+	if got := dbfx.Count(t, "SELECT count(*) FROM aurora_generation WHERE workspace_id = $1", testWorkspaceID); got != beforeGenerations {
+		t.Fatalf("generation rows = %d, want %d unchanged", got, beforeGenerations)
+	}
+	if got := dbfx.Count(t, "SELECT count(*) FROM credit_ledger WHERE user_id = $1 AND kind = $2", testUserID, aurora.LedgerKindDeduction); got != beforeDeductions {
+		t.Fatalf("reservation ledger rows = %d, want %d unchanged", got, beforeDeductions)
+	}
 }
 
 // creditTestReset empties the fixture user's credit wallet so each test starts
