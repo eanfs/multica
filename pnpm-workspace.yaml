@@ -1,6 +1,7 @@
 packages:
   - apps/*
   - packages/*
+  - deploy/aurora-sandbox/runtime
 
 catalog:
   '@formatjs/intl-localematcher': ^0.8.4
