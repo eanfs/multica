@@ -1,0 +1,24 @@
+# Deny-all build context: only the exact inputs the sandbox and egress images
+# consume are sent to the builder. The Go module and the root pnpm workspace
+# files arrive through Bake named contexts (server, reporoot, scripts), so this
+# file only re-allows the image-local runtime, vendor, policy, and Docker
+# inputs; the rest of the repository (including .git and credentials) is never
+# part of the context.
+**
+!runtime
+!runtime/package.json
+!runtime/src
+!runtime/src/**
+!runtime/test
+!runtime/test/**
+!vendor
+!vendor/volcengine
+!vendor/volcengine/**
+!versions.json
+!apt-packages.lock
+!seccomp.json
+!multica-aurora-sandbox.apparmor
+!Dockerfile
+!Dockerfile.egress
+!docker-bake.hcl
+!.dockerignore

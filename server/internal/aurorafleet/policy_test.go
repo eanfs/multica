@@ -322,6 +322,99 @@ func TestWorkspaceNetworkCreateIsInternal(t *testing.T) {
 	}
 }
 
+// TestProviderSecretMount pins the four fixed provider credential mounts: the
+// policy accepts host files only from its configured secret root, mounts each
+// read-only at its fixed destination, and never carries a secret value in the
+// argv. The API cannot name either the source or the destination.
+func TestProviderSecretMount(t *testing.T) {
+	root := t.TempDir()
+	p := validTestPolicy(t)
+	p.SecretRoot = root
+	nodeDir := filepath.Join(root, testNodeID)
+	if err := os.MkdirAll(nodeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	files := ProviderSecretFiles{
+		AnthropicAPIKey: filepath.Join(nodeDir, "anthropic-api-key"),
+		ArkAPIKey:       filepath.Join(nodeDir, "ark-api-key"),
+		OpenAIAPIKey:    filepath.Join(nodeDir, "openai-api-key"),
+		VolcASRAPIKey:   filepath.Join(nodeDir, "volc-asr-api-key"),
+	}
+	p.ProviderSecretFiles = files
+	enrollment := filepath.Join(nodeDir, "enrollment")
+	if err := os.WriteFile(enrollment, []byte("mse_test"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	const secretValue = "provider-secret-value-that-must-never-appear"
+	for _, path := range []string{files.AnthropicAPIKey, files.ArkAPIKey, files.OpenAIAPIKey, files.VolcASRAPIKey} {
+		if err := os.WriteFile(path, []byte(secretValue), 0o400); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	spec := testSpec(root)
+	spec.EnrollmentFile = enrollment
+	args, err := p.SandboxArgs(spec)
+	if err != nil {
+		t.Fatalf("SandboxArgs: %v", err)
+	}
+	for _, want := range [][]string{
+		{"--mount", "type=bind,src=" + files.AnthropicAPIKey + ",dst=/run/secrets/anthropic-api-key,readonly"},
+		{"--mount", "type=bind,src=" + files.ArkAPIKey + ",dst=/run/secrets/ark-api-key,readonly"},
+		{"--mount", "type=bind,src=" + files.OpenAIAPIKey + ",dst=/run/secrets/openai-api-key,readonly"},
+		{"--mount", "type=bind,src=" + files.VolcASRAPIKey + ",dst=/run/secrets/volc-asr-api-key,readonly"},
+		{"--mount", "type=bind,src=" + enrollment + ",dst=" + enrollmentSecretMountPath + ",readonly"},
+	} {
+		if !containsSubslice(args, want) {
+			t.Errorf("sandbox args missing fixed mount %v: %v", want, args)
+		}
+	}
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, secretValue) {
+		t.Errorf("sandbox args leak a provider secret value: %s", joined)
+	}
+	for i, a := range args {
+		if a == "-e" && strings.Contains(args[i+1], "API_KEY") {
+			t.Errorf("provider credential reaches the container environment: %s", args[i+1])
+		}
+	}
+
+	// A host path outside the configured secret root is rejected.
+	outside := filepath.Join(os.TempDir(), "multica-provider-secret-outside")
+	if err := os.WriteFile(outside, []byte("x"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(outside)
+	outsideSpec := spec
+	pOut := p
+	pOut.ProviderSecretFiles.ArkAPIKey = outside
+	if _, err := pOut.SandboxArgs(outsideSpec); err == nil {
+		t.Error("policy accepted a provider secret outside the secret root")
+	}
+
+	// A symlinked provider secret is rejected.
+	link := filepath.Join(nodeDir, "ark-link")
+	if err := os.Symlink(files.ArkAPIKey, link); err != nil {
+		t.Fatal(err)
+	}
+	pLink := p
+	pLink.ProviderSecretFiles.ArkAPIKey = link
+	if _, err := pLink.SandboxArgs(spec); err == nil {
+		t.Error("policy accepted a symlinked provider secret")
+	}
+
+	// A provider secret that is not a regular file is rejected.
+	dirAsSecret := filepath.Join(nodeDir, "as-secret-dir")
+	if err := os.Mkdir(dirAsSecret, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pDir := p
+	pDir.ProviderSecretFiles.OpenAIAPIKey = dirAsSecret
+	if _, err := pDir.SandboxArgs(spec); err == nil {
+		t.Error("policy accepted a directory as a provider secret")
+	}
+}
+
 // containsSubslice reports whether want appears as a contiguous subslice of args.
 func containsSubslice(args []string, want []string) bool {
 	for i := 0; i+len(want) <= len(args); i++ {

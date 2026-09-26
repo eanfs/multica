@@ -211,6 +211,7 @@ func TestManagedModeDoesNotDiscoverWorkstationWorkspaces(t *testing.T) {
 		t.Setenv("MULTICA_CLAUDE_PATH", fakeClaude)
 		t.Setenv("MULTICA_DAEMON_ID", "")
 		t.Setenv("MULTICA_LAUNCHED_BY", "")
+		stageManagedProviderSecrets(t)
 
 		cfg, err := LoadConfig(Overrides{
 			Managed:                    true,

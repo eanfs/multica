@@ -182,6 +182,11 @@ type ManagedConfig struct {
 	// EnrollmentTokenFile is the absolute path of the single-use mse_ secret.
 	// It is re-read and re-validated by bootstrapManaged.
 	EnrollmentTokenFile string
+	// ProviderSecrets holds the four validated provider credentials loaded at
+	// managed startup. The Anthropic value is scoped to the Claude child; the
+	// other three are file paths the MCP broker reads itself. LoadConfig
+	// requires every file before any workstation source is read.
+	ProviderSecrets managedProviderSecrets
 }
 
 // Overrides allows CLI flags to override environment variables and defaults.
@@ -242,10 +247,18 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	// Managed mode is additive and gated: validate its workstation-identity
 	// and enrollment-secret constraints before any workstation source is read.
 	managedEnabled := overrides.Managed
+	var managedProviderCredentials managedProviderSecrets
 	if managedEnabled {
 		if err := validateManagedOverrides(overrides); err != nil {
 			return Config{}, err
 		}
+		// Every advertised skill routes through a provider, so the sandbox
+		// refuses to start when any of the four credential files is missing.
+		creds, err := loadManagedProviderSecrets(managedSecretPathsFromEnv())
+		if err != nil {
+			return Config{}, err
+		}
+		managedProviderCredentials = creds
 	}
 
 	// Apply backend overrides from the CLI config file (issue #3875).
@@ -701,7 +714,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		DeviceName:                      deviceName,
 		RuntimeName:                     runtimeName,
 		Profile:                         profile,
-		Managed:                         ManagedConfig{Enabled: managedEnabled, EnrollmentTokenFile: strings.TrimSpace(overrides.ManagedEnrollmentTokenFile)},
+		Managed:                         ManagedConfig{Enabled: managedEnabled, EnrollmentTokenFile: strings.TrimSpace(overrides.ManagedEnrollmentTokenFile), ProviderSecrets: managedProviderCredentials},
 		Agents:                          agents,
 		WorkspacesRoot:                  workspacesRoot,
 		KeepEnvAfterTask:                keepEnv,

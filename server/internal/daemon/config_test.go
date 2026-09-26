@@ -1863,6 +1863,8 @@ func TestManagedConfigRejectsMissingOrOversizedTokenFile(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 	valid := writeMode("valid", testManagedEnrollmentToken+"\n", 0o600)
+	// Managed startup also requires the four provider credential files.
+	stageManagedProviderSecrets(t)
 
 	cases := map[string]string{
 		"missing path":       "",
