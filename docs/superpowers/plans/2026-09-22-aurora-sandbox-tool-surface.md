@@ -32,12 +32,12 @@
 ## Progress Status (2026-09-25)
 
 - [x] Root-cause audit, provider decisions, official Volcengine skill audit, master plan, and four child plans are complete in pr://eanfs/multica/84.
-- [ ] Plan A — scoped enrollment, daemon managed mode, claim-set installation, and execution-provider mapping.
+- [ ] Plan A — scoped enrollment, daemon managed mode, claim-set installation, and execution-provider mapping. **Tasks 1–7 merged and `S4-Done` (#89–#95); Task 8 remains.**
 - [ ] Plan B — workspace fleet lifecycle, hardened Docker policy, enforced egress, and Linux isolation acceptance.
 - [ ] Plan C — attachment inputs, all 13 available skill routes, hardened provider tools, and artifact staging/reporting.
 - [ ] Plan D — reproducible multi-architecture images, SBOM/provenance/signing, container smoke, and final acceptance.
 
-Tracker issue #29 remains open with `S2-InProgress`. Planning completion is not implementation completion; the next executable frontier is Plan A Task 1.
+Tracker issue #29 remains open with `S2-InProgress`. Planning completion is not implementation completion; Plan A Tasks 1–7 are now implemented and merged, and the next executable frontier is Plan A Task 8.
 
 ---
 
@@ -185,6 +185,9 @@ There is no `AURORA_SANDBOX_TOKEN` after Plan A. Configuration must reject a lit
 **Interfaces:**
 - Consumes: Existing daemon-token authentication, managed runtime rows, task claim/heartbeat/report APIs.
 - Produces: `mse_` enrollment issuance/consumption, `ManagedEnrollmentResponse`, managed-daemon bootstrap, one-runtime claim set, and `execution_provider=claude`.
+
+> Progress 2026-09-26: child Tasks 1–7 are merged (#89–#95); Step 1 is
+> partially complete and child Task 8, Step 2 and Step 3 remain.
 
 - [ ] **Step 1: Execute every unchecked task in child plan A in order**
 
