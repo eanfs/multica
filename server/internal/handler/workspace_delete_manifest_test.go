@@ -37,6 +37,7 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"aurora_asset":                       workspaceDelete,
 	"aurora_generation":                  workspaceDelete,
 	"aurora_moderation_log":              workspaceDelete,
+	"aurora_provider_run":                workspaceDelete,
 	"aurora_sandbox_node":                workspaceDelete,
 	"aurora_signup_bonus":                workspaceDeleteKeep, // Account-level eligibility, not workspace-owned.
 	"aurora_subscription":                workspaceDeleteKeep, // The user's personal plan, not the workspace's.

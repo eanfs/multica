@@ -1307,6 +1307,20 @@ func (c *Client) getJSONWithToken(ctx context.Context, path, token string, respB
 // postJSONWithToken is getJSONWithToken's write counterpart, for the daemon's
 // task-scoped calls that carry a body.
 func (c *Client) postJSONWithToken(ctx context.Context, path, token string, reqBody, respBody any) error {
+	return c.sendJSONWithToken(ctx, http.MethodPost, path, token, reqBody, respBody)
+}
+
+// putJSONWithToken is postJSONWithToken for the idempotent provider-run
+// transitions, which are PUTs on the server.
+func (c *Client) putJSONWithToken(ctx context.Context, path, token string, reqBody, respBody any) error {
+	return c.sendJSONWithToken(ctx, http.MethodPut, path, token, reqBody, respBody)
+}
+
+// sendJSONWithToken performs one JSON request with an explicit credential. The
+// credential travels only in the Authorization header — never in the body — so
+// a task-scoped mat_ token cannot leak into tool arguments or model-visible
+// context.
+func (c *Client) sendJSONWithToken(ctx context.Context, method, path, token string, reqBody, respBody any) error {
 	// A nil body is a deliberately empty request (managed enrollment names no
 	// caller identity); anything else is JSON-encoded as usual.
 	var body io.Reader
@@ -1317,7 +1331,7 @@ func (c *Client) postJSONWithToken(ctx context.Context, path, token string, reqB
 		}
 		body = bytes.NewReader(encoded)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return err
 	}
@@ -1335,13 +1349,86 @@ func (c *Client) postJSONWithToken(ctx context.Context, path, token string, reqB
 
 	if resp.StatusCode >= 400 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return &requestError{Method: http.MethodPost, Path: path, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
+		return &requestError{Method: method, Path: path, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
 	}
 	if respBody == nil {
 		io.Copy(io.Discard, resp.Body)
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(respBody)
+}
+
+// AuroraProviderRun is one create-once provider run as the server owns it. The
+// zero value is not meaningful; every field is filled by the server.
+type AuroraProviderRun struct {
+	ID            string  `json:"id"`
+	GenerationID  string  `json:"generation_id"`
+	Provider      string  `json:"provider"`
+	Operation     string  `json:"operation"`
+	Model         string  `json:"model"`
+	State         string  `json:"state"`
+	ExternalID    *string `json:"external_id"`
+	ErrorCode     *string `json:"error_code"`
+	RequestSHA256 string  `json:"request_sha256"`
+	CreateAllowed bool    `json:"create_allowed"`
+	CreatedAt     string  `json:"created_at"`
+	UpdatedAt     string  `json:"updated_at"`
+	CompletedAt   *string `json:"completed_at"`
+}
+
+// AuroraProviderRunBegin is the create lease request. Arguments carries the
+// canonical tool arguments; credentials never belong here.
+type AuroraProviderRunBegin struct {
+	Provider  string          `json:"provider"`
+	Operation string          `json:"operation"`
+	Model     string          `json:"model"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+func auroraProviderRunPath(taskID, operation string) string {
+	base := "/api/agent/tasks/" + url.PathEscape(taskID) + "/aurora-provider-runs"
+	if operation == "" {
+		return base
+	}
+	return base + "/" + url.PathEscape(operation)
+}
+
+// BeginAuroraProviderRun opens the create lease for one (task, operation).
+// create_allowed is true only on the winning call. taskToken is the mat_ token
+// the daemon holds for this task; it is sent as the bearer credential and never
+// mixed into the request body, so the model-visible tool arguments stay clean.
+func (c *Client) BeginAuroraProviderRun(ctx context.Context, taskToken, taskID string, begin AuroraProviderRunBegin) (AuroraProviderRun, error) {
+	var run AuroraProviderRun
+	err := c.postJSONWithToken(ctx, auroraProviderRunPath(taskID, "")+"/begin", taskToken, begin, &run)
+	return run, err
+}
+
+// RecordAuroraProviderRunExternal records the provider's external id once.
+func (c *Client) RecordAuroraProviderRunExternal(ctx context.Context, taskToken, taskID, operation, externalID string) (AuroraProviderRun, error) {
+	var run AuroraProviderRun
+	err := c.putJSONWithToken(ctx, auroraProviderRunPath(taskID, operation)+"/external", taskToken, map[string]any{
+		"external_id": externalID,
+	}, &run)
+	return run, err
+}
+
+// FinishAuroraProviderRun records the terminal state of a provider run.
+func (c *Client) FinishAuroraProviderRun(ctx context.Context, taskToken, taskID, operation, state, errorCode string) (AuroraProviderRun, error) {
+	body := map[string]any{"state": state}
+	if errorCode != "" {
+		body["error_code"] = errorCode
+	}
+	var run AuroraProviderRun
+	err := c.putJSONWithToken(ctx, auroraProviderRunPath(taskID, operation)+"/finish", taskToken, body, &run)
+	return run, err
+}
+
+// GetAuroraProviderRun loads the task's run for one operation so a restarted
+// broker can resume polling instead of creating again.
+func (c *Client) GetAuroraProviderRun(ctx context.Context, taskToken, taskID, operation string) (AuroraProviderRun, error) {
+	var run AuroraProviderRun
+	err := c.getJSONWithToken(ctx, auroraProviderRunPath(taskID, operation), taskToken, &run)
+	return run, err
 }
 
 // InvokeAgentPluginHook asks the server to make one agent-triggered hook call.
