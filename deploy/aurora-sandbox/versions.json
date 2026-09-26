@@ -1,0 +1,62 @@
+{
+  "schema": "com.multica.aurora.sandbox-image-versions",
+  "version": 1,
+  "retrieved_at": "2026-09-25",
+  "go": {
+    "toolchain": "1.26.6",
+    "builder_image": "golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36"
+  },
+  "node": {
+    "runtime_image": "node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c"
+  },
+  "runtime_packages": {
+    "@anthropic-ai/claude-code": "2.1.282",
+    "@modelcontextprotocol/sdk": "1.30.1",
+    "hyperframes": "0.8.75",
+    "openai": "7.23.0"
+  },
+  "runtime_workspace_dependencies": {
+    "zod": "catalog:"
+  },
+  "hyperframes_source": {
+    "tag": "v0.8.75",
+    "commit": "a95cb96a5dd3c1f7b31266a4b470590c86ad231f",
+    "license": "Apache-2.0",
+    "node_engine": ">=22"
+  },
+  "skills_cli": "1.7.0",
+  "vendor_trees": {
+    "byted-ark-seedance-skill": {
+      "declared_version": "5.0.0",
+      "vendored": false,
+      "whole_tree_sha256": null,
+      "license_sha256": null
+    },
+    "byted-ark-seedream-skill": {
+      "declared_version": "4.0.0",
+      "vendored": true,
+      "whole_tree_sha256": "sha256:aac297142496fe2f07f3c4d9a8d792110c5bad871a515f72b1374bbde3a1fc0d",
+      "license_sha256": "sha256:8a32047e9ee5270ab9f49e5d293b650bc0253e05bff2d81787b3276ea0d75935"
+    }
+  },
+  "debian_snapshot": {
+    "timestamp": "20260925T000000Z",
+    "architectures": [
+      "amd64",
+      "arm64"
+    ],
+    "packages": [
+      "ca-certificates",
+      "chromium",
+      "ffmpeg",
+      "fonts-noto-cjk",
+      "fonts-noto-color-emoji",
+      "imagemagick",
+      "libnss3",
+      "poppler-utils",
+      "tini",
+      "unzip"
+    ],
+    "lock": "deploy/aurora-sandbox/apt-packages.lock"
+  }
+}
