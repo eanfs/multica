@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +13,10 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrNodeNotFound reports that the fleet does not know the requested node.
+// Deletion treats it as success so cleanup is idempotent across restarts.
+var ErrNodeNotFound = errors.New("fleet node not found")
 
 const (
 	// controlConnectTimeout bounds dialing the fleet controller.
@@ -126,6 +131,9 @@ func (c *ControlClient) DeleteWorkspaceNode(ctx context.Context, nodeID string) 
 		return err
 	}
 	defer drainClose(resp)
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w: %s", ErrNodeNotFound, statusError(resp))
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return statusError(resp)
 	}

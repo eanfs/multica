@@ -31,11 +31,6 @@ const (
 	sandboxStartTimeout      = 30 * time.Second
 )
 
-// errProvisioningNotImplemented is returned for operations whose
-// implementation arrives with later plan tasks (label-based startup
-// reconciliation).
-var errProvisioningNotImplemented = errors.New("workspace node reconciliation requires label-based startup reconciliation (not yet implemented)")
-
 // DockerBackend manages workspace nodes as Docker containers via the docker
 // CLI. It shells out to docker rather than depending on the Docker SDK so the
 // fleet controller stays a single self-contained binary. Every container and
@@ -44,6 +39,9 @@ var errProvisioningNotImplemented = errors.New("workspace node reconciliation re
 type DockerBackend struct {
 	dockerPath string
 	policy     Policy
+	// desired is the server's node view for reconciliation. It is optional: a
+	// fleet without it removes only partial nodes.
+	desired DesiredNodeState
 }
 
 // NewDockerBackend returns a DockerBackend with no policy configured. It
@@ -211,10 +209,21 @@ func (d *DockerBackend) DeleteWorkspaceNode(ctx context.Context, nodeID string) 
 	return err
 }
 
-// Reconcile is not implemented yet; the label-based startup reconciliation
-// arrives with the lifecycle manager.
-func (d *DockerBackend) Reconcile(context.Context) error {
-	return errProvisioningNotImplemented
+// SetDesiredNodeState supplies the server's node view to reconciliation.
+func (d *DockerBackend) SetDesiredNodeState(desired DesiredNodeState) {
+	d.desired = desired
+}
+
+// Reconcile removes fleet-owned Docker resources the server no longer expects.
+// Only label-filtered inventory is examined, so user containers and networks
+// are never candidates.
+func (d *DockerBackend) Reconcile(ctx context.Context) error {
+	store := NewDockerResourceStore(func(ctx context.Context, args ...string) (string, error) {
+		out, err := d.run(ctx, args...)
+		return string(out), err
+	})
+	_, err := NewReconciler(store, d.desired, reconcileGrace, nil, nil).Reconcile(ctx)
+	return err
 }
 
 // Ping reports whether the Docker daemon is reachable. It is the ready

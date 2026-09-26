@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
+	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
@@ -160,7 +161,7 @@ func runPeriodicSweep(ctx context.Context, interval time.Duration, sweep func())
 // hot heartbeat path; the DB is allowed to lag up to runtimeHeartbeatDBFlushInterval).
 // When liveness is unavailable or errors, we fall back to trusting the DB
 // stale window — that is the original behavior.
-func runRuntimeSweeper(ctx context.Context, queries *db.Queries, liveness handler.LivenessStore, taskSvc *service.TaskService, bus *events.Bus, reconnectGrace time.Duration) {
+func runRuntimeSweeper(ctx context.Context, queries *db.Queries, liveness handler.LivenessStore, taskSvc *service.TaskService, bus *events.Bus, reconnectGrace time.Duration, sandboxReaper *aurora.SandboxReaper) {
 	runPeriodicSweep(ctx, sweepInterval, func() {
 		// These stages retain their existing cadence and ordering. Runtime GC and
 		// delegated-failure recovery run in independent lower-frequency loops.
@@ -170,7 +171,30 @@ func runRuntimeSweeper(ctx context.Context, queries *db.Queries, liveness handle
 		sweepStaleTasks(ctx, queries, taskSvc, bus, reconnectGrace)
 		sweepExpiredQueuedTasks(ctx, queries, taskSvc, reconnectGrace)
 		sweepDeferredChatFinalizations(ctx, queries, taskSvc)
+		sweepAuroraSandboxNodes(ctx, sandboxReaper)
 	})
+}
+
+// sweepAuroraSandboxNodes advances the managed sandbox fleet by one bounded
+// step. A nil reaper means autoprovisioning is disabled, so there is no fleet
+// to reap and the stage is skipped.
+func sweepAuroraSandboxNodes(ctx context.Context, reaper *aurora.SandboxReaper) {
+	if reaper == nil {
+		return
+	}
+	stats, err := reaper.Sweep(ctx)
+	if err != nil {
+		slog.Error("aurora sandbox sweep failed", "error", err)
+		return
+	}
+	if stats.StartingFailed > 0 || stats.Draining > 0 || stats.Stopped > 0 || stats.Settled > 0 {
+		slog.Info("aurora sandbox sweep",
+			"candidates", stats.Candidates,
+			"starting_failed", stats.StartingFailed,
+			"draining", stats.Draining,
+			"stopped", stats.Stopped,
+			"settled", stats.Settled)
+	}
 }
 
 func runDelegatedFailureRecoverySweeper(ctx context.Context, taskSvc *service.TaskService) {
