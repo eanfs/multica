@@ -7690,9 +7690,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// today) must not fall back to the default autonomous (bypass) mode.
 	var auroraSandbox *auroraSurface
 	if isAuroraTask(task) {
-		surface, ok := auroraToolSurface(provider)
-		if !ok {
-			return TaskResult{}, fmt.Errorf("%w: %s", errAuroraSurfaceNotOnboarded, provider)
+		surface, err := auroraToolSurface(provider)
+		if err != nil {
+			return TaskResult{}, err
 		}
 		auroraSandbox = &surface
 	}

@@ -52,7 +52,7 @@ func (d *Daemon) bootstrapManaged(ctx context.Context) error {
 // projection stays aurora_managed/cloud; the installed runtime launches as the
 // execution provider (claude) under the enrolled daemon identity.
 func (d *Daemon) installManagedEnrollment(resp ManagedEnrollmentResponse) error {
-	if resp.ExecutionProvider != "claude" || resp.MaxConcurrency != 1 {
+	if resp.ExecutionProvider != auroraExecutionProvider || resp.MaxConcurrency != 1 {
 		return fmt.Errorf("%w: execution_provider=%q max_concurrency=%d", ErrInvalidManagedEnrollmentResponse, resp.ExecutionProvider, resp.MaxConcurrency)
 	}
 	if strings.TrimSpace(resp.WorkspaceID) == "" || strings.TrimSpace(resp.DaemonID) == "" || strings.TrimSpace(resp.DaemonToken) == "" {
@@ -68,6 +68,9 @@ func (d *Daemon) installManagedEnrollment(resp ManagedEnrollmentResponse) error 
 	if runtime.WorkspaceID != resp.WorkspaceID {
 		return fmt.Errorf("%w: runtime workspace %q does not match enrolled workspace %q", ErrInvalidManagedEnrollmentResponse, runtime.WorkspaceID, resp.WorkspaceID)
 	}
+	// Execution identity is enrollment-only. The persisted carrier row stays
+	// aurora_managed; only this in-memory copy takes the validated execution
+	// provider, and the database provider is never rewritten to claude.
 	runtime.Provider = resp.ExecutionProvider
 	runtime.DaemonID = resp.DaemonID
 
