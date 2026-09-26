@@ -1,0 +1,259 @@
+diff --git a/byted-ark-seedream-skill/scripts/seedream-broker.js b/byted-ark-seedream-skill/scripts/seedream-broker.js
+new file mode 100644
+index 0000000..089ab59
+--- /dev/null
++++ b/byted-ark-seedream-skill/scripts/seedream-broker.js
+@@ -0,0 +1,253 @@
++'use strict';
++
++// Hardened, broker-only Seedream adapter added by the Multica Aurora hardening
++// patch series. The untouched upstream CLI is never the sandbox entrypoint: this
++// module is the only supported surface for byted-ark-seedream-skill and never
++// scans workstation config, saves credentials, honors an API base override,
++// downloads provider output URLs, or returns anything but narrow provider
++// result descriptors with machine JSON.
++//
++// Node built-ins only.
++
++const crypto = require('node:crypto');
++const fs = require('node:fs');
++const path = require('node:path');
++
++const PRODUCER_ID = 'byted-ark-seedream-skill';
++const PRODUCER_VERSION = '4.0.0';
++const API_ORIGIN = 'https://ark.cn-beijing.volces.com';
++const GENERATE_PATH = '/api/plan/v3/images/generations';
++
++const ALLOWED_MODELS = Object.freeze(['doubao-seedream-5.0-lite', 'doubao-seedream-5.0-pro']);
++const MAX_RESPONSE_BYTES = 1 * 1024 * 1024;
++const MAX_SSE_BYTES = 4 * 1024 * 1024;
++const MAX_DATA_URI_BYTES = 25 * 1024 * 1024;
++const MAX_PROMPT_CHARS = 3000;
++const MAX_REFERENCES = 14;
++const DISABLED_INPUT_KEYS = Object.freeze([
++  'baseUrl',
++  'base_url',
++  'apiKey',
++  'api_key',
++  'saveApiKey',
++  'save_api_key',
++  'callback',
++  'callback_url',
++  'downloadDir',
++  'download_dir',
++  'preferences',
++  'modelList',
++]);
++const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
++
++function assertApiOrigin(raw) {
++  let url;
++  try {
++    url = new URL(raw);
++  } catch (error) {
++    throw new Error('invalid Ark API origin');
++  }
++  if (
++    url.protocol !== 'https:' ||
++    url.host !== 'ark.cn-beijing.volces.com' ||
++    url.pathname !== '/' ||
++    url.port ||
++    url.search ||
++    url.hash ||
++    url.username ||
++    url.password
++  ) {
++    throw new Error('Ark origin must be exactly https://ark.cn-beijing.volces.com with no port/query/fragment/userinfo');
++  }
++  return API_ORIGIN;
++}
++
++function readBrokerApiKey(env) {
++  const key = env ? env.ARK_API_KEY : undefined;
++  if (typeof key !== 'string' || !key.startsWith('ark-') || key.length < 8) {
++    throw new Error('broker-supplied ARK_API_KEY required; argv and workstation config are rejected');
++  }
++  return key.trim();
++}
++
++function assertModel(value) {
++  if (!ALLOWED_MODELS.includes(value)) throw new Error('model is not on the Aurora Seedream allowlist');
++  return value;
++}
++
++function redactString(value) {
++  return value
++    .replace(/ark-[A-Za-z0-9._-]{4,}/g, 'ark-[redacted]')
++    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [redacted]')
++    .replace(/data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+/gi, '[data-uri-redacted]')
++    .replace(
++      /([?&](?:X-Amz-Signature|Signature|Expires|OSSAccessKeyId|security-token)=)[^&\s]+/gi,
++      '$1[redacted]',
++    );
++}
++
++function sanitizeValue(value, depth) {
++  const level = depth || 0;
++  if (level > 8) return '[truncated]';
++  if (typeof value === 'string') return redactString(value);
++  if (Array.isArray(value)) return value.map(function (item) { return sanitizeValue(item, level + 1); });
++  if (value && typeof value === 'object') {
++    const out = {};
++    for (const key of Object.keys(value)) {
++      if (/^(api[_-]?key|authorization|password|secret|token)$/i.test(key)) out[key] = '[redacted]';
++      else out[key] = sanitizeValue(value[key], level + 1);
++    }
++    return out;
++  }
++  return value;
++}
++
++function machineJson(value) {
++  return JSON.stringify(sanitizeValue(value));
++}
++
++function assertDataUri(value, label) {
++  if (typeof value !== 'string' || !/^data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+$/i.test(value)) {
++    throw new Error(label + ' accepts only broker-authorized base64 data URIs');
++  }
++  if (Buffer.byteLength(value, 'utf8') > MAX_DATA_URI_BYTES) throw new Error(label + ' exceeds the Data URI size cap');
++  return value;
++}
++
++async function boundedText(response, maxBytes) {
++  const headerValue = response && response.headers && response.headers.get ? response.headers.get('content-length') : null;
++  const declared = Number(headerValue);
++  if (Number.isFinite(declared) && declared > maxBytes) throw new Error('Ark response exceeds the buffer cap');
++  if (!response.body || typeof response.body.getReader !== 'function') {
++    const text = await response.text();
++    if (Buffer.byteLength(text, 'utf8') > maxBytes) throw new Error('Ark response exceeds the buffer cap');
++    return text;
++  }
++  const reader = response.body.getReader();
++  const chunks = [];
++  let total = 0;
++  for (;;) {
++    const next = await reader.read();
++    if (next.done) break;
++    total += next.value.byteLength;
++    if (total > maxBytes) throw new Error('Ark response exceeds the buffer cap');
++    chunks.push(Buffer.from(next.value));
++  }
++  return Buffer.concat(chunks).toString('utf8');
++}
++
++async function requestJson(fetchImpl, url, init, maxBytes) {
++  assertApiOrigin(url.origin);
++  const response = await fetchImpl(url.href, init);
++  const text = await boundedText(response, maxBytes);
++  if (!response.ok) {
++    throw new Error('Ark request failed with status ' + response.status + ': ' + redactString(text.slice(0, 512)));
++  }
++  try {
++    return JSON.parse(text);
++  } catch (error) {
++    throw new Error('Ark response was not JSON');
++  }
++}
++
++function buildGenerateBody(input) {
++  if (!input || typeof input !== 'object') throw new Error('input is required');
++  for (const key of DISABLED_INPUT_KEYS) {
++    if (Object.prototype.hasOwnProperty.call(input, key) && input[key] !== undefined) {
++      throw new Error('disabled Seedream input: ' + key);
++    }
++  }
++  const model = assertModel(input.model);
++  if (typeof input.prompt !== 'string' || input.prompt.trim().length === 0) throw new Error('prompt is required');
++  if (input.prompt.length > MAX_PROMPT_CHARS) throw new Error('prompt exceeds the character cap');
++  const references = input.referenceImages === undefined ? [] : input.referenceImages;
++  if (!Array.isArray(references) || references.length > MAX_REFERENCES) throw new Error('invalid referenceImages');
++  for (const reference of references) assertDataUri(reference, 'referenceImages');
++  const body = {
++    model: model,
++    prompt: input.prompt,
++    response_format: 'url',
++    output_format: input.outputFormat === undefined ? 'png' : input.outputFormat,
++    watermark: false,
++  };
++  if (references.length === 1) body.image = references[0];
++  else if (references.length > 1) body.image = references;
++  if (input.size !== undefined) body.size = input.size;
++  return body;
++}
++
++function uuidFilename(extension) {
++  const suffix = extension.startsWith('.') ? extension : '.' + extension;
++  const name = crypto.randomUUID() + suffix;
++  if (!UUID_RE.test(name.slice(0, 36))) throw new Error('failed to allocate a UUID filename');
++  return name;
++}
++
++function writePrivateJson(file, value) {
++  fs.mkdirSync(path.dirname(file), { recursive: true });
++  fs.writeFileSync(file, machineJson(value) + '\n', { mode: 0o600 });
++  fs.chmodSync(file, 0o600);
++  return file;
++}
++
++// Returns descriptors only. Provider result URLs are never fetched here; the
++// Multica server performs the bounded, SSRF-safe import.
++function providerDescriptor(response) {
++  const data = response && Array.isArray(response.data) ? response.data : [];
++  const images = data.map(function (item, index) {
++    return {
++      index: index,
++      kind: 'image',
++      url: item && item.url ? item.url : null,
++      b64_json: item && item.b64_json ? item.b64_json : null,
++    };
++  });
++  return {
++    provider: 'volcengine-agentplan',
++    model: (response && response.model) || null,
++    external_id: (response && response.id) || null,
++    images: images,
++  };
++}
++
++function producerMetadata(treeSha256) {
++  return { id: PRODUCER_ID, version: PRODUCER_VERSION, tree_sha256: treeSha256 || null };
++}
++
++async function generate(options) {
++  const env = options.env;
++  const fetchImpl = options.fetchImpl;
++  const apiKey = readBrokerApiKey(env);
++  const body = buildGenerateBody(options.input);
++  if (typeof fetchImpl !== 'function') throw new Error('fetch implementation is required');
++  const response = await requestJson(
++    fetchImpl,
++    new URL(GENERATE_PATH, API_ORIGIN),
++    { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + apiKey }, body: JSON.stringify(body) },
++    MAX_RESPONSE_BYTES,
++  );
++  return providerDescriptor(response);
++}
++
++module.exports = {
++  API_ORIGIN: API_ORIGIN,
++  ALLOWED_MODELS: ALLOWED_MODELS,
++  PRODUCER_ID: PRODUCER_ID,
++  PRODUCER_VERSION: PRODUCER_VERSION,
++  MAX_RESPONSE_BYTES: MAX_RESPONSE_BYTES,
++  MAX_SSE_BYTES: MAX_SSE_BYTES,
++  MAX_DATA_URI_BYTES: MAX_DATA_URI_BYTES,
++  MAX_PROMPT_CHARS: MAX_PROMPT_CHARS,
++  assertApiOrigin: assertApiOrigin,
++  readBrokerApiKey: readBrokerApiKey,
++  assertModel: assertModel,
++  sanitizeValue: sanitizeValue,
++  machineJson: machineJson,
++  boundedText: boundedText,
++  buildGenerateBody: buildGenerateBody,
++  uuidFilename: uuidFilename,
++  writePrivateJson: writePrivateJson,
++  providerDescriptor: providerDescriptor,
++  producerMetadata: producerMetadata,
++  generate: generate,
++};

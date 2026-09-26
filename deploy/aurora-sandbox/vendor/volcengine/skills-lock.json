@@ -1,0 +1,31 @@
+{
+  "schema": "com.multica.aurora.volcengine-skills-lock",
+  "version": 1,
+  "retrieved_at": "2026-09-26T09:59:10Z",
+  "skills_cli_version": "1.7.0",
+  "upstream_revision": null,
+  "source": {
+    "source": "skills.volces.com",
+    "source_url": "https://skills.volces.com/skills/volcengine/agentplan",
+    "source_type": "well-known",
+    "well_known_index_url": "https://skills.volces.com/skills/volcengine/agentplan/.well-known/skills/index.json"
+  },
+  "skills": {
+    "byted-ark-seedance-skill": {
+      "skill_id": "byted-ark-seedance-skill",
+      "package_name": "byted-ark-seedance-skill",
+      "declared_version": "5.0.0",
+      "spdx_license": "MIT",
+      "computed_hash": "9aed265f32003e867089212d831c1982e369fd766c02d8459770370377ca04eb",
+      "well_known_digest": "sha256:97bfafe21dfdd127cb7a040413ac2be5a0a816f75db1d049506dac222b42d6dd"
+    },
+    "byted-ark-seedream-skill": {
+      "skill_id": "byted-ark-seedream-skill",
+      "package_name": "ark-agentplan-seedream-skill",
+      "declared_version": "4.0.0",
+      "spdx_license": "MIT",
+      "computed_hash": "e11bbd33031f6c2e975291d08cb7ab09a9468ec7442496744070fc54f12c4a94",
+      "well_known_digest": "sha256:ecd6b80fc5b2b10c6dc944fd8940126a289e9ffb7f6890672baaa9ece4410a2c"
+    }
+  }
+}
