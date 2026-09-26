@@ -1179,6 +1179,14 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The runtime heartbeat already succeeded; extend the managed sandbox
+	// node's activity window so the idle reaper can see the node is alive. The
+	// provider guard keeps a workstation runtime that happens to share a
+	// daemon_id from touching the workspace's managed node.
+	if rt.Provider == "aurora_managed" && rt.DaemonID.Valid {
+		h.touchManagedSandboxNode(r.Context(), rt.WorkspaceID, rt.DaemonID.String)
+	}
+
 	outcome = "ok"
 	// Preserve the existing HTTP response shape: the runtime_id field is new
 	// in the WS path and would be redundant noise on the HTTP path where the
@@ -1228,7 +1236,18 @@ func (h *Handler) HandleDaemonWSHeartbeat(ctx context.Context, identity daemonws
 		return nil, err
 	}
 	ack, _, err := h.processHeartbeat(ctx, runtimeID, supportsBatchImport)
-	return ack, err
+	if err != nil {
+		return ack, err
+	}
+	// Mirror the HTTP path's managed-node touch. The WS transport suppresses
+	// the HTTP tick, so without this a healthy WebSocket would leave the node's
+	// activity window to expire while the runtime stays live.
+	if identity.DaemonID != "" {
+		if wsID, parseErr := util.ParseUUID(lease.Snapshot().WorkspaceID); parseErr == nil {
+			h.touchManagedSandboxNode(ctx, wsID, identity.DaemonID)
+		}
+	}
+	return ack, nil
 }
 
 func runtimeGoneHeartbeatAck(runtimeID string) *protocol.DaemonHeartbeatAckPayload {

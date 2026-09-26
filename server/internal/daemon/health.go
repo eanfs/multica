@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
@@ -83,11 +84,140 @@ type HealthResponse struct {
 	// older consumers see no change. Diagnostic only: nothing keys off it.
 	ReloadPendingReason string            `json:"reload_pending_reason,omitempty"`
 	Workspaces          []healthWorkspace `json:"workspaces"`
+	// Managed is the control-plane readiness of a managed sandbox daemon. It
+	// is additive and omitted for workstation daemons, so existing consumers
+	// see no change. It deliberately carries identifiers and a timestamp only:
+	// never a credential, a secret-file path, a prompt, a provider URL, or a
+	// task token.
+	Managed *ManagedHealth `json:"managed,omitempty"`
 }
 
 type healthWorkspace struct {
 	ID       string   `json:"id"`
 	Runtimes []string `json:"runtimes"`
+}
+
+// ManagedHealth is what a managed sandbox daemon reports about its own
+// lifecycle. Ready means the enrollment was validated and at least one
+// heartbeat has been acknowledged, so the node may claim; a credential problem
+// or shutdown clears it again.
+type ManagedHealth struct {
+	Ready bool `json:"ready"`
+	// LastHeartbeatAt is the last acknowledged heartbeat, omitted until one
+	// arrives.
+	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
+}
+
+// managedHeartbeatAuthFailureLimit is how many consecutive heartbeat
+// authorization failures a managed daemon tolerates before reporting unready.
+// One transient 401 — a server restart racing a cached credential, say — must
+// not flap a healthy node.
+const managedHeartbeatAuthFailureLimit = 3
+
+// managedHealthState is the daemon-side mirror of the control plane's view of a
+// managed sandbox. The mutex guards every field because health reads race the
+// heartbeat goroutines that write them.
+type managedHealthState struct {
+	mu            sync.Mutex
+	enrolled      bool
+	heartbeatAck  bool
+	lastHeartbeat time.Time
+	authFailures  int
+	unreadyReason string
+}
+
+// markManagedEnrolled records that the enrollment response passed validation
+// and was installed. It does not make the daemon ready: that also needs an
+// acknowledged heartbeat.
+func (d *Daemon) markManagedEnrolled() {
+	if d == nil || !d.cfg.Managed.Enabled {
+		return
+	}
+	d.managed.mu.Lock()
+	d.managed.enrolled = true
+	d.managed.mu.Unlock()
+}
+
+// markManagedHeartbeatAcknowledged records a successful heartbeat from either
+// transport. A daemon that is not enrolled, or that has already gone unready,
+// stays unready: a late acknowledgement must not resurrect a revoked node.
+func (d *Daemon) markManagedHeartbeatAcknowledged(at time.Time) {
+	if d == nil || !d.cfg.Managed.Enabled {
+		return
+	}
+	d.managed.mu.Lock()
+	defer d.managed.mu.Unlock()
+	if !d.managed.enrolled || d.managed.unreadyReason != "" {
+		return
+	}
+	d.managed.heartbeatAck = true
+	// Postgres stores microseconds, and macOS time.Now has microsecond
+	// resolution, so truncate here to keep health and the database reporting
+	// the same instant.
+	d.managed.lastHeartbeat = at.Truncate(time.Microsecond)
+	d.managed.authFailures = 0
+}
+
+// recordManagedHeartbeatAuthFailure counts one rejected heartbeat credential.
+// The daemon goes unready once the failures are repeated, which is how an
+// expired or revoked token surfaces to a readiness probe.
+func (d *Daemon) recordManagedHeartbeatAuthFailure() {
+	if d == nil || !d.cfg.Managed.Enabled {
+		return
+	}
+	d.managed.mu.Lock()
+	defer d.managed.mu.Unlock()
+	d.managed.authFailures++
+	if d.managed.authFailures >= managedHeartbeatAuthFailureLimit {
+		d.markManagedUnreadyLocked("heartbeat authorization failed")
+	}
+}
+
+// markManagedUnready takes readiness away for a reason that a later heartbeat
+// must not undo: token expiry, repeated authorization failure, a drain or
+// shutdown, or context cancellation.
+func (d *Daemon) markManagedUnready(reason string) {
+	if d == nil || !d.cfg.Managed.Enabled {
+		return
+	}
+	d.managed.mu.Lock()
+	defer d.managed.mu.Unlock()
+	d.markManagedUnreadyLocked(reason)
+}
+
+func (d *Daemon) markManagedUnreadyLocked(reason string) {
+	d.managed.heartbeatAck = false
+	d.managed.unreadyReason = reason
+}
+
+// managedReady reports the gate a managed daemon must pass before /health says
+// running: enrollment validated, one acknowledged heartbeat, and no terminal
+// reason to be unready.
+func (d *Daemon) managedReady() bool {
+	if d == nil || !d.cfg.Managed.Enabled {
+		return false
+	}
+	d.managed.mu.Lock()
+	defer d.managed.mu.Unlock()
+	return d.managed.enrolled && d.managed.heartbeatAck && d.managed.unreadyReason == ""
+}
+
+// managedHealthSnapshot copies the managed lifecycle into the /health payload.
+// It returns nil for a workstation daemon so the field stays absent.
+func (d *Daemon) managedHealthSnapshot() *ManagedHealth {
+	if d == nil || !d.cfg.Managed.Enabled {
+		return nil
+	}
+	d.managed.mu.Lock()
+	defer d.managed.mu.Unlock()
+	snapshot := &ManagedHealth{
+		Ready: d.managed.enrolled && d.managed.heartbeatAck && d.managed.unreadyReason == "",
+	}
+	if !d.managed.lastHeartbeat.IsZero() {
+		at := d.managed.lastHeartbeat
+		snapshot.LastHeartbeatAt = &at
+	}
+	return snapshot
 }
 
 // listenHealth binds the health port. Returns the listener or an error if
@@ -330,8 +460,17 @@ func (d *Daemon) healthHandler(startedAt time.Time) http.HandlerFunc {
 		// liveness/diagnostics, so callers must not treat a reachable endpoint
 		// as ready — they gate on this status. Consumers that only know
 		// "running" (older CLI/desktop) safely treat "starting" as not-ready.
+		//
+		// A managed daemon is gated on its control-plane acknowledgement
+		// instead: enrollment validation plus one acknowledged heartbeat. It
+		// must not report running merely because startup finished, or the fleet
+		// would route work to a node the server has not confirmed.
 		status := "starting"
-		if d.ready.Load() {
+		if d.cfg.Managed.Enabled {
+			if d.managedReady() {
+				status = "running"
+			}
+		} else if d.ready.Load() {
 			status = "running"
 		}
 
@@ -354,6 +493,7 @@ func (d *Daemon) healthHandler(startedAt time.Time) http.HandlerFunc {
 
 			ReloadPendingReason: d.reloadPending(),
 			Workspaces:          wsList,
+			Managed:             d.managedHealthSnapshot(),
 		}
 		if reporter, ok := d.repoCache.(interface{ Activity() repocache.Activity }); ok {
 			activity := reporter.Activity()

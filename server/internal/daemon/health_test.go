@@ -879,3 +879,159 @@ func TestHealthHandlerReportsProfileIdentity(t *testing.T) {
 		}
 	})
 }
+
+// managedHealthSecretToken is a distinctive daemon credential the managed
+// health tests install so any accidental exposure is unambiguous.
+const managedHealthSecretToken = "mdt_lifecycle_secret_value_do_not_leak"
+
+// newManagedHealthDaemon builds a managed daemon with one installed workspace
+// and runtime, mirroring what bootstrapManaged leaves behind: the enrollment is
+// validated, the mdt_ credential is live, and no heartbeat has been
+// acknowledged yet. Enrollment acknowledgement is left to the test so it can
+// assert the transition.
+func newManagedHealthDaemon(t *testing.T) *Daemon {
+	t.Helper()
+	d := newManagedTestDaemon(t)
+	d.cfg.Managed = ManagedConfig{
+		Enabled:             true,
+		EnrollmentTokenFile: "/run/secrets/aurora-enrollment",
+	}
+	d.cfg.DaemonID = testManagedDaemonID
+	d.client = NewClient("https://api.example.test")
+	d.client.SetToken(managedHealthSecretToken)
+
+	resp := validManagedEnrollmentResponse()
+	resp.DaemonToken = managedHealthSecretToken
+	if err := d.installManagedEnrollment(resp); err != nil {
+		t.Fatalf("installManagedEnrollment() = %v, want nil", err)
+	}
+	return d
+}
+
+// managedHealthStatus reads /health and returns the readiness status plus the
+// decoded response, so a test can assert both the transition and the payload.
+func managedHealthStatus(t *testing.T, d *Daemon) (string, HealthResponse, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	d.healthHandler(time.Now()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	var resp HealthResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	return resp.Status, resp, body
+}
+
+// TestManagedHealthStartsUnreadyUntilEnrollmentAndHeartbeat pins the managed
+// readiness gate: a managed daemon is not ready merely because its enrollment
+// was validated. It becomes ready only after a heartbeat is acknowledged, and
+// it falls back to unready on repeated authorization failures and on context
+// cancellation.
+func TestManagedHealthStartsUnreadyUntilEnrollmentAndHeartbeat(t *testing.T) {
+	t.Parallel()
+
+	t.Run("enrollment alone is not ready", func(t *testing.T) {
+		t.Parallel()
+		d := newManagedHealthDaemon(t)
+
+		if status, _, _ := managedHealthStatus(t, d); status != "starting" {
+			t.Fatalf("status before the enrollment is acknowledged = %q, want starting", status)
+		}
+		d.markManagedEnrolled()
+		if status, _, _ := managedHealthStatus(t, d); status != "starting" {
+			t.Fatalf("status after enrollment but before a heartbeat = %q, want starting", status)
+		}
+		d.markManagedHeartbeatAcknowledged(time.Now())
+		if status, _, _ := managedHealthStatus(t, d); status != "running" {
+			t.Fatalf("status after an acknowledged heartbeat = %q, want running", status)
+		}
+	})
+
+	t.Run("repeated heartbeat authorization failure unready", func(t *testing.T) {
+		t.Parallel()
+		d := newManagedHealthDaemon(t)
+		d.markManagedEnrolled()
+		d.markManagedHeartbeatAcknowledged(time.Now())
+
+		for i := 1; i < managedHeartbeatAuthFailureLimit; i++ {
+			d.recordManagedHeartbeatAuthFailure()
+			if status, _, _ := managedHealthStatus(t, d); status != "running" {
+				t.Fatalf("status after %d authorization failure(s) = %q, want running", i, status)
+			}
+		}
+		d.recordManagedHeartbeatAuthFailure()
+		if status, _, _ := managedHealthStatus(t, d); status != "starting" {
+			t.Fatalf("status after %d authorization failures = %q, want starting", managedHeartbeatAuthFailureLimit, status)
+		}
+	})
+
+	t.Run("context cancellation unready", func(t *testing.T) {
+		t.Parallel()
+		d := newManagedHealthDaemon(t)
+		d.markManagedEnrolled()
+		d.markManagedHeartbeatAcknowledged(time.Now())
+		if status, _, _ := managedHealthStatus(t, d); status != "running" {
+			t.Fatalf("status before cancellation = %q, want running", status)
+		}
+		d.markManagedUnready("daemon context cancelled")
+		if status, _, _ := managedHealthStatus(t, d); status != "starting" {
+			t.Fatalf("status after cancellation = %q, want starting", status)
+		}
+	})
+}
+
+// TestManagedHealthReportsOneRuntimeAndNoCredential pins the managed /health
+// payload: it names the single enrolled runtime and its heartbeat, and it never
+// carries the daemon credential, the enrollment secret-file path, a prompt, a
+// provider URL, or a task token.
+func TestManagedHealthReportsOneRuntimeAndNoCredential(t *testing.T) {
+	t.Parallel()
+
+	d := newManagedHealthDaemon(t)
+	d.markManagedEnrolled()
+	heartbeatAt := time.Now().UTC().Truncate(time.Microsecond)
+	d.markManagedHeartbeatAcknowledged(heartbeatAt)
+
+	status, resp, body := managedHealthStatus(t, d)
+	if status != "running" {
+		t.Fatalf("status = %q, want running", status)
+	}
+	if len(resp.Workspaces) != 1 {
+		t.Fatalf("workspaces = %d, want exactly the one enrolled workspace", len(resp.Workspaces))
+	}
+	workspace := resp.Workspaces[0]
+	if workspace.ID != testManagedWorkspaceID {
+		t.Errorf("workspace id = %q, want %q", workspace.ID, testManagedWorkspaceID)
+	}
+	if len(workspace.Runtimes) != 1 || workspace.Runtimes[0] != testManagedRuntimeID {
+		t.Fatalf("workspace runtimes = %v, want only [%s]", workspace.Runtimes, testManagedRuntimeID)
+	}
+	if resp.Managed == nil {
+		t.Fatal("managed health block is absent for a managed daemon")
+	}
+	if !resp.Managed.Ready {
+		t.Error("managed health reports not ready after enrollment and a heartbeat")
+	}
+	if resp.Managed.LastHeartbeatAt == nil || !resp.Managed.LastHeartbeatAt.Equal(heartbeatAt) {
+		t.Fatalf("last heartbeat = %v, want %v", resp.Managed.LastHeartbeatAt, heartbeatAt)
+	}
+
+	// The absence assertions are explicit: a future field must not be able to
+	// smuggle a credential into the readiness payload.
+	for _, secret := range []string{
+		managedHealthSecretToken,
+		"mdt_",
+		"mse_",
+		"aurora-enrollment",
+		"api.anthropic.com",
+		"ark.cn-beijing.volces.com",
+		"sk-",
+	} {
+		if strings.Contains(body, secret) {
+			t.Errorf("health body leaks %q: %s", secret, body)
+		}
+	}
+}

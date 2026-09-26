@@ -607,6 +607,9 @@ type Daemon struct {
 	runningTasks      atomic.Int64
 	resourceWaitTasks atomic.Int64
 	ready             atomic.Bool // false until preflight completes; gates /health status (starting -> running)
+	// managed mirrors the control-plane acknowledgements that gate a managed
+	// daemon's readiness. It is inert for workstation daemons.
+	managed managedHealthState
 	// reloadPendingReason explains why a confirmed multica version change hasn't
 	// restarted the daemon yet (a task was running at the barrier check). Set
 	// and cleared by trySelfReload, read by /health. Diagnostic only.
@@ -2125,6 +2128,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if err := d.bootstrapManaged(ctx); err != nil {
 			return err
 		}
+		// The enrollment passed validation and was installed. Readiness still
+		// waits for one acknowledged heartbeat, so a node whose credential the
+		// server has not accepted is never reported ready.
+		d.markManagedEnrolled()
 	} else if err := d.resolveAuth(); err != nil {
 		return err
 	}
@@ -2180,13 +2187,25 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 
 	// Startup succeeded and the background loops are up: the daemon has its
-	// runtimes and can now claim and run tasks. Flip /health from "starting" to
-	// "running" — this is the signal `daemon start`'s readiness wait blocks
-	// on, so success is reported only after startup actually completed, not
-	// merely because the health port came up.
-	d.ready.Store(true)
-	d.logger.Debug("background loops launched (terminal-report-replay, task-wakeup, heartbeat, gc, and, for workstation daemons, workspace-sync, agent-discovery, auto-update, token-renewal); health now reporting ready")
+	// runtimes and can now claim and run tasks. A workstation daemon flips
+	// /health from "starting" to "running" here — this is the signal
+	// `daemon start`'s readiness wait blocks on, so success is reported only
+	// after startup actually completed, not merely because the health port came
+	// up.
+	//
+	// A managed daemon deliberately stays "starting": its readiness is gated on
+	// the server acknowledging a heartbeat (managedReady), so a fleet never
+	// routes work to a node it has not confirmed.
+	if !d.cfg.Managed.Enabled {
+		d.ready.Store(true)
+	}
+	d.logger.Debug("background loops launched (terminal-report-replay, task-wakeup, heartbeat, gc, and, for workstation daemons, workspace-sync, agent-discovery, auto-update, token-renewal)")
 	err = d.pollLoop(ctx, taskWakeups)
+	if d.cfg.Managed.Enabled {
+		// The run context is done: the daemon is shutting down, so health must
+		// stop reporting ready even if the listener is still draining.
+		d.markManagedUnready("daemon context cancelled")
+	}
 	d.logger.Debug("daemon main loop returning", "error", err)
 	return err
 }
@@ -2201,6 +2220,11 @@ func (d *Daemon) RestartBinary() string {
 
 // deregisterRuntimes notifies the server that all runtimes are going offline.
 func (d *Daemon) deregisterRuntimes() {
+	if d.cfg.Managed.Enabled {
+		d.shutdownManagedRuntime()
+		return
+	}
+
 	runtimeIDs := d.allRuntimeIDs()
 	if len(runtimeIDs) == 0 {
 		d.logger.Debug("deregister: no runtimes to deregister")
@@ -2216,6 +2240,26 @@ func (d *Daemon) deregisterRuntimes() {
 	} else {
 		d.logger.Info("deregistered runtimes", "count", len(runtimeIDs))
 	}
+}
+
+// shutdownManagedRuntime is the graceful managed-sandbox shutdown. It asks the
+// server to release the node and revoke the credential in one transaction so a
+// restarted node cannot keep using a credential the server already retired.
+//
+// An abrupt process death is deliberately not covered here: the fleet sweeper
+// owns that case, and inventing a local success would leave the server's node
+// and daemon tokens live.
+func (d *Daemon) shutdownManagedRuntime() {
+	d.markManagedUnready("managed shutdown")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := d.client.ManagedShutdown(ctx); err != nil {
+		d.logger.Warn("managed sandbox shutdown failed", "daemon_id", d.cfg.DaemonID, "error", err)
+		return
+	}
+	d.logger.Info("managed sandbox shut down", "daemon_id", d.cfg.DaemonID)
 }
 
 // resolveAuth loads the auth token from the CLI config for the active profile.
@@ -4551,6 +4595,12 @@ func (d *Daemon) runHeartbeatTick(ctx context.Context, rid string) bool {
 				go d.handleRuntimeGone(rid)
 				return false
 			}
+			if isUnauthorizedError(err) {
+				// The daemon credential was rejected. Repeated failures mean it
+				// expired or was revoked, so a managed node stops reporting
+				// ready instead of looping on a credential the server refuses.
+				d.recordManagedHeartbeatAuthFailure()
+			}
 			d.logger.Warn("heartbeat failed", "runtime_id", rid, "error", err)
 		}
 		return ctx.Err() == nil && isTransientError(err)
@@ -4574,6 +4624,10 @@ func (d *Daemon) handleHeartbeatActions(ctx context.Context, runtimeID string, r
 	if resp == nil {
 		return
 	}
+	// Both transports funnel a successful ack through here, so this is the one
+	// place that can mark a managed daemon's heartbeat as acknowledged. It is
+	// inert for workstation daemons.
+	d.markManagedHeartbeatAcknowledged(time.Now())
 	if resp.PendingUpdate != nil || resp.PendingModelList != nil || resp.PendingLocalSkills != nil || resp.PendingLocalSkillImport != nil {
 		d.logger.Debug("heartbeat: pending actions",
 			"runtime_id", runtimeID,
