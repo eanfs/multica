@@ -1,0 +1,175 @@
+{
+  "schema": "com.multica.aurora.apt-packages-lock",
+  "version": 1,
+  "snapshot_timestamp": "20260925T000000Z",
+  "sources": [
+    "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260925T000000Z bookworm main",
+    "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260925T000000Z bookworm-security main"
+  ],
+  "architectures": [
+    "amd64",
+    "arm64"
+  ],
+  "packages": {
+    "ca-certificates": {
+      "amd64": {
+        "version": "20250419~deb12u1",
+        "architecture": "all",
+        "repository": "https://snapshot.debian.org/archive/debian-security/20260925T000000Z",
+        "filename": "pool/updates/main/c/ca-certificates/ca-certificates_20250419~deb12u1_all.deb",
+        "sha256": "sha256:62b08a77d985d4253894b1f69aebda5925034ca4e294add364167fad8cb64a44"
+      },
+      "arm64": {
+        "version": "20250419~deb12u1",
+        "architecture": "all",
+        "repository": "https://snapshot.debian.org/archive/debian-security/20260925T000000Z",
+        "filename": "pool/updates/main/c/ca-certificates/ca-certificates_20250419~deb12u1_all.deb",
+        "sha256": "sha256:62b08a77d985d4253894b1f69aebda5925034ca4e294add364167fad8cb64a44"
+      }
+    },
+    "chromium": {
+      "amd64": {
+        "version": "153.0.8010.52-1~deb12u1",
+        "architecture": "amd64",
+        "repository": "https://snapshot.debian.org/archive/debian-security/20260925T000000Z",
+        "filename": "pool/updates/main/c/chromium/chromium_153.0.8010.52-1~deb12u1_amd64.deb",
+        "sha256": "sha256:ac40026c10d0a8c2bb699035873ca33440566033068b1abdc19cbe7c861ff11f"
+      },
+      "arm64": {
+        "version": "153.0.8010.52-1~deb12u1",
+        "architecture": "arm64",
+        "repository": "https://snapshot.debian.org/archive/debian-security/20260925T000000Z",
+        "filename": "pool/updates/main/c/chromium/chromium_153.0.8010.52-1~deb12u1_arm64.deb",
+        "sha256": "sha256:a7bba2726939dfa0484dee3f9c4da46761e32a7b0ee97ffc7040be1582dc5824"
+      }
+    },
+    "ffmpeg": {
+      "amd64": {
+        "version": "7:5.1.9-0+deb12u1",
+        "architecture": "amd64",
+        "repository": "https://snapshot.debian.org/archive/debian/20260925T000000Z",
+        "filename": "pool/main/f/ffmpeg/ffmpeg_5.1.9-0+deb12u1_amd64.deb",
+        "sha256": "sha256:2ba8ead87657c123ce6de2de5ecdbc1fb4ead9a4b317b85b8ec41e16c890fe01"
+      },
+      "arm64": {
+        "version": "7:5.1.9-0+deb12u1",
+        "architecture": "arm64",
+        "repository": "https://snapshot.debian.org/archive/debian/20260925T000000Z",
+        "filename": "pool/main/f/ffmpeg/ffmpeg_5.1.9-0+deb12u1_arm64.deb",
+        "sha256": "sha256:7890aeb19a94d73e5d9281afa5ca07005804c1fca4f10791f4f2ce0df741b610"
+      }
+    },
+    "fonts-noto-cjk": {
+      "amd64": {
+        "version": "1:20220127+repack1-1",
+        "architecture": "all",
+        "repository": "https://snapshot.debian.org/archive/debian/20260925T000000Z",
+        "filename": "pool/main/f/fonts-noto-cjk/fonts-noto-cjk_20220127+repack1-1_all.deb",
+        "sha256": "sha256:4a2515eb6db3978b897fef9709ed0d2b1f4c6c4df4d83d6c4ef65f71f1b1f502"
+      },
+      "arm64": {
+        "version": "1:20220127+repack1-1",
+        "architecture": "all",
+        "repository": "https://snapshot.debian.org/archive/debian/20260925T000000Z",
+        "filename": "pool/main/f/fonts-noto-cjk/fonts-noto-cjk_20220127+repack1-1_all.deb",
+        "sha256": "sha256:4a2515eb6db3978b897fef9709ed0d2b1f4c6c4df4d83d6c4ef65f71f1b1f502"
+      }
+    },
+    "fonts-noto-color-emoji": {
+      "amd64": {
+        "version": "2.042-0+deb12u1",
+        "architecture": "all",
+        "repository": "https://snapshot.debian.org/archive/debian/20260925T000000Z",
+        "filename": "pool/main/f/fonts-noto-color-emoji/fonts-noto-color-emoji_2.042-0+deb12u1_all.deb",
+        "sha256": "sha256:a5ab0f69c7938423862320d9aca5dd187b3fd879d6a9a57dd52e17c3fa8d2751"
+      },
+      "arm64": {
+        "version": "2.042-0+deb12u1",
+        "architecture": "all",
+        "repository": "https://snapshot.debian.org/archive/debian/20260925T000000Z",
+        "filename": "pool/main/f/fonts-noto-color-emoji/fonts-noto-color-emoji_2.042-0+deb12u1_all.deb",
+        "sha256": "sha256:a5ab0f69c7938423862320d9aca5dd187b3fd879d6a9a57dd52e17c3fa8d2751"
+      }
+    },
+    "imagemagick": {
+      "amd64": {
+        "version": "8:6.9.11.60+dfsg-1.6+deb12u13",
+        "architecture": "amd64",
+        "repository": "https://snapshot.debian.org/archive/debian-security/20260925T000000Z",
+        "filename": "pool/updates/main/i/imagemagick/imagemagick_6.9.11.60+dfsg-1.6+deb12u13_amd64.deb",
+        "sha256": "sha256:b07ee21eb6fcce0252af0195f51f8ebe24545c9c2000d9193834607b44974eb2"
+      },
+      "arm64": {
+        "version": "8:6.9.11.60+dfsg-1.6+deb12u13",
+        "architecture": "arm64",
+        "repository": "https://snapshot.debian.org/archive/debian-security/20260925T000000Z",
+        "filename": "pool/updates/main/i/imagemagick/imagemagick_6.9.11.60+dfsg-1.6+deb12u13_arm64.deb",
+        "sha256": "sha256:34ed649e6c3452ce32bb9ed6f879a693360b6f659eed9e1d613c40dba73f5aa7"
+      }
+    },
+    "libnss3": {
+      "amd64": {
+        "version": "2:3.87.1-1+deb12u4",
+        "architecture": "amd64",
+        "repository": "https://snapshot.debian.org/archive/debian-security/20260925T000000Z",
+        "filename": "pool/updates/main/n/nss/libnss3_3.87.1-1+deb12u4_amd64.deb",
+        "sha256": "sha256:666bce4768414a6a79d2dacb1549f922cedb1facd373790a477e12739878284e"
+      },
+      "arm64": {
+        "version": "2:3.87.1-1+deb12u4",
+        "architecture": "arm64",
+        "repository": "https://snapshot.debian.org/archive/debian-security/20260925T000000Z",
+        "filename": "pool/updates/main/n/nss/libnss3_3.87.1-1+deb12u4_arm64.deb",
+        "sha256": "sha256:aaa1b291b6330590079a0eb1404650c7c4f6c788f9213ab6911149dc22b2b6d0"
+      }
+    },
+    "poppler-utils": {
+      "amd64": {
+        "version": "22.12.0-2+deb12u3",
+        "architecture": "amd64",
+        "repository": "https://snapshot.debian.org/archive/debian-security/20260925T000000Z",
+        "filename": "pool/updates/main/p/poppler/poppler-utils_22.12.0-2+deb12u3_amd64.deb",
+        "sha256": "sha256:7e328919d626d9d988832eb1e4adff4ceed275abcdabcb61ec0b3bf2dc64260d"
+      },
+      "arm64": {
+        "version": "22.12.0-2+deb12u3",
+        "architecture": "arm64",
+        "repository": "https://snapshot.debian.org/archive/debian-security/20260925T000000Z",
+        "filename": "pool/updates/main/p/poppler/poppler-utils_22.12.0-2+deb12u3_arm64.deb",
+        "sha256": "sha256:71f3d1203f4cf1a981915e6ef960765e29173fc8d949e8b8e28aab414a8d7d38"
+      }
+    },
+    "tini": {
+      "amd64": {
+        "version": "0.19.0-1+b3",
+        "architecture": "amd64",
+        "repository": "https://snapshot.debian.org/archive/debian/20260925T000000Z",
+        "filename": "pool/main/t/tini/tini_0.19.0-1+b3_amd64.deb",
+        "sha256": "sha256:7d1947665fa40e55f218fefad773dc6de66458d0b39eaa292cdcadfc7c996632"
+      },
+      "arm64": {
+        "version": "0.19.0-1+b3",
+        "architecture": "arm64",
+        "repository": "https://snapshot.debian.org/archive/debian/20260925T000000Z",
+        "filename": "pool/main/t/tini/tini_0.19.0-1+b3_arm64.deb",
+        "sha256": "sha256:335dee1e36c0bf61f11c9fe9740012966a3183bd50405b73ed19477293c28f7f"
+      }
+    },
+    "unzip": {
+      "amd64": {
+        "version": "6.0-28+deb12u1",
+        "architecture": "amd64",
+        "repository": "https://snapshot.debian.org/archive/debian-security/20260925T000000Z",
+        "filename": "pool/updates/main/u/unzip/unzip_6.0-28+deb12u1_amd64.deb",
+        "sha256": "sha256:1c27c879f4f7f056499c5393d422fd6c77ff6fbfa450c3f91f2f205ca788cc36"
+      },
+      "arm64": {
+        "version": "6.0-28+deb12u1",
+        "architecture": "arm64",
+        "repository": "https://snapshot.debian.org/archive/debian-security/20260925T000000Z",
+        "filename": "pool/updates/main/u/unzip/unzip_6.0-28+deb12u1_arm64.deb",
+        "sha256": "sha256:28b082677d0da11106b7da9173a9359267d76c6fe1d26e86982c014b183ad3ec"
+      }
+    }
+  }
+}
