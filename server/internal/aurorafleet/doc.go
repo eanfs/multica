@@ -8,9 +8,10 @@
 // and provisions sandbox nodes on demand.
 //
 // A sandbox node is a container running the Multica daemon. The controller
-// injects the server URL and the managed-registration secret into each node so
-// its daemon can register as managed (see handler.ManagedRuntimeRegister) and
-// claim the workspace's queued Aurora tasks. The Backend interface is the seam
+// injects the main server's URL into each node so its daemon can claim the
+// workspace's queued Aurora tasks; managed enrollment is issued internally by
+// the server and delivered through the authenticated fleet API. The Backend
+// interface is the seam
 // between that transport/API layer and a concrete node runtime: Docker in
 // production, an in-memory registry in tests.
 package aurorafleet

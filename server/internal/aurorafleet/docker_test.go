@@ -86,7 +86,7 @@ func TestDockerBackendCreateBuildsRunArgs(t *testing.T) {
 	node, err := backend.Create(context.Background(), CreateRequest{
 		Name:   "worker-1",
 		Image:  "custom:image",
-		Env:    map[string]string{"EXTRA": "1", EnvSandboxToken: "secret-token"},
+		Env:    map[string]string{"EXTRA": "1"},
 		Labels: map[string]string{"tier": "gpu"},
 	})
 	if err != nil {
@@ -99,7 +99,6 @@ func TestDockerBackendCreateBuildsRunArgs(t *testing.T) {
 	log := argLog()
 	for _, want := range []string{
 		"run -d --label multica-aurora-node=1 --name worker-1",
-		"-e AURORA_SANDBOX_TOKEN=secret-token",
 		"-e EXTRA=1",
 		"--label tier=gpu",
 		"custom:image",

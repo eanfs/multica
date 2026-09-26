@@ -32,12 +32,12 @@
 ## Progress Status (2026-09-25)
 
 - [x] Root-cause audit, provider decisions, official Volcengine skill audit, master plan, and four child plans are complete in pr://eanfs/multica/84.
-- [ ] Plan A — scoped enrollment, daemon managed mode, claim-set installation, and execution-provider mapping.
+- [x] Plan A — scoped enrollment, daemon managed mode, claim-set installation, and execution-provider mapping.
 - [ ] Plan B — workspace fleet lifecycle, hardened Docker policy, enforced egress, and Linux isolation acceptance.
 - [ ] Plan C — attachment inputs, all 13 available skill routes, hardened provider tools, and artifact staging/reporting.
 - [ ] Plan D — reproducible multi-architecture images, SBOM/provenance/signing, container smoke, and final acceptance.
 
-Tracker issue #29 remains open with `S2-InProgress`. Planning completion is not implementation completion; the next executable frontier is Plan A Task 1.
+Tracker issue #29 remains open with `S2-InProgress`. Planning completion is not implementation completion; Plan A is implemented (see the child plan's completion evidence) and the next executable frontier is Plan B — workspace fleet lifecycle, hardened Docker policy, enforced egress, and Linux isolation acceptance.
 
 ---
 
