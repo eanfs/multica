@@ -29,7 +29,7 @@ const appArmorProfile = "multica-aurora-sandbox"
 
 // uplinkNetworkName is the fleet-wide Docker network that carries outbound
 // traffic. Only the egress sidecar joins it; the sandbox never does.
-const uplinkNetworkName = "aurora-uplink"
+const uplinkNetworkName = "aurora-egress-uplink"
 
 // enrollmentSecretMountPath is where the controller-staged enrollment secret
 // appears inside the sandbox. It is always mounted read-only.
@@ -123,7 +123,7 @@ func (p Policy) NodeNames(spec WorkspaceNodeSpec) (network, proxy, sandbox strin
 	}
 	sum := sha256.Sum256([]byte("workspace=" + spec.WorkspaceID + ";node=" + spec.NodeID))
 	prefix := hex.EncodeToString(sum[:])[:16]
-	network, proxy, sandbox = "aurora-net-"+prefix, "aurora-egr-"+prefix, "aurora-sbx-"+prefix
+	network, proxy, sandbox = "aurora-ws-"+prefix, "aurora-egr-"+prefix, "aurora-sbx-"+prefix
 	for _, name := range []string{network, proxy, sandbox} {
 		if !safeNamePattern.MatchString(name) {
 			return "", "", "", fmt.Errorf("generated name %q is not a safe Docker name", name)

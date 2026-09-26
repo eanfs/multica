@@ -167,7 +167,123 @@ func TestEnsureWorkspaceNodeRollsBackOnFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "rm -f aurora-egr-") || !strings.Contains(string(data), "network rm aurora-net-") {
+	if !strings.Contains(string(data), "rm -f aurora-egr-") || !strings.Contains(string(data), "network rm aurora-ws-") {
 		t.Errorf("rollback did not remove the created resources:\n%s", data)
+	}
+}
+
+// TestDockerWorkspaceNetworkIsInternalAndUplinkIsSeparate covers the Step-6
+// wiring: an internal per-workspace network, the egress sidecar aliased as
+// "egress" on it, and the sidecar's separate pre-created uplink bridge.
+func TestDockerWorkspaceNetworkIsInternalAndUplinkIsSeparate(t *testing.T) {
+	b, record := policyBackendForTest(t)
+	spec := testSpec(b.policy.SecretRoot)
+	if err := os.MkdirAll(filepath.Dir(spec.EnrollmentFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(spec.EnrollmentFile, []byte("mse_test"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	network, _, _, err := b.policy.NodeNames(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := b.EnsureWorkspaceNode(context.Background(), spec); err != nil {
+		t.Fatalf("EnsureWorkspaceNode: %v", err)
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invocations := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(invocations) == 0 || !strings.HasPrefix(invocations[0], "network create --internal") || !strings.Contains(invocations[0], network) {
+		t.Fatalf("first invocation is not the internal workspace network create: %v", invocations)
+	}
+	if !strings.HasPrefix(network, "aurora-ws-") {
+		t.Errorf("workspace network %q is not named aurora-ws-<hash>", network)
+	}
+
+	var proxyInv, sandboxInv string
+	for _, inv := range invocations {
+		switch {
+		case strings.HasPrefix(inv, "run") && strings.Contains(inv, "aurora-egr-"):
+			proxyInv = inv
+		case strings.HasPrefix(inv, "run") && strings.Contains(inv, "aurora-sbx-"):
+			sandboxInv = inv
+		}
+	}
+	if proxyInv == "" || sandboxInv == "" {
+		t.Fatalf("missing proxy or sandbox run: %v", invocations)
+	}
+	if b.policy.UplinkNetwork() != "aurora-egress-uplink" {
+		t.Errorf("uplink network = %q, want aurora-egress-uplink", b.policy.UplinkNetwork())
+	}
+	if !containsSubslice(strings.Fields(proxyInv), []string{"--network", b.policy.UplinkNetwork()}) {
+		t.Errorf("egress sidecar is not on the pre-created uplink bridge: %q", proxyInv)
+	}
+	joined := strings.Join(invocations, "\n")
+	if !strings.Contains(joined, "network connect --alias egress "+network+" ") {
+		t.Errorf("egress sidecar was not attached with the egress alias: %s", joined)
+	}
+	// The sandbox is attached only to the internal network, never the uplink.
+	if !strings.Contains(sandboxInv, "--network "+network) {
+		t.Errorf("sandbox is not on the workspace internal network: %q", sandboxInv)
+	}
+	if strings.Contains(sandboxInv, b.policy.UplinkNetwork()) {
+		t.Errorf("sandbox must never join the uplink network: %q", sandboxInv)
+	}
+	networks := 0
+	for _, field := range strings.Fields(sandboxInv) {
+		if field == "--network" {
+			networks++
+		}
+	}
+	if networks != 1 {
+		t.Errorf("sandbox run declares %d networks, want exactly 1: %q", networks, sandboxInv)
+	}
+}
+
+// TestEnsureWorkspaceNodeRollbackRemovesSecret asserts a partial failure cleans
+// up the sandbox, proxy, network, and the controller-staged enrollment secret.
+func TestEnsureWorkspaceNodeRollbackRemovesSecret(t *testing.T) {
+	dir := t.TempDir()
+	record := dir + "/record"
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> \"$DOCKER_RECORD\"\n" +
+		"if [ \"$1\" = \"run\" ]; then echo boom >&2; exit 1; fi\n" +
+		"if [ \"$1\" = \"inspect\" ]; then echo true; else echo fakecontainerid; fi\n"
+	path := dir + "/docker"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_RECORD", record)
+
+	p := validTestPolicy(t)
+	b := NewDockerBackendWithPolicy(p)
+	b.dockerPath = path
+	spec := testSpec(p.SecretRoot)
+	if err := os.MkdirAll(filepath.Dir(spec.EnrollmentFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(spec.EnrollmentFile, []byte("mse_test"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := b.EnsureWorkspaceNode(context.Background(), spec); err == nil {
+		t.Fatal("expected ensure to fail when docker run fails")
+	}
+	if _, err := os.Stat(spec.EnrollmentFile); !os.IsNotExist(err) {
+		t.Errorf("rollback left the staged enrollment secret in place (stat err = %v)", err)
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := string(data)
+	for _, want := range []string{"rm -f aurora-egr-", "rm -f aurora-sbx-", "network rm aurora-ws-"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("rollback did not run %q:\n%s", want, joined)
+		}
 	}
 }

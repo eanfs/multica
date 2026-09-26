@@ -91,7 +91,7 @@ func TestSandboxArgsEnforceImmutablePolicy(t *testing.T) {
 	}
 	// The only network flag is the per-workspace internal network name.
 	for i, a := range args {
-		if a == "--network" && !strings.HasPrefix(args[i+1], "aurora-net-") {
+		if a == "--network" && !strings.HasPrefix(args[i+1], "aurora-ws-") {
 			t.Errorf("--network is not a workspace internal network: %s", args[i+1])
 		}
 	}
@@ -155,8 +155,8 @@ func TestProxyArgsEnforceSidecarPolicy(t *testing.T) {
 
 func TestEgressNetworkConnectJoinsWorkspaceNetwork(t *testing.T) {
 	p := validTestPolicy(t)
-	args := p.EgressNetworkConnect("aurora-egr-deadbeefdeadbeef", "aurora-net-deadbeefdeadbeef")
-	if !containsSubslice(args, []string{"network", "connect", "--alias", "egress", "aurora-net-deadbeefdeadbeef", "aurora-egr-deadbeefdeadbeef"}) {
+	args := p.EgressNetworkConnect("aurora-egr-deadbeefdeadbeef", "aurora-ws-deadbeefdeadbeef")
+	if !containsSubslice(args, []string{"network", "connect", "--alias", "egress", "aurora-ws-deadbeefdeadbeef", "aurora-egr-deadbeefdeadbeef"}) {
 		t.Errorf("unexpected connect args: %v", args)
 	}
 }
@@ -313,7 +313,7 @@ func TestNodeNamesAreDeterministicAndSafe(t *testing.T) {
 
 func TestWorkspaceNetworkCreateIsInternal(t *testing.T) {
 	p := validTestPolicy(t)
-	args := p.WorkspaceNetworkCreateArgs("aurora-net-deadbeefdeadbeef")
+	args := p.WorkspaceNetworkCreateArgs("aurora-ws-deadbeefdeadbeef")
 	if !containsSubslice(args, []string{"network", "create", "--internal"}) {
 		t.Errorf("workspace network is not internal: %v", args)
 	}
