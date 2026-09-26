@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/multica-ai/multica/server/internal/aurora"
+	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -266,4 +267,188 @@ func responseKeys(raw map[string]json.RawMessage) []string {
 		keys = append(keys, key)
 	}
 	return keys
+}
+
+// seededManagedSandbox is one workspace's live managed sandbox: the node that
+// consumed its enrollment, the bound runtime, and the daemon identity that
+// consumed it. The lifecycle tests act on the server-visible rows only; the raw
+// daemon token is deliberately not returned because no test needs it once the
+// daemon identity is known.
+type seededManagedSandbox struct {
+	WorkspaceID string
+	RuntimeID   string
+	NodeID      string
+	DaemonID    string
+}
+
+// seedManagedSandbox creates a throwaway workspace with one managed runtime and
+// spends its enrollment, leaving the runtime bound to the consuming daemon and
+// the node online. A throwaway workspace keeps the per-workspace node and
+// managed-runtime unique indexes from colliding with other handler tests.
+func seedManagedSandbox(t *testing.T) seededManagedSandbox {
+	t.Helper()
+	ctx := context.Background()
+	workspaceID := dbfx.Workspace(t, "Aurora lifecycle workspace", "aurora-lifecycle-"+uuid.NewString())
+	runtimeID := dbfx.Runtime(t, "Aurora lifecycle managed runtime", testutil.Cols{
+		"workspace_id": workspaceID,
+		"provider":     "aurora_managed",
+		"status":       "offline",
+		"last_seen_at": nil,
+	})
+	// Node and daemon-token rows carry no foreign key, so the fixture's row
+	// cleanup cannot reach them.
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM daemon_token WHERE workspace_id = $1`, workspaceID)
+		testPool.Exec(ctx, `DELETE FROM aurora_sandbox_node WHERE workspace_id = $1`, workspaceID)
+	})
+
+	svc := aurora.NewSandboxEnrollmentService(testPool, db.New(testPool), nil)
+	issued, err := svc.Issue(ctx, parseUUID(workspaceID), parseUUID(runtimeID), auroraEnrollmentImageDigest)
+	if err != nil {
+		t.Fatalf("issue managed enrollment: %v", err)
+	}
+	consumed, _, err := svc.Consume(ctx, issued.Token)
+	if err != nil {
+		t.Fatalf("consume managed enrollment: %v", err)
+	}
+	return seededManagedSandbox{
+		WorkspaceID: workspaceID,
+		RuntimeID:   runtimeID,
+		NodeID:      uuidToString(consumed.Identity.NodeID),
+		DaemonID:    consumed.Identity.DaemonID,
+	}
+}
+
+// TestManagedHeartbeatTouchesNodeActivity pins the heartbeat half of the
+// managed lifecycle: an authenticated beat for the bound daemon advances the
+// node's last_active_at, which is what keeps the idle reaper from stopping a
+// live sandbox.
+func TestManagedHeartbeatTouchesNodeActivity(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+
+	// assertTouched ages the node, runs one accepted heartbeat through the
+	// supplied transport, and proves the node's activity window moved forward.
+	// Both transports need this because a healthy WebSocket suppresses the HTTP
+	// tick, so an HTTP-only touch would let the node look idle while live.
+	assertTouched := func(t *testing.T, heartbeat func(fx seededManagedSandbox)) {
+		t.Helper()
+		fx := seedManagedSandbox(t)
+
+		stale := time.Now().UTC().Truncate(time.Microsecond).Add(-time.Hour)
+		if _, err := testPool.Exec(ctx,
+			`UPDATE aurora_sandbox_node SET last_active_at = $2 WHERE id = $1`,
+			fx.NodeID, stale); err != nil {
+			t.Fatalf("age node activity: %v", err)
+		}
+
+		heartbeat(fx)
+
+		node, err := db.New(testPool).GetAuroraSandboxNodeByWorkspace(ctx, parseUUID(fx.WorkspaceID))
+		if err != nil {
+			t.Fatalf("load sandbox node: %v", err)
+		}
+		if !node.LastActiveAt.Valid {
+			t.Fatal("last_active_at is NULL after a managed heartbeat")
+		}
+		if !node.LastActiveAt.Time.After(stale.Add(time.Minute)) {
+			t.Errorf("last_active_at = %v, want a fresh touch well after %v", node.LastActiveAt.Time, stale)
+		}
+	}
+
+	t.Run("http heartbeat", func(t *testing.T) {
+		assertTouched(t, func(fx seededManagedSandbox) {
+			req := newDaemonTokenRequest(http.MethodPost, "/api/daemon/heartbeat", map[string]any{
+				"runtime_id": fx.RuntimeID,
+			}, fx.WorkspaceID, fx.DaemonID)
+			testutil.Call(t, testHandler.DaemonHeartbeat, req).Want(http.StatusOK)
+		})
+	})
+
+	t.Run("websocket heartbeat", func(t *testing.T) {
+		assertTouched(t, func(fx seededManagedSandbox) {
+			identity := daemonws.ClientIdentity{
+				DaemonID: fx.DaemonID,
+				RuntimeLeases: map[string]*daemonws.RuntimeLease{
+					fx.RuntimeID: daemonws.NewRuntimeLease(fx.WorkspaceID, "online", time.Now().Add(-time.Hour), true),
+				},
+			}
+			if _, err := testHandler.HandleDaemonWSHeartbeat(context.Background(), identity, fx.RuntimeID, false); err != nil {
+				t.Fatalf("HandleDaemonWSHeartbeat: %v", err)
+			}
+		})
+	})
+}
+
+// TestManagedShutdownRevokesDaemonTokensAndMarksRuntimeOffline pins the
+// graceful managed shutdown contract: one authenticated request releases the
+// runtime, stops the node, clears its enrollment/backend fields, revokes every
+// daemon token for the workspace/daemon, and retains the audit timestamps.
+func TestManagedShutdownRevokesDaemonTokensAndMarksRuntimeOffline(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	fx := seedManagedSandbox(t)
+	ctx := context.Background()
+	q := db.New(testPool)
+
+	if got := dbfx.Count(t, `SELECT count(*) FROM daemon_token WHERE workspace_id = $1 AND daemon_id = $2`, fx.WorkspaceID, fx.DaemonID); got == 0 {
+		t.Fatal("fixture created no daemon token to revoke")
+	}
+	before, err := q.GetAuroraSandboxNodeByWorkspace(ctx, parseUUID(fx.WorkspaceID))
+	if err != nil {
+		t.Fatalf("load sandbox node before shutdown: %v", err)
+	}
+	if before.State != "online" {
+		t.Fatalf("node state before shutdown = %q, want online", before.State)
+	}
+	if !before.StartedAt.Valid {
+		t.Fatal("node started_at is NULL before shutdown; the audit assertion needs it set")
+	}
+
+	testutil.Call(t, testHandler.ManagedRuntimeShutdown,
+		newDaemonTokenRequest(http.MethodPost, "/api/daemon/managed/shutdown", nil, fx.WorkspaceID, fx.DaemonID)).
+		Want(http.StatusOK)
+
+	// 1. The bound runtime is offline and unbound.
+	runtime, err := q.GetAgentRuntime(ctx, parseUUID(fx.RuntimeID))
+	if err != nil {
+		t.Fatalf("load runtime after shutdown: %v", err)
+	}
+	if runtime.Status != "offline" {
+		t.Errorf("runtime status = %q, want offline", runtime.Status)
+	}
+	if runtime.DaemonID.Valid {
+		t.Errorf("runtime daemon_id = %q, want cleared", runtime.DaemonID.String)
+	}
+
+	// 2. The node is stopped, its live fields are cleared, and the audit
+	// timestamps survive.
+	node, err := q.GetAuroraSandboxNodeByWorkspace(ctx, parseUUID(fx.WorkspaceID))
+	if err != nil {
+		t.Fatalf("load sandbox node after shutdown: %v", err)
+	}
+	if node.State != "stopped" {
+		t.Errorf("node state = %q, want stopped", node.State)
+	}
+	if node.EnrollmentTokenHash.Valid || node.EnrollmentExpiresAt.Valid || node.EnrollmentConsumedAt.Valid {
+		t.Errorf("node enrollment fields survived shutdown: hash=%+v expires=%+v consumed=%+v",
+			node.EnrollmentTokenHash, node.EnrollmentExpiresAt, node.EnrollmentConsumedAt)
+	}
+	if node.BackendNodeID.Valid {
+		t.Errorf("node backend_node_id = %q, want cleared", node.BackendNodeID.String)
+	}
+	if !node.StoppedAt.Valid {
+		t.Error("node stopped_at is NULL after shutdown")
+	}
+	if !node.StartedAt.Valid || !node.StartedAt.Time.Equal(before.StartedAt.Time) {
+		t.Errorf("node started_at = %+v, want the retained audit value %+v", node.StartedAt, before.StartedAt)
+	}
+
+	// 3. Every daemon token for the workspace/daemon is gone.
+	if got := dbfx.Count(t, `SELECT count(*) FROM daemon_token WHERE workspace_id = $1 AND daemon_id = $2`, fx.WorkspaceID, fx.DaemonID); got != 0 {
+		t.Errorf("daemon_token rows after shutdown = %d, want 0", got)
+	}
 }

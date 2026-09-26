@@ -1480,6 +1480,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 		r.Post("/register", h.DaemonRegister)
 		r.Post("/deregister", h.DaemonDeregister)
+		// Graceful managed-sandbox shutdown: the daemon presents its mdt_
+		// credential and the server releases its node, runtime binding, and
+		// tokens in one transaction (Plan A Task 6).
+		r.Post("/managed/shutdown", h.ManagedRuntimeShutdown)
 		r.Post("/heartbeat", h.DaemonHeartbeat)
 		r.Get("/ws", h.DaemonWebSocket)
 		r.Get("/workspaces", h.ListDaemonWorkspaces)

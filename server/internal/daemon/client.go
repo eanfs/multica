@@ -1026,6 +1026,15 @@ func (c *Client) Deregister(ctx context.Context, runtimeIDs []string, reasons ma
 	return c.postJSON(ctx, "/api/daemon/deregister", body, nil)
 }
 
+// ManagedShutdown releases a managed sandbox daemon's node and revokes its
+// credential. The server takes the workspace and daemon identity from the mdt_
+// bearer alone, so the request carries no body and a caller cannot name another
+// node. This is the graceful path only: an abrupt process death is the fleet
+// sweeper's job.
+func (c *Client) ManagedShutdown(ctx context.Context) error {
+	return c.postJSON(ctx, "/api/daemon/managed/shutdown", map[string]any{}, nil)
+}
+
 // RegisterResponse holds the server's response to a daemon registration.
 type RegisterResponse struct {
 	Runtimes     []Runtime       `json:"runtimes"`

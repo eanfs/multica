@@ -402,6 +402,32 @@ func (q *Queries) MarkAuroraSandboxNodeStopped(ctx context.Context, arg MarkAuro
 	return i, err
 }
 
+const releaseAuroraManagedRuntime = `-- name: ReleaseAuroraManagedRuntime :exec
+UPDATE agent_runtime
+SET status = 'offline',
+    daemon_id = NULL,
+    updated_at = now()
+WHERE id = $1
+  AND workspace_id = $2
+  AND provider = 'aurora_managed'
+  AND daemon_id = $3
+`
+
+type ReleaseAuroraManagedRuntimeParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	DaemonID    pgtype.Text `json:"daemon_id"`
+}
+
+// Takes the bound daemon's managed runtime offline and clears its daemon
+// binding in one write. The predicate repeats the carrier identity so no other
+// runtime, workspace, or daemon can be released by a stale request; a repeated
+// shutdown (binding already cleared) matches nothing and is a safe no-op.
+func (q *Queries) ReleaseAuroraManagedRuntime(ctx context.Context, arg ReleaseAuroraManagedRuntimeParams) error {
+	_, err := q.db.Exec(ctx, releaseAuroraManagedRuntime, arg.ID, arg.WorkspaceID, arg.DaemonID)
+	return err
+}
+
 const rotateAuroraSandboxEnrollment = `-- name: RotateAuroraSandboxEnrollment :one
 UPDATE aurora_sandbox_node
 SET enrollment_token_hash = $2,

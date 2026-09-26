@@ -125,6 +125,20 @@ WHERE workspace_id = $1
   AND daemon_id = $2
 RETURNING *;
 
+-- name: ReleaseAuroraManagedRuntime :exec
+-- Takes the bound daemon's managed runtime offline and clears its daemon
+-- binding in one write. The predicate repeats the carrier identity so no other
+-- runtime, workspace, or daemon can be released by a stale request; a repeated
+-- shutdown (binding already cleared) matches nothing and is a safe no-op.
+UPDATE agent_runtime
+SET status = 'offline',
+    daemon_id = NULL,
+    updated_at = now()
+WHERE id = $1
+  AND workspace_id = $2
+  AND provider = 'aurora_managed'
+  AND daemon_id = $3;
+
 -- name: ListAuroraSandboxNodesForReap :many
 -- Bounded, oldest-first candidate scan for the node reaper: an active node is
 -- a candidate once it is idle past the idle cutoff or past the hard lifetime
