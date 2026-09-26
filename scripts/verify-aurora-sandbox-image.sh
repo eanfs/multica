@@ -1,0 +1,407 @@
+#!/usr/bin/env bash
+# Verify the built Aurora sandbox and egress images against the locked inputs
+# and the image contract in
+# docs/superpowers/plans/2026-09-25-aurora-sandbox-image-smoke.md (Task 3).
+#
+# Usage:
+#   scripts/verify-aurora-sandbox-image.sh <sandbox-image> [<egress-image>]
+#
+# Each argument is any local image reference (tag or digest). The script never
+# pulls: every image must already be present in the local Docker store. It
+# inspects the configured user, entrypoint, health check and architecture, the
+# per-architecture size, the required binaries and locked versions, the patched
+# vendor tree, the absence of forbidden package-manager/download/SSH/Git
+# binaries, root-owned writable directories, and any token/key pattern in
+# files, config, labels, environment, or docker history --no-trunc. It runs an
+# in-image self-test and exits non-zero naming the first unmet invariant.
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+
+if [ "$#" -lt 1 ]; then
+  printf 'usage: %s <sandbox-image> [<egress-image>]\n' "$(basename "$0")" >&2
+  exit 2
+fi
+sandbox_image="$1"
+egress_image=""
+if [ "$#" -ge 2 ]; then egress_image="$2"; fi
+
+fail() { printf 'verify-aurora-sandbox-image: FAIL: %s\n' "$*" >&2; exit 1; }
+pass() { printf 'verify-aurora-sandbox-image: ok: %s\n' "$*"; }
+
+for tool in docker node tar; do
+  command -v "$tool" >/dev/null 2>&1 || fail "required tool '$tool' is not on PATH"
+done
+
+max_image_bytes=$((4 * 1024 * 1024 * 1024))
+sandbox_user="10001:10001"
+
+versions_json="$repo_root/deploy/aurora-sandbox/versions.json"
+apt_lock="$repo_root/deploy/aurora-sandbox/apt-packages.lock"
+vendor_lock="$repo_root/deploy/aurora-sandbox/vendor/volcengine/vendor-lock.json"
+vendor_source="$repo_root/deploy/aurora-sandbox/vendor/volcengine"
+for f in "$versions_json" "$apt_lock" "$vendor_lock"; do
+  [ -f "$f" ] || fail "missing locked input $f"
+done
+
+work="$(mktemp -d)"
+cleanup() { rm -rf "$work"; }
+trap cleanup EXIT
+
+# ---------------------------------------------------------------------------
+# Token/key patterns. These are matched against image files, Config.Env,
+# Config.Labels, the full inspect JSON, and docker history --no-trunc.
+# ---------------------------------------------------------------------------
+cat >"$work/secret-patterns" <<'PATTERNS'
+sk-ant-[A-Za-z0-9_-]{16,}
+sk-proj-[A-Za-z0-9_-]{16,}
+sk-[A-Za-z0-9]{40,}
+AKIA[0-9A-Z]{16}
+-----BEGIN [A-Z ]*PRIVATE KEY-----
+ghp_[A-Za-z0-9]{30,}
+github_pat_[A-Za-z0-9_]{20,}
+xox[baprs]-[A-Za-z0-9-]{10,}
+mse_[0-9a-f]{16,}
+volc-[A-Za-z0-9]{20,}
+PATTERNS
+
+scan_secrets() {
+  # scan_secrets <label> <text-file>
+  local label="$1" file="$2" hits
+  hits="$(grep -E -n -f "$work/secret-patterns" "$file" 2>/dev/null || true)"
+  [ -z "$hits" ] || fail "$label contains a token/key pattern:
+$hits"
+}
+
+# resolve_image pins a local reference to its immutable image ID.
+resolve_image() {
+  local ref="$1"
+  docker image inspect "$ref" >/dev/null 2>&1 || fail "image '$ref' is not present locally (the verifier never pulls)"
+  docker image inspect --format '{{.Id}}' "$ref"
+}
+
+check_image_identity() {
+  # check_image_identity <name> <ref> <expected-entrypoint-json>
+  local name="$1" ref="$2" want_entrypoint="$3"
+  local os arch size entrypoint user
+  os="$(docker image inspect --format '{{.Os}}' "$ref")"
+  arch="$(docker image inspect --format '{{.Architecture}}' "$ref")"
+  [ "$os" = "linux" ] || fail "$name image OS is '$os', want linux"
+  case "$arch" in
+    amd64 | arm64) ;;
+    *) fail "$name image architecture is '$arch', want amd64 or arm64" ;;
+  esac
+  pass "$name image runs linux/$arch"
+  size="$(docker image inspect --format '{{.Size}}' "$ref")"
+  if [ "$size" -ge "$max_image_bytes" ]; then
+    fail "$name image size $size bytes is not under 4 GiB ($max_image_bytes)"
+  fi
+  pass "$name image size $size bytes is under 4 GiB"
+  user="$(docker image inspect --format '{{.Config.User}}' "$ref")"
+  [ "$user" = "$sandbox_user" ] || fail "$name image Config.User is '$user', want '$sandbox_user'"
+  pass "$name image runs as UID/GID $sandbox_user"
+  entrypoint="$(docker image inspect --format '{{json .Config.Entrypoint}}' "$ref")"
+  [ "$entrypoint" = "$want_entrypoint" ] || fail "$name image Entrypoint is $entrypoint, want $want_entrypoint"
+  pass "$name image entrypoint is fixed"
+}
+
+check_no_exported_secrets() {
+  # check_no_exported_secrets <name> <ref>
+  local name="$1" ref="$2"
+  docker image inspect --format '{{json .Config.Env}}' "$ref" >"$work/$name-env.json"
+  docker image inspect --format '{{json .Config.Labels}}' "$ref" >"$work/$name-labels.json"
+  docker image inspect --format '{{json .Config.Entrypoint}}' "$ref" >"$work/$name-entrypoint.json"
+  docker image inspect --format '{{json .Config.Cmd}}' "$ref" >"$work/$name-cmd.json"
+  scan_secrets "$name Config.Env" "$work/$name-env.json"
+  scan_secrets "$name Config.Labels" "$work/$name-labels.json"
+  scan_secrets "$name Entrypoint/Cmd" "$work/$name-entrypoint.json"
+  scan_secrets "$name Entrypoint/Cmd" "$work/$name-cmd.json"
+  docker history --no-trunc --format '{{.CreatedBy}}' "$ref" >"$work/$name-history.txt"
+  scan_secrets "$name image history" "$work/$name-history.txt"
+  pass "$name config, labels, environment and history carry no token/key pattern"
+}
+
+# ===========================================================================
+# Sandbox image
+# ===========================================================================
+sandbox_id="$(resolve_image "$sandbox_image")"
+sandbox="multica-aurora-sandbox-verify"
+docker tag "$sandbox_id" "$sandbox" >/dev/null
+check_image_identity "sandbox" "$sandbox" '["/usr/local/bin/multica","daemon","start","--managed","--foreground","--managed-enrollment-token-file=/run/secrets/aurora-enrollment"]'
+
+healthcheck="$(docker image inspect --format '{{json .Config.Healthcheck}}' "$sandbox")"
+case "$healthcheck" in
+  *managed-healthcheck*--url=http://127.0.0.1:19514/health*--max-age=90s*) ;;
+  *managed-healthcheck*--max-age=90s*--url=http://127.0.0.1:19514/health*) ;;
+  *) fail "sandbox image health check is $healthcheck, want the fixed non-shell managed-healthcheck command" ;;
+esac
+volumes="$(docker image inspect --format '{{json .Config.Volumes}}' "$sandbox")"
+case "$volumes" in
+  ""|"null"|"{}") ;;
+  *) fail "sandbox image declares volumes: $volumes" ;;
+esac
+pass "sandbox image health check is fixed and declares no volume"
+
+check_no_exported_secrets "sandbox" "$sandbox"
+
+# --- locked versions table, derived from the lock files ---------------------
+export VERIFY_ARCH="$(docker image inspect --format '{{.Architecture}}' "$sandbox")"
+node - "$versions_json" "$apt_lock" >"$work/version-expectations.tsv" <<'NODE'
+const fs = require('node:fs');
+const [versionsPath, aptPath] = process.argv.slice(2);
+const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
+const apt = JSON.parse(fs.readFileSync(aptPath, 'utf8'));
+const arch = process.env.VERIFY_ARCH || 'arm64';
+function aptVersion(pkg) {
+  const entry = apt.packages[pkg];
+  if (!entry) throw new Error('missing apt package ' + pkg);
+  const perArch = entry[arch] || entry.amd64;
+  return perArch.version;
+}
+function upstream(version) {
+  const noEpoch = version.includes(':') ? version.slice(version.indexOf(':') + 1) : version;
+  return noEpoch.split('-')[0].split('+')[0];
+}
+const nodeMajor = versions.node.runtime_image.match(/node:(\d+)/);
+const rows = [
+  ['node', 'node --version', nodeMajor ? 'v' + nodeMajor[1] + '.' : 'v22.'],
+  ['ffmpeg', 'ffmpeg -version', upstream(aptVersion('ffmpeg'))],
+  ['chromium', 'chromium --version', upstream(aptVersion('chromium'))],
+  ['pdfinfo', 'pdfinfo -v', upstream(aptVersion('poppler-utils'))],
+  ['convert', 'convert -version', upstream(aptVersion('imagemagick')).split('.').slice(0, 3).join('.')],
+  ['unzip', 'unzip -v', upstream(aptVersion('unzip'))],
+  ['tini', 'tini --version', upstream(aptVersion('tini'))],
+];
+for (const [name, probe, expected] of rows) {
+  process.stdout.write([name, probe, expected].join('\t') + '\n');
+}
+for (const [pkg, version] of Object.entries(versions.runtime_packages)) {
+  process.stdout.write(['pkg:' + pkg, version, version].join('\t') + '\n');
+}
+NODE
+
+# --- in-container content inspection ---------------------------------------
+cat >"$work/sandbox-inspect.sh" <<'INSPECT'
+set -eu
+fail() { echo "INSPECT_FAIL: $*"; exit 1; }
+
+missing=""
+for b in /usr/local/bin/multica /usr/local/bin/node /usr/bin/ffmpeg /usr/bin/ffprobe \
+         /usr/bin/chromium /usr/bin/convert /usr/bin/pdftoppm /usr/bin/pdfinfo \
+         /usr/bin/unzip /usr/bin/tini; do
+  [ -x "$b" ] || missing="$missing $b"
+done
+[ -z "$missing" ] || fail "missing required binaries:$missing"
+echo "BINARIES ok"
+
+hyperframes="$(find /opt/aurora/runtime/node_modules -maxdepth 3 -path '*/.bin/hyperframes' -print -quit 2>/dev/null || true)"
+[ -n "$hyperframes" ] || fail "missing hyperframes CLI under node_modules/.bin"
+claude="$(find /opt/aurora/runtime/node_modules/@anthropic-ai/claude-code -maxdepth 1 -name 'cli.*' -print -quit 2>/dev/null || true)"
+[ -n "$claude" ] || fail "missing Claude Code CLI"
+[ -x /usr/local/bin/multica ] || fail "missing multica daemon"
+echo "CLIS ok"
+
+forbidden=""
+for b in npm npx pnpm pnpx corepack yarn git curl wget ssh scp sftp \
+         apt apt-get dpkg python python3 gcc cc make go; do
+  p="$(command -v "$b" 2>/dev/null || true)"
+  [ -z "$p" ] || forbidden="$forbidden $b=$p"
+done
+[ -z "$forbidden" ] || fail "forbidden binaries present:$forbidden"
+echo "FORBIDDEN ok"
+
+writable="$(find / -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /tmp -o -path /run -o -path /var/tmp -o -path /workspace \) -prune -o -type d -user 0 -perm /002 -print 2>/dev/null || true)"
+[ -z "$writable" ] || fail "other-writable root-owned directories:
+$writable"
+writable_group="$(find / -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /tmp -o -path /run -o -path /var/tmp -o -path /workspace \) -prune -o -type d -user 0 -group 10001 -perm /020 -print 2>/dev/null || true)"
+[ -z "$writable_group" ] || fail "group-writable root-owned directories for gid 10001:
+$writable_group"
+echo "WRITABLE ok"
+
+residue=""
+for p in /root/.npm /root/.cache /root/.pnpm-store /root/.local/share/pnpm \
+         /opt/aurora/runtime/.npmrc \
+         /opt/aurora/vendor/volcengine/byted-ark-seedance-skill \
+         /opt/aurora/vendor/volcengine/patches \
+         /opt/aurora/runtime/deploy/aurora-sandbox/vendor/volcengine/byted-ark-seedance-skill; do
+  [ -e "$p" ] && residue="$residue $p" || true
+done
+gitdirs="$(find / -xdev -type d -name .git -print 2>/dev/null || true)"
+[ -z "$gitdirs" ] || residue="$residue $gitdirs"
+[ -z "$residue" ] || fail "forbidden build residue:$residue"
+echo "RESIDUE ok"
+
+generated="$(find /workspace /opt/aurora -xdev -name 'aurora-artifacts.v1.json' -print 2>/dev/null || true)"
+[ -z "$generated" ] || fail "generated artifact manifest present:$generated"
+if [ -e /run/secrets ]; then fail "image contains /run/secrets"; fi
+echo "GENERATED ok"
+
+for pkg in @anthropic-ai/claude-code @modelcontextprotocol/sdk hyperframes openai; do
+  v="$(node -e "process.stdout.write(require('/opt/aurora/runtime/node_modules/$pkg/package.json').version)" 2>/dev/null || echo MISSING)"
+  echo "PKG $pkg $v"
+done
+
+echo "PROBE node $(node --version)"
+echo "PROBE ffmpeg $(ffmpeg -version 2>&1 | head -n1)"
+echo "PROBE chromium $(chromium --version 2>&1 | head -n1)"
+echo "PROBE pdfinfo $(pdfinfo -v 2>&1 | head -n1)"
+echo "PROBE convert $(convert -version 2>&1 | head -n1)"
+echo "PROBE unzip $(unzip -v 2>&1 | head -n1)"
+echo "PROBE tini $(tini --version 2>&1 | head -n1)"
+
+stored="$(cat /opt/aurora/vendor-tree.sha256 2>/dev/null || echo MISSING)"
+recomputed="$(find /opt/aurora/vendor -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+[ "$stored" = "$recomputed" ] || fail "vendor-tree.sha256 stored=$stored recomputed=$recomputed"
+echo "VENDOR_TREE_HASH $stored"
+
+node -e "const {createRequire}=require('node:module');const r=createRequire('/opt/aurora/vendor/volcengine/');const m=r('/opt/aurora/vendor/volcengine/byted-ark-seedream-skill/scripts/seedream-broker.js');if(typeof m.generate!=='function'){console.error('seedream-broker generate missing');process.exit(3);}console.log('SELFTEST seedream-broker ok');"
+node --input-type=module -e "const m=await import('/opt/aurora/runtime/deploy/aurora-sandbox/runtime/src/server.mjs');if(!Array.isArray(m.TOOL_NAMES)||m.TOOL_NAMES.length!==9){console.error('broker tool count',m.TOOL_NAMES&&m.TOOL_NAMES.length);process.exit(4);}console.log('SELFTEST broker tools='+m.TOOL_NAMES.length);"
+echo "SELFTEST ok"
+INSPECT
+
+inspect_out="$(docker run --rm -i --user 0:0 --entrypoint /bin/sh "$sandbox" - <"$work/sandbox-inspect.sh")" || fail "sandbox in-image inspection failed:
+$inspect_out"
+printf '%s\n' "$inspect_out" >"$work/sandbox-inspect.out"
+printf '%s\n' "$inspect_out" | grep -q '^SELFTEST ok$' || fail "sandbox in-image self-test did not complete"
+pass "sandbox required binaries, forbidden-binary boundary, writable-directory boundary and build residue are clean"
+pass "sandbox in-image self-test passed"
+
+# Token/key patterns over every regular, non-binary file in the image rootfs.
+sandbox_cid="$(docker create "$sandbox")"
+docker export "$sandbox_cid" >"$work/sandbox-rootfs.tar"
+docker rm "$sandbox_cid" >/dev/null
+mkdir -p "$work/sandbox-rootfs"
+tar -xf "$work/sandbox-rootfs.tar" -C "$work/sandbox-rootfs"
+secret_files="$(grep -r -I -E -l -f "$work/secret-patterns" "$work/sandbox-rootfs" 2>/dev/null || true)"
+if [ -n "$secret_files" ]; then
+  fail "sandbox rootfs files contain a token/key pattern:
+$secret_files"
+fi
+pass "sandbox rootfs files carry no token/key pattern"
+
+# Locked binary and node package versions.
+while IFS="$(printf '\t')" read -r name probe expected; do
+  [ -n "$name" ] || continue
+  case "$name" in
+    pkg:*)
+      pkg="$(printf '%s' "$name" | sed 's/^pkg://')"
+      actual="$(printf '%s\n' "$inspect_out" | awk -v p="$pkg" '$1=="PKG" && $2==p {print $3}')"
+      [ -n "$actual" ] || fail "in-image self-test did not report package $pkg"
+      [ "$actual" = "$expected" ] || fail "package $pkg version is $actual, want locked $expected"
+      ;;
+    *)
+      actual="$(printf '%s\n' "$inspect_out" | awk -v n="$name" '$1=="PROBE" && $2==n { $1=""; $2=""; sub(/^  /,""); print }')"
+      [ -n "$actual" ] || fail "in-image self-test did not report binary $name"
+      case "$actual" in
+        *"$expected"*) ;;
+        *) fail "binary $name reports '$actual', want locked version '$expected'" ;;
+      esac
+      ;;
+  esac
+done <"$work/version-expectations.tsv"
+pass "sandbox binaries and node packages match the locked versions"
+
+# --- vendor patched tree matches the lock ----------------------------------
+vendor_cid="$(docker create "$sandbox")"
+if ! docker cp "$vendor_cid:/opt/aurora/vendor" "$work/image-vendor" >/dev/null 2>&1; then
+  docker rm "$vendor_cid" >/dev/null
+  fail "image has no /opt/aurora/vendor tree"
+fi
+docker rm "$vendor_cid" >/dev/null
+mkdir -p "$work/patched"
+cp -a "$vendor_source/byted-ark-seedream-skill" "$work/patched/"
+(
+  cd "$work/patched"
+  git init -q
+  git apply "$vendor_source/patches/0002-seedream-broker-adapter.patch"
+  git apply "$vendor_source/patches/0003-seedream-fail-closed-cli.patch"
+  rm -rf .git
+) || fail "could not apply the locked vendor patch series on the host"
+
+manifest_hash() {
+  # manifest_hash <root> <relative-directory>
+  local root="$1" rel="$2"
+  ( cd "$root" && find "$rel" -type f -print0 | sort -z | while IFS= read -r -d '' f; do
+      printf '%s\0' "$f"
+      sha256sum "$f" | awk '{print $1}'
+    done | sha256sum | awk '{print $1}' )
+}
+image_vendor_hash="$(manifest_hash "$work/image-vendor/volcengine" "byted-ark-seedream-skill")"
+locked_vendor_hash="$(manifest_hash "$work/patched" "byted-ark-seedream-skill")"
+[ "$image_vendor_hash" = "$locked_vendor_hash" ] || fail "vendor patched-tree hash $image_vendor_hash does not match the locked source+patches $locked_vendor_hash"
+
+node - "$vendor_lock" "$vendor_source" <<'NODE' || fail "vendored source files or patch hashes do not match vendor-lock.json"
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const [lockPath, source] = process.argv.slice(2);
+const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+function sha256(file) {
+  return 'sha256:' + crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+}
+for (const skill of Object.values(lock.skills)) {
+  if (!skill.vendored) continue;
+  for (const entry of skill.files) {
+    const actual = sha256(source + '/' + entry.path);
+    if (actual !== entry.sha256) {
+      console.error('locked file mismatch: ' + entry.path + ' actual=' + actual);
+      process.exit(1);
+    }
+  }
+  for (const patch of skill.patches) {
+    const actual = sha256(source + '/' + patch.path);
+    if (actual !== patch.sha256) {
+      console.error('locked patch mismatch: ' + patch.path);
+      process.exit(1);
+    }
+  }
+}
+NODE
+pass "sandbox vendor patched tree matches the locked source files and patch series"
+
+# ===========================================================================
+# Egress image
+# ===========================================================================
+if [ -n "$egress_image" ]; then
+  egress_id="$(resolve_image "$egress_image")"
+  egress="multica-aurora-egress-verify"
+  docker tag "$egress_id" "$egress" >/dev/null
+  check_image_identity "egress" "$egress" '["/usr/local/bin/aurora-egress-proxy"]'
+  healthcheck="$(docker image inspect --format '{{json .Config.Healthcheck}}' "$egress")"
+  [ "$healthcheck" = "null" ] || fail "egress image declares a health check: $healthcheck"
+  check_no_exported_secrets "egress" "$egress"
+
+  # Inspect the saved image layers rather than a container export: docker export
+  # injects runtime files (.dockerenv, /etc/hosts, /proc, /sys) that are not part
+  # of the image. Non-tar blobs (config, index, attestation) are skipped.
+  docker save "$egress" >"$work/egress-image.tar"
+  mkdir -p "$work/egress-save" "$work/egress-rootfs"
+  tar -xf "$work/egress-image.tar" -C "$work/egress-save"
+  : >"$work/egress-paths.txt"
+  while IFS= read -r layer; do
+    [ -n "$layer" ] || continue
+    if tar -tf "$layer" >/dev/null 2>&1; then
+      tar -tf "$layer" >>"$work/egress-paths.txt"
+      tar -xf "$layer" -C "$work/egress-rootfs" 2>/dev/null || true
+    fi
+  done < <(find "$work/egress-save" \( -name 'layer.tar' -o -path '*/blobs/sha256/*' \) -type f)
+  sort -u "$work/egress-paths.txt" -o "$work/egress-paths.txt"
+  grep -qx 'usr/local/bin/aurora-egress-proxy' "$work/egress-paths.txt" || fail "egress image is missing /usr/local/bin/aurora-egress-proxy"
+  grep -qx 'etc/ssl/certs/ca-certificates.crt' "$work/egress-paths.txt" || fail "egress image is missing the CA bundle"
+  for forbidden_path in bin/ usr/bin/ usr/sbin/ sbin/ lib/ usr/lib/ etc/passwd etc/shadow lib/ld-linux-aarch64.so.1 lib64/ld-linux-x86-64.so.2 usr/bin/apt usr/bin/git usr/bin/curl usr/bin/wget usr/bin/ssh; do
+    if grep -qx "$forbidden_path" "$work/egress-paths.txt"; then
+      fail "egress image contains forbidden path /$forbidden_path"
+    fi
+  done
+  file_count="$(grep -cv '/$' "$work/egress-paths.txt" || true)"
+  if [ "$file_count" -gt 3 ]; then
+    fail "egress image carries $file_count regular files, want only the proxy and CA bundle"
+  fi
+  secret_files="$(grep -r -I -E -l -f "$work/secret-patterns" "$work/egress-rootfs" 2>/dev/null || true)"
+  [ -z "$secret_files" ] || fail "egress rootfs files contain a token/key pattern:
+$secret_files"
+  pass "egress image content, entrypoint, size and secret boundary are clean"
+fi
+
+pass "all sandbox image content invariants passed"
