@@ -44,6 +44,28 @@ const uplinkNetworkName = "aurora-egress-uplink"
 // appears inside the sandbox. It is always mounted read-only.
 const enrollmentSecretMountPath = "/run/secrets/aurora-enrollment"
 
+// Fixed provider credential destinations inside the sandbox. The daemon reads
+// the Anthropic value from its child environment; the MCP broker reads the
+// other three files directly. The fleet mounts every one read-only at exactly
+// these paths and never passes a credential value.
+const (
+	anthropicAPIKeyMountPath = "/run/secrets/anthropic-api-key"
+	arkAPIKeyMountPath       = "/run/secrets/ark-api-key"
+	openaiAPIKeyMountPath    = "/run/secrets/openai-api-key"
+	volcASRAPIKeyMountPath   = "/run/secrets/volc-asr-api-key"
+)
+
+// ProviderSecretFiles are the operator-staged host files mounted at the four
+// fixed provider credential destinations. They are policy configuration, not
+// request data: the control API cannot choose either a source or a
+// destination. Each non-empty path must live under Policy.SecretRoot.
+type ProviderSecretFiles struct {
+	AnthropicAPIKey string
+	ArkAPIKey       string
+	OpenAIAPIKey    string
+	VolcASRAPIKey   string
+}
+
 // compiledEgressHosts are the provider endpoints every workspace may reach
 // through the egress sidecar. The list is compiled into the policy, not
 // configurable per workspace.
@@ -90,6 +112,10 @@ type Policy struct {
 	// ExtraEgressHosts are additional exact host:port entries the operator
 	// allows through the egress sidecar. Wildcards are rejected.
 	ExtraEgressHosts []string
+	// ProviderSecretFiles are the operator-staged provider credential files
+	// mounted read-only at their fixed destinations. Empty entries mount
+	// nothing; API callers cannot influence this value.
+	ProviderSecretFiles ProviderSecretFiles
 }
 
 // Validate reports whether the policy is completely and safely configured.
@@ -164,6 +190,10 @@ func (p Policy) SandboxArgs(spec WorkspaceNodeSpec) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	providerMounts, err := p.providerSecretMountArgs()
+	if err != nil {
+		return nil, err
+	}
 	network, _, sandbox, err := p.NodeNames(spec)
 	if err != nil {
 		return nil, err
@@ -199,6 +229,7 @@ func (p Policy) SandboxArgs(spec WorkspaceNodeSpec) ([]string, error) {
 		"--network", network,
 	}
 	args = append(args, mount...)
+	args = append(args, providerMounts...)
 	args = append(args, envArgs(map[string]string{
 		"MULTICA_SERVER_URL":                    p.ServerOrigin,
 		"MULTICA_MANAGED":                       "1",
@@ -261,10 +292,16 @@ func (p Policy) EgressNetworkConnect(proxyName, network string) []string {
 	return []string{"network", "connect", "--alias", "egress", network, proxyName}
 }
 
-// secretMountArgs returns the read-only bind mount for one controller-staged
-// secret file. The path must be absolute, a regular file (never a symlink),
-// and inside the configured secret root.
+// secretMountArgs returns the read-only bind mount for the controller-staged
+// enrollment secret file.
 func (p Policy) secretMountArgs(path string) ([]string, error) {
+	return p.secretMountArgsAt(path, enrollmentSecretMountPath)
+}
+
+// secretMountArgsAt returns the read-only bind mount for one controller-staged
+// secret file. The path must be absolute, a regular file (never a symlink), and
+// inside the configured secret root.
+func (p Policy) secretMountArgsAt(path, destination string) ([]string, error) {
 	if !filepath.IsAbs(path) {
 		return nil, fmt.Errorf("secret path %q must be absolute", path)
 	}
@@ -285,8 +322,37 @@ func (p Policy) secretMountArgs(path string) ([]string, error) {
 		return nil, fmt.Errorf("secret path %q is not a regular file", path)
 	}
 	return []string{
-		"--mount", "type=bind,src=" + clean + ",dst=" + enrollmentSecretMountPath + ",readonly",
+		"--mount", "type=bind,src=" + clean + ",dst=" + destination + ",readonly",
 	}, nil
+}
+
+// providerSecretMountArgs mounts the operator-staged provider credential files
+// read-only at their four fixed destinations. Each supplied path is validated
+// against SecretRoot, so the control API can never point the sandbox at a
+// credential outside the operator's secret directory; an empty entry mounts
+// nothing and the daemon's own startup validation rejects the run.
+func (p Policy) providerSecretMountArgs() ([]string, error) {
+	ordered := []struct {
+		path        string
+		destination string
+	}{
+		{p.ProviderSecretFiles.AnthropicAPIKey, anthropicAPIKeyMountPath},
+		{p.ProviderSecretFiles.ArkAPIKey, arkAPIKeyMountPath},
+		{p.ProviderSecretFiles.OpenAIAPIKey, openaiAPIKeyMountPath},
+		{p.ProviderSecretFiles.VolcASRAPIKey, volcASRAPIKeyMountPath},
+	}
+	var mounts []string
+	for _, entry := range ordered {
+		if strings.TrimSpace(entry.path) == "" {
+			continue
+		}
+		mount, err := p.secretMountArgsAt(entry.path, entry.destination)
+		if err != nil {
+			return nil, err
+		}
+		mounts = append(mounts, mount...)
+	}
+	return mounts, nil
 }
 
 // identityLabels returns the controlled identity labels for a sandbox node.

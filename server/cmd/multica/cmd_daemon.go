@@ -51,6 +51,13 @@ var daemonStatusCmd = &cobra.Command{
 	RunE:  runDaemonStatus,
 }
 
+var daemonManagedHealthcheckCmd = &cobra.Command{
+	Use:    "managed-healthcheck",
+	Short:  "Non-shell container health check for a managed sandbox daemon",
+	Hidden: true,
+	RunE:   runDaemonManagedHealthcheck,
+}
+
 var daemonProbeRuntimesCmd = &cobra.Command{
 	Use:    "probe-runtimes",
 	Short:  "Probe locally configured runtimes for the Desktop app",
@@ -149,6 +156,11 @@ func init() {
 	daemonCmd.AddCommand(daemonProbeRuntimesCmd)
 	daemonCmd.AddCommand(daemonLogsCmd)
 	daemonCmd.AddCommand(daemonDiskUsageCmd)
+
+	mh := daemonManagedHealthcheckCmd.Flags()
+	mh.String("url", "", "Health endpoint URL to check (required)")
+	mh.Duration("max-age", 90*time.Second, "Fail when the last managed heartbeat is older than this")
+	daemonCmd.AddCommand(daemonManagedHealthcheckCmd)
 }
 
 type daemonRuntimeProbe struct {
@@ -2405,4 +2417,72 @@ func formatAge(seconds int64) string {
 	default:
 		return fmt.Sprintf("%ds", seconds)
 	}
+}
+
+// managedHealthcheckTimeout stays below the image HEALTHCHECK's own timeout so
+// the check fails fast instead of being killed by the container runtime.
+const managedHealthcheckTimeout = 8 * time.Second
+
+// managedHealthPayload mirrors the subset of the daemon /health response this
+// command gates on. A managed sandbox daemon reports "starting" until it has
+// been enrolled and has acknowledged a heartbeat, so a reachable endpoint is
+// not by itself proof of health.
+type managedHealthPayload struct {
+	Status  string `json:"status"`
+	Managed *struct {
+		LastHeartbeatAt *time.Time `json:"last_heartbeat_at"`
+	} `json:"managed"`
+}
+
+func runDaemonManagedHealthcheck(cmd *cobra.Command, _ []string) error {
+	url, err := cmd.Flags().GetString("url")
+	if err != nil {
+		return err
+	}
+	maxAge, err := cmd.Flags().GetDuration("max-age")
+	if err != nil {
+		return err
+	}
+	if url == "" {
+		return errors.New("managed-healthcheck: --url is required")
+	}
+	if maxAge <= 0 {
+		return errors.New("managed-healthcheck: --max-age must be positive")
+	}
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), managedHealthcheckTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("managed-healthcheck: build request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("managed-healthcheck: request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("managed-healthcheck: endpoint returned HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("managed-healthcheck: read response: %w", err)
+	}
+
+	var health managedHealthPayload
+	if err := json.Unmarshal(body, &health); err != nil {
+		return fmt.Errorf("managed-healthcheck: decode response: %w", err)
+	}
+	if health.Status != "running" {
+		return fmt.Errorf("managed-healthcheck: daemon status is %q, want %q", health.Status, "running")
+	}
+	if health.Managed == nil || health.Managed.LastHeartbeatAt == nil {
+		return errors.New("managed-healthcheck: daemon reports no acknowledged heartbeat")
+	}
+	age := time.Since(*health.Managed.LastHeartbeatAt)
+	if age > maxAge {
+		return fmt.Errorf("managed-healthcheck: heartbeat is stale (%s old, max %s)", age.Truncate(time.Second), maxAge)
+	}
+	return nil
 }

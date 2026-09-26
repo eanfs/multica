@@ -8658,6 +8658,21 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		agentCustomEnv = task.Agent.CustomEnv
 	}
 	layerCustomEnvAndHermesHome(agentEnv, agentCustomEnv, env.HermesHome, d.logger)
+	// Managed sandbox credential scoping. The Anthropic value reaches only the
+	// Claude child, which is the sole provider a managed node may launch. The
+	// MCP broker is a Claude stdio child, so it inherits the three provider
+	// file paths and reads the secrets itself; no provider value enters the
+	// model-visible context, the daemon environment, or any log line.
+	if d.cfg.Managed.Enabled {
+		for name, value := range d.cfg.Managed.ProviderSecrets.mcpBrokerChildEnv() {
+			agentEnv[name] = value
+		}
+		if provider == auroraExecutionProvider {
+			for name, value := range d.cfg.Managed.ProviderSecrets.claudeChildEnv() {
+				agentEnv[name] = value
+			}
+		}
+	}
 	if provider == "reasonix" {
 		reasonixStateHome, err := prepareReasonixTaskStateHome(d.cfg.Profile, task.RuntimeID, task.AgentID)
 		if err != nil {
