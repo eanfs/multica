@@ -20,6 +20,10 @@ type SystemAgentDef struct {
 	SystemKey    string
 	Name         string
 	Instructions string
+	// RequiredTools is the reviewed MCP tool set the skill's canonical workflow
+	// calls, copied from the execution policy. The daemon narrows a task's
+	// surface to this trusted list; unavailable skills carry none.
+	RequiredTools []string
 }
 
 // SystemAgents returns the 16 system-agent definitions in catalog order.
@@ -33,12 +37,16 @@ func SystemAgents() []SystemAgentDef {
 }
 
 func systemAgentDef(e SkillCatalogEntry) SystemAgentDef {
-	return SystemAgentDef{
+	def := SystemAgentDef{
 		SkillID:      e.ID,
 		SystemKey:    "aurora:" + e.ID,
 		Name:         e.Name,
 		Instructions: systemAgentInstructions(e),
 	}
+	if policy, ok := ExecutionPolicy(e.ID); ok {
+		def.RequiredTools = policy.RequiredTools
+	}
+	return def
 }
 
 // The managed runtime is the workspace's server-hosted host for Aurora's
@@ -151,9 +159,15 @@ func systemAgentInstructions(e SkillCatalogEntry) string {
 	)
 }
 
-// systemSkillContent is the minimal SKILL.md workflow text stored on the skill
-// row. Later plans enrich it; the seed refreshes it on every run.
+// systemSkillContent is the prompt content stored on the skill row: the
+// canonical embedded workflow for an available skill, refreshed on every seed.
+// It deliberately never reads a vendor SKILL.md — the vendored trees are not
+// model-visible, only the reviewed brief is. Unavailable skills keep a short
+// placeholder so the catalog stays complete.
 func systemSkillContent(e SkillCatalogEntry) string {
-	return fmt.Sprintf("# %s\n\nAurora skill %q.\nInput: %s\nOutput: %s\n",
+	if brief, ok := Workflow(e.ID); ok {
+		return brief
+	}
+	return fmt.Sprintf("# %s\n\nAurora skill %q is not available.\nInput: %s\nOutput: %s\n",
 		e.Name, e.ID, strings.Join(e.Input, ", "), strings.Join(e.Output, ", "))
 }
