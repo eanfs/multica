@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS aurora_provider_run_task_operation_uidx;

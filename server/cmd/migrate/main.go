@@ -332,6 +332,9 @@ var concurrentIndexCleanups = map[string]string{
 	"524_aurora_sandbox_node_enrollment_idx":                    "aurora_sandbox_node_enrollment_uidx",
 	"525_aurora_sandbox_node_reap_idx":                          "aurora_sandbox_node_reap_idx",
 	"526_aurora_managed_runtime_workspace_idx":                  "agent_runtime_aurora_managed_workspace_uidx",
+	"528_aurora_provider_run_id_idx":                            "aurora_provider_run_pkey",
+	"530_aurora_provider_run_task_operation_idx":                "aurora_provider_run_task_operation_uidx",
+	"531_aurora_provider_run_external_idx":                      "aurora_provider_run_provider_external_uidx",
 	"484_issue_triage_state_index":                              "idx_issue_triage_state",
 }
 

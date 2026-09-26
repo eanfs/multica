@@ -1597,6 +1597,18 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/api/feedback", h.CreateFeedback)
 		r.With(handler.RequireHumanActor).Post("/api/client-usage", h.UpsertClientUsage)
 
+		// Aurora create-once provider runs (Plan C Task 4). Authenticated by the
+		// task-scoped mat_ token the managed sandbox daemon injects into the
+		// agent process; the handler re-verifies the path task against the
+		// token's task/agent/workspace and the task's Aurora generation before
+		// it opens or advances a create lease.
+		r.Route("/api/agent/tasks/{taskID}/aurora-provider-runs", func(r chi.Router) {
+			r.Post("/begin", h.BeginAuroraProviderRun)
+			r.Put("/{operation}/external", h.RecordAuroraProviderRunExternal)
+			r.Put("/{operation}/finish", h.FinishAuroraProviderRun)
+			r.Get("/{operation}", h.GetAuroraProviderRun)
+		})
+
 		// Note (MUL-4309): the generic OpenAI-compatible passthrough endpoints
 		// (POST /api/llm/v1/chat/completions[/stream]) were intentionally
 		// removed. Exposing a general LLM proxy backed by the deployment's own

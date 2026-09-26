@@ -238,6 +238,23 @@ type AuroraModerationLog struct {
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
+type AuroraProviderRun struct {
+	ID            pgtype.UUID        `json:"id"`
+	GenerationID  pgtype.UUID        `json:"generation_id"`
+	TaskID        pgtype.UUID        `json:"task_id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	Provider      string             `json:"provider"`
+	Operation     string             `json:"operation"`
+	Model         string             `json:"model"`
+	RequestSha256 string             `json:"request_sha256"`
+	ExternalID    pgtype.Text        `json:"external_id"`
+	State         string             `json:"state"`
+	ErrorCode     pgtype.Text        `json:"error_code"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	CompletedAt   pgtype.Timestamptz `json:"completed_at"`
+}
+
 type AuroraSandboxNode struct {
 	ID                   pgtype.UUID        `json:"id"`
 	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
