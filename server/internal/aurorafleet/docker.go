@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -99,15 +100,15 @@ func (d *DockerBackend) EnsureWorkspaceNode(ctx context.Context, spec WorkspaceN
 
 	node := Node{ID: sandboxName, ProxyID: proxyName, NetworkID: network, State: StateStarting}
 	if err := d.createEgress(ctx, proxyName, network); err != nil {
-		d.rollback(ctx, node)
+		d.rollback(ctx, node, spec.EnrollmentFile)
 		return Node{}, err
 	}
 	if err := d.createSandbox(ctx, spec); err != nil {
-		d.rollback(ctx, node)
+		d.rollback(ctx, node, spec.EnrollmentFile)
 		return Node{}, err
 	}
 	if err := d.waitRunning(ctx, sandboxName); err != nil {
-		d.rollback(ctx, node)
+		d.rollback(ctx, node, spec.EnrollmentFile)
 		return Node{}, err
 	}
 	return node, nil
@@ -172,9 +173,11 @@ func (d *DockerBackend) waitRunning(ctx context.Context, container string) error
 	}
 }
 
-// rollback removes any containers and network created for a failed ensure.
-// Errors are ignored: rollback is best-effort cleanup of best-effort state.
-func (d *DockerBackend) rollback(ctx context.Context, node Node) {
+// rollback removes any containers, network, and staged secret created for a
+// failed ensure. Errors are ignored: rollback is best-effort cleanup of
+// best-effort state, and the controller also removes the secret after the
+// call, so the removal is idempotent.
+func (d *DockerBackend) rollback(ctx context.Context, node Node, secretPath string) {
 	if node.ProxyID != "" {
 		_, _ = d.run(ctx, "rm", "-f", node.ProxyID)
 	}
@@ -183,6 +186,9 @@ func (d *DockerBackend) rollback(ctx context.Context, node Node) {
 	}
 	if node.NetworkID != "" {
 		_, _ = d.run(ctx, "network", "rm", node.NetworkID)
+	}
+	if secretPath != "" {
+		_ = os.Remove(secretPath)
 	}
 }
 
