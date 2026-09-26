@@ -10,6 +10,11 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-11-aurora-content-creation-app-design.md`
 
+> **Progress 2026-09-26:** child Tasks 1–7 are implemented, merged and `S4-Done`
+> (#89 → PR #120, #90 → PR #121, #91 → PR #122, #92 → PR #123, #93 → PR #124,
+> #94 → PR #125, #95 → PR #126). **Task 8 remains**, and the parent tracker
+> issue #29 stays open until the master plan's Linux acceptance gates pass.
+
 ## Global Constraints
 
 - This plan is child plan A of `docs/superpowers/plans/2026-09-22-aurora-sandbox-tool-surface.md`; use that master plan for shared security and acceptance rules.
@@ -156,7 +161,7 @@ func (d *Daemon) installManagedEnrollment(resp ManagedEnrollmentResponse) error
 - Consumes: Existing `agent_runtime` rows with `provider='aurora_managed'` and `runtime_mode='cloud'`.
 - Produces: Generated `db.AuroraSandboxNode` plus create, lock, consume, bind, touch, drain, stop, and reap-candidate queries.
 
-- [ ] **Step 1: Write the failing database invariant test**
+- [x] **Step 1: Write the failing database invariant test**
 
 Add a DB-backed test that creates one workspace/runtime/node, then proves duplicate `workspace_id`, `runtime_id`, and `daemon_id` writes fail and that an expired or consumed enrollment hash is not returned by the consumable-token query.
 
@@ -187,7 +192,7 @@ func TestAuroraSandboxNodeUniquenessAndConsumption(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the focused test and observe the missing generated API**
+- [x] **Step 2: Run the focused test and observe the missing generated API**
 
 Run:
 
@@ -198,7 +203,7 @@ cd server && go test ./internal/aurora -run TestAuroraSandboxNodeUniquenessAndCo
 
 Expected: compilation fails because `db.CreateAuroraSandboxNodeParams` and its queries do not exist.
 
-- [ ] **Step 3: Add the table migration without inline indexes**
+- [x] **Step 3: Add the table migration without inline indexes**
 
 Use this exact state model in migration 518:
 
@@ -227,7 +232,7 @@ CREATE TABLE aurora_sandbox_node (
 
 Migration 518 down drops the table. Do not add foreign keys.
 
-- [ ] **Step 4: Add each index in its own migration**
+- [x] **Step 4: Add each index in its own migration**
 
 Use these exact statements in migrations 519 and 521–526:
 
@@ -243,11 +248,11 @@ CREATE UNIQUE INDEX CONCURRENTLY agent_runtime_aurora_managed_workspace_uidx ON 
 
 Migration 520 attaches `aurora_sandbox_node_pkey` as the table primary key with `ALTER TABLE ... ADD CONSTRAINT ... PRIMARY KEY USING INDEX ...`. Its down migration drops the constraint; migration 519’s down is `SELECT 1;` because dropping the primary-key constraint already drops the attached index. The other index down migrations use one `DROP INDEX CONCURRENTLY IF EXISTS` statement each.
 
-- [ ] **Step 5: Register concurrent migrations with the runner**
+- [x] **Step 5: Register concurrent migrations with the runner**
 
 Add 519, 521, 522, 523, 524, 525, and 526 to the migration runner’s non-transactional/concurrent-index set. Keep 518 and 520 transactional.
 
-- [ ] **Step 6: Add exact lifecycle queries**
+- [x] **Step 6: Add exact lifecycle queries**
 
 Define sqlc queries with these names and semantics:
 
@@ -293,7 +298,7 @@ RETURNING *;
 
 Change `GetAuroraManagedRuntime` so it no longer requires `daemon_id IS NULL`; uniqueness comes from migration 526.
 
-- [ ] **Step 7: Generate sqlc and run migration/query tests**
+- [x] **Step 7: Generate sqlc and run migration/query tests**
 
 Run:
 
@@ -305,7 +310,7 @@ cd server && go test ./internal/aurora ./cmd/migrate -run 'TestAuroraSandboxNode
 
 Expected: all selected tests pass, and generated code contains every query named above.
 
-- [ ] **Step 8: Commit the schema atomically**
+- [x] **Step 8: Commit the schema atomically**
 
 ```bash
 git add server/migrations/518_aurora_sandbox_node.* \
@@ -335,7 +340,7 @@ git commit -m "feat(aurora): persist scoped sandbox nodes"
 - Consumes: Task 1’s node queries, `auth.GenerateDaemonToken`, `auth.HashToken`, and `db.CreateDaemonToken`.
 - Produces: `SandboxEnrollmentService.Issue` and `.Consume` using the types in this plan’s Public Interfaces section.
 
-- [ ] **Step 1: Add failing token-format and service tests**
+- [x] **Step 1: Add failing token-format and service tests**
 
 Cover all of these cases in named tests:
 
@@ -351,7 +356,7 @@ func TestSandboxEnrollmentConsumeRollsBackWhenRuntimeBindingFails(t *testing.T)
 
 The success test must query the stored daemon token by hash and assert its workspace and daemon ID match the consumed node. It must also assert the managed runtime’s persisted provider is still `aurora_managed`.
 
-- [ ] **Step 2: Run the focused tests and observe missing functions**
+- [x] **Step 2: Run the focused tests and observe missing functions**
 
 Run:
 
@@ -362,7 +367,7 @@ cd server && go test ./internal/auth ./internal/aurora -run 'TestGenerateManaged
 
 Expected: compilation fails on `GenerateManagedEnrollmentToken` and `NewSandboxEnrollmentService`.
 
-- [ ] **Step 3: Add the enrollment token generator**
+- [x] **Step 3: Add the enrollment token generator**
 
 Implement a shared random-hex helper or mirror the existing daemon-token implementation exactly:
 
@@ -378,7 +383,7 @@ func GenerateManagedEnrollmentToken() (string, error) {
 
 Do not accept any other prefix in `Consume`.
 
-- [ ] **Step 4: Implement issuance under a workspace advisory lock**
+- [x] **Step 4: Implement issuance under a workspace advisory lock**
 
 `Issue` must:
 
@@ -393,7 +398,7 @@ Do not accept any other prefix in `Consume`.
 
 Use `time.Now` only through the injected `now` function so expiry tests are deterministic.
 
-- [ ] **Step 5: Implement one-transaction consumption**
+- [x] **Step 5: Implement one-transaction consumption**
 
 `Consume` must:
 
@@ -406,7 +411,7 @@ Use `time.Now` only through the injected `now` function so expiry tests are dete
 
 Map no-row outcomes to one `ErrInvalidManagedEnrollment` error so callers do not distinguish unknown, expired, and replayed secrets.
 
-- [ ] **Step 6: Run focused and package tests**
+- [x] **Step 6: Run focused and package tests**
 
 Run:
 
@@ -418,7 +423,7 @@ go test ./internal/aurora -count=1
 
 Expected: all selected tests pass.
 
-- [ ] **Step 7: Commit the enrollment service**
+- [x] **Step 7: Commit the enrollment service**
 
 ```bash
 git add server/internal/auth/jwt.go server/internal/auth/jwt_test.go \
@@ -440,7 +445,7 @@ git commit -m "feat(aurora): issue scoped sandbox enrollments"
 - Consumes: `SandboxEnrollmentService.Consume`.
 - Produces: `POST /api/daemon/managed/enroll` with no request body and a `ManagedEnrollmentResponse` JSON body.
 
-- [ ] **Step 1: Write the failing HTTP contract matrix**
+- [x] **Step 1: Write the failing HTTP contract matrix**
 
 Use `testutil.Call` and table cases for missing bearer, malformed prefix, expired token, replay, service disabled, and success. The success assertion must be exact:
 
@@ -467,7 +472,7 @@ require.True(t, strings.HasPrefix(got.DaemonToken, "mdt_"))
 
 Also assert that a JSON body attempting to supply `workspace_id` is ignored because the endpoint decodes no caller identity.
 
-- [ ] **Step 2: Run the handler test and observe the old route/contract**
+- [x] **Step 2: Run the handler test and observe the old route/contract**
 
 Run:
 
@@ -478,7 +483,7 @@ cd server && go test ./internal/handler -run TestManagedRuntimeEnroll -count=1
 
 Expected: FAIL because the handler still expects the global token and workspace body, and no `/enroll` route exists.
 
-- [ ] **Step 3: Replace the handler implementation**
+- [x] **Step 3: Replace the handler implementation**
 
 Implement:
 
@@ -511,15 +516,15 @@ func (h *Handler) ManagedRuntimeEnroll(w http.ResponseWriter, r *http.Request) {
 
 Log node/workspace/runtime/daemon IDs only. Never log either raw token.
 
-- [ ] **Step 4: Replace the route and server wiring**
+- [x] **Step 4: Replace the route and server wiring**
 
 Register `POST /api/daemon/managed/enroll` outside `DaemonAuth`, delete `/api/daemon/managed/register`, inject the service through `Handler`, and remove `AuroraSandboxToken` loading from server config. A missing fleet integration may leave the service available for tests but must not restore a shared token.
 
-- [ ] **Step 5: Prove old authentication no longer works**
+- [x] **Step 5: Prove old authentication no longer works**
 
 Add an assertion that setting `AURORA_SANDBOX_TOKEN` and presenting its value still receives 401. Verify the removed route returns 404.
 
-- [ ] **Step 6: Run handler tests**
+- [x] **Step 6: Run handler tests**
 
 Run:
 
@@ -530,7 +535,7 @@ cd server && go test ./internal/handler -run 'TestManagedRuntimeEnroll|TestManag
 
 Expected: all selected tests pass.
 
-- [ ] **Step 7: Commit the endpoint replacement**
+- [x] **Step 7: Commit the endpoint replacement**
 
 ```bash
 git add server/internal/handler/aurora_runtime.go server/internal/handler/aurora_runtime_test.go \
@@ -555,7 +560,7 @@ git commit -m "feat(aurora): exchange managed enrollment credentials"
 - Consumes: Task 3’s HTTP response; existing `Client.SetToken`, `workspaceState.runtimeIDs`, `Daemon.runtimeIndex`, heartbeat, batch claim, and report methods.
 - Produces: `Client.EnrollManaged`, `Config.Managed`, `Daemon.bootstrapManaged`, and `Daemon.installManagedEnrollment`.
 
-- [ ] **Step 1: Write client and bootstrap failures first**
+- [x] **Step 1: Write client and bootstrap failures first**
 
 Add tests that assert:
 
@@ -571,7 +576,7 @@ func TestManagedModeDoesNotDiscoverWorkstationWorkspaces(t *testing.T)
 
 The successful install must assert `d.allRuntimeIDs()` equals only the enrolled runtime ID and `d.findRuntime(id).Provider == "claude"` even though the response’s persisted runtime projection contains `provider=aurora_managed`.
 
-- [ ] **Step 2: Run focused tests and observe missing managed mode**
+- [x] **Step 2: Run focused tests and observe missing managed mode**
 
 Run:
 
@@ -581,11 +586,11 @@ cd server && go test ./internal/daemon -run 'TestClientEnrollManaged|TestInstall
 
 Expected: compilation fails on the new config and methods.
 
-- [ ] **Step 3: Implement the enrollment client**
+- [x] **Step 3: Implement the enrollment client**
 
 `EnrollManaged` must create a request-local client or request header carrying `Bearer <mse_...>` without replacing the client’s long-lived token until the response has passed validation. It sends `POST /api/daemon/managed/enroll` with an empty body and decodes the typed response. After successful validation, `bootstrapManaged` calls `SetToken(resp.DaemonToken)` exactly once.
 
-- [ ] **Step 4: Add managed config validation**
+- [x] **Step 4: Add managed config validation**
 
 Extend daemon config with `Managed ManagedConfig`. In managed mode:
 
@@ -598,7 +603,7 @@ Extend daemon config with `Managed ManagedConfig`. In managed mode:
 
 Do not read a user CLI config or workstation home directory in managed mode.
 
-- [ ] **Step 5: Install the enrolled identity into existing daemon state**
+- [x] **Step 5: Install the enrolled identity into existing daemon state**
 
 `installManagedEnrollment` validates all response fields, then creates one `workspaceState` and one in-memory `Runtime`:
 
@@ -618,7 +623,7 @@ func (d *Daemon) installManagedEnrollment(resp ManagedEnrollmentResponse) error 
 
 The implementation must compare runtime workspace ID with top-level workspace ID and reject a persisted runtime provider other than `aurora_managed` or mode other than `cloud`.
 
-- [ ] **Step 6: Branch daemon startup before workstation registration/sync**
+- [x] **Step 6: Branch daemon startup before workstation registration/sync**
 
 At daemon startup, managed mode must:
 
@@ -631,7 +636,7 @@ At daemon startup, managed mode must:
 
 Do not add a second claim loop; reuse the existing batch path with the installed runtime ID and one slot.
 
-- [ ] **Step 7: Expose a foreground-only CLI entry**
+- [x] **Step 7: Expose a foreground-only CLI entry**
 
 Add these flags to `multica daemon start`:
 
@@ -643,7 +648,7 @@ Add these flags to `multica daemon start`:
 
 `--managed` requires `--foreground`; background profile paths and PID/log management remain for workstation daemons only. The sandbox image will use this command directly.
 
-- [ ] **Step 8: Run daemon package tests**
+- [x] **Step 8: Run daemon package tests**
 
 Run:
 
@@ -653,7 +658,7 @@ cd server && go test ./internal/daemon ./cmd/multica -run 'TestClientEnrollManag
 
 Expected: all selected tests pass and no test resolves a user-installed Claude executable.
 
-- [ ] **Step 9: Commit managed mode**
+- [x] **Step 9: Commit managed mode**
 
 ```bash
 git add server/internal/daemon/managed.go server/internal/daemon/managed_test.go \
@@ -675,7 +680,7 @@ git commit -m "feat(daemon): add managed sandbox bootstrap"
 - Consumes: Task 4’s in-memory runtime with `Provider="claude"` and the task’s persisted Aurora context.
 - Produces: Fail-closed launch review that never treats `aurora_managed` as an executable provider.
 
-- [ ] **Step 1: Add a regression test for the exact identity split**
+- [x] **Step 1: Add a regression test for the exact identity split**
 
 ```go
 func TestManagedAuroraTaskUsesClaudeToolSurface(t *testing.T) {
@@ -693,7 +698,7 @@ func TestAuroraManagedIsNotAnExecutableProvider(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the regression test**
+- [x] **Step 2: Run the regression test**
 
 Run:
 
@@ -703,15 +708,15 @@ cd server && go test ./internal/daemon -run 'TestManagedAuroraTaskUsesClaudeTool
 
 Expected before the fix: the managed runtime either reaches launch as `aurora_managed` and is rejected, or the install helper is missing.
 
-- [ ] **Step 3: Make execution identity an enrollment-only value**
+- [x] **Step 3: Make execution identity an enrollment-only value**
 
 Ensure all provider-dependent launch, executable lookup, version reporting, argument construction, permission mode, deny list, and tool-surface review use the in-memory `claude` value. Ensure every server authorization, claim query, node query, and database row continues to use persisted runtime ID/workspace/daemon identity and never rewrites the database provider to `claude`.
 
-- [ ] **Step 4: Preserve the deny list**
+- [x] **Step 4: Preserve the deny list**
 
 The effective Claude launch must still deny general `Bash`, `WebFetch`, `WebSearch`, arbitrary MCP servers, and user-installed skills. Later provider tools are added as explicit MCP names in child plan C; this task must not broaden them.
 
-- [ ] **Step 5: Run the complete Aurora surface tests**
+- [x] **Step 5: Run the complete Aurora surface tests**
 
 Run:
 
@@ -721,7 +726,7 @@ cd server && go test ./internal/daemon -run 'Aurora|Managed' -count=1
 
 Expected: all selected tests pass.
 
-- [ ] **Step 6: Commit the identity boundary**
+- [x] **Step 6: Commit the identity boundary**
 
 ```bash
 git add server/internal/daemon/aurora_tool_surface.go \
@@ -745,7 +750,7 @@ git commit -m "fix(aurora): separate carrier and execution providers"
 - Consumes: Existing local daemon health server and runtime deregistration.
 - Produces: Managed `/health` readiness fields, node activity touches, and token/runtime revocation on graceful shutdown.
 
-- [ ] **Step 1: Write lifecycle tests**
+- [x] **Step 1: Write lifecycle tests**
 
 Add tests for these exact outcomes:
 
@@ -758,7 +763,7 @@ func TestManagedShutdownRevokesDaemonTokensAndMarksRuntimeOffline(t *testing.T)
 
 Health JSON may include node/workspace/runtime/daemon IDs and last successful heartbeat time. It must not include enrollment or daemon tokens, secret-file paths, prompts, provider URLs, or task-token values.
 
-- [ ] **Step 2: Run tests and observe missing lifecycle state**
+- [x] **Step 2: Run tests and observe missing lifecycle state**
 
 Run:
 
@@ -769,11 +774,11 @@ cd server && go test ./internal/daemon ./internal/handler -run 'TestManagedHealt
 
 Expected: tests fail because health and deregistration do not update the managed node.
 
-- [ ] **Step 3: Extend managed heartbeat handling**
+- [x] **Step 3: Extend managed heartbeat handling**
 
 After a successful authenticated runtime heartbeat, call `TouchAuroraSandboxNode(workspaceID, daemonID)`. A failed touch logs identifiers and the error but must not turn a successful runtime heartbeat into a credential leak or duplicate claim.
 
-- [ ] **Step 4: Extend graceful deregistration**
+- [x] **Step 4: Extend graceful deregistration**
 
 A managed shutdown request authenticated by its `mdt_` token must in one server transaction:
 
@@ -784,11 +789,11 @@ A managed shutdown request authenticated by its `mdt_` token must in one server 
 
 An abrupt container death is handled by child plan B’s sweeper, not by inventing a client-side success.
 
-- [ ] **Step 5: Expose health based on acknowledged control-plane state**
+- [x] **Step 5: Expose health based on acknowledged control-plane state**
 
 Managed health becomes ready only after enrollment validation and one acknowledged heartbeat. It becomes unready on token expiry, repeated heartbeat authorization failure, draining signal, or context cancellation. Keep the listener loopback-only.
 
-- [ ] **Step 6: Run lifecycle tests**
+- [x] **Step 6: Run lifecycle tests**
 
 Run:
 
@@ -799,7 +804,7 @@ cd server && go test ./internal/daemon ./internal/handler -run 'TestManagedHealt
 
 Expected: all selected tests pass.
 
-- [ ] **Step 7: Commit lifecycle observability**
+- [x] **Step 7: Commit lifecycle observability**
 
 ```bash
 git add server/internal/daemon/daemon.go server/internal/daemon/health.go \
@@ -820,7 +825,7 @@ git commit -m "feat(aurora): track managed node lifecycle"
 - Consumes: Tasks 1–6, existing quick-create enqueue, daemon claim, fake executable injection, heartbeat, progress, completion, and settlement.
 - Produces: One canonical non-provider end-to-end regression for enroll → claim → fake execute → report → complete.
 
-- [ ] **Step 1: Write a process-level test using a test-created executable**
+- [x] **Step 1: Write a process-level test using a test-created executable**
 
 The test must:
 
@@ -838,7 +843,7 @@ Name the test:
 func TestAuroraManagedDaemonEnrollsClaimsAndCompletesWithFakeClaude(t *testing.T)
 ```
 
-- [ ] **Step 2: Run the new test and capture the first failing seam**
+- [x] **Step 2: Run the new test and capture the first failing seam**
 
 Run:
 
@@ -849,15 +854,15 @@ cd server && go test ./internal/handler -run TestAuroraManagedDaemonEnrollsClaim
 
 Expected before final wiring: FAIL at the earliest missing lifecycle seam; it must not skip because no real Claude CLI exists.
 
-- [ ] **Step 3: Add only the test seam needed to inject the fake executable**
+- [x] **Step 3: Add only the test seam needed to inject the fake executable**
 
 Pass the test-created executable through daemon configuration. Do not search `PATH`, `$HOME`, or user agent config in this test. If the fake command name is a new default command token, add it to `scripts/agent-cli-command-names.txt`; otherwise use an absolute temporary path and leave the list unchanged.
 
-- [ ] **Step 4: Make startup and shutdown condition-driven**
+- [x] **Step 4: Make startup and shutdown condition-driven**
 
 Use channels/HTTP observations/task-row polling with a bounded context. Do not add arbitrary sleeps. Timeout diagnostics must include current task, runtime, node, and daemon health state but no tokens.
 
-- [ ] **Step 5: Run the lifecycle test three times**
+- [x] **Step 5: Run the lifecycle test three times**
 
 Run:
 
@@ -868,7 +873,7 @@ cd server && go test ./internal/handler -run TestAuroraManagedDaemonEnrollsClaim
 
 Expected: three passes, one claim and one fake execution per run.
 
-- [ ] **Step 6: Commit the canonical lifecycle regression**
+- [x] **Step 6: Commit the canonical lifecycle regression**
 
 ```bash
 git add server/internal/handler/aurora_managed_lifecycle_test.go \
