@@ -97,6 +97,23 @@ func (d *DockerBackend) EnsureWorkspaceNode(ctx context.Context, spec WorkspaceN
 		return Node{}, err
 	}
 
+	// Confirm an already-running node instead of recreating it. The
+	// policy-derived names are deterministic, so a second ensure would
+	// otherwise collide on the container names and roll the node back.
+	existing, exists, err := d.existingSandboxState(ctx, sandboxName)
+	if err != nil {
+		return Node{}, err
+	}
+	if exists && existing == StateOnline {
+		return Node{ID: sandboxName, ProxyID: proxyName, NetworkID: network, State: StateOnline, Health: HealthHealthy}, nil
+	}
+	if exists {
+		// A non-running leftover cannot serve; remove it before the
+		// deterministic names are recreated.
+		_, _ = d.run(ctx, "rm", "-f", sandboxName)
+		_, _ = d.run(ctx, "rm", "-f", proxyName)
+	}
+
 	node := Node{ID: sandboxName, ProxyID: proxyName, NetworkID: network, State: StateStarting}
 	if err := d.createEgress(ctx, proxyName, network); err != nil {
 		d.rollback(ctx, node, spec.EnrollmentFile)
@@ -191,9 +208,15 @@ func (d *DockerBackend) rollback(ctx context.Context, node Node, secretPath stri
 	}
 }
 
-// WorkspaceNodeStatus reports the sandbox container's state for the node.
+// WorkspaceNodeStatus reports the sandbox container's state for the node. A
+// node UUID is resolved to its policy-derived sandbox name through the
+// controlled identity label; a name the policy would generate is used as-is.
 func (d *DockerBackend) WorkspaceNodeStatus(ctx context.Context, nodeID string) (Node, error) {
-	out, err := d.run(ctx, "ps", "-a", "--filter", "id="+nodeID, "--format", dockerPSFormat)
+	sandbox, err := d.resolveSandboxName(ctx, nodeID)
+	if err != nil {
+		return Node{}, err
+	}
+	out, err := d.run(ctx, "ps", "-a", "--filter", "name=^"+sandbox+"$", "--format", dockerPSFormat)
 	if err != nil {
 		return Node{}, err
 	}
@@ -201,7 +224,33 @@ func (d *DockerBackend) WorkspaceNodeStatus(ctx context.Context, nodeID string) 
 	if !ok {
 		return Node{}, ErrNotFound
 	}
-	return Node{ID: nodeID, State: state}, nil
+	health := HealthUnhealthy
+	if state == StateOnline {
+		health = HealthHealthy
+	}
+	return Node{ID: sandbox, State: state, Health: health}, nil
+}
+
+// existingSandboxState reports the state of the policy-derived sandbox
+// container, or exists=false when no such container exists. The name filter is
+// anchored so only the exact node is considered.
+func (d *DockerBackend) existingSandboxState(ctx context.Context, sandbox string) (state string, exists bool, err error) {
+	out, err := d.run(ctx, "ps", "-a", "--filter", "name=^"+sandbox+"$", "--format", dockerPSFormat)
+	if err != nil {
+		return "", false, err
+	}
+	state, exists = parsePSLine(string(out))
+	return state, exists, nil
+}
+
+// resolveSandboxName maps a node UUID to its policy-derived sandbox name
+// through the controlled identity label. A name already carrying the sandbox
+// prefix is returned unchanged.
+func (d *DockerBackend) resolveSandboxName(ctx context.Context, nodeID string) (string, error) {
+	if strings.HasPrefix(nodeID, sandboxNamePrefix) {
+		return nodeID, nil
+	}
+	return d.findSandboxByNodeID(ctx, nodeID)
 }
 
 // DeleteWorkspaceNode destroys a workspace node: the sandbox container, its
@@ -229,8 +278,14 @@ func (d *DockerBackend) DeleteWorkspaceNode(ctx context.Context, nodeID string) 
 // removeSandbox removes the sandbox container addressed by a policy-derived name
 // or a node UUID and returns the container name it removed.
 func (d *DockerBackend) removeSandbox(ctx context.Context, nodeID string) (string, error) {
-	if _, err := d.run(ctx, "rm", "-f", nodeID); err == nil {
-		return nodeID, nil
+	// Only a policy-derived sandbox name can be removed directly. Any other
+	// reference (a node UUID) must resolve through the controlled label first:
+	// some Docker versions report success for a missing reference, so the exit
+	// code alone cannot prove a sandbox was removed.
+	if _, _, isSandboxName := siblingNodeNames(nodeID); isSandboxName {
+		if _, err := d.run(ctx, "rm", "-f", nodeID); err == nil {
+			return nodeID, nil
+		}
 	}
 	name, err := d.findSandboxByNodeID(ctx, nodeID)
 	if err != nil {
