@@ -469,3 +469,27 @@ func TestSandboxReaperUsesAuroraFailureSettlementForRefund(t *testing.T) {
 		t.Fatalf("second sweep batches = %d settled = %d, want 1/1 (no duplicate refund)", settler.batchCount(), settler.settledCount())
 	}
 }
+
+// TestSandboxReaperAddressesFleetNodeByWorkspaceNodeID pins the control API
+// contract: deletion addresses the node UUID the server issued, not the fleet's
+// backend container name, because the route validates a UUID and the backend
+// resolves the container through the controlled node label.
+func TestSandboxReaperAddressesFleetNodeByWorkspaceNodeID(t *testing.T) {
+	f := newReaperFixture(t)
+	node := f.node(t, nodeOptions{state: "online", daemonID: "daemon-id", backendNodeID: "aurora-sbx-0123456789abcdef", createdAgo: time.Hour, lastActiveAgo: 20 * time.Minute, startedAgo: 30 * time.Minute})
+	fleet := &fakeNodeDeleter{}
+	settler := &recordingSettler{queries: f.queries}
+
+	f.sweep(t, fleet, settler)
+
+	if fleet.callCount() != 1 {
+		t.Fatalf("fleet deletes = %d, want 1", fleet.callCount())
+	}
+	want := util.UUIDToString(node.ID)
+	if fleet.deleted[0] != want {
+		t.Fatalf("fleet delete address = %q, want the node UUID %q", fleet.deleted[0], want)
+	}
+	if want == node.BackendNodeID.String {
+		t.Fatalf("delete address %q is the backend name, not the node UUID", fleet.deleted[0])
+	}
+}

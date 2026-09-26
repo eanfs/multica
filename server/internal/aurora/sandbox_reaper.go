@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/multica-ai/multica/server/internal/util"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/aurorafleet"
@@ -249,11 +251,16 @@ func (r *SandboxReaper) deleteFleetNode(ctx context.Context, node db.AuroraSandb
 	if !node.BackendNodeID.Valid || node.BackendNodeID.String == "" {
 		return nil
 	}
-	if err := r.fleet.DeleteWorkspaceNode(ctx, node.BackendNodeID.String); err != nil {
+	// The control API addresses a node by the UUID the server issued at ensure
+	// time; the backend resolves it to its own sandbox container through the
+	// controlled node label. Sending the fleet's backend name here would fail
+	// the route's UUID check and leave the node un-reapable.
+	nodeID := util.UUIDToString(node.ID)
+	if err := r.fleet.DeleteWorkspaceNode(ctx, nodeID); err != nil {
 		if errors.Is(err, aurorafleet.ErrNodeNotFound) {
 			return nil
 		}
-		return fmt.Errorf("delete fleet node %s: %w", node.BackendNodeID.String, err)
+		return fmt.Errorf("delete fleet node %s: %w", nodeID, err)
 	}
 	return nil
 }
