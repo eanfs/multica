@@ -34,6 +34,7 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"agent_task_queue":                   workspaceDelete,
 	"agent_to_label":                     workspaceDelete,
 	"attachment":                         workspaceDelete,
+	"aurora_artifact_staging":            workspaceDelete,
 	"aurora_asset":                       workspaceDelete,
 	"aurora_generation":                  workspaceDelete,
 	"aurora_moderation_log":              workspaceDelete,

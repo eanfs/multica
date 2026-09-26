@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS aurora_artifact_staging_task_artifact_uidx;

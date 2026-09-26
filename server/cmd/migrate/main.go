@@ -335,6 +335,9 @@ var concurrentIndexCleanups = map[string]string{
 	"528_aurora_provider_run_id_idx":                            "aurora_provider_run_pkey",
 	"530_aurora_provider_run_task_operation_idx":                "aurora_provider_run_task_operation_uidx",
 	"531_aurora_provider_run_external_idx":                      "aurora_provider_run_provider_external_uidx",
+	"533_aurora_artifact_staging_id_idx":                        "aurora_artifact_staging_pkey",
+	"535_aurora_artifact_staging_task_artifact_idx":             "aurora_artifact_staging_task_artifact_uidx",
+	"537_aurora_asset_manifest_idx":                             "aurora_asset_generation_manifest_uidx",
 	"484_issue_triage_state_index":                              "idx_issue_triage_state",
 }
 
