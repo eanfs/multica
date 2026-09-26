@@ -6,210 +6,270 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func newTestController(t *testing.T) (*MemoryBackend, *httptest.Server) {
+// fixture IDs in UUID form, matching the shape plan A persists.
+const (
+	testNodeID      = "01933e5f-8a2c-7d4e-9f01-2a3b4c5d6e7f"
+	testWorkspaceID = "01933e5f-8a2c-7d4e-9f01-2a3b4c5d6e80"
+	testRuntimeID   = "01933e5f-8a2c-7d4e-9f01-2a3b4c5d6e81"
+	testDaemonID    = "01933e5f-8a2c-7d4e-9f01-2a3b4c5d6e82"
+	testEnrollToken = "mse_0123456789abcdef0123456789abcdef01234567"
+)
+
+// newTestController builds an authenticated controller over an in-memory
+// backend with a fresh secret root. It returns the backend, the secret root,
+// the control bearer token, and the server.
+func newTestController(t *testing.T) (*MemoryBackend, string, string, *httptest.Server) {
 	t.Helper()
 	backend := NewMemoryBackend()
-	ctrl := NewController(Config{
-		Backend:      backend,
-		SandboxImage: "aurora-sandbox:test",
-		ServerURL:    "http://multica.test",
-	})
+	secretRoot := t.TempDir()
+	tokenPath := writeTokenFile(t, t.TempDir(), testTokenB64, 0o400)
+	auth, err := LoadControlAuth(tokenPath)
+	if err != nil {
+		t.Fatalf("LoadControlAuth: %v", err)
+	}
+	ctrl := NewController(Config{Backend: backend, Auth: auth, SecretRoot: secretRoot})
 	srv := httptest.NewServer(ctrl.Handler())
 	t.Cleanup(srv.Close)
-	return backend, srv
+	return backend, secretRoot, string(testTokenRaw), srv
 }
 
-func postJSON(t *testing.T, url string, body any) *http.Response {
+// fleetReq performs an authenticated request against the test server.
+func fleetReq(t *testing.T, srv *httptest.Server, method, path, body, bearer string) *http.Response {
 	t.Helper()
-	b, err := json.Marshal(body)
-	if err != nil {
-		t.Fatalf("marshal body: %v", err)
+	var reader io.Reader
+	if body != "" {
+		reader = bytes.NewReader([]byte(body))
 	}
-	resp, err := http.Post(url, "application/json", bytes.NewReader(b))
+	req, err := http.NewRequest(method, srv.URL+path, reader)
 	if err != nil {
-		t.Fatalf("POST %s: %v", url, err)
+		t.Fatalf("new request: %v", err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
 	}
 	t.Cleanup(func() { resp.Body.Close() })
 	return resp
 }
 
-func decodeNode(t *testing.T, resp *http.Response) Node {
-	t.Helper()
+// validEnsureBody is the exact five-field ensure request the API accepts.
+func validEnsureBody(nodeID string) string {
+	return `{"node_id":"` + nodeID + `","workspace_id":"` + testWorkspaceID +
+		`","runtime_id":"` + testRuntimeID + `","daemon_id":"` + testDaemonID +
+		`","enrollment_token":"` + testEnrollToken + `"}`
+}
+
+func TestWorkspaceNodeEnsureRequiresControlBearer(t *testing.T) {
+	_, _, token, srv := newTestController(t)
+
+	// /healthz is excluded from auth.
+	if resp := fleetReq(t, srv, http.MethodGet, "/healthz", "", ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("healthz without bearer = %d, want 200", resp.StatusCode)
+	}
+
+	// /readyz and the node route require auth; missing and wrong are identical 401s.
+	var missingBody, wrongBody string
+	for _, bearer := range []string{"", "wrong-token"} {
+		resp := fleetReq(t, srv, http.MethodGet, "/readyz", "", bearer)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("readyz bearer=%q = %d, want 401", bearer, resp.StatusCode)
+		}
+		respEnsure := fleetReq(t, srv, http.MethodPut, "/internal/v1/workspace-nodes/"+testNodeID, validEnsureBody(testNodeID), bearer)
+		if respEnsure.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("ensure bearer=%q = %d, want 401", bearer, respEnsure.StatusCode)
+		}
+		rawEnsure, _ := io.ReadAll(respEnsure.Body)
+		if !strings.Contains(string(rawEnsure), "unauthorized") {
+			t.Fatalf("ensure 401 body = %q", rawEnsure)
+		}
+		if bearer == "" {
+			missingBody = string(rawEnsure)
+		} else {
+			wrongBody = string(rawEnsure)
+		}
+	}
+	if missingBody != wrongBody {
+		t.Fatalf("missing and wrong bearer 401 bodies differ: %q vs %q", missingBody, wrongBody)
+	}
+
+	// With the correct bearer the ensure proceeds.
+	resp := fleetReq(t, srv, http.MethodPut, "/internal/v1/workspace-nodes/"+testNodeID, validEnsureBody(testNodeID), token)
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("ensure = %d, want 200 (body %s)", resp.StatusCode, raw)
+	}
+}
+
+func TestWorkspaceNodeEnsureRejectsIdentityMismatch(t *testing.T) {
+	_, _, token, srv := newTestController(t)
+
+	other := "01933e5f-8a2c-7d4e-9f01-2a3b4c5d6eff"
+	resp := fleetReq(t, srv, http.MethodPut, "/internal/v1/workspace-nodes/"+testNodeID, validEnsureBody(other), token)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("path/body node mismatch = %d, want 400", resp.StatusCode)
+	}
+
+	// Malformed JSON is also a 400.
+	resp = fleetReq(t, srv, http.MethodPut, "/internal/v1/workspace-nodes/"+testNodeID, "{not json", token)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed JSON = %d, want 400", resp.StatusCode)
+	}
+
+	// Malformed or missing UUID / token formats are rejected.
+	bad := map[string]string{
+		"node_id":          "not-a-uuid",
+		"workspace_id":     "also-not",
+		"runtime_id":       "",
+		"daemon_id":        "bad",
+		"enrollment_token": "mdt_0123456789abcdef0123456789abcdef01234567",
+	}
+	for field, value := range bad {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(validEnsureBody(testNodeID)), &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if value == "" {
+			delete(m, field)
+		} else {
+			m[field] = value
+		}
+		raw, _ := json.Marshal(m)
+		resp := fleetReq(t, srv, http.MethodPut, "/internal/v1/workspace-nodes/"+testNodeID, string(raw), token)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("bad %s = %d, want 400", field, resp.StatusCode)
+		}
+	}
+}
+
+func TestWorkspaceNodeEnsureDoesNotAcceptImageOrCommand(t *testing.T) {
+	_, _, token, srv := newTestController(t)
+
+	for _, extra := range []map[string]any{
+		{"image": "evil:latest"},
+		{"command": []string{"sh", "-c"}},
+		{"env": map[string]string{"X": "y"}},
+		{"labels": map[string]string{"a": "b"}},
+		{"mounts": []string{"/:/host"}},
+		{"cpu_limit": 8},
+	} {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(validEnsureBody(testNodeID)), &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		raw, _ := json.Marshal(m)
+		resp := fleetReq(t, srv, http.MethodPut, "/internal/v1/workspace-nodes/"+testNodeID, string(raw), token)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("extra field %v = %d, want 400", extra, resp.StatusCode)
+		}
+	}
+}
+
+func TestWorkspaceNodeRoutesCallTypedBackend(t *testing.T) {
+	backend, secretRoot, token, srv := newTestController(t)
+
+	// Ensure: the backend receives the typed spec and the enrollment secret is
+	// staged through a 0700/0400 file, then removed after the response.
+	resp := fleetReq(t, srv, http.MethodPut, "/internal/v1/workspace-nodes/"+testNodeID, validEnsureBody(testNodeID), token)
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("ensure = %d, want 200 (body %s)", resp.StatusCode, raw)
+	}
 	var node Node
 	if err := json.NewDecoder(resp.Body).Decode(&node); err != nil {
 		t.Fatalf("decode node: %v", err)
 	}
-	return node
-}
-
-func decodeNodes(t *testing.T, resp *http.Response) []Node {
-	t.Helper()
-	var envelope struct {
-		Nodes []Node `json:"nodes"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		t.Fatalf("decode nodes: %v", err)
-	}
-	return envelope.Nodes
-}
-
-// TestControllerProvisionLifecycle covers the provision/status/stop/start/reboot/
-// terminate arc the cloudruntime surface exposes.
-func TestControllerProvisionLifecycle(t *testing.T) {
-	_, srv := newTestController(t)
-
-	create := postJSON(t, srv.URL+"/api/v1/nodes", map[string]any{"name": "worker-1"})
-	if create.StatusCode != http.StatusCreated {
-		t.Fatalf("create status = %d, want 201", create.StatusCode)
-	}
-	node := decodeNode(t, create)
-	if node.ID == "" || node.Status != StatusRunning {
-		t.Fatalf("created node = %+v, want running with id", node)
-	}
-	if node.Image != "aurora-sandbox:test" {
-		t.Fatalf("created node image = %q, want default sandbox image", node.Image)
+	if node.ID != testNodeID || node.State != StateOnline {
+		t.Fatalf("node = %+v", node)
 	}
 
-	// Status reports the same node.
-	status := postJSON(t, srv.URL+"/api/v1/nodes/status", map[string]any{"id": node.ID})
-	if status.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status.StatusCode)
+	spec := backend.LastSpec()
+	if spec.NodeID != testNodeID || spec.WorkspaceID != testWorkspaceID ||
+		spec.RuntimeID != testRuntimeID || spec.DaemonID != testDaemonID {
+		t.Fatalf("spec = %+v", spec)
 	}
-	if got := decodeNode(t, status); got.ID != node.ID {
-		t.Fatalf("status node id = %q, want %q", got.ID, node.ID)
+	if spec.EnrollmentFile == "" {
+		t.Fatal("backend received no enrollment file path")
 	}
-
-	// Stop -> stopped, Start -> running.
-	stop := postJSON(t, srv.URL+"/api/v1/nodes/stop", map[string]any{"id": node.ID})
-	if got := decodeNode(t, stop); got.Status != StatusStopped {
-		t.Fatalf("stop status = %q, want stopped", got.Status)
+	if _, err := os.Stat(spec.EnrollmentFile); !os.IsNotExist(err) {
+		t.Fatalf("enrollment file still present after ensure: %v", err)
 	}
-	start := postJSON(t, srv.URL+"/api/v1/nodes/start", map[string]any{"id": node.ID})
-	if got := decodeNode(t, start); got.Status != StatusRunning {
-		t.Fatalf("start status = %q, want running", got.Status)
+	if !strings.HasPrefix(spec.EnrollmentFile, filepath.Join(secretRoot, testNodeID)+string(os.PathSeparator)) {
+		t.Fatalf("enrollment file %q is outside the node secret dir", spec.EnrollmentFile)
 	}
 
-	// Reboot -> rebooting.
-	reboot := postJSON(t, srv.URL+"/api/v1/nodes/reboot", map[string]any{"id": node.ID})
-	if got := decodeNode(t, reboot); got.Status != StatusRebooting {
-		t.Fatalf("reboot status = %q, want rebooting", got.Status)
+	// The staged file, while it existed, had the required modes. Re-stage it
+	// through the controller's own helper to pin parent 0700 / file 0400.
+	if _, err := writeEnrollmentSecret(secretRoot, testNodeID, testEnrollToken); err != nil {
+		t.Fatalf("re-stage enrollment secret: %v", err)
 	}
-
-	// Delete removes it, so a later status is 404.
-	raw, err := srv.Client().Do(mustNewRequest(t, http.MethodDelete, srv.URL+"/api/v1/nodes", `{"id":"`+node.ID+`"}`))
+	info, err := os.Stat(filepath.Join(secretRoot, testNodeID))
 	if err != nil {
-		t.Fatalf("delete: %v", err)
+		t.Fatalf("stat secret dir: %v", err)
 	}
-	defer raw.Body.Close()
-	if raw.StatusCode != http.StatusNoContent {
-		t.Fatalf("delete status = %d, want 204", raw.StatusCode)
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("secret dir mode = %v, want 0700", info.Mode().Perm())
 	}
-
-	after := postJSON(t, srv.URL+"/api/v1/nodes/status", map[string]any{"id": node.ID})
-	if after.StatusCode != http.StatusNotFound {
-		t.Fatalf("status after delete = %d, want 404", after.StatusCode)
-	}
-}
-
-func mustNewRequest(t *testing.T, method, url, body string) *http.Request {
-	t.Helper()
-	req, err := http.NewRequest(method, url, bytes.NewReader([]byte(body)))
+	info, err = os.Stat(spec.EnrollmentFile)
 	if err != nil {
-		t.Fatalf("new request: %v", err)
+		t.Fatalf("stat enrollment file: %v", err)
 	}
-	return req
-}
-
-// TestControllerInjectsBootstrapEnv pins the secret the fleet hands a node: the
-// server URL and managed-registration token reach the node's environment but
-// never the API response.
-func TestControllerInjectsBootstrapEnv(t *testing.T) {
-	backend, srv := newTestController(t)
-
-	create := postJSON(t, srv.URL+"/api/v1/nodes", map[string]any{})
-	raw, err := io.ReadAll(create.Body)
-	if err != nil {
-		t.Fatalf("read create body: %v", err)
+	if info.Mode().Perm() != 0o400 {
+		t.Fatalf("enrollment file mode = %v, want 0400", info.Mode().Perm())
 	}
-	var node Node
-	if err := json.Unmarshal(raw, &node); err != nil {
-		t.Fatalf("decode node: %v", err)
+	staged, err := os.ReadFile(spec.EnrollmentFile)
+	if err != nil || string(staged) != testEnrollToken {
+		t.Fatalf("staged secret = %q, %v", staged, err)
 	}
+	// Clean up the re-staged copy so delete's cleanup is observed on its own.
+	_ = os.Remove(spec.EnrollmentFile)
 
-	env := backend.NodeEnv(node.ID)
-	if env[EnvServerURL] != "http://multica.test" {
-		t.Fatalf("injected server url = %q", env[EnvServerURL])
-	}
-	// No shared enrollment secret is part of the bootstrap environment.
-	if len(env) != 1 {
-		t.Fatalf("bootstrap env = %v, want only the server URL", env)
-	}
-}
-
-func TestControllerExec(t *testing.T) {
-	_, srv := newTestController(t)
-
-	create := postJSON(t, srv.URL+"/api/v1/nodes", map[string]any{})
-	node := decodeNode(t, create)
-
-	resp := postJSON(t, srv.URL+"/api/v1/nodes/exec", map[string]any{
-		"id":      node.ID,
-		"command": []string{"echo", "hi"},
-	})
+	// Status returns the node.
+	resp = fleetReq(t, srv, http.MethodGet, "/internal/v1/workspace-nodes/"+testNodeID, "", token)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("exec status = %d, want 200", resp.StatusCode)
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	var out struct {
-		ExitCode int `json:"exit_code"`
+	if err := json.NewDecoder(resp.Body).Decode(&node); err != nil || node.ID != testNodeID {
+		t.Fatalf("status node = %+v, %v", node, err)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatalf("decode exec: %v", err)
+
+	// Delete removes it; a later status is 404.
+	resp = fleetReq(t, srv, http.MethodDelete, "/internal/v1/workspace-nodes/"+testNodeID, "", token)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete = %d, want 204", resp.StatusCode)
 	}
-	if out.ExitCode != 0 {
-		t.Fatalf("exec exit code = %d, want 0", out.ExitCode)
+	resp = fleetReq(t, srv, http.MethodGet, "/internal/v1/workspace-nodes/"+testNodeID, "", token)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status after delete = %d, want 404", resp.StatusCode)
 	}
 }
 
-func TestControllerListAndReady(t *testing.T) {
-	_, srv := newTestController(t)
+func TestLegacyFleetExecRouteIsNotExposed(t *testing.T) {
+	_, _, token, srv := newTestController(t)
 
-	postJSON(t, srv.URL+"/api/v1/nodes", map[string]any{"name": "a"})
-	postJSON(t, srv.URL+"/api/v1/nodes", map[string]any{"name": "b"})
-
-	list, err := http.Get(srv.URL + "/api/v1/nodes")
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	defer list.Body.Close()
-	nodes := decodeNodes(t, list)
-	if len(nodes) != 2 {
-		t.Fatalf("listed %d nodes, want 2", len(nodes))
-	}
-
-	ready, err := http.Get(srv.URL + "/readyz")
-	if err != nil {
-		t.Fatalf("ready: %v", err)
-	}
-	defer ready.Body.Close()
-	if ready.StatusCode != http.StatusOK {
-		t.Fatalf("ready = %d, want 200", ready.StatusCode)
-	}
-}
-
-func TestControllerUnknownNode(t *testing.T) {
-	_, srv := newTestController(t)
-
-	for _, endpoint := range []string{"/status", "/start", "/stop", "/reboot", "/exec"} {
-		var body any = map[string]any{"id": "does-not-exist"}
-		if endpoint == "/exec" {
-			body = map[string]any{"id": "does-not-exist", "command": []string{"echo"}}
-		}
-		resp := postJSON(t, srv.URL+"/api/v1/nodes"+endpoint, body)
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodPost, "/api/v1/nodes/exec", `{"id":"x","command":["echo"]}`},
+		{http.MethodPost, "/api/v1/nodes", `{"image":"custom:image"}`},
+		{http.MethodGet, "/api/v1/nodes", ""},
+		{http.MethodPost, "/api/v1/nodes/status", `{"id":"x"}`},
+	} {
+		resp := fleetReq(t, srv, tc.method, tc.path, tc.body, token)
 		if resp.StatusCode != http.StatusNotFound {
-			t.Fatalf("%s unknown node = %d, want 404", endpoint, resp.StatusCode)
+			t.Fatalf("%s %s = %d, want 404", tc.method, tc.path, resp.StatusCode)
 		}
 	}
 }

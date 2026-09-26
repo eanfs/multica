@@ -1,45 +1,58 @@
 package aurorafleet
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-// Env keys the controller injects into every provisioned node so the sandbox
-// daemon can reach the main server. It mirrors the server's own configuration
-// name: MULTICA_SERVER_URL is the API/control-plane base the daemon dials.
-// Managed enrollment secrets are issued internally by the server and delivered
-// through the authenticated fleet API; no shared enrollment token is injected
-// through the node environment.
 const (
-	EnvServerURL = "MULTICA_SERVER_URL"
+	// maxEnsureBodyBytes caps the ensure request body. The request carries
+	// identity only, so anything larger is abuse or a future caller trying to
+	// smuggle runtime configuration.
+	maxEnsureBodyBytes = 4 << 10
+	// enrollmentFileMode and secretDirMode are the permissions of the staged
+	// enrollment secret and its parent directory.
+	enrollmentFileMode = 0o400
+	secretDirMode      = 0o700
+	// enrollmentFileName is the file name the secret is staged under inside
+	// the per-node secret directory.
+	enrollmentFileName = "enrollment"
 )
 
-// Config wires a Controller to a node backend and the sandbox bootstrap values
-// injected into provisioned nodes.
+// uuidPattern matches the canonical 8-4-4-4-12 UUID form all identity fields
+// use. Plan A persists sandbox nodes, runtimes, and daemons as UUIDs.
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// enrollmentTokenPattern matches the mse_ enrollment secret plan A issues:
+// the prefix plus exactly 40 lowercase hex characters. It is a format check
+// only; the secret is validated against the database by the server on use.
+var enrollmentTokenPattern = regexp.MustCompile(`^mse_[0-9a-f]{40}$`)
+
+// Config wires a Controller to a node backend, the control bearer gate, and
+// the secret root enrollment secrets are staged under.
 type Config struct {
 	Backend Backend
-	// SandboxImage is provisioned when a create request omits an image.
-	SandboxImage string
-	// ServerURL is the main Multica server the sandbox daemon dials.
-	ServerURL string
+	// Auth gates every route except /healthz. It is required.
+	Auth *ControlAuth
+	// SecretRoot is the directory under which per-node enrollment secrets are
+	// staged. It is required.
+	SecretRoot string
 }
 
-// Controller exposes the cloudruntime-compatible node API over a Backend. The
-// main server's cloudruntime proxy — baseURL pointed here — forwards these exact
-// paths verbatim, so the controller mirrors that surface: GET/POST/DELETE
-// /api/v1/nodes and /nodes/{start,stop,reboot,status,exec}, plus /healthz and
-// /readyz.
+// Controller exposes the authenticated internal workspace-node API over a
+// Backend. There is deliberately no generic node surface: callers can ensure,
+// inspect, and delete exactly one kind of node, with identity fields only.
 type Controller struct {
 	cfg Config
-	// env is the bootstrap environment injected into every provisioned node,
-	// built once from the immutable config instead of per request.
-	env map[string]string
 }
 
 // NewController returns a Controller. A nil Backend defaults to an in-memory
@@ -48,33 +61,36 @@ func NewController(cfg Config) *Controller {
 	if cfg.Backend == nil {
 		cfg.Backend = NewMemoryBackend()
 	}
-	return &Controller{cfg: cfg, env: bootstrapEnv(cfg)}
+	return &Controller{cfg: cfg}
 }
 
-// Handler returns the controller's HTTP routes.
+// Handler returns the controller's HTTP routes. Only these exist:
+//
+//	PUT    /internal/v1/workspace-nodes/{nodeID}
+//	GET    /internal/v1/workspace-nodes/{nodeID}
+//	DELETE /internal/v1/workspace-nodes/{nodeID}
+//	GET    /healthz
+//	GET    /readyz
 func (c *Controller) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 
 	r.Get("/healthz", c.health)
-	r.Get("/readyz", c.ready)
-	r.Get("/api/v1/", c.serviceInfo)
-
-	r.Route("/api/v1/nodes", func(r chi.Router) {
-		r.Get("/", c.listNodes)
-		r.Post("/", c.createNode)
-		r.Delete("/", c.deleteNode)
-		r.Post("/start", c.startNode)
-		r.Post("/stop", c.stopNode)
-		r.Post("/reboot", c.rebootNode)
-		r.Post("/status", c.statusNode)
-		r.Post("/exec", c.execNode)
+	r.Group(func(r chi.Router) {
+		r.Use(c.cfg.Auth.Middleware)
+		r.Get("/readyz", c.ready)
+		r.Route("/internal/v1/workspace-nodes", func(r chi.Router) {
+			r.Put("/{nodeID}", c.ensureNode)
+			r.Get("/{nodeID}", c.nodeStatus)
+			r.Delete("/{nodeID}", c.deleteNode)
+		})
 	})
 
 	return r
 }
 
-// health reports the process is up, independent of the node backend.
+// health reports the process is up, independent of the node backend. It is
+// the only unauthenticated route.
 func (c *Controller) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -89,172 +105,140 @@ func (c *Controller) ready(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
-func (c *Controller) serviceInfo(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"service":  "aurora-fleet",
-		"endpoint": "/api/v1/nodes",
-	})
+// ensureRequest is the exact ensure body. There is no image, command,
+// environment, label, mount, or resource field by construction: unknown JSON
+// fields are rejected, so the surface cannot grow through the wire.
+type ensureRequest struct {
+	NodeID          string `json:"node_id"`
+	WorkspaceID     string `json:"workspace_id"`
+	RuntimeID       string `json:"runtime_id"`
+	DaemonID        string `json:"daemon_id"`
+	EnrollmentToken string `json:"enrollment_token"`
 }
 
-// nodeActionRequest is the body for the id-addressed operations
-// (delete/start/stop/reboot/status/exec).
-type nodeActionRequest struct {
-	ID string `json:"id"`
-}
-
-// createNodeRequest is the self-host provision body. All fields are optional:
-// the controller fills image and env from its own config.
-type createNodeRequest struct {
-	Name   string            `json:"name"`
-	Image  string            `json:"image"`
-	Labels map[string]string `json:"labels"`
-}
-
-// execNodeRequest carries the command to run inside a node.
-type execNodeRequest struct {
-	ID      string   `json:"id"`
-	Command []string `json:"command"`
-}
-
-func (c *Controller) createNode(w http.ResponseWriter, r *http.Request) {
-	var req createNodeRequest
-	if !decodeJSON(w, r, &req) {
+// ensureNode provisions (or confirms) the workspace node addressed by the
+// path, staging the enrollment secret into a host file the backend mounts.
+func (c *Controller) ensureNode(w http.ResponseWriter, r *http.Request) {
+	nodeID := chi.URLParam(r, "nodeID")
+	var req ensureRequest
+	body := io.LimitReader(r.Body, maxEnsureBodyBytes+1)
+	dec := json.NewDecoder(body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	node, err := c.cfg.Backend.Create(r.Context(), CreateRequest{
-		Name:   req.Name,
-		Image:  firstNonEmpty(req.Image, c.cfg.SandboxImage),
-		Env:    c.env,
-		Labels: req.Labels,
+	if req.NodeID != nodeID {
+		writeError(w, http.StatusBadRequest, "node_id must match the URL path")
+		return
+	}
+	if !uuidPattern.MatchString(req.NodeID) || !uuidPattern.MatchString(req.WorkspaceID) ||
+		!uuidPattern.MatchString(req.RuntimeID) || !uuidPattern.MatchString(req.DaemonID) {
+		writeError(w, http.StatusBadRequest, "node_id, workspace_id, runtime_id, and daemon_id must be UUIDs")
+		return
+	}
+	if !enrollmentTokenPattern.MatchString(req.EnrollmentToken) {
+		writeError(w, http.StatusBadRequest, "enrollment_token format is invalid")
+		return
+	}
+
+	secretPath, err := writeEnrollmentSecret(c.cfg.SecretRoot, req.NodeID, req.EnrollmentToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to stage enrollment secret")
+		return
+	}
+
+	node, err := c.cfg.Backend.EnsureWorkspaceNode(r.Context(), WorkspaceNodeSpec{
+		NodeID:         req.NodeID,
+		WorkspaceID:    req.WorkspaceID,
+		RuntimeID:      req.RuntimeID,
+		DaemonID:       req.DaemonID,
+		EnrollmentFile: secretPath,
 	})
+	removeEnrollmentSecret(secretPath)
 	if err != nil {
 		writeBackendError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, node)
+	writeJSON(w, http.StatusOK, node)
 }
 
-func (c *Controller) listNodes(w http.ResponseWriter, r *http.Request) {
-	nodes, err := c.cfg.Backend.List(r.Context())
-	if err != nil {
-		writeBackendError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes})
-}
-
-func (c *Controller) deleteNode(w http.ResponseWriter, r *http.Request) {
-	id, ok := c.nodeID(w, r)
+// nodeStatus returns the node's current state.
+func (c *Controller) nodeStatus(w http.ResponseWriter, r *http.Request) {
+	nodeID, ok := c.pathNodeID(w, r)
 	if !ok {
 		return
 	}
-	if err := c.cfg.Backend.Terminate(r.Context(), id); err != nil {
+	node, err := c.cfg.Backend.WorkspaceNodeStatus(r.Context(), nodeID)
+	if err != nil {
 		writeBackendError(w, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, node)
+}
+
+// deleteNode destroys the node and removes any leftover staged secret.
+func (c *Controller) deleteNode(w http.ResponseWriter, r *http.Request) {
+	nodeID, ok := c.pathNodeID(w, r)
+	if !ok {
+		return
+	}
+	if err := c.cfg.Backend.DeleteWorkspaceNode(r.Context(), nodeID); err != nil {
+		writeBackendError(w, err)
+		return
+	}
+	removeEnrollmentSecret(filepath.Join(c.cfg.SecretRoot, nodeID, enrollmentFileName))
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (c *Controller) startNode(w http.ResponseWriter, r *http.Request) {
-	c.applyNodeAction(w, r, c.cfg.Backend.Start)
-}
-
-func (c *Controller) stopNode(w http.ResponseWriter, r *http.Request) {
-	c.applyNodeAction(w, r, c.cfg.Backend.Stop)
-}
-
-func (c *Controller) rebootNode(w http.ResponseWriter, r *http.Request) {
-	c.applyNodeAction(w, r, c.cfg.Backend.Reboot)
-}
-
-// nodeID decodes an id-addressed action body and returns the node id, writing a
-// 400 when the body is malformed or the id is missing.
-func (c *Controller) nodeID(w http.ResponseWriter, r *http.Request) (string, bool) {
-	var req nodeActionRequest
-	if !decodeJSON(w, r, &req) {
+// pathNodeID returns the URL's node ID after checking it is a UUID, so a
+// crafted path segment can never reach the backend or the secret-root path
+// arithmetic below.
+func (c *Controller) pathNodeID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	nodeID := chi.URLParam(r, "nodeID")
+	if !uuidPattern.MatchString(nodeID) {
+		writeError(w, http.StatusBadRequest, "node id must be a UUID")
 		return "", false
 	}
-	if req.ID == "" {
-		writeError(w, http.StatusBadRequest, "id is required")
-		return "", false
-	}
-	return req.ID, true
+	return nodeID, true
 }
 
-// applyNodeAction runs a mutating backend operation addressed by id, then
-// returns the node's post-operation state.
-func (c *Controller) applyNodeAction(w http.ResponseWriter, r *http.Request, op func(ctx context.Context, id string) error) {
-	id, ok := c.nodeID(w, r)
-	if !ok {
-		return
+// writeEnrollmentSecret stages the enrollment secret at
+// <secret-root>/<nodeID>/enrollment. The parent directory is 0700, the file
+// is created exclusively at 0400 via an atomic rename in the same directory,
+// and only the resulting absolute path ever leaves this function.
+func writeEnrollmentSecret(secretRoot, nodeID, token string) (string, error) {
+	dir := filepath.Join(secretRoot, nodeID)
+	if err := os.MkdirAll(dir, secretDirMode); err != nil {
+		return "", fmt.Errorf("create node secret dir: %w", err)
 	}
-	if err := op(r.Context(), id); err != nil {
-		writeBackendError(w, err)
-		return
+	if err := os.Chmod(dir, secretDirMode); err != nil {
+		return "", fmt.Errorf("restrict node secret dir: %w", err)
 	}
-	node, err := c.cfg.Backend.Status(r.Context(), id)
+	final := filepath.Join(dir, enrollmentFileName)
+	tmp, err := os.OpenFile(final+".tmp", os.O_WRONLY|os.O_CREATE|os.O_EXCL, enrollmentFileMode)
 	if err != nil {
-		writeBackendError(w, err)
-		return
+		return "", fmt.Errorf("stage enrollment secret: %w", err)
 	}
-	writeJSON(w, http.StatusOK, node)
+	if _, err := tmp.WriteString(token); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("write enrollment secret: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("close enrollment secret: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), final); err != nil {
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("publish enrollment secret: %w", err)
+	}
+	return final, nil
 }
 
-func (c *Controller) statusNode(w http.ResponseWriter, r *http.Request) {
-	id, ok := c.nodeID(w, r)
-	if !ok {
-		return
-	}
-	node, err := c.cfg.Backend.Status(r.Context(), id)
-	if err != nil {
-		writeBackendError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, node)
-}
-
-func (c *Controller) execNode(w http.ResponseWriter, r *http.Request) {
-	var req execNodeRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	if req.ID == "" {
-		writeError(w, http.StatusBadRequest, "id is required")
-		return
-	}
-	if len(req.Command) == 0 {
-		writeError(w, http.StatusBadRequest, "command is required")
-		return
-	}
-	res, err := c.cfg.Backend.Exec(r.Context(), req.ID, req.Command)
-	if err != nil {
-		writeBackendError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"exit_code": res.ExitCode,
-		"stdout":    string(res.Stdout),
-		"stderr":    string(res.Stderr),
-	})
-}
-
-// bootstrapEnv is the environment injected into every provisioned node. It
-// never appears in a response body.
-func bootstrapEnv(cfg Config) map[string]string {
-	env := make(map[string]string, 1)
-	if cfg.ServerURL != "" {
-		env[EnvServerURL] = cfg.ServerURL
-	}
-	return env
-}
-
-func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(dst); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return false
-	}
-	return true
+// removeEnrollmentSecret deletes a staged secret file, ignoring absence.
+func removeEnrollmentSecret(path string) {
+	_ = os.Remove(path)
 }
 
 func writeBackendError(w http.ResponseWriter, err error) {
@@ -276,11 +260,4 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
-}
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }

@@ -5,22 +5,25 @@ import (
 	"errors"
 )
 
-// CreateRequest describes a sandbox node to provision. Image is the container
-// image; Env is the environment injected into the node. The controller, not the
-// caller, controls Env — it carries the server URL and managed-registration
-// secret that must never round-trip through a client.
-type CreateRequest struct {
-	Name   string
-	Image  string
-	Env    map[string]string
-	Labels map[string]string
+// WorkspaceNodeSpec describes one workspace-scoped sandbox node to provision.
+// The controller, not the API caller, owns everything the sandbox runs with:
+// the request carries identity only, and the enrollment secret is staged by
+// the controller into EnrollmentFile, which the backend mounts read-only.
+type WorkspaceNodeSpec struct {
+	NodeID         string
+	WorkspaceID    string
+	RuntimeID      string
+	DaemonID       string
+	EnrollmentFile string
 }
 
-// ExecResult is the output of running a command inside a node.
-type ExecResult struct {
-	ExitCode int
-	Stdout   []byte
-	Stderr   []byte
+// Node is the fleet's view of one workspace sandbox node.
+type Node struct {
+	ID        string `json:"id"`
+	ProxyID   string `json:"proxy_id"`
+	NetworkID string `json:"network_id"`
+	State     string `json:"state"`
+	Health    string `json:"health"`
 }
 
 var (
@@ -32,29 +35,20 @@ var (
 	ErrUnavailable = errors.New("node backend unavailable")
 )
 
-// Backend provisions and manages sandbox nodes. It is the seam that lets the
-// controller run against real Docker containers in production and an in-memory
-// registry in tests without the HTTP layer knowing which is in use.
+// Backend provisions and manages workspace sandbox nodes. It is the seam that
+// lets the controller run against real Docker containers in production and an
+// in-memory registry in tests without the HTTP layer knowing which is in use.
 type Backend interface {
-	// Create provisions a node and returns it. A freshly created node is not
-	// necessarily running; implementations that need an async bring-up return a
-	// provisioning node and let Status report progress.
-	Create(ctx context.Context, req CreateRequest) (Node, error)
-	// Terminate destroys a node.
-	Terminate(ctx context.Context, id string) error
-	// Start brings a stopped node back up.
-	Start(ctx context.Context, id string) error
-	// Stop halts a running node without destroying it.
-	Stop(ctx context.Context, id string) error
-	// Reboot restarts a node.
-	Reboot(ctx context.Context, id string) error
-	// Status returns a node's current state.
-	Status(ctx context.Context, id string) (Node, error)
-	// Exec runs a command inside a node.
-	Exec(ctx context.Context, id string, command []string) (ExecResult, error)
-	// List returns every node the backend knows about.
-	List(ctx context.Context) ([]Node, error)
-	// Ping reports whether the backend's underlying runtime is reachable. It is
-	// the health/ready signal the controller surfaces.
+	// EnsureWorkspaceNode provisions the workspace node described by spec (or
+	// confirms the existing one) and returns its current state.
+	EnsureWorkspaceNode(ctx context.Context, spec WorkspaceNodeSpec) (Node, error)
+	// WorkspaceNodeStatus returns a node's current state.
+	WorkspaceNodeStatus(ctx context.Context, nodeID string) (Node, error)
+	// DeleteWorkspaceNode destroys a node and its network and proxy sidecar.
+	DeleteWorkspaceNode(ctx context.Context, nodeID string) error
+	// Reconcile restores label-based invariants after a fleet restart.
+	Reconcile(ctx context.Context) error
+	// Ping reports whether the backend's underlying runtime is reachable. It
+	// is the ready signal the controller surfaces.
 	Ping(ctx context.Context) error
 }
