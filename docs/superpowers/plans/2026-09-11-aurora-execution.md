@@ -136,7 +136,7 @@ git commit -m "feat(aurora): reserve credits and enqueue task on generation"
 - Create: `server/internal/handler/aurora_runtime_test.go`
 
 **Interfaces:**
-- Produces：`POST /api/daemon/managed/register`（服务端内部端点）——请求带 server-issued token（新配置 `AURORA_SANDBOX_TOKEN`，constant-time 比较，错误即 401），为沙箱 daemon 注册托管身份；响应返回其应认领的 managed runtime id（daemon 加入 claim 集）。
+- Produces：托管身份注册通道——为沙箱 daemon 注册托管身份，daemon 将 managed runtime id 加入 claim 集。（更新：原共享 token 注册端点设计已在 Plan A 移除；scoped enrollment 由服务端内部签发，并通过带认证的 fleet API 下发，操作者不手动配置 enrollment token。见 `2026-09-25-aurora-managed-sandbox-control-plane.md`。）
 
 - [ ] **Step 1: 探明现状**（2026-09-13 已核实，实现时复核）
 

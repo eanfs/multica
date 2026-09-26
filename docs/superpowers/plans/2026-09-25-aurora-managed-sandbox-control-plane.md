@@ -887,11 +887,11 @@ git commit -m "test(aurora): cover managed daemon lifecycle"
 - Consumes: Every deliverable in this child plan.
 - Produces: No documented or compiled `AURORA_SANDBOX_TOKEN` contract and verified control-plane evidence for child plan B.
 
-- [ ] **Step 1: Remove obsolete configuration documentation**
+- [x] **Step 1: Remove obsolete configuration documentation**
 
 Delete `AURORA_SANDBOX_TOKEN` from templates and examples. Document only that managed enrollment is issued internally by the server and delivered by the authenticated fleet API from child plan B; operators never configure an enrollment token manually.
 
-- [ ] **Step 2: Scan for the removed contract and forbidden compatibility paths**
+- [x] **Step 2: Scan for the removed contract and forbidden compatibility paths**
 
 Run:
 
@@ -903,7 +903,7 @@ rg -n 'AURORA_SANDBOX_TOKEN|/api/daemon/managed/register|ManagedRuntimeRegister'
 
 Expected: no matches in executable code, tests, active configuration docs, or environment templates. Historical plan prose may describe the removed gap.
 
-- [ ] **Step 3: Run code generation and focused suites**
+- [x] **Step 3: Run code generation and focused suites**
 
 Run:
 
@@ -915,7 +915,7 @@ cd server && go test ./internal/auth ./internal/aurora ./internal/daemon ./inter
 
 Expected: all packages pass; no test invokes a real agent.
 
-- [ ] **Step 4: Run backend verification**
+- [x] **Step 4: Run backend verification**
 
 Run from the repository root:
 
@@ -926,11 +926,11 @@ git diff --check
 
 Expected: both commands exit 0. If known unrelated full-suite flakes occur, rerun the exact failing test, report both outputs, and do not claim the suite passed.
 
-- [ ] **Step 5: Update plan status narrowly**
+- [x] **Step 5: Update plan status narrowly**
 
 Record that scoped enrollment and managed daemon bootstrap are complete. Keep fleet isolation, skill runtime, image supply chain, and issue #29 marked pending.
 
-- [ ] **Step 6: Commit documentation cleanup**
+- [x] **Step 6: Commit documentation cleanup**
 
 ```bash
 git add .env.example docs/superpowers/plans/2026-09-11-aurora-execution.md \
@@ -940,11 +940,15 @@ git commit -m "docs(aurora): record managed control plane"
 
 ## Plan A Completion Evidence
 
-Before handing off to child plan B, preserve:
+Plan A is implemented on top of origin/main `20f3d5972`: scoped enrollment and managed daemon bootstrap (Tasks 1–7, merged through PRs #120–#126) plus this contract-removal and verification task (Task 8).
 
-- migration and sqlc output;
-- the three-run fake managed-daemon lifecycle result;
-- the focused package test result;
-- the full `make test` result, including any explicitly identified unrelated known failure;
-- the removal scan showing no active shared-token contract;
-- confirmation that no `agentintegration` or external-provider test ran.
+Preserved before handing off to child plan B:
+
+- migration and sqlc output: `make sqlc` (sqlc v1.31.1) regenerated with no drift; the enrollment/schema migrations from Tasks 1–2 are merged.
+- the three-run fake managed-daemon lifecycle result: the lifecycle regression from PR #126 (`server/internal/handler`) passed three consecutive runs against the worktree database.
+- the focused package test result: `go test ./internal/auth ./internal/aurora ./internal/daemon ./internal/handler ./cmd/multica ./cmd/migrate -count=1` — all six packages `ok` on the macOS worktree (auth ~1s, aurora ~2s, daemon ~40s, handler ~22s, multica ~1s, migrate ~7s).
+- the full `make test` result, including any explicitly identified unrelated known failure: completed with the documented known noise (repocache process-tree teardown message, two clock-skew handler tests, `cmd/migrate` resolving `localhost` to `[::1]` behind a Docker 127.0.0.1 publish) passing when rerun alone; local macOS passing is not Linux CI proof.
+- the removal scan showing no active shared-token contract: the Task 8 scan over code, tests, active docs, and environment templates returns no matches — the enrollment constant, route literal, and doc references were removed, and the removal-proof regressions assert 401/404 with static non-contract values.
+- confirmation that no `agentintegration` or external-provider test ran: the default suites above ran without the `agentintegration` build tag and without `MULTICA_RUN_REAL_AGENT_SMOKE`; no real agent CLI was invoked.
+
+Scope notes: fleet lifecycle/isolation/egress (Plan B), the skill runtime surface (Plan C), and image supply chain (Plan D) remain pending. Tracker issue #29 stays open in `S2-InProgress`. Earlier tasks' step checkboxes were left unticked by their implementers; their completion is recorded by the merged PRs listed above.

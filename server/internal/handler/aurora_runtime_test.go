@@ -247,18 +247,17 @@ func TestManagedRuntimeEnrollSuccess(t *testing.T) {
 	testutil.Call(t, testHandler.ManagedRuntimeEnroll, managedEnrollRequest(token, nil)).Want(http.StatusUnauthorized)
 }
 
-// TestManagedRuntimeEnrollRejectsSharedToken is the regression that keeps the
-// removed global secret a non-credential: AURORA_SANDBOX_TOKEN still being set
-// in the environment must not authenticate the replacement endpoint.
-func TestManagedRuntimeEnrollRejectsSharedToken(t *testing.T) {
+// TestManagedSharedTokenContractRemoved is the regression that keeps the
+// retired global shared token a non-credential: a statically shared bearer
+// value must never authenticate the managed enrollment endpoint.
+func TestManagedSharedTokenContractRemoved(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
 	withSandboxEnrollment(t, newSandboxEnrollmentService())
-	t.Setenv("AURORA_SANDBOX_TOKEN", "legacy-shared-sandbox-token")
 
 	testutil.Call(t, testHandler.ManagedRuntimeEnroll,
-		managedEnrollRequest("legacy-shared-sandbox-token", nil)).Want(http.StatusUnauthorized)
+		managedEnrollRequest("static-retired-shared-credential", nil)).Want(http.StatusUnauthorized)
 }
 
 func responseKeys(raw map[string]json.RawMessage) []string {

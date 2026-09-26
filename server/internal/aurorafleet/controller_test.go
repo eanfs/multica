@@ -16,7 +16,6 @@ func newTestController(t *testing.T) (*MemoryBackend, *httptest.Server) {
 		Backend:      backend,
 		SandboxImage: "aurora-sandbox:test",
 		ServerURL:    "http://multica.test",
-		SandboxToken: "test-sandbox-token",
 	})
 	srv := httptest.NewServer(ctrl.Handler())
 	t.Cleanup(srv.Close)
@@ -144,13 +143,9 @@ func TestControllerInjectsBootstrapEnv(t *testing.T) {
 	if env[EnvServerURL] != "http://multica.test" {
 		t.Fatalf("injected server url = %q", env[EnvServerURL])
 	}
-	if env[EnvSandboxToken] != "test-sandbox-token" {
-		t.Fatalf("injected sandbox token = %q", env[EnvSandboxToken])
-	}
-
-	// The token is a server-side secret: it must not appear in the node JSON.
-	if bytes.Contains(raw, []byte("test-sandbox-token")) {
-		t.Fatalf("create response leaked the sandbox token: %s", raw)
+	// No shared enrollment secret is part of the bootstrap environment.
+	if len(env) != 1 {
+		t.Fatalf("bootstrap env = %v, want only the server URL", env)
 	}
 }
 

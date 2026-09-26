@@ -8,7 +8,6 @@
 //	AURORA_FLEET_BACKEND     node backend: "docker" or "memory" (default "docker")
 //	AURORA_SANDBOX_IMAGE     sandbox image to provision (docker backend)
 //	MULTICA_SERVER_URL       main server the sandbox daemon dials (injected into nodes)
-//	AURORA_SANDBOX_TOKEN     managed-registration secret (injected into nodes)
 package main
 
 import (
@@ -33,7 +32,6 @@ func main() {
 		Backend:      backendFromEnv(),
 		SandboxImage: os.Getenv("AURORA_SANDBOX_IMAGE"),
 		ServerURL:    os.Getenv(aurorafleet.EnvServerURL),
-		SandboxToken: os.Getenv(aurorafleet.EnvSandboxToken),
 	})
 
 	srv := &http.Server{

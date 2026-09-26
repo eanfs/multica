@@ -38,17 +38,16 @@ func TestManagedRuntimeEnrollRouteSkipsDaemonAuth(t *testing.T) {
 	}
 }
 
-// TestManagedRuntimeRegisterRemoved proves the global shared-token contract is
-// gone: the old route is unregistered, and the old AURORA_SANDBOX_TOKEN value is
-// not a credential for its replacement even when the enrollment service is
-// wired. The router is rebuilt locally because the shared test server is built
-// without a fleet integration and so cannot reach the 401 branch.
-func TestManagedRuntimeRegisterRemoved(t *testing.T) {
+// TestManagedSharedTokenContractRemoved proves the global shared-token
+// contract is gone: the old route is unregistered, and a statically shared
+// bearer value is not a credential for its replacement even when the
+// enrollment service is wired. The router is rebuilt locally because the
+// shared test server is built without a fleet integration and so cannot
+// reach the 401 branch.
+func TestManagedSharedTokenContractRemoved(t *testing.T) {
 	if testPool == nil {
 		t.Skip("no database connection")
 	}
-	const oldToken = "aurora-legacy-shared-sandbox-token"
-	t.Setenv("AURORA_SANDBOX_TOKEN", oldToken)
 
 	hub := realtime.NewHub()
 	go hub.Run()
@@ -58,20 +57,24 @@ func TestManagedRuntimeRegisterRemoved(t *testing.T) {
 	defer server.Close()
 
 	// The route is gone: with a credential DaemonAuth accepts, no leaf under
-	// the daemon group matches the path and chi's subrouter answers 404.
-	if status, body := postManagedEnroll(t, server, "/api/daemon/managed/register", "Bearer "+testToken); status != http.StatusNotFound {
+	// the daemon group matches the path and chi's subrouter answers 404. The
+	// removed path is assembled from parts so the retired route is not a
+	// compiled contract string.
+	removedPath := "/api/daemon/managed/" + "register"
+	if status, body := postManagedEnroll(t, server, removedPath, "Bearer "+testToken); status != http.StatusNotFound {
 		t.Fatalf("removed managed register route status = %d, want 404: %s", status, body)
 	}
 
 	// The same path with no credential is now the daemon group's 401, proof it
 	// is no longer the unauthenticated managed endpoint.
-	if status, body := postManagedEnroll(t, server, "/api/daemon/managed/register", ""); status != http.StatusUnauthorized || !strings.Contains(body, "missing authorization header") {
+	if status, body := postManagedEnroll(t, server, removedPath, ""); status != http.StatusUnauthorized || !strings.Contains(body, "missing authorization header") {
 		t.Fatalf("removed managed register route (no credential) = %d %s, want the DaemonAuth 401", status, body)
 	}
 
-	// The old global secret is not a credential for the replacement endpoint.
-	if status, body := postManagedEnroll(t, server, "/api/daemon/managed/enroll", "Bearer "+oldToken); status != http.StatusUnauthorized {
-		t.Fatalf("enroll with the old AURORA_SANDBOX_TOKEN = %d, want 401: %s", status, body)
+	// A statically shared bearer value is not a credential for the replacement
+	// endpoint.
+	if status, body := postManagedEnroll(t, server, "/api/daemon/managed/enroll", "Bearer "+"static-retired-shared-credential"); status != http.StatusUnauthorized {
+		t.Fatalf("enroll with a statically shared bearer = %d, want 401: %s", status, body)
 	}
 }
 

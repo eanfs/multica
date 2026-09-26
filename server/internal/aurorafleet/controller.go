@@ -11,13 +11,13 @@ import (
 )
 
 // Env keys the controller injects into every provisioned node so the sandbox
-// daemon can reach the main server and register as managed. They mirror the
-// server's own configuration names: MULTICA_SERVER_URL is the API/control-plane
-// base the daemon dials, AURORA_SANDBOX_TOKEN is the shared secret presented to
-// POST /api/daemon/managed/register.
+// daemon can reach the main server. It mirrors the server's own configuration
+// name: MULTICA_SERVER_URL is the API/control-plane base the daemon dials.
+// Managed enrollment secrets are issued internally by the server and delivered
+// through the authenticated fleet API; no shared enrollment token is injected
+// through the node environment.
 const (
-	EnvServerURL    = "MULTICA_SERVER_URL"
-	EnvSandboxToken = "AURORA_SANDBOX_TOKEN"
+	EnvServerURL = "MULTICA_SERVER_URL"
 )
 
 // Config wires a Controller to a node backend and the sandbox bootstrap values
@@ -28,9 +28,6 @@ type Config struct {
 	SandboxImage string
 	// ServerURL is the main Multica server the sandbox daemon dials.
 	ServerURL string
-	// SandboxToken is the managed-registration secret. It is injected into
-	// nodes and never returned to the API caller.
-	SandboxToken string
 }
 
 // Controller exposes the cloudruntime-compatible node API over a Backend. The
@@ -241,15 +238,12 @@ func (c *Controller) execNode(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// bootstrapEnv is the environment injected into every provisioned node. It is
-// the controller's secret: it never appears in a response body.
+// bootstrapEnv is the environment injected into every provisioned node. It
+// never appears in a response body.
 func bootstrapEnv(cfg Config) map[string]string {
-	env := make(map[string]string, 2)
+	env := make(map[string]string, 1)
 	if cfg.ServerURL != "" {
 		env[EnvServerURL] = cfg.ServerURL
-	}
-	if cfg.SandboxToken != "" {
-		env[EnvSandboxToken] = cfg.SandboxToken
 	}
 	return env
 }
