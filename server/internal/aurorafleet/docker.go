@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
-// fleetLabel marks containers the fleet owns so host-level filtering can
-// distinguish them from unrelated containers.
+// fleetLabel marks containers and networks the fleet owns so host-level
+// filtering can distinguish them from unrelated resources.
 const fleetLabel = "multica-aurora-node=1"
 
 // dockerPSFormat is the docker ps format used by WorkspaceNodeStatus. It
@@ -19,23 +20,42 @@ const fleetLabel = "multica-aurora-node=1"
 // enum, plus the container's creation timestamp.
 const dockerPSFormat = "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.State}}"
 
-// errProvisioningNotImplemented fails closed until the hardened workspace
-// Docker policy lands: without the digest-pinned image, per-workspace
-// networks, and immutable security flags there is no safe way to provision a
-// workspace node from this backend.
-var errProvisioningNotImplemented = errors.New("workspace node provisioning requires the hardened Docker policy (not yet implemented)")
+// nodeProvisionTimeout bounds one EnsureWorkspaceNode call's docker work.
+const nodeProvisionTimeout = 90 * time.Second
+
+// sandboxStartPollInterval and sandboxStartTimeout bound the wait for the
+// sandbox container to reach the running state after creation.
+const (
+	sandboxStartPollInterval = 500 * time.Millisecond
+	sandboxStartTimeout      = 30 * time.Second
+)
+
+// errProvisioningNotImplemented is returned for operations whose
+// implementation arrives with later plan tasks (label-based startup
+// reconciliation).
+var errProvisioningNotImplemented = errors.New("workspace node reconciliation requires label-based startup reconciliation (not yet implemented)")
 
 // DockerBackend manages workspace nodes as Docker containers via the docker
 // CLI. It shells out to docker rather than depending on the Docker SDK so the
-// fleet controller stays a single self-contained binary. Container ids are
-// the node ids.
+// fleet controller stays a single self-contained binary. Every container and
+// network is created from the backend's immutable Policy; a backend without a
+// valid policy fails closed.
 type DockerBackend struct {
 	dockerPath string
+	policy     Policy
 }
 
-// NewDockerBackend returns a DockerBackend that talks to the docker binary.
+// NewDockerBackend returns a DockerBackend with no policy configured. It
+// fails closed: EnsureWorkspaceNode returns an error until a hardened Policy
+// is supplied via NewDockerBackendWithPolicy.
 func NewDockerBackend() *DockerBackend {
 	return &DockerBackend{dockerPath: "docker"}
+}
+
+// NewDockerBackendWithPolicy returns a DockerBackend that provisions
+// workspace nodes from the given immutable policy.
+func NewDockerBackendWithPolicy(policy Policy) *DockerBackend {
+	return &DockerBackend{dockerPath: "docker", policy: policy}
 }
 
 // run runs docker and returns its stdout, folding stderr into the error on
@@ -57,11 +77,113 @@ func (d *DockerBackend) run(ctx context.Context, args ...string) ([]byte, error)
 	return outBuf.Bytes(), nil
 }
 
-// EnsureWorkspaceNode provisions the workspace node. It fails closed until
-// the hardened Docker policy (per-workspace internal network, egress sidecar,
-// digest-pinned image, immutable security flags) is implemented.
-func (d *DockerBackend) EnsureWorkspaceNode(context.Context, WorkspaceNodeSpec) (Node, error) {
-	return Node{}, errProvisioningNotImplemented
+// EnsureWorkspaceNode provisions the workspace node: a workspace-private
+// internal network, the egress sidecar, and the hardened sandbox container,
+// all constructed from the backend's immutable Policy. On any failure the
+// created resources are rolled back so no half-provisioned node survives.
+func (d *DockerBackend) EnsureWorkspaceNode(ctx context.Context, spec WorkspaceNodeSpec) (Node, error) {
+	if err := d.policy.Validate(); err != nil {
+		return Node{}, fmt.Errorf("docker backend policy: %w", err)
+	}
+	network, proxyName, sandboxName, err := d.policy.NodeNames(spec)
+	if err != nil {
+		return Node{}, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, nodeProvisionTimeout)
+	defer cancel()
+
+	if err := d.ensureNetwork(ctx, network); err != nil {
+		return Node{}, err
+	}
+
+	node := Node{ID: sandboxName, ProxyID: proxyName, NetworkID: network, State: StateStarting}
+	if err := d.createEgress(ctx, proxyName, network); err != nil {
+		d.rollback(ctx, node)
+		return Node{}, err
+	}
+	if err := d.createSandbox(ctx, spec); err != nil {
+		d.rollback(ctx, node)
+		return Node{}, err
+	}
+	if err := d.waitRunning(ctx, sandboxName); err != nil {
+		d.rollback(ctx, node)
+		return Node{}, err
+	}
+	return node, nil
+}
+
+// ensureNetwork creates the workspace network if it does not already exist.
+func (d *DockerBackend) ensureNetwork(ctx context.Context, network string) error {
+	if _, err := d.run(ctx, d.policy.WorkspaceNetworkCreateArgs(network)...); err != nil {
+		// Another ensure for the same node may have created it first; any
+		// existing network must be one of ours.
+		if _, inspectErr := d.run(ctx, "network", "inspect", network); inspectErr != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// createEgress runs the egress sidecar on the uplink network and attaches it
+// to the workspace-internal network under the "egress" alias.
+func (d *DockerBackend) createEgress(ctx context.Context, proxyName, network string) error {
+	args, err := d.policy.ProxyArgs(proxyName)
+	if err != nil {
+		return err
+	}
+	if _, err := d.run(ctx, args...); err != nil {
+		return fmt.Errorf("create egress sidecar: %w", err)
+	}
+	if _, err := d.run(ctx, d.policy.EgressNetworkConnect(proxyName, network)...); err != nil {
+		return fmt.Errorf("attach egress sidecar to workspace network: %w", err)
+	}
+	return nil
+}
+
+// createSandbox runs the sandbox container from the immutable policy.
+func (d *DockerBackend) createSandbox(ctx context.Context, spec WorkspaceNodeSpec) error {
+	args, err := d.policy.SandboxArgs(spec)
+	if err != nil {
+		return err
+	}
+	if _, err := d.run(ctx, args...); err != nil {
+		return fmt.Errorf("create sandbox: %w", err)
+	}
+	return nil
+}
+
+// waitRunning polls until the sandbox container reports running.
+func (d *DockerBackend) waitRunning(ctx context.Context, container string) error {
+	deadline := time.Now().Add(sandboxStartTimeout)
+	for {
+		out, err := d.run(ctx, "inspect", "--format", "{{.State.Running}}", container)
+		if err == nil && strings.TrimSpace(string(out)) == "true" {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("sandbox container %s did not reach the running state", container)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(sandboxStartPollInterval):
+		}
+	}
+}
+
+// rollback removes any containers and network created for a failed ensure.
+// Errors are ignored: rollback is best-effort cleanup of best-effort state.
+func (d *DockerBackend) rollback(ctx context.Context, node Node) {
+	if node.ProxyID != "" {
+		_, _ = d.run(ctx, "rm", "-f", node.ProxyID)
+	}
+	if node.ID != "" {
+		_, _ = d.run(ctx, "rm", "-f", node.ID)
+	}
+	if node.NetworkID != "" {
+		_, _ = d.run(ctx, "network", "rm", node.NetworkID)
+	}
 }
 
 // WorkspaceNodeStatus reports the sandbox container's state for the node.
@@ -84,7 +206,7 @@ func (d *DockerBackend) DeleteWorkspaceNode(ctx context.Context, nodeID string) 
 }
 
 // Reconcile is not implemented yet; the label-based startup reconciliation
-// arrives with the hardened Docker policy.
+// arrives with the lifecycle manager.
 func (d *DockerBackend) Reconcile(context.Context) error {
 	return errProvisioningNotImplemented
 }
