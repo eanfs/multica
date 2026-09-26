@@ -20,6 +20,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/storage"
 	"github.com/multica-ai/multica/server/internal/testutil"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 func TestListAuroraSkills(t *testing.T) {
@@ -2430,5 +2431,211 @@ func TestListAuroraTopupsHidesPriceIDs(t *testing.T) {
 func TestNewHandlerLeavesPaymentsNilWithoutStripeSecrets(t *testing.T) {
 	if testHandler.Payments != nil {
 		t.Fatalf("Payments = %#v without Stripe secrets, want a nil interface", testHandler.Payments)
+	}
+}
+
+// fakeSandboxManager is an in-process WorkspaceSandboxManager for handler
+// tests. It records how often the generation path ensured a sandbox, can fail
+// the ensure, and offers an onEnsure hook so an ordering assertion runs at the
+// exact moment the ensure happens.
+type fakeSandboxManager struct {
+	mu       sync.Mutex
+	calls    int
+	err      error
+	onEnsure func()
+}
+
+func (f *fakeSandboxManager) Ensure(_ context.Context, workspaceID, runtimeID pgtype.UUID) (db.AuroraSandboxNode, error) {
+	f.mu.Lock()
+	f.calls++
+	onEnsure := f.onEnsure
+	err := f.err
+	f.mu.Unlock()
+	if onEnsure != nil {
+		onEnsure()
+	}
+	if err != nil {
+		return db.AuroraSandboxNode{}, err
+	}
+	return db.AuroraSandboxNode{WorkspaceID: workspaceID, RuntimeID: runtimeID, State: "starting"}, nil
+}
+
+func (f *fakeSandboxManager) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// withSandboxManager installs mgr on the shared handler and restores the
+// previous wiring at cleanup, so a test that disables the fleet cannot leak a
+// nil manager into a sibling.
+func withSandboxManager(t *testing.T, mgr aurora.WorkspaceSandboxManager) {
+	t.Helper()
+	prev := testHandler.SandboxManager
+	testHandler.SandboxManager = mgr
+	t.Cleanup(func() { testHandler.SandboxManager = prev })
+}
+
+// auroraSystemTaskCount counts queued work on the workspace's Aurora system
+// agents. The fleet gate must leave it unchanged.
+func auroraSystemTaskCount(t *testing.T) int {
+	t.Helper()
+	return dbfx.Count(t, "SELECT count(*) FROM agent_task_queue atq JOIN agent a ON a.id = atq.agent_id WHERE a.workspace_id = $1 AND a.system_key LIKE 'aurora:%'", testWorkspaceID)
+}
+
+// TestCreateGenerationEnsuresSandboxBeforeReserve proves the ordering the
+// handler now promises: the sandbox is accepted by the fleet before any credit
+// is reserved. The manager hook samples the deduction ledger while the ensure
+// is running, and the same request must still reach reserve and enqueue.
+func TestCreateGenerationEnsuresSandboxBeforeReserve(t *testing.T) {
+	creditTestReset(t)
+	cleanupAuroraSystemAgents(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	if err := testHandler.Credit.Grant(ctx, user, ws, 1_000_000_000, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
+	var deductionsAtEnsure int
+	mgr := &fakeSandboxManager{onEnsure: func() {
+		deductionsAtEnsure = dbfx.Count(t, "SELECT count(*) FROM credit_ledger WHERE user_id = $1 AND kind = $2", testUserID, aurora.LedgerKindDeduction)
+	}}
+	withSandboxManager(t, mgr)
+
+	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
+		"skillId": "xhs-image",
+		"prompt":  "ensure before reserve",
+	})
+	out := testutil.Decode[struct {
+		Generation struct {
+			ID string `json:"id"`
+		} `json:"generation"`
+	}](t, testHandler.CreateAuroraGeneration, req, http.StatusCreated)
+
+	if mgr.callCount() != 1 {
+		t.Fatalf("sandbox ensure calls = %d, want exactly 1", mgr.callCount())
+	}
+	if deductionsAtEnsure != 0 {
+		t.Fatalf("ensure observed %d reservation ledger rows, want 0: reserve ran before ensure", deductionsAtEnsure)
+	}
+	if got := dbfx.Count(t, "SELECT count(*) FROM credit_ledger WHERE user_id = $1 AND kind = $2", testUserID, aurora.LedgerKindDeduction); got != 1 {
+		t.Fatalf("reservation ledger rows after create = %d, want 1", got)
+	}
+
+	var taskID pgtype.UUID
+	if err := testPool.QueryRow(ctx, "SELECT task_id FROM aurora_generation WHERE id = $1", out.Generation.ID).Scan(&taskID); err != nil {
+		t.Fatalf("load generation task: %v", err)
+	}
+	if !taskID.Valid {
+		t.Fatal("generation has no task id after create")
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), "DELETE FROM agent_task_queue WHERE id = $1", taskID)
+		testPool.Exec(context.Background(), "DELETE FROM aurora_generation WHERE id = $1", out.Generation.ID)
+	})
+}
+
+// TestCreateGenerationFleetDisabledReturns503WithoutReserve pins fail-closed
+// configuration: with no fleet client the catalog still works, but a new
+// generation is rejected with the stable code before any row, reserve, or
+// enqueue exists.
+func TestCreateGenerationFleetDisabledReturns503WithoutReserve(t *testing.T) {
+	creditTestReset(t)
+	cleanupAuroraSystemAgents(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	if err := testHandler.Credit.Grant(ctx, user, ws, 1_000_000_000, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
+	beforeGenerations := dbfx.Count(t, "SELECT count(*) FROM aurora_generation WHERE workspace_id = $1", testWorkspaceID)
+	beforeTasks := auroraSystemTaskCount(t)
+	beforeDeductions := dbfx.Count(t, "SELECT count(*) FROM credit_ledger WHERE user_id = $1 AND kind = $2", testUserID, aurora.LedgerKindDeduction)
+	beforeBalance, err := testHandler.Credit.Balance(ctx, user)
+	if err != nil {
+		t.Fatalf("Balance before: %v", err)
+	}
+
+	withSandboxManager(t, nil)
+
+	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
+		"skillId": "xhs-image",
+		"prompt":  "fleet disabled",
+	})
+	body := testutil.Decode[struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}](t, testHandler.CreateAuroraGeneration, req, http.StatusServiceUnavailable)
+	if body.Code != "aurora_runtime_unavailable" {
+		t.Fatalf("error code = %q, want aurora_runtime_unavailable", body.Code)
+	}
+
+	if got := dbfx.Count(t, "SELECT count(*) FROM aurora_generation WHERE workspace_id = $1", testWorkspaceID); got != beforeGenerations {
+		t.Fatalf("generation rows = %d, want %d unchanged", got, beforeGenerations)
+	}
+	if got := auroraSystemTaskCount(t); got != beforeTasks {
+		t.Fatalf("aurora task rows = %d, want %d unchanged", got, beforeTasks)
+	}
+	if got := dbfx.Count(t, "SELECT count(*) FROM credit_ledger WHERE user_id = $1 AND kind = $2", testUserID, aurora.LedgerKindDeduction); got != beforeDeductions {
+		t.Fatalf("reservation ledger rows = %d, want %d unchanged", got, beforeDeductions)
+	}
+	afterBalance, err := testHandler.Credit.Balance(ctx, user)
+	if err != nil {
+		t.Fatalf("Balance after: %v", err)
+	}
+	if afterBalance != beforeBalance {
+		t.Fatalf("balance = %d, want %d unchanged", afterBalance, beforeBalance)
+	}
+}
+
+// TestCreateGenerationFleetFailureReturns503WithoutReserveOrEnqueue pins the
+// fleet failure path: the ensure is attempted exactly once, and a rejection
+// returns the stable 503 with no generation row, no reservation, and no
+// enqueued task.
+func TestCreateGenerationFleetFailureReturns503WithoutReserveOrEnqueue(t *testing.T) {
+	creditTestReset(t)
+	cleanupAuroraSystemAgents(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	if err := testHandler.Credit.Grant(ctx, user, ws, 1_000_000_000, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
+	beforeGenerations := dbfx.Count(t, "SELECT count(*) FROM aurora_generation WHERE workspace_id = $1", testWorkspaceID)
+	beforeTasks := auroraSystemTaskCount(t)
+	beforeDeductions := dbfx.Count(t, "SELECT count(*) FROM credit_ledger WHERE user_id = $1 AND kind = $2", testUserID, aurora.LedgerKindDeduction)
+
+	mgr := &fakeSandboxManager{err: errors.New("fleet unavailable")}
+	withSandboxManager(t, mgr)
+
+	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
+		"skillId": "xhs-image",
+		"prompt":  "fleet failure",
+	})
+	body := testutil.Decode[struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}](t, testHandler.CreateAuroraGeneration, req, http.StatusServiceUnavailable)
+	if body.Code != "aurora_runtime_unavailable" {
+		t.Fatalf("error code = %q, want aurora_runtime_unavailable", body.Code)
+	}
+	if mgr.callCount() != 1 {
+		t.Fatalf("sandbox ensure calls = %d, want exactly 1", mgr.callCount())
+	}
+
+	if got := dbfx.Count(t, "SELECT count(*) FROM aurora_generation WHERE workspace_id = $1", testWorkspaceID); got != beforeGenerations {
+		t.Fatalf("generation rows = %d, want %d unchanged", got, beforeGenerations)
+	}
+	if got := auroraSystemTaskCount(t); got != beforeTasks {
+		t.Fatalf("aurora task rows = %d, want %d unchanged", got, beforeTasks)
+	}
+	if got := dbfx.Count(t, "SELECT count(*) FROM credit_ledger WHERE user_id = $1 AND kind = $2", testUserID, aurora.LedgerKindDeduction); got != beforeDeductions {
+		t.Fatalf("reservation ledger rows = %d, want %d unchanged", got, beforeDeductions)
 	}
 }

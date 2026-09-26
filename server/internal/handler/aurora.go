@@ -43,11 +43,17 @@ const microCreditsPerCredit = 1_000_000
 // checkout replace one Stripe may still complete.
 const auroraCheckoutIntentTTL = 25 * time.Hour
 
+// auroraRuntimeUnavailableCode is the stable error code for a workspace whose
+// sandbox the fleet cannot make ready. New generation creation fails closed
+// with it rather than reserving credits for work no node can run.
+const auroraRuntimeUnavailableCode = "aurora_runtime_unavailable"
+
 var (
 	errAuroraMonthlyGenerationLimit = errors.New("monthly generation limit reached")
 	errAuroraConcurrencyLimit       = errors.New("concurrency limit reached")
 	errAuroraAllowanceUnavailable   = errors.New("monthly allowance unavailable")
 	errAuroraSubscriptionConflict   = errors.New("subscription already exists")
+	errAuroraRuntimeUnavailable     = errors.New("aurora runtime unavailable")
 )
 
 // ListAuroraSkills returns the full catalog, including unavailable phase-2 skills.
@@ -130,6 +136,30 @@ func (h *Handler) CreateAuroraGeneration(w http.ResponseWriter, r *http.Request)
 	if !decision.Allowed {
 		h.recordModerationBlock(r.Context(), pgtype.UUID{}, workspaceID, aurora.ModerationScopePrompt, decision.Reason)
 		writeError(w, http.StatusUnprocessableEntity, decision.Reason)
+		return
+	}
+
+	// Provision order matters: seed the workspace's Aurora system agents and
+	// managed runtime, then make the workspace sandbox accepted by the fleet,
+	// and only then run the entitlement check and insert the generation row.
+	// The fleet call is deliberately outside every database transaction, and a
+	// node may be created for a request entitlement later rejects; the idle
+	// reaper removes it. That trade-off avoids reserving credits for
+	// infrastructure that could not start.
+	if err := h.ensureAuroraSystemAgents(r.Context(), workspaceID, userUUID); err != nil {
+		slog.Error("failed to prepare aurora workspace", "workspace_id", uuidToString(workspaceID), "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to create generation")
+		return
+	}
+	runtimeID, err := aurora.ManagedRuntimeID(r.Context(), h.Queries, workspaceID)
+	if err != nil {
+		slog.Error("failed to load aurora managed runtime", "workspace_id", uuidToString(workspaceID), "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to create generation")
+		return
+	}
+	if err := h.ensureWorkspaceSandbox(r.Context(), workspaceID, runtimeID); err != nil {
+		slog.Error("aurora sandbox unavailable", "workspace_id", uuidToString(workspaceID), "error", err)
+		writeErrorCode(w, http.StatusServiceUnavailable, auroraRuntimeUnavailableCode, errAuroraRuntimeUnavailable.Error())
 		return
 	}
 
@@ -251,12 +281,6 @@ func (h *Handler) createAuroraGenerationWithEntitlement(
 		return db.AuroraGeneration{}, errAuroraConcurrencyLimit
 	}
 
-	// Seed only after both gates pass; a rejected request must not create system
-	// agents. The seeder has its own workspace-scoped transaction and advisory
-	// lock, independent from this user's entitlement lock.
-	if err := h.ensureAuroraSystemAgents(ctx, workspaceID, userID); err != nil {
-		return db.AuroraGeneration{}, fmt.Errorf("prepare workspace agents: %w", err)
-	}
 	if limits.Tier == "free" {
 		// The allowance must exist before Reserve runs. Unlike the previous
 		// best-effort path, an infrastructure failure remains a 503 rather than
@@ -311,6 +335,20 @@ func (h *Handler) ensureAuroraSystemAgents(ctx context.Context, workspaceID, own
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// ensureWorkspaceSandbox makes the workspace's sandbox accepted by the fleet.
+// A nil manager is the fail-closed configuration: with no usable fleet client
+// the catalog and library still work, but new generation creation is rejected
+// before any reservation rather than queued without a runtime.
+func (h *Handler) ensureWorkspaceSandbox(ctx context.Context, workspaceID, runtimeID pgtype.UUID) error {
+	if h.SandboxManager == nil {
+		return errAuroraRuntimeUnavailable
+	}
+	if _, err := h.SandboxManager.Ensure(ctx, workspaceID, runtimeID); err != nil {
+		return fmt.Errorf("%w: %v", errAuroraRuntimeUnavailable, err)
+	}
+	return nil
 }
 
 // markGenerationFailed moves a generation to the terminal failed state with a
