@@ -1,0 +1,82 @@
+# multica-aurora-sandbox: AppArmor profile for Aurora workspace sandbox
+# containers. Denies raw networking, all mounts, process memory access,
+# kernel/sysfs writes, and Docker socket paths. Host filesystem access is
+# denied except the read-only enrollment/provider secret files staged under
+# the fleet secret root by the deployment.
+#
+# Deploy (Linux only): apparmor_parser -Q validates the profile syntax, then
+#   apparmor_parser -r multica-aurora-sandbox.apparmor
+# Docker references it via --security-opt apparmor=multica-aurora-sandbox.
+
+#include <tunables/global>
+
+profile multica-aurora-sandbox flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  #include <abstractions/consoles>
+
+  # ---- Network: no raw or packet sockets; only stream/datagram via the
+  # workspace-internal network through the egress sidecar.
+  deny network raw,
+  deny network packet,
+  network inet stream,
+  network inet6 stream,
+  network inet dgram,
+  network inet6 dgram,
+  network netlink stream,
+  network unix stream,
+  network unix dgram,
+
+  # ---- Mount: deny every mount/umount/pivot from inside the container.
+  deny mount,
+  deny umount,
+  deny pivot_root,
+
+  # ---- Process memory and tracing.
+  deny /proc/*/mem rwklx,
+  deny /proc/*/memory rwklx,
+  deny ptrace (read, tracedby, readby),
+
+  # ---- Kernel and sysfs writes.
+  deny /sys/** wklx,
+  deny /proc/sys/** wklx,
+  deny /proc/latency_trace rwklx,
+  deny /proc/kcore rwklx,
+  deny /proc/kmsg rwklx,
+  deny /proc/sysrq-trigger rwklx,
+
+  # ---- Docker socket: the sandbox never reaches the host daemon.
+  deny /var/run/docker.sock rwklx,
+  deny /run/docker.sock rwklx,
+  deny /run/docker/** rwklx,
+
+  # ---- Host filesystem: deny by default; allow read-only access only to
+  # the fleet secret root the deployment mounts enrollment/provider secrets
+  # from (the container sees them at /run/secrets/).
+  deny / rwklx,
+  deny /** wklx,
+
+  # Read-only secret files staged by the fleet controller.
+  /run/secrets/aurora-enrollment r,
+  /run/secrets/aurora-provider-* r,
+
+  # Writable tmpfs surfaces only (mounted nosuid,nodev,noexec by the run
+  # policy): workspace scratch, /tmp, and /run.
+  /tmp/** rwk,
+  /run/** rwk,
+  /workspace/** rwk,
+
+  # The root filesystem is read-only; allow reading and mapping executables
+  # and libraries from the image, nothing else.
+  /{,usr/}bin/** mr,
+  /{,usr/}sbin/** mr,
+  /usr/lib/** mr,
+  /lib/** mr,
+  /opt/** mr,
+  /etc/** r,
+  /usr/share/** r,
+
+  # Deny capability-relevant sysfs/debugfs exposure outright.
+  deny /sys/kernel/debug/** rwklx,
+  deny /sys/fs/cgroup/** wklx,
+  deny /sys/firmware/** rwklx,
+}
