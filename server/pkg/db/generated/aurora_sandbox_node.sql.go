@@ -100,6 +100,22 @@ func (q *Queries) ConsumeAuroraSandboxEnrollment(ctx context.Context, enrollment
 	return i, err
 }
 
+const countActiveAuroraSandboxTasks = `-- name: CountActiveAuroraSandboxTasks :one
+SELECT count(*) FROM agent_task_queue
+WHERE runtime_id = $1
+  AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+`
+
+// Active means the task still holds or awaits the managed runtime: queued work
+// that never started, work the daemon is executing, and work parked on a local
+// directory. Terminal rows do not keep a node alive.
+func (q *Queries) CountActiveAuroraSandboxTasks(ctx context.Context, runtimeID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveAuroraSandboxTasks, runtimeID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createAuroraSandboxNode = `-- name: CreateAuroraSandboxNode :one
 
 INSERT INTO aurora_sandbox_node (
@@ -227,6 +243,116 @@ func (q *Queries) FailAuroraSandboxNode(ctx context.Context, arg FailAuroraSandb
 	return i, err
 }
 
+const failAuroraSandboxTasksForRuntime = `-- name: FailAuroraSandboxTasksForRuntime :many
+WITH victims AS (
+  SELECT task.id
+  FROM agent_task_queue task
+  WHERE task.runtime_id = $2
+    AND task.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+  ORDER BY task.created_at, task.id
+  LIMIT $3
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE agent_task_queue AS task
+SET status = 'failed', completed_at = now(), error = $1,
+    failure_reason = $1, wait_reason = NULL
+FROM victims
+WHERE task.id = victims.id
+  AND task.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+RETURNING task.id, task.agent_id, task.issue_id, task.status, task.priority, task.dispatched_at, task.started_at, task.completed_at, task.result, task.error, task.created_at, task.context, task.runtime_id, task.session_id, task.work_dir, task.trigger_comment_id, task.chat_session_id, task.autopilot_run_id, task.attempt, task.max_attempts, task.parent_task_id, task.failure_reason, task.trigger_summary, task.force_fresh_session, task.is_leader_task, task.wait_reason, task.initiator_user_id, task.handoff_note, task.prepare_lease_expires_at, task.squad_id, task.runtime_mcp_overlay, task.escalation_for_task_id, task.fire_at, task.originator_user_id, task.runtime_connected_apps, task.coalesced_comment_ids, task.delivered_comment_ids, task.chat_input_task_id, task.chat_finalize_deferred_at, task.originator_source, task.delegated_from_task_id, task.retry_of_task_id, task.rerun_of_task_id, task.rule_version_id, task.trigger_evidence_kind, task.trigger_evidence_ref_id, task.accountable_user_id, task.session_rollout_missing, task.retired_session_id, task.quick_actions_disabled, task.regenerate_quick_actions_for, task.branch_name, task.durable_work_dir, task.channel_context_revision, task.comment_thread_id, task.cancelled_by_type, task.cancelled_by_id, task.cancelled_by_name, task.issue_snapshot
+`
+
+type FailAuroraSandboxTasksForRuntimeParams struct {
+	FailureReason pgtype.Text `json:"failure_reason"`
+	RuntimeID     pgtype.UUID `json:"runtime_id"`
+	RowLimit      int32       `json:"row_limit"`
+}
+
+// Fails the runtime's active tasks after its sandbox node could not start or
+// exceeded its hard lifetime. Bounded per call like the runtime sweeper so a
+// backlog cannot monopolise the reaper transaction, and the RETURNING set is
+// exactly the rows this call transitioned, which keeps refund settlement
+// idempotent across repeated sweeps.
+func (q *Queries) FailAuroraSandboxTasksForRuntime(ctx context.Context, arg FailAuroraSandboxTasksForRuntimeParams) ([]AgentTaskQueue, error) {
+	rows, err := q.db.Query(ctx, failAuroraSandboxTasksForRuntime, arg.FailureReason, arg.RuntimeID, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AgentTaskQueue{}
+	for rows.Next() {
+		var i AgentTaskQueue
+		if err := rows.Scan(
+			&i.ID,
+			&i.AgentID,
+			&i.IssueID,
+			&i.Status,
+			&i.Priority,
+			&i.DispatchedAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.Result,
+			&i.Error,
+			&i.CreatedAt,
+			&i.Context,
+			&i.RuntimeID,
+			&i.SessionID,
+			&i.WorkDir,
+			&i.TriggerCommentID,
+			&i.ChatSessionID,
+			&i.AutopilotRunID,
+			&i.Attempt,
+			&i.MaxAttempts,
+			&i.ParentTaskID,
+			&i.FailureReason,
+			&i.TriggerSummary,
+			&i.ForceFreshSession,
+			&i.IsLeaderTask,
+			&i.WaitReason,
+			&i.InitiatorUserID,
+			&i.HandoffNote,
+			&i.PrepareLeaseExpiresAt,
+			&i.SquadID,
+			&i.RuntimeMcpOverlay,
+			&i.EscalationForTaskID,
+			&i.FireAt,
+			&i.OriginatorUserID,
+			&i.RuntimeConnectedApps,
+			&i.CoalescedCommentIds,
+			&i.DeliveredCommentIds,
+			&i.ChatInputTaskID,
+			&i.ChatFinalizeDeferredAt,
+			&i.OriginatorSource,
+			&i.DelegatedFromTaskID,
+			&i.RetryOfTaskID,
+			&i.RerunOfTaskID,
+			&i.RuleVersionID,
+			&i.TriggerEvidenceKind,
+			&i.TriggerEvidenceRefID,
+			&i.AccountableUserID,
+			&i.SessionRolloutMissing,
+			&i.RetiredSessionID,
+			&i.QuickActionsDisabled,
+			&i.RegenerateQuickActionsFor,
+			&i.BranchName,
+			&i.DurableWorkDir,
+			&i.ChannelContextRevision,
+			&i.CommentThreadID,
+			&i.CancelledByType,
+			&i.CancelledByID,
+			&i.CancelledByName,
+			&i.IssueSnapshot,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getAuroraSandboxNodeByWorkspace = `-- name: GetAuroraSandboxNodeByWorkspace :one
 SELECT id, workspace_id, runtime_id, daemon_id, backend_node_id, image_digest, state, enrollment_token_hash, enrollment_expires_at, enrollment_consumed_at, last_active_at, drain_started_at, started_at, stopped_at, failure_reason, created_at, updated_at FROM aurora_sandbox_node
 WHERE workspace_id = $1
@@ -261,22 +387,34 @@ func (q *Queries) GetAuroraSandboxNodeByWorkspace(ctx context.Context, workspace
 const listAuroraSandboxNodesForReap = `-- name: ListAuroraSandboxNodesForReap :many
 SELECT id, workspace_id, runtime_id, daemon_id, backend_node_id, image_digest, state, enrollment_token_hash, enrollment_expires_at, enrollment_consumed_at, last_active_at, drain_started_at, started_at, stopped_at, failure_reason, created_at, updated_at FROM aurora_sandbox_node
 WHERE state IN ('starting', 'online', 'draining')
-  AND (last_active_at < $1 OR created_at < $2)
+  AND (
+    (state = 'starting' AND created_at < $1)
+    OR (state IN ('online', 'draining') AND last_active_at < $2)
+    OR created_at < $3
+  )
 ORDER BY created_at ASC, id ASC
-LIMIT $3
+LIMIT $4
 `
 
 type ListAuroraSandboxNodesForReapParams struct {
-	LastActiveAt pgtype.Timestamptz `json:"last_active_at"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
-	Limit        int32              `json:"limit"`
+	StartingCutoff pgtype.Timestamptz `json:"starting_cutoff"`
+	IdleCutoff     pgtype.Timestamptz `json:"idle_cutoff"`
+	HardCutoff     pgtype.Timestamptz `json:"hard_cutoff"`
+	RowLimit       int32              `json:"row_limit"`
 }
 
-// Bounded, oldest-first candidate scan for the node reaper: an active node is
-// a candidate once it is idle past the idle cutoff or past the hard lifetime
-// measured from created_at.
+// Bounded, oldest-first candidate scan for the node reaper. A candidate is a
+// starting node that never completed its grace window, an online or draining
+// node idle past the idle cutoff, or any active node older than the hard
+// lifetime. The three cutoffs stay separate so a queue of not-yet-due idle
+// nodes cannot consume the batch before a stuck starting node is examined.
 func (q *Queries) ListAuroraSandboxNodesForReap(ctx context.Context, arg ListAuroraSandboxNodesForReapParams) ([]AuroraSandboxNode, error) {
-	rows, err := q.db.Query(ctx, listAuroraSandboxNodesForReap, arg.LastActiveAt, arg.CreatedAt, arg.Limit)
+	rows, err := q.db.Query(ctx, listAuroraSandboxNodesForReap,
+		arg.StartingCutoff,
+		arg.IdleCutoff,
+		arg.HardCutoff,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

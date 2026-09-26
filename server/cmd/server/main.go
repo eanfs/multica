@@ -731,7 +731,7 @@ func main() {
 	// Queued work now expires on the same runtime-liveness signal as in-flight
 	// work, so there is no separate queue TTL to tune: a busy runtime keeps its
 	// backlog, and a departed one retires everything it owned at once.
-	go runRuntimeSweeper(sweepCtx, queries, liveness, taskSvc, bus, runtimeReconnectGrace)
+	go runRuntimeSweeper(sweepCtx, queries, liveness, taskSvc, bus, runtimeReconnectGrace, newSandboxReaper(pool, queries, taskSvc))
 	// Aurora's monthly credit settlement. It shares the credit service the
 	// handler bills through, so the grants it writes and the balance the API
 	// reports cannot drift apart.
@@ -976,4 +976,21 @@ func newWorkspaceSandboxManager(pool *pgxpool.Pool, queries *db.Queries) aurora.
 		return nil
 	}
 	return aurora.NewSandboxManager(queries, pool, client, image, nil)
+}
+
+// newSandboxReaper builds the managed sandbox lifecycle reaper with the same
+// fail-closed gate as the sandbox manager: no fleet client means no reaper, so
+// a deployment without fleet configuration never deletes fleet resources.
+func newSandboxReaper(pool *pgxpool.Pool, queries *db.Queries, taskSvc *service.TaskService) *aurora.SandboxReaper {
+	fleetURL := strings.TrimSpace(os.Getenv("AURORA_FLEET_URL"))
+	tokenFile := strings.TrimSpace(os.Getenv("AURORA_FLEET_CONTROL_TOKEN_FILE"))
+	if fleetURL == "" || tokenFile == "" {
+		return nil
+	}
+	client, err := aurorafleet.NewControlClient(fleetURL, tokenFile)
+	if err != nil {
+		slog.Error("aurora sandbox reaper disabled", "error", err)
+		return nil
+	}
+	return aurora.NewSandboxReaper(queries, pool, client, taskSvc, nil)
 }

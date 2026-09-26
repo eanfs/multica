@@ -5898,6 +5898,16 @@ func (s *TaskService) FailExpiredRuntimeReconnectRetries(ctx context.Context, ar
 	})
 }
 
+// FailAuroraSandboxTasksForRuntime fails the managed runtime's active tasks
+// after its sandbox node could not start or outlived its hard lifetime. It
+// shares terminateTasksInTx with the other termination paths so delegated
+// failure recoveries are settled in the same transaction as the transition.
+func (s *TaskService) FailAuroraSandboxTasksForRuntime(ctx context.Context, arg db.FailAuroraSandboxTasksForRuntimeParams) ([]db.AgentTaskQueue, error) {
+	return s.terminateTasksInTx(ctx, func(qtx *db.Queries) ([]db.AgentTaskQueue, error) {
+		return qtx.FailAuroraSandboxTasksForRuntime(ctx, arg)
+	})
+}
+
 // FailStaleTasks fails claimed work whose runtime stopped reporting.
 func (s *TaskService) FailStaleTasks(ctx context.Context, arg db.FailStaleTasksParams) ([]db.AgentTaskQueue, error) {
 	return s.terminateTasksInTx(ctx, func(qtx *db.Queries) ([]db.AgentTaskQueue, error) {

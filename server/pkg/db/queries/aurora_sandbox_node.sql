@@ -140,14 +140,51 @@ WHERE id = $1
   AND daemon_id = $3;
 
 -- name: ListAuroraSandboxNodesForReap :many
--- Bounded, oldest-first candidate scan for the node reaper: an active node is
--- a candidate once it is idle past the idle cutoff or past the hard lifetime
--- measured from created_at.
+-- Bounded, oldest-first candidate scan for the node reaper. A candidate is a
+-- starting node that never completed its grace window, an online or draining
+-- node idle past the idle cutoff, or any active node older than the hard
+-- lifetime. The three cutoffs stay separate so a queue of not-yet-due idle
+-- nodes cannot consume the batch before a stuck starting node is examined.
 SELECT * FROM aurora_sandbox_node
 WHERE state IN ('starting', 'online', 'draining')
-  AND (last_active_at < $1 OR created_at < $2)
+  AND (
+    (state = 'starting' AND created_at < sqlc.arg(starting_cutoff))
+    OR (state IN ('online', 'draining') AND last_active_at < sqlc.arg(idle_cutoff))
+    OR created_at < sqlc.arg(hard_cutoff)
+  )
 ORDER BY created_at ASC, id ASC
-LIMIT $3;
+LIMIT sqlc.arg(row_limit);
+
+-- name: CountActiveAuroraSandboxTasks :one
+-- Active means the task still holds or awaits the managed runtime: queued work
+-- that never started, work the daemon is executing, and work parked on a local
+-- directory. Terminal rows do not keep a node alive.
+SELECT count(*) FROM agent_task_queue
+WHERE runtime_id = sqlc.arg(runtime_id)
+  AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory');
+
+-- name: FailAuroraSandboxTasksForRuntime :many
+-- Fails the runtime's active tasks after its sandbox node could not start or
+-- exceeded its hard lifetime. Bounded per call like the runtime sweeper so a
+-- backlog cannot monopolise the reaper transaction, and the RETURNING set is
+-- exactly the rows this call transitioned, which keeps refund settlement
+-- idempotent across repeated sweeps.
+WITH victims AS (
+  SELECT task.id
+  FROM agent_task_queue task
+  WHERE task.runtime_id = sqlc.arg(runtime_id)
+    AND task.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+  ORDER BY task.created_at, task.id
+  LIMIT sqlc.arg(row_limit)
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE agent_task_queue AS task
+SET status = 'failed', completed_at = now(), error = sqlc.arg(failure_reason),
+    failure_reason = sqlc.arg(failure_reason), wait_reason = NULL
+FROM victims
+WHERE task.id = victims.id
+  AND task.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+RETURNING task.*;
 
 -- name: ReArmAuroraSandboxNode :one
 -- Re-arms the workspace's single node with a fresh single-use enrollment and
