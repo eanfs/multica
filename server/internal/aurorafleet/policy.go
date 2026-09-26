@@ -17,6 +17,15 @@ import (
 // sandbox image is built for; there is no configuration surface to change it.
 const sandboxUser = "10001:10001"
 
+// Node name prefixes are the single source of truth for every policy-generated
+// Docker resource name. NodeNames builds names from them and the backend derives
+// siblings from a sandbox name by swapping the prefix, so the two can never drift.
+const (
+	sandboxNamePrefix = "aurora-sbx-"
+	proxyNamePrefix   = "aurora-egr-"
+	networkNamePrefix = "aurora-ws-"
+)
+
 // egressProxyEndpoint is the address the sandbox uses to reach its egress
 // sidecar across the per-workspace internal network. "egress" is the alias
 // Docker assigns when the sidecar is connected to the workspace network.
@@ -55,6 +64,10 @@ var safeNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // labelNamespace is the only label key namespace this fleet writes.
 const labelNamespace = "com.multica.aurora."
+
+// nodeIdentityLabel carries the node UUID on every fleet-owned sandbox. It is
+// the controlled identity a delete can use to resolve a node to its container.
+const nodeIdentityLabel = labelNamespace + "node"
 
 // Policy is the immutable hardened Docker policy for workspace sandbox nodes.
 // Every field is process configuration owned by the operator; API callers can
@@ -123,7 +136,7 @@ func (p Policy) NodeNames(spec WorkspaceNodeSpec) (network, proxy, sandbox strin
 	}
 	sum := sha256.Sum256([]byte("workspace=" + spec.WorkspaceID + ";node=" + spec.NodeID))
 	prefix := hex.EncodeToString(sum[:])[:16]
-	network, proxy, sandbox = "aurora-ws-"+prefix, "aurora-egr-"+prefix, "aurora-sbx-"+prefix
+	network, proxy, sandbox = networkNamePrefix+prefix, proxyNamePrefix+prefix, sandboxNamePrefix+prefix
 	for _, name := range []string{network, proxy, sandbox} {
 		if !safeNamePattern.MatchString(name) {
 			return "", "", "", fmt.Errorf("generated name %q is not a safe Docker name", name)
@@ -283,7 +296,7 @@ func identityLabels(spec WorkspaceNodeSpec) (map[string]string, error) {
 	labels := map[string]string{
 		labelNamespace + "managed":   "1",
 		labelNamespace + "role":      "sandbox",
-		labelNamespace + "node":      spec.NodeID,
+		nodeIdentityLabel:            spec.NodeID,
 		labelNamespace + "workspace": spec.WorkspaceID,
 		labelNamespace + "runtime":   spec.RuntimeID,
 		labelNamespace + "daemon":    spec.DaemonID,

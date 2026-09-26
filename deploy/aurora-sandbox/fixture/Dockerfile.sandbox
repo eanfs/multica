@@ -1,0 +1,16 @@
+# Fixture sandbox image for the Linux Docker security acceptance.
+#
+# This is deliberately not the release image: child plan D builds the
+# digest-pinned managed runtime. This image contains only the fixed probe
+# binary, so the acceptance can exercise the filesystem, capability,
+# namespace, PID, tmpfs, and network boundaries without an interactive shell.
+#
+# The build context must contain the pre-built linux probe binary at
+# ./aurora-sandbox-probe; docker-security-test.sh produces it.
+FROM scratch
+# /opt is the image path the AppArmor profile grants read+map access to, so the
+# fixed probe binary lives there rather than under /usr/local.
+COPY aurora-sandbox-probe /opt/aurora/bin/aurora-sandbox-probe
+USER 10001:10001
+ENTRYPOINT ["/opt/aurora/bin/aurora-sandbox-probe"]
+CMD ["serve"]

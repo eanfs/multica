@@ -223,3 +223,106 @@ func TestProxyLogsHostWithoutPathQueryOrAuthorization(t *testing.T) {
 		}
 	}
 }
+
+// newFakeOrigin starts an in-process origin that answers every request with 200
+// and returns both the server and its parsed URL. It is the reusable helper for
+// the Task 6 proxy probe matrix.
+func newFakeOrigin(t *testing.T) (*httptest.Server, *url.URL) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("fake-origin"))
+	}))
+	t.Cleanup(server.Close)
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse fake origin URL: %v", err)
+	}
+	return server, parsed
+}
+
+// proxyClientFor returns a client that sends every request through the proxy.
+func proxyClientFor(t *testing.T, proxyURL string) *http.Client {
+	t.Helper()
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+	return &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			Proxy:               http.ProxyURL(parsed),
+			DisableKeepAlives:   true,
+			TLSHandshakeTimeout: time.Second,
+		},
+	}
+}
+
+// TestProxyFakeOriginAllowAndDenyMatrix mirrors the Task 6 container proxy probe
+// in-process: the exact fake Multica origin succeeds over plain HTTP while an
+// unknown host, a wrong port, and an out-of-policy CONNECT target are refused.
+func TestProxyFakeOriginAllowAndDenyMatrix(t *testing.T) {
+	origin, originURL := newFakeOrigin(t)
+	p, err := NewPolicy(origin.URL, nil)
+	if err != nil {
+		t.Fatalf("NewPolicy: %v", err)
+	}
+	// The server-origin exception may resolve privately; pin the resolver so the
+	// matrix runs offline.
+	p.Resolve = staticResolver(net.ParseIP("127.0.0.1"))
+	proxy := New(Config{Policy: p})
+	proxyServer := httptest.NewServer(proxy)
+	defer proxyServer.Close()
+	client := proxyClientFor(t, proxyServer.URL)
+
+	// 1. The exact configured origin is allowed over plain HTTP.
+	resp, err := client.Get(origin.URL + "/aurora-acceptance")
+	if err != nil {
+		t.Fatalf("exact origin request failed: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("exact origin status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// 2. An unlisted host is refused before any dial.
+	resp, err = client.Get("http://unknown.invalid/")
+	if err != nil {
+		t.Fatalf("unknown host returned a transport error, want a 403 response: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("unknown host status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+
+	// 3. The exact origin host on a different port is not the configured origin.
+	_, originPort, err := net.SplitHostPort(originURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongPort := 8443
+	if originPort == strconv.Itoa(wrongPort) {
+		wrongPort = 8444
+	}
+	resp, err = client.Get("http://" + net.JoinHostPort(originURL.Hostname(), strconv.Itoa(wrongPort)) + "/")
+	if err != nil {
+		t.Fatalf("wrong-port request returned a transport error, want a 403 response: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("wrong-port status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+
+	// 4. CONNECT targets outside the policy are refused: a private address, an
+	// unknown host, and a provider host on the wrong port.
+	for _, target := range []string{
+		"https://10.0.0.1/",
+		"https://unknown.invalid/",
+		"https://api.anthropic.com:8443/",
+	} {
+		if resp, err := client.Get(target); err == nil {
+			_ = resp.Body.Close()
+			t.Errorf("CONNECT to %s was not refused (status %d)", target, resp.StatusCode)
+		}
+	}
+}
