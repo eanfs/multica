@@ -371,3 +371,115 @@ func TestDeleteWorkspaceNodeResolvesUUIDThroughLabel(t *testing.T) {
 		}
 	}
 }
+
+// TestEnsureWorkspaceNodeConfirmsRunningNode asserts a repeat ensure confirms
+// the existing running node instead of recreating it. Recreating would collide
+// on the deterministic container names and roll the live node back.
+func TestEnsureWorkspaceNodeConfirmsRunningNode(t *testing.T) {
+	p := validTestPolicy(t)
+	_, _, sandbox, err := p.NodeNames(testSpec(p.SecretRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	record := filepath.Join(dir, "record")
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> \"$DOCKER_RECORD\"\n" +
+		"if [ \"$1\" = \"ps\" ]; then printf 'abc123\tworker\taurora-sbx\trunning\n'; exit 0; fi\n" +
+		"exit 0\n"
+	path := filepath.Join(dir, "docker")
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_RECORD", record)
+
+	b := NewDockerBackendWithPolicy(p)
+	b.dockerPath = path
+	node, err := b.EnsureWorkspaceNode(context.Background(), testSpec(p.SecretRoot))
+	if err != nil {
+		t.Fatalf("EnsureWorkspaceNode: %v", err)
+	}
+	if node.ID != sandbox || node.State != StateOnline || node.Health != HealthHealthy {
+		t.Fatalf("confirmed node = %+v, want id %q online healthy", node, sandbox)
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "run --detach") {
+		t.Fatalf("ensure recreated the running node:\n%s", data)
+	}
+}
+
+// TestWorkspaceNodeStatusResolvesUUIDAndReportsHealth asserts the status route
+// resolves a node UUID through the controlled label and reports the running
+// container as online and healthy.
+func TestWorkspaceNodeStatusResolvesUUIDAndReportsHealth(t *testing.T) {
+	p := validTestPolicy(t)
+	_, _, sandbox, err := p.NodeNames(testSpec(p.SecretRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"case \"$4\" in\n" +
+		"  label=*) echo " + sandbox + " ;;\n" +
+		"  name=^*) printf 'abc123\tworker\taurora-sbx\trunning\n' ;;\n" +
+		"  *) echo unexpected >&2; exit 1 ;;\n" +
+		"esac\n"
+	path := filepath.Join(dir, "docker")
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	b := NewDockerBackendWithPolicy(p)
+	b.dockerPath = path
+	node, err := b.WorkspaceNodeStatus(context.Background(), policyTestNodeID)
+	if err != nil {
+		t.Fatalf("WorkspaceNodeStatus: %v", err)
+	}
+	if node.ID != sandbox || node.State != StateOnline || node.Health != HealthHealthy {
+		t.Fatalf("status = %+v, want id %q online healthy", node, sandbox)
+	}
+}
+
+// TestDeleteWorkspaceNodeResolvesUUIDWhenDirectRemoveReportsSuccess covers
+// Docker versions where removing a missing reference exits 0. A node UUID must
+// never be treated as proof that the sandbox was removed; the controlled-label
+// lookup and the sibling teardown must still run.
+func TestDeleteWorkspaceNodeResolvesUUIDWhenDirectRemoveReportsSuccess(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "record")
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> \"$DOCKER_RECORD\"\n" +
+		"if [ \"$1\" = \"ps\" ]; then echo aurora-sbx-0123456789abcdef; exit 0; fi\n" +
+		"exit 0\n"
+	path := filepath.Join(dir, "docker")
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_RECORD", record)
+
+	b := NewDockerBackendWithPolicy(validTestPolicy(t))
+	b.dockerPath = path
+	if err := b.DeleteWorkspaceNode(context.Background(), policyTestNodeID); err != nil {
+		t.Fatalf("DeleteWorkspaceNode: %v", err)
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := string(data)
+	if !strings.Contains(joined, "--filter label=com.multica.aurora.node="+policyTestNodeID) {
+		t.Errorf("delete did not resolve the UUID through the controlled label:\n%s", joined)
+	}
+	for _, want := range []string{
+		"rm -f aurora-sbx-0123456789abcdef",
+		"rm -f aurora-egr-0123456789abcdef",
+		"network rm aurora-ws-0123456789abcdef",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("delete did not run %q:\n%s", want, joined)
+		}
+	}
+}
