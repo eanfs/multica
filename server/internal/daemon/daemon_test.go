@@ -1616,6 +1616,38 @@ func newTestDaemon(t *testing.T) *Daemon {
 	}
 }
 
+// TestManagedDaemonLaunchesConfiguredClaudeExecutable pins the managed-mode
+// executable injection seam the lifecycle handler test relies on: the enrolled
+// claude runtime launches the absolute path supplied through Config.Agents, and
+// the launch resolver must not fall back to PATH, $HOME, or a user agent config.
+func TestManagedDaemonLaunchesConfiguredClaudeExecutable(t *testing.T) {
+	t.Parallel()
+
+	fake := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+
+	d := New(Config{
+		Agents: map[string]AgentEntry{"claude": {Path: fake, Command: fake}},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	entry, ok := d.agents()["claude"]
+	if !ok {
+		t.Fatal("managed daemon did not install the configured claude agent")
+	}
+	if entry.Path != fake {
+		t.Fatalf("configured claude path = %q, want %q", entry.Path, fake)
+	}
+	resolved, _, err := d.resolveAgentEntryForLaunch(context.Background(), "claude", entry)
+	if err != nil {
+		t.Fatalf("resolveAgentEntryForLaunch: %v", err)
+	}
+	if resolved.Path != fake {
+		t.Fatalf("resolved launch path = %q, want the configured absolute path %q", resolved.Path, fake)
+	}
+}
+
 func newRepoReadyTestDaemon(t *testing.T, handler http.HandlerFunc) *Daemon {
 	t.Helper()
 	srv := httptest.NewServer(handler)
