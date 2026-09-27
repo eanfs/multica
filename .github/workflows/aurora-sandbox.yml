@@ -1,0 +1,408 @@
+name: Aurora Sandbox Supply Chain
+
+# Builds, scans, signs, and publishes the managed Aurora sandbox and egress
+# images. Pull requests verify locks, build the host-platform images without
+# pushing, run the fake container smoke, and scan both the filesystem and the
+# images. Pushes to main in eanfs/multica additionally publish both
+# architectures to GHCR, sign the OCI index digests keylessly, and attach
+# SBOM and provenance attestations. Tags aid discovery only: fleet
+# configuration and documentation reference images by digest.
+
+on:
+  pull_request:
+    paths:
+      - ".github/aurora-sandbox-vex.json"
+      - ".github/workflows/aurora-sandbox.yml"
+      - "deploy/aurora-sandbox/**"
+      - "scripts/update-aurora-sandbox-*"
+      - "scripts/verify-aurora-sandbox-image.sh"
+      - "scripts/verify-aurora-sandbox-locks.mjs"
+      - "scripts/verify-aurora-sandbox-locks.test.mjs"
+      - "server/cmd/aurora-egress-proxy/**"
+      - "server/cmd/aurora-fleet/**"
+      - "server/cmd/aurora-sandbox-probe/**"
+      - "server/internal/aurorafleet/**"
+      - "server/internal/daemon/**"
+      - "server/internal/daemonws/**"
+      - "server/pkg/agent/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/aurora-sandbox-vex.json"
+      - ".github/workflows/aurora-sandbox.yml"
+      - "deploy/aurora-sandbox/**"
+      - "scripts/update-aurora-sandbox-*"
+      - "scripts/verify-aurora-sandbox-image.sh"
+      - "scripts/verify-aurora-sandbox-locks.mjs"
+      - "scripts/verify-aurora-sandbox-locks.test.mjs"
+      - "server/cmd/aurora-egress-proxy/**"
+      - "server/cmd/aurora-fleet/**"
+      - "server/cmd/aurora-sandbox-probe/**"
+      - "server/internal/aurorafleet/**"
+      - "server/internal/daemon/**"
+      - "server/internal/daemonws/**"
+      - "server/pkg/agent/**"
+  workflow_dispatch:
+
+concurrency:
+  group: aurora-sandbox-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  SANDBOX_IMAGE: ghcr.io/eanfs/multica-aurora-sandbox
+  EGRESS_IMAGE: ghcr.io/eanfs/multica-aurora-egress
+
+jobs:
+  verify:
+    name: Verify, build, and scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+          cache-dependency-path: server/go.sum
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify sandbox locks
+        run: node scripts/verify-aurora-sandbox-locks.mjs
+
+      - name: Verify workflow supply-chain policy
+        run: node scripts/verify-aurora-sandbox-locks.mjs --workflow
+
+      - name: Verify vendor patches and licenses
+        run: pnpm --dir deploy/aurora-sandbox/runtime exec node --test test/volc-vendor-security.test.mjs
+
+      - name: Run focused Node runtime tests
+        run: pnpm --dir deploy/aurora-sandbox/runtime test
+
+      - name: Run focused Go secret-boundary tests
+        working-directory: server
+        run: go test ./internal/daemon ./internal/aurorafleet -run 'TestManagedSecret|TestProviderSecretMount' -count=1
+
+      - name: Build host-platform sandbox image without pushing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: deploy/aurora-sandbox
+          file: deploy/aurora-sandbox/Dockerfile
+          build-contexts: |
+            server=server
+            reporoot=.
+            scripts=scripts
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          sbom: false
+          tags: ${{ env.SANDBOX_IMAGE }}:ci
+
+      - name: Build host-platform egress proxy image without pushing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: deploy/aurora-sandbox
+          file: deploy/aurora-sandbox/Dockerfile.egress
+          build-contexts: |
+            server=server
+            reporoot=.
+            scripts=scripts
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          sbom: false
+          tags: ${{ env.EGRESS_IMAGE }}:ci
+
+      - name: Verify built image contents
+        run: scripts/verify-aurora-sandbox-image.sh "${{ env.SANDBOX_IMAGE }}:ci" "${{ env.EGRESS_IMAGE }}:ci"
+
+      - name: Run fake container smoke on Linux
+        run: deploy/aurora-sandbox/docker-security-test.sh
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+
+      - name: Generate SPDX SBOMs with Syft
+        run: |
+          syft dir:. -o spdx-json > sbom-repo.spdx.json
+          syft "${{ env.SANDBOX_IMAGE }}:ci" -o spdx-json > sbom-sandbox.spdx.json
+          syft "${{ env.EGRESS_IMAGE }}:ci" -o spdx-json > sbom-egress.spdx.json
+
+      - name: Scan filesystem with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          format: json
+          output: trivy-fs.json
+          exit-code: "0"
+
+      - name: Scan sandbox image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.SANDBOX_IMAGE }}:ci
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          format: json
+          output: trivy-sandbox.json
+          exit-code: "0"
+
+      - name: Scan egress image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.EGRESS_IMAGE }}:ci
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          format: json
+          output: trivy-egress.json
+          exit-code: "0"
+
+      - name: Enforce supply-chain release policy
+        if: always()
+        run: |
+          set -euo pipefail
+          failed=0
+          for report in trivy-fs.json trivy-sandbox.json trivy-egress.json; do
+            [ -f "$report" ] || continue
+            violations="$(jq -r --slurpfile vex .github/aurora-sandbox-vex.json \
+              'def vexed($id; $pkg; $ver; $image):
+                 [ $vex[0].entries[]?
+                   | select(.cve == $id and .package == $pkg and .version == $ver)
+                   | . as $entry
+                   | select($image | contains($entry.image))
+                 ] | length > 0;
+               . as $report
+               | [ ($report.Results[]? | (.Secrets // [])[] | "secret " + (.RuleID // "unknown") + " at " + (.Target // "unknown")),
+                   ($report.Results[]? | (.Vulnerabilities // [])[] | . as $v
+                     | select($v.Severity == "CRITICAL")
+                     | ($v.VulnerabilityID // "unknown") + " " + ($v.PkgName // "unknown") + " " + ($v.InstalledVersion // "unknown") + " CRITICAL at " + ($report.ArtifactName // $v.Target // "unknown")),
+                   ($report.Results[]? | (.Vulnerabilities // [])[] | . as $v
+                     | select($v.Severity == "HIGH")
+                     | select(vexed($v.VulnerabilityID; $v.PkgName; $v.InstalledVersion; ($report.ArtifactName // $v.Target // "")) | not)
+                     | ($v.VulnerabilityID // "unknown") + " " + ($v.PkgName // "unknown") + " " + ($v.InstalledVersion // "unknown") + " HIGH at " + ($report.ArtifactName // $v.Target // "unknown")) ]
+               | .[]' \
+              "$report")"
+            if [ -n "$violations" ]; then
+              printf 'supply-chain release policy blocked %s:\n%s\n' "$report" "$violations"
+              failed=1
+            fi
+          done
+          [ "$failed" -eq 0 ]
+
+      - name: Upload supply-chain reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: aurora-sandbox-reports
+          path: |
+            sbom-*.spdx.json
+            trivy-*.json
+          retention-days: 30
+          if-no-files-found: error
+
+  publish:
+    name: Publish signed images
+    if: github.repository == 'eanfs/multica' && github.ref == 'refs/heads/main'
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      sandbox_digest: ${{ steps.sandbox.outputs.digest }}
+      egress_digest: ${{ steps.egress.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Docker QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the sandbox OCI index
+        id: sandbox
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: deploy/aurora-sandbox
+          file: deploy/aurora-sandbox/Dockerfile
+          build-contexts: |
+            server=server
+            reporoot=.
+            scripts=scripts
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: |
+            ${{ env.SANDBOX_IMAGE }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/eanfs/multica
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+
+      - name: Build and push the egress OCI index
+        id: egress
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: deploy/aurora-sandbox
+          file: deploy/aurora-sandbox/Dockerfile.egress
+          build-contexts: |
+            server=server
+            reporoot=.
+            scripts=scripts
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: |
+            ${{ env.EGRESS_IMAGE }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/eanfs/multica
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+
+      - name: Generate published SPDX SBOMs
+        run: |
+          syft "${{ env.SANDBOX_IMAGE }}@${{ steps.sandbox.outputs.digest }}" -o spdx-json > sbom-sandbox.spdx.json
+          syft "${{ env.EGRESS_IMAGE }}@${{ steps.egress.outputs.digest }}" -o spdx-json > sbom-egress.spdx.json
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Sign the OCI index digests keylessly
+        run: |
+          cosign sign --yes "${{ env.SANDBOX_IMAGE }}@${{ steps.sandbox.outputs.digest }}"
+          cosign sign --yes "${{ env.EGRESS_IMAGE }}@${{ steps.egress.outputs.digest }}"
+
+      - name: Attach SPDX attestations
+        run: |
+          cosign attest --yes --type spdxjson --predicate sbom-sandbox.spdx.json "${{ env.SANDBOX_IMAGE }}@${{ steps.sandbox.outputs.digest }}"
+          cosign attest --yes --type spdxjson --predicate sbom-egress.spdx.json "${{ env.EGRESS_IMAGE }}@${{ steps.egress.outputs.digest }}"
+
+      - name: Write provenance predicates
+        run: |
+          jq -n --arg repository "${GITHUB_REPOSITORY}" --arg revision "${GITHUB_SHA}" --arg digest "${{ steps.sandbox.outputs.digest }}" \
+            '{builder: {id: ("https://github.com/" + $repository + "/actions")}, buildType: "https://github.com/docker/buildx", invocation: {configSource: {uri: ("git+https://github.com/" + $repository), digest: {sha1: $revision}}}, metadata: {buildInvocationID: $digest, completeness: {parameters: true, environment: true, materials: false}, reproducible: false}, materials: [{uri: ("git+https://github.com/" + $repository), digest: {sha1: $revision}}]}' > provenance-sandbox.json
+          jq -n --arg repository "${GITHUB_REPOSITORY}" --arg revision "${GITHUB_SHA}" --arg digest "${{ steps.egress.outputs.digest }}" \
+            '{builder: {id: ("https://github.com/" + $repository + "/actions")}, buildType: "https://github.com/docker/buildx", invocation: {configSource: {uri: ("git+https://github.com/" + $repository), digest: {sha1: $revision}}}, metadata: {buildInvocationID: $digest, completeness: {parameters: true, environment: true, materials: false}, reproducible: false}, materials: [{uri: ("git+https://github.com/" + $repository), digest: {sha1: $revision}}]}' > provenance-egress.json
+
+      - name: Attach provenance attestations
+        run: |
+          cosign attest --yes --type slsaprovenance --predicate provenance-sandbox.json "${{ env.SANDBOX_IMAGE }}@${{ steps.sandbox.outputs.digest }}"
+          cosign attest --yes --type slsaprovenance --predicate provenance-egress.json "${{ env.EGRESS_IMAGE }}@${{ steps.egress.outputs.digest }}"
+
+      - name: Attest GitHub build provenance (sandbox)
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-name: ghcr.io/eanfs/multica-aurora-sandbox
+          subject-digest: ${{ steps.sandbox.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest GitHub build provenance (egress)
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-name: ghcr.io/eanfs/multica-aurora-egress
+          subject-digest: ${{ steps.egress.outputs.digest }}
+          push-to-registry: true
+
+      - name: Record published digest references
+        run: |
+          {
+            printf '%s@%s\n' "${{ env.SANDBOX_IMAGE }}" "${{ steps.sandbox.outputs.digest }}"
+            printf '%s@%s\n' "${{ env.EGRESS_IMAGE }}" "${{ steps.egress.outputs.digest }}"
+          } | tee digest-references.txt
+
+      - name: Upload published SBOMs, provenance, and digests
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: aurora-sandbox-published
+          path: |
+            sbom-*.spdx.json
+            provenance-*.json
+            digest-references.txt
+          retention-days: 30
+          if-no-files-found: error
+
+  verify-published:
+    name: Verify published signatures and attestations
+    if: github.repository == 'eanfs/multica' && github.ref == 'refs/heads/main'
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Verify signatures, attestations, digests, and architectures
+        env:
+          SANDBOX_DIGEST: ${{ needs.publish.outputs.sandbox_digest }}
+          EGRESS_DIGEST: ${{ needs.publish.outputs.egress_digest }}
+        run: |
+          set -euo pipefail
+          identity="https://github.com/eanfs/multica/.github/workflows/aurora-sandbox.yml@refs/heads/main"
+          issuer="https://token.actions.githubusercontent.com"
+          for pair in "${SANDBOX_IMAGE} ${SANDBOX_DIGEST}" "${EGRESS_IMAGE} ${EGRESS_DIGEST}"; do
+            set -- ${pair}
+            image="${1}"
+            digest="${2}"
+            reference="${image}@${digest}"
+            cosign verify --certificate-identity "${identity}" --certificate-oidc-issuer "${issuer}" "${reference}"
+            cosign verify-attestation --type spdxjson --certificate-identity "${identity}" --certificate-oidc-issuer "${issuer}" "${reference}"
+            cosign verify-attestation --type slsaprovenance --certificate-identity "${identity}" --certificate-oidc-issuer "${issuer}" "${reference}"
+            tag_digest="$(docker buildx imagetools inspect "${image}:sha-${GITHUB_SHA}" --format "{{.Manifest.Digest}}")"
+            test "${tag_digest}" = "${digest}"
+            raw="$(docker buildx imagetools inspect "${reference}" --raw)"
+            printf "%s\n" "${raw}" | jq -e '([.manifests[].platform.architecture] | index("amd64")) and ([.manifests[].platform.architecture] | index("arm64"))' > /dev/null
+            printf "verified %s@%s\n" "${image}" "${digest}"
+          done

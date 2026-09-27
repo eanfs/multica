@@ -13,7 +13,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { REPO_ROOT, verify } from "./verify-aurora-sandbox-locks.mjs";
+import { REPO_ROOT, verify, verifyWorkflow } from "./verify-aurora-sandbox-locks.mjs";
 
 const VERSIONS = "deploy/aurora-sandbox/versions.json";
 const RUNTIME_PACKAGE = "deploy/aurora-sandbox/runtime/package.json";
@@ -149,4 +149,162 @@ test("rejects a Dockerfile network fetch for skills or HyperFrames source", asyn
       "RUN curl -fsSL https://github.com/example/HyperFrames/archive/refs/tags/v0.8.75.tar.gz -o /tmp/hf.tgz\n",
   });
   await assert.rejects(() => verify({ root }), /network fetch/);
+});
+
+// ---------------------------------------------------------------------------
+// Workflow supply-chain policy (--workflow mode). Each case mutates the
+// committed workflow and proves the policy rejects the drift. The committed
+// workflow must pass.
+// ---------------------------------------------------------------------------
+
+const WORKFLOW = ".github/workflows/aurora-sandbox.yml";
+
+function readText(rel) {
+  return fs.readFileSync(path.join(REPO_ROOT, rel), "utf8");
+}
+
+function validVexEntry() {
+  return {
+    cve: "CVE-2026-12345",
+    package: "libexample",
+    version: "1.2.3-1",
+    image: "ghcr.io/eanfs/multica-aurora-sandbox",
+    status: "not_affected",
+    justification:
+      "the vulnerable code path is not reachable in the managed runtime",
+    approver: "security-reviewer",
+    issue_url: "https://github.com/eanfs/multica/issues/115",
+    expires: "2026-10-20",
+  };
+}
+
+function vexWith(entries) {
+  return (
+    JSON.stringify(
+      { schema: "com.multica.aurora.sandbox-vex", version: 1, entries },
+      null,
+      2,
+    ) + "\n"
+  );
+}
+
+test("committed workflow passes the workflow policy", async () => {
+  const summary = await verifyWorkflow();
+  assert.match(summary, /verified aurora sandbox workflow/);
+});
+
+test("rejects a mutable action tag in the workflow", async () => {
+  const workflow = readText(WORKFLOW).replace(/@[0-9a-f]{40}/, "@v6");
+  await assert.rejects(
+    () => verifyWorkflow({ workflow }),
+    /mutable action tag/,
+  );
+});
+
+test("rejects pull_request_target", async () => {
+  const workflow = readText(WORKFLOW).replace(
+    /^on:\s*$/m,
+    "on:\n  pull_request_target:",
+  );
+  await assert.rejects(
+    () => verifyWorkflow({ workflow }),
+    /pull_request_target/,
+  );
+});
+
+test("rejects missing least-privilege top-level permissions", async () => {
+  const workflow = readText(WORKFLOW).replace(
+    /^permissions:\n  contents: read\n/m,
+    "",
+  );
+  await assert.rejects(
+    () => verifyWorkflow({ workflow }),
+    /least-privilege permissions/,
+  );
+});
+
+test("rejects secret interpolation into build args", async () => {
+  const workflow =
+    readText(WORKFLOW) +
+    "\nbuild-args: |\n  TOKEN=${{ secrets.GITHUB_TOKEN }}\n";
+  await assert.rejects(
+    () => verifyWorkflow({ workflow }),
+    /secret into build args/,
+  );
+});
+
+test("rejects an unpinned base image reference", async () => {
+  const workflow = readText(WORKFLOW) + "\n    image: node:22-bookworm-slim\n";
+  await assert.rejects(
+    () => verifyWorkflow({ workflow }),
+    /unpinned base image/,
+  );
+});
+
+test("rejects a tag-only fleet example", async () => {
+  const workflow =
+    readText(WORKFLOW) +
+    "\n    run: echo ghcr.io/eanfs/multica-aurora-sandbox:latest\n";
+  await assert.rejects(
+    () => verifyWorkflow({ workflow }),
+    /tag-only fleet example/,
+  );
+});
+
+test("rejects a workflow missing the Trivy scan step", async () => {
+  const workflow = readText(WORKFLOW).replace(/trivy/gi, "scanner");
+  await assert.rejects(
+    () => verifyWorkflow({ workflow }),
+    /missing a Trivy scan step/,
+  );
+});
+
+test("rejects an expired VEX entry", async () => {
+  const entry = validVexEntry();
+  entry.expires = "2026-09-20";
+  await assert.rejects(
+    () =>
+      verifyWorkflow({ vex: vexWith([entry]), now: "2026-09-25T00:00:00Z" }),
+    /expired/,
+  );
+});
+
+test("rejects a VEX expiry more than 30 days away", async () => {
+  const entry = validVexEntry();
+  entry.expires = "2026-12-31";
+  await assert.rejects(
+    () =>
+      verifyWorkflow({ vex: vexWith([entry]), now: "2026-09-25T00:00:00Z" }),
+    /more than 30 days/,
+  );
+});
+
+test("rejects a wildcard VEX entry", async () => {
+  const entry = validVexEntry();
+  entry.cve = "CVE-*";
+  await assert.rejects(
+    () =>
+      verifyWorkflow({ vex: vexWith([entry]), now: "2026-09-25T00:00:00Z" }),
+    /wildcard or invalid cve/,
+  );
+});
+
+test("rejects a VEX entry with a missing field", async () => {
+  const entry = validVexEntry();
+  delete entry.approver;
+  await assert.rejects(
+    () =>
+      verifyWorkflow({ vex: vexWith([entry]), now: "2026-09-25T00:00:00Z" }),
+    /missing the approver field/,
+  );
+});
+
+test("rejects a tag-only fleet reference in the README", async () => {
+  await assert.rejects(
+    () =>
+      verifyWorkflow({
+        readme: "deploy with ghcr.io/eanfs/multica-aurora-sandbox:latest",
+      }),
+    /tag-only fleet reference/,
+  );
 });
