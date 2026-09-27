@@ -70,21 +70,34 @@ staging="$(mktemp -d)"
 cleanup() { rm -rf "$staging"; }
 trap cleanup EXIT
 
-# image_ref resolves a locally tagged image to the digest-qualified reference
-# the hardened policy requires.
+# image_ref resolves a locally tagged image to an immutable reference the
+# local image store can actually resolve. It prefers the registry digest Docker
+# records in RepoDigests; when the store records none (an image built locally on
+# the classic image store), it derives one from the image ID. That derived
+# <repo>@<image-id> form is not resolvable on the classic store, so passing it
+# to docker run starts a network pull instead; the bare image ID is
+# content-addressed and always resolves while the image is present. Both forms
+# keep the hardened policy's immutability boundary; a mutable tag never passes.
 image_ref() {
-  local tag="$1" ref id repo
+  local tag="$1" ref id candidate
+  id="$(docker inspect --format '{{.Id}}' "$tag")" || fail "cannot inspect image $tag"
   ref="$(docker inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$tag" 2>/dev/null || true)"
   if [ -z "$ref" ]; then
-    id="$(docker inspect --format '{{.Id}}' "$tag")"
-    repo="${tag%:*}"
-    ref="$repo@$id"
+    ref="${tag%:*}@$id"
   fi
   case "$ref" in
     *@sha256:*) ;;
     *) fail "resolved image reference $ref is not digest-pinned" ;;
   esac
-  printf '%s' "$ref"
+  # Prove the reference resolves before a docker invocation can turn it into a
+  # network pull. docker image inspect never pulls.
+  for candidate in "$ref" "$id"; do
+    if docker image inspect "$candidate" >/dev/null 2>&1; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  fail "image $tag is not resolvable locally as $ref or $id; refusing to pull"
 }
 
 if [ -z "$fixture_sandbox_ref" ]; then
@@ -108,7 +121,7 @@ export AURORA_APPARMOR_PROFILE="multica-aurora-sandbox"
 
 count="${AURORA_DOCKER_SECURITY_COUNT:-1}"
 cd "$server_dir"
-# Both auroradocker tests run against the same digest-pinned image pair: the
+# Both auroradocker tests run against the same immutable image pair: the
 # Linux isolation/egress boundary and Task 3's containerized fake pipelines
 # (fake Multica/Ark/OpenAI/ASR endpoints, real HyperFrames/FFmpeg/Chromium).
 "$go_bin" test -tags=auroradocker ./internal/aurorafleet \

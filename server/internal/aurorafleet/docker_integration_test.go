@@ -257,7 +257,7 @@ func assertSandboxBoundary(t *testing.T, inspect ContainerInspect, raw []byte, s
 		t.Errorf("container inspect references a Docker socket")
 	}
 	if !strings.Contains(inspect.Config.Image, pinnedDigest(t, cfg.sandboxImage)) {
-		t.Errorf("Config.Image = %q, want the digest-pinned reference %q", inspect.Config.Image, cfg.sandboxImage)
+		t.Errorf("Config.Image = %q, want the pinned reference %q", inspect.Config.Image, cfg.sandboxImage)
 	}
 	assertNoSecret(t, secret, map[string]string{
 		"container inspect": string(raw),
@@ -791,14 +791,18 @@ func randomHex(t *testing.T, n int) string {
 	return hex.EncodeToString(b)
 }
 
-// pinnedDigest extracts the immutable digest from a digest-pinned reference.
+// pinnedDigest extracts the immutable digest from a digest-qualified
+// reference or a bare image ID.
 func pinnedDigest(t *testing.T, image string) string {
 	t.Helper()
-	at := strings.LastIndex(image, "@")
-	if at < 0 {
-		t.Fatalf("image %q is not digest-pinned", image)
+	if at := strings.LastIndex(image, "@"); at >= 0 {
+		return image[at+1:]
 	}
-	return image[at+1:]
+	if digestPattern.MatchString(image) {
+		return image
+	}
+	t.Fatalf("image %q is neither digest-qualified nor an image ID", image)
+	return ""
 }
 
 // TestDockerSandboxFakeAuroraPipelines runs the representative Aurora skill
@@ -834,7 +838,7 @@ func runFakeAuroraPipelines(t *testing.T, sandboxImage string) {
 	}
 	container := "aurora-pipelines-" + randomHex(t, 6)
 	args := []string{
-		"run", "--rm", "--name", container,
+		"run", "--rm", "--pull", "never", "--name", container,
 		"--network", "none",
 		"--user", sandboxUser,
 		"--read-only",

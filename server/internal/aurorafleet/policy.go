@@ -97,9 +97,13 @@ const nodeIdentityLabel = labelNamespace + "node"
 // deterministic docker invocation. The zero value is not usable: Validate
 // fails closed so an unconfigured backend never provisions anything.
 type Policy struct {
-	// SandboxImage must be digest-pinned (@sha256:<64 lowercase hex>).
+	// SandboxImage must be pinned to immutable content: a digest-qualified
+	// reference (<name>@sha256:<64 lowercase hex>) or a bare image ID
+	// (sha256:<64 lowercase hex>).
 	SandboxImage string
-	// ProxyImage must be digest-pinned (@sha256:<64 lowercase hex>).
+	// ProxyImage must be pinned to immutable content: a digest-qualified
+	// reference (<name>@sha256:<64 lowercase hex>) or a bare image ID
+	// (sha256:<64 lowercase hex>).
 	ProxyImage string
 	// SeccompPath is the absolute host path of the deployed seccomp profile
 	// (deploy/aurora-sandbox/seccomp.json).
@@ -431,12 +435,19 @@ func labelArgs(labels map[string]string) []string {
 	return args
 }
 
-// validateDigestPinnedImage requires an OCI image reference whose digest is
-// an immutable sha256 of exactly 64 lowercase hex characters.
+// validateDigestPinnedImage requires an OCI image reference pinned to
+// immutable content: either a digest-qualified reference
+// (<name>@sha256:<64 lowercase hex>) or a bare image ID (sha256:<64 lowercase
+// hex). A locally built image on the classic image store has no resolvable
+// repository digest, so the fleet accepts its content-addressed image ID. A
+// mutable tag is never accepted.
 func validateDigestPinnedImage(image string) error {
+	if digestPattern.MatchString(image) {
+		return nil
+	}
 	at := strings.LastIndex(image, "@")
 	if at <= 0 || at == len(image)-1 {
-		return fmt.Errorf("image %q must be digest-pinned as <name>@sha256:<64 hex>", image)
+		return fmt.Errorf("image %q must be pinned as <name>@sha256:<64 hex> or sha256:<64 hex>", image)
 	}
 	name, digest := image[:at], image[at+1:]
 	if strings.ContainsAny(name, " \t\r\n") || strings.Contains(name, "@") {
