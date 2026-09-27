@@ -484,15 +484,23 @@ func requireBlocked(t *testing.T, out probeOutcome, name string) {
 	}
 }
 
+// seccompKillExit is 128+SIGSYS, the exit status a shell-compatible waiter
+// reports for a process the seccomp KILL_PROCESS rule terminated. `docker exec` reports
+// the in-container signal death this way rather than as a local signal on the
+// docker CLI process, so the acceptance must accept both spellings.
+const seccompKillExit = 128 + int(syscall.SIGSYS)
+
 // requireSeccompKilled requires the syscall to be terminated by the seccomp
-// KILL_PROCESS rule, which is the strongest denial the profile expresses.
+// KILL_PROCESS rule, which is the strongest denial the profile expresses. A
+// probe that returns to userspace (with a JSON result) is a weaker denial — for
+// example an AppArmor permission error — and fails.
 func requireSeccompKilled(t *testing.T, out probeOutcome, name string) {
 	t.Helper()
 	if out.hasJSON {
 		t.Fatalf("%s returned to userspace instead of being killed: %+v", name, out.result)
 	}
-	if out.signal != syscall.SIGSYS {
-		t.Fatalf("%s exit = %d signal = %v, want SIGSYS from the seccomp KILL_PROCESS rule", name, out.exit, out.signal)
+	if out.signal != syscall.SIGSYS && out.exit != seccompKillExit {
+		t.Fatalf("%s exit = %d signal = %v, want the seccomp KILL_PROCESS termination (SIGSYS or exit %d)", name, out.exit, out.signal, seccompKillExit)
 	}
 }
 
