@@ -1,8 +1,11 @@
 # multica-aurora-sandbox: AppArmor profile for Aurora workspace sandbox
-# containers. Denies raw networking, all mounts, process memory access,
-# kernel/sysfs writes, and Docker socket paths. Host filesystem access is
-# denied except the read-only enrollment/provider secret files staged under
-# the fleet secret root by the deployment.
+# containers. AppArmor file rules are default-deny, so this profile grants only
+# the image's executables/libraries, the writable tmpfs surfaces, and the
+# read-only enrollment/provider secret files, and explicitly denies raw
+# networking, mounts, process memory, kernel/sysfs writes, and Docker socket
+# paths. A blanket `deny /**` rule must NOT be used here: an AppArmor deny
+# overrides the matching allow rules, including the writable tmpfs surfaces and
+# the execute permission the container's own init needs.
 #
 # Deploy (Linux only): apparmor_parser -Q validates the profile syntax, then
 #   apparmor_parser -r multica-aurora-sandbox.apparmor
@@ -49,12 +52,6 @@ profile multica-aurora-sandbox flags=(attach_disconnected,mediate_deleted) {
   deny /run/docker.sock rwklx,
   deny /run/docker/** rwklx,
 
-  # ---- Host filesystem: deny by default; allow read-only access only to
-  # the fleet secret root the deployment mounts enrollment/provider secrets
-  # from (the container sees them at /run/secrets/).
-  deny / rwklx,
-  deny /** wklx,
-
   # Read-only secret files staged by the fleet controller.
   /run/secrets/aurora-enrollment r,
   /run/secrets/aurora-provider-* r,
@@ -65,13 +62,27 @@ profile multica-aurora-sandbox flags=(attach_disconnected,mediate_deleted) {
   /run/** rwk,
   /workspace/** rwk,
 
-  # The root filesystem is read-only; allow reading and mapping executables
-  # and libraries from the image, nothing else.
+  # The root filesystem is read-only; allow reading, mapping, and inheriting
+  # into the image's own executables and libraries, nothing else. `ix` keeps a
+  # child inside this profile rather than escaping to unconfined, and the
+  # root-owned read-only image means only trusted content can be executed.
+  # The --init runtime binary is mounted by the run policy and may appear under
+  # /dev/init or /{,usr/}sbin/docker-init depending on the engine.
+  /dev/init ix,
   /{,usr/}bin/** mr,
+  /{,usr/}bin/** ix,
   /{,usr/}sbin/** mr,
+  /{,usr/}sbin/** ix,
+  /usr/local/** mr,
+  /usr/local/** ix,
   /usr/lib/** mr,
+  /usr/lib/** ix,
+  /usr/libexec/** mr,
+  /usr/libexec/** ix,
   /lib/** mr,
+  /lib/** ix,
   /opt/** mr,
+  /opt/** ix,
   /etc/** r,
   /usr/share/** r,
 

@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createBroker } from '../src/server.mjs';
 import { buildResumeHtml } from '../src/tools/resume.mjs';
-import { buildCaptionComposition, formatDurationSeconds, parseVideoDuration } from '../src/tools/hyperframes.mjs';
+import { buildCaptionComposition, formatDurationSeconds, parseVideoDuration, renderEnvironment, resolveBrowserPath } from '../src/tools/hyperframes.mjs';
 import { makeWorkspace, baseContext, writeContextFile, writeInput, attachmentEntry, uuid, makeDocx, pngBytes, readManifest } from './helpers.mjs';
 
 const DOC_ID = uuid(9);
@@ -110,10 +110,30 @@ test('id_photo runs a fixed ImageMagick pipeline and writes a manifest image', a
 // A caption render must declare the probed media duration (HyperFrames never
 // captures a zero-duration composition) and must serve the media from its own
 // project directory (Chromium blocks a file:// video subresource).
-test('render_video_captions derives the duration and serves the media beside the composition', async () => {
+// HyperFrames prefers its own managed Chrome on x86-64 Linux and only falls
+// back to the system browser on ARM64, so the bounded child environment must
+// carry the sandbox's browser override or an offline amd64 runner fails with
+// "Chrome not found".
+test('render_video_captions forwards the configured browser override to the child environment', () => {
+  const env = { PATH: '/usr/local/bin:/usr/bin:/bin', HYPERFRAMES_BROWSER_PATH: process.execPath };
+  assert.equal(resolveBrowserPath(env), process.execPath);
+  const rendered = renderEnvironment(env);
+  assert.equal(rendered.HYPERFRAMES_BROWSER_PATH, process.execPath);
+  assert.equal(rendered.PATH, env.PATH);
+  const explicit = renderEnvironment({ PATH: '/usr/bin' }, '/opt/aurora/bin/chromium');
+  assert.equal(explicit.HYPERFRAMES_BROWSER_PATH, '/opt/aurora/bin/chromium');
+});
+
+test('render_video_captions derives the duration and serves the media beside the composition', async (t) => {
   const ws = makeWorkspace();
   const video = Buffer.alloc(32, 2);
   writeInput(ws, 'clip.mp4', video);
+  const previousBrowserPath = process.env.HYPERFRAMES_BROWSER_PATH;
+  process.env.HYPERFRAMES_BROWSER_PATH = process.execPath;
+  t.after(() => {
+    if (previousBrowserPath === undefined) delete process.env.HYPERFRAMES_BROWSER_PATH;
+    else process.env.HYPERFRAMES_BROWSER_PATH = previousBrowserPath;
+  });
   const processRunner = {
     calls: [],
     async run(input) {
@@ -142,6 +162,8 @@ test('render_video_captions derives the duration and serves the media beside the
   assert.equal(call.command, 'hyperframes');
   assert.ok(call.args.includes('render'));
   assert.ok(call.args.includes('-c'));
+  assert.equal(call.env.HYPERFRAMES_BROWSER_PATH, process.execPath);
+  assert.equal(typeof call.env.PATH, 'string');
   const composition = call.args[call.args.indexOf('-c') + 1];
   // HyperFrames joins -c with the child cwd, so the value must be relative and
   // resolve to exactly one entry file (an absolute -c was joined twice).

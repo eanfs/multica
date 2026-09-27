@@ -11,6 +11,32 @@ const STAGE_WIDTH = 1280;
 const STAGE_HEIGHT = 720;
 const MEDIA_BASENAME = 'source';
 
+// HyperFrames prefers its own managed chrome-headless-shell and only consults
+// the system browser on Linux ARM64; on x86-64 it tries to download the
+// managed shell instead, which the network-isolated sandbox cannot do. Point
+// its documented override at the image's apt-installed Chromium and forward
+// that through the minimal child environment the process runner builds.
+const BROWSER_PATH_ENV = 'HYPERFRAMES_BROWSER_PATH';
+const SYSTEM_CHROMIUM_PATHS = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'];
+
+export function resolveBrowserPath(env = process.env) {
+  const configured = env[BROWSER_PATH_ENV];
+  if (configured && fs.existsSync(configured)) return configured;
+  return SYSTEM_CHROMIUM_PATHS.find((candidate) => fs.existsSync(candidate));
+}
+
+// renderEnvironment mirrors the process runner's minimal { PATH, LANG }
+// environment and adds the browser override so the browser-dependent render
+// keeps working after the runner drops the image-level environment.
+export function renderEnvironment(env = process.env, browserPath = resolveBrowserPath(env)) {
+  const environment = {
+    PATH: env.PATH || '/usr/local/bin:/usr/bin:/bin',
+    LANG: env.LANG || 'C.UTF-8',
+  };
+  if (browserPath) environment[BROWSER_PATH_ENV] = browserPath;
+  return environment;
+}
+
 // Fixed extension map: the attachment mime type is validated by the task
 // context, and the served file name is compiled, not model-controlled.
 const VIDEO_EXTENSIONS = Object.freeze({
@@ -136,6 +162,7 @@ export async function renderVideoCaptions(broker, args) {
     args: ['render', '-c', compositionEntry, '-o', target],
     cwd: projectDirectory,
     timeoutMs: broker.config.renderTimeoutMs,
+    env: renderEnvironment(),
   });
   broker.manifest.addFile({ id: 'primary-1', path: target, name, kind: 'video', role: 'primary', format: 'mp4', mimeType: 'video/mp4' });
   broker.manifest.write();
