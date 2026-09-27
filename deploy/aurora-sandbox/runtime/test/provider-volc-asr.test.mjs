@@ -168,3 +168,13 @@ test('the process runner terminates timed-out process trees', async () => {
   );
   assert.ok(Date.now() - started < 5000);
 });
+
+// A timed-out HyperFrames render must surface its stderr, otherwise the smoke
+// only ever reports the bare timeout.
+test('the process runner surfaces captured stderr on timeout', async () => {
+  const runner = createProcessRunner();
+  await assert.rejects(
+    runner.run({ command: 'bash', args: ['-c', 'echo hyperframes-render-diagnostic >&2; sleep 30'], timeoutMs: 150 }),
+    /tim(e|ed) out[\s\S]*hyperframes-render-diagnostic/,
+  );
+});

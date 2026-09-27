@@ -524,7 +524,7 @@ test('video-captions chains the ASR transcript into the caption renderer without
   const scenario = prepareScenario(ws, 'video-captions');
   await scenario.run(scenario.broker);
 
-  assert.deepEqual(scenario.processRunner.calls.map((entry) => entry.command), ['ffprobe', 'ffmpeg', 'hyperframes']);
+  assert.deepEqual(scenario.processRunner.calls.map((entry) => entry.command), ['ffprobe', 'ffmpeg', 'ffprobe', 'hyperframes']);
   assert.deepEqual(scenario.router.counts(), { ark: 0, openai: 0, asr: 1 });
 
   // HyperFrames resolves the entry as join(cwd, -c): an absolute -c would be
@@ -535,6 +535,14 @@ test('video-captions chains the ASR transcript into the caption renderer without
   assert.ok(!path.isAbsolute(composition), 'composition must be relative to the hyperframes cwd');
   assert.equal(path.join(hyperframes.cwd, composition), path.resolve(hyperframes.cwd, composition));
   assert.ok(fs.existsSync(path.join(hyperframes.cwd, composition)), 'hyperframes must resolve the composition entry under its cwd');
+
+  // The renderer must declare the probed duration and serve the media from the
+  // project directory; the old file:// video source was blocked by Chromium.
+  const captionHtml = fs.readFileSync(path.join(hyperframes.cwd, composition), 'utf8');
+  assert.match(captionHtml, /data-duration="12\.5"/);
+  assert.match(captionHtml, /<video[^>]*src="source\.mp4"/);
+  assert.doesNotMatch(captionHtml, /file:\/\//);
+  assert.ok(fs.existsSync(path.join(hyperframes.cwd, 'source.mp4')), 'the media must be copied beside the composition');
 
   const manifest = readManifest(ws.outputRoot);
   const transcript = manifest.artifacts.find((artifact) => artifact.role === 'transcript');

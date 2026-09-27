@@ -124,7 +124,10 @@ export function createProcessRunner({ spawnImpl = spawn } = {}) {
           settled = true;
           clearTimeout(timer);
           if (timedOut) {
-            reject(new Error('process timed out and its process tree was terminated'));
+            // Surface the captured diagnostics: a stalled render otherwise
+            // hides the child's stderr behind a bare timeout message.
+            const tail = stderr.length ? ': ' + Buffer.concat(stderr).toString('utf8').slice(-1024) : '';
+            reject(new Error(redactString('process timed out and its process tree was terminated' + tail)));
             return;
           }
           if (total > maxBytes) {

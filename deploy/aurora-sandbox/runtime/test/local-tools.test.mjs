@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createBroker } from '../src/server.mjs';
 import { buildResumeHtml } from '../src/tools/resume.mjs';
+import { buildCaptionComposition, formatDurationSeconds, parseVideoDuration } from '../src/tools/hyperframes.mjs';
 import { makeWorkspace, baseContext, writeContextFile, writeInput, attachmentEntry, uuid, makeDocx, pngBytes, readManifest } from './helpers.mjs';
 
 const DOC_ID = uuid(9);
@@ -106,29 +107,38 @@ test('id_photo runs a fixed ImageMagick pipeline and writes a manifest image', a
   assert.equal(manifest.artifacts[0].role, 'primary');
 });
 
-test('render_video_captions uses a fixed composition and never arbitrary source', async () => {
+// A caption render must declare the probed media duration (HyperFrames never
+// captures a zero-duration composition) and must serve the media from its own
+// project directory (Chromium blocks a file:// video subresource).
+test('render_video_captions derives the duration and serves the media beside the composition', async () => {
   const ws = makeWorkspace();
-  writeInput(ws, 'clip.mp4', Buffer.alloc(32, 2));
+  const video = Buffer.alloc(32, 2);
+  writeInput(ws, 'clip.mp4', video);
   const processRunner = {
     calls: [],
     async run(input) {
       this.calls.push(input);
+      if (input.command === 'ffprobe') {
+        return { stdout: JSON.stringify({ format: { duration: '1.5' } }), stderr: '', code: 0 };
+      }
       const outputIndex = input.args.indexOf('-o');
-      const output = input.args[outputIndex + 1];
-      fs.writeFileSync(output, Buffer.from('mp4'));
+      fs.writeFileSync(input.args[outputIndex + 1], Buffer.from('mp4'));
       return { stdout: '', stderr: '', code: 0 };
     },
   };
   const broker = makeBroker(ws, {
     skillId: 'video-captions',
-    attachments: { [VIDEO_ID]: attachmentEntry('clip.mp4', 'video/mp4', 32) },
+    attachments: { [VIDEO_ID]: attachmentEntry('clip.mp4', 'video/mp4', video.length) },
     processRunner,
   });
   const result = await broker.dispatch('aurora.render_video_captions', {
     attachment_id: VIDEO_ID,
     cues: [{ start: 0, end: 1.5, text: '</script><script>alert(1)</script>' }],
   });
-  const call = processRunner.calls[0];
+  assert.deepEqual(processRunner.calls.map((entry) => entry.command), ['ffprobe', 'hyperframes']);
+  const probe = processRunner.calls[0];
+  assert.ok(probe.args.includes('-show_format'));
+  const call = processRunner.calls[1];
   assert.equal(call.command, 'hyperframes');
   assert.ok(call.args.includes('render'));
   assert.ok(call.args.includes('-c'));
@@ -139,10 +149,44 @@ test('render_video_captions uses a fixed composition and never arbitrary source'
   assert.equal(path.join(call.cwd, composition), path.resolve(call.cwd, composition));
   const html = fs.readFileSync(path.join(call.cwd, composition), 'utf8');
   assert.doesNotMatch(html, /<script>alert/);
+  assert.doesNotMatch(html, /file:\/\//);
+  assert.match(html, /data-composition-id="aurora-captions"/);
+  assert.match(html, /data-duration="1\.5"/);
+  assert.match(html, /<video[^>]*src="source\.mp4"/);
+  // The media is a private copy next to the entry, so HyperFrames' loopback
+  // server can serve it.
+  const served = path.join(call.cwd, 'source.mp4');
+  assert.ok(fs.existsSync(served), 'the media must be copied beside the composition');
+  assert.deepEqual(fs.readFileSync(served), video);
   assert.equal(call.shell, undefined);
   const manifest = readManifest(ws.outputRoot);
   assert.equal(manifest.artifacts[0].kind, 'video');
   assert.doesNotMatch(JSON.stringify(result), /alert\(1\)/);
+});
+
+test('render_video_captions fails closed when ffprobe reports no usable duration', async () => {
+  const ws = makeWorkspace();
+  writeInput(ws, 'clip.mp4', Buffer.alloc(32, 2));
+  const processRunner = {
+    calls: [],
+    async run(input) {
+      this.calls.push(input);
+      return { stdout: JSON.stringify({ format: {} }), stderr: '', code: 0 };
+    },
+  };
+  const broker = makeBroker(ws, {
+    skillId: 'video-captions',
+    attachments: { [VIDEO_ID]: attachmentEntry('clip.mp4', 'video/mp4', 32) },
+    processRunner,
+  });
+  await assert.rejects(
+    broker.dispatch('aurora.render_video_captions', {
+      attachment_id: VIDEO_ID,
+      cues: [{ start: 0, end: 1, text: 'no duration' }],
+    }),
+    /duration/,
+  );
+  assert.deepEqual(processRunner.calls.map((entry) => entry.command), ['ffprobe']);
 });
 
 // Regression for the doubled HyperFrames composition path: the CLI reads
@@ -157,9 +201,11 @@ test('render_video_captions passes a cwd-relative composition so HyperFrames res
     calls: [],
     async run(input) {
       this.calls.push(input);
+      if (input.command === 'ffprobe') {
+        return { stdout: JSON.stringify({ format: { duration: '1' } }), stderr: '', code: 0 };
+      }
       const outputIndex = input.args.indexOf('-o');
-      const output = input.args[outputIndex + 1];
-      fs.writeFileSync(output, Buffer.from('mp4'));
+      fs.writeFileSync(input.args[outputIndex + 1], Buffer.from('mp4'));
       return { stdout: '', stderr: '', code: 0 };
     },
   };
@@ -172,14 +218,25 @@ test('render_video_captions passes a cwd-relative composition so HyperFrames res
     attachment_id: VIDEO_ID,
     cues: [{ start: 0, end: 1, text: 'relative entry' }],
   });
-  const call = processRunner.calls[0];
-  assert.equal(call.command, 'hyperframes');
+  const call = processRunner.calls.find((entry) => entry.command === 'hyperframes');
+  assert.ok(call);
   const composition = call.args[call.args.indexOf('-c') + 1];
   const resolved = path.join(call.cwd, composition);
   assert.ok(!path.isAbsolute(composition), 'composition must be relative to the hyperframes cwd');
   assert.equal(resolved, path.resolve(call.cwd, composition));
   assert.ok(fs.existsSync(resolved), 'hyperframes must resolve the composition entry under its cwd');
   assert.match(fs.readFileSync(resolved, 'utf8'), /<!doctype html>/);
+});
+
+test('caption composition declares the probed duration and never a file:// source', () => {
+  const html = buildCaptionComposition({ cues: [{ start: 0, end: 2, text: 'hello' }], mediaName: 'source.mp4', durationSeconds: 2.5 });
+  assert.match(html, /data-composition-id="aurora-captions"/);
+  assert.match(html, /data-duration="2\.5"/);
+  assert.match(html, /<video[^>]*src="source\.mp4"/);
+  assert.doesNotMatch(html, /file:\/\//);
+  assert.throws(() => formatDurationSeconds(0), /positive/);
+  assert.throws(() => formatDurationSeconds(Number.NaN), /positive/);
+  assert.throws(() => parseVideoDuration(JSON.stringify({ format: { duration: '0' } })), /duration/);
 });
 
 test('render_resume escapes structured sections and prints PDF with network disabled', async () => {
