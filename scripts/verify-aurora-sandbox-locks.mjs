@@ -34,6 +34,9 @@ export const REL = {
   skillsLock: "deploy/aurora-sandbox/vendor/volcengine/skills-lock.json",
   dockerfile: "deploy/aurora-sandbox/Dockerfile",
   dockerfileEgress: "deploy/aurora-sandbox/Dockerfile.egress",
+  workflow: ".github/workflows/aurora-sandbox.yml",
+  vex: ".github/aurora-sandbox-vex.json",
+  readme: "deploy/aurora-sandbox/README.md",
 };
 
 // The audited lock. Mirrors the plan's Locked Inputs table and the child plan C
@@ -136,6 +139,9 @@ export function loadLockState(root = REPO_ROOT) {
     goModText: readLockText(resolved, REL.goMod),
     dockerfile: readLockText(resolved, REL.dockerfile),
     dockerfileEgress: readLockText(resolved, REL.dockerfileEgress),
+    workflowText: readLockText(resolved, REL.workflow),
+    vexText: readLockText(resolved, REL.vex),
+    readmeText: readLockText(resolved, REL.readme),
   };
 }
 
@@ -692,6 +698,594 @@ export function validate(state) {
   return errors;
 }
 
+// ---------------------------------------------------------------------------
+// Workflow supply-chain policy (--workflow mode).
+//
+// Parses .github/workflows/aurora-sandbox.yml and enforces the plan's publish
+// contract: every action pinned to a full commit SHA, no unpinned base image,
+// least-privilege permissions, no secret interpolation into build args,
+// digest-only fleet references, the required scan/SBOM/provenance/sign steps,
+// and no pull_request_target trigger. It also validates the structured,
+// expiring VEX entries in .github/aurora-sandbox-vex.json. The parser is
+// dependency-free and understands the YAML subset GitHub Actions uses (block
+// mappings, block sequences, and literal/folded scalars).
+
+const ACTION_SHA = /@[0-9a-f]{40}$/;
+const FULL_SHA256_REF = /@sha256:[0-9a-f]{64}$/;
+const AURORA_IMAGE = /ghcr\.io\/eanfs\/multica-aurora-(?:sandbox|egress)/;
+
+function yamlLines(text) {
+  return text.replace(/\r\n/g, "\n").split("\n");
+}
+
+function yamlIndent(line) {
+  const match = /^[ \t]*/.exec(line);
+  return match ? match[0].length : 0;
+}
+
+function isYamlIgnorable(line) {
+  const trimmed = line.trim();
+  return trimmed === "" || trimmed.startsWith("#");
+}
+
+function stripYamlComment(value) {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i];
+    if (char === "'" && !inDouble) inSingle = !inSingle;
+    else if (char === '"' && !inSingle) inDouble = !inDouble;
+    else if (
+      char === "#" &&
+      !inSingle &&
+      !inDouble &&
+      (i === 0 || /\s/.test(value[i - 1]))
+    ) {
+      return value.slice(0, i).trim();
+    }
+  }
+  return value.trim();
+}
+
+function yamlScalar(value) {
+  const trimmed = stripYamlComment(value);
+  if (
+    trimmed.length >= 2 &&
+    ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+      (trimmed.startsWith("'") && trimmed.endsWith("'")))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function yamlKeyValue(content) {
+  const match = /^([^:#]+):\s*(.*)$/.exec(content);
+  if (!match) return null;
+  return { key: yamlScalar(match[1]), value: match[2] };
+}
+
+function findTopSection(lines, name) {
+  const pattern = new RegExp("^" + name + ":(.*)$");
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = pattern.exec(lines[i]);
+    if (!match) continue;
+    let end = lines.length;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      if (isYamlIgnorable(lines[j])) continue;
+      if (yamlIndent(lines[j]) === 0) {
+        end = j;
+        break;
+      }
+    }
+    return {
+      start: i,
+      end,
+      inline: stripYamlComment(match[1]),
+      body: lines.slice(i + 1, end),
+    };
+  }
+  return null;
+}
+
+function collectKeyBlocks(lines, key) {
+  const pattern = new RegExp("^(\\s*)" + key + ":\\s*(.*)$");
+  const blocks = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = pattern.exec(lines[i]);
+    if (!match) continue;
+    const indent = match[1].length;
+    const inline = stripYamlComment(match[2]);
+    const body = [];
+    if (inline === "" || /^[|>][-+]?\d*$/.test(inline)) {
+      for (let j = i + 1; j < lines.length; j += 1) {
+        if (isYamlIgnorable(lines[j])) {
+          body.push("");
+          continue;
+        }
+        if (yamlIndent(lines[j]) <= indent) break;
+        body.push(lines[j]);
+      }
+    }
+    blocks.push({ indent, inline, body: body.join("\n") });
+  }
+  return blocks;
+}
+
+function parsePermissions(block) {
+  const permissions = {};
+  const inline = block.inline;
+  if (inline) {
+    if (inline === "read-all" || inline === "write-all") {
+      permissions.__all = inline.slice(0, -4);
+      return permissions;
+    }
+    const flow = /^\{\s*(.*?)\s*\}$/.exec(inline);
+    if (flow) {
+      for (const pair of flow[1].split(",")) {
+        const kv = pair.split(":");
+        if (kv.length >= 2)
+          permissions[kv[0].trim()] = kv.slice(1).join(":").trim();
+      }
+      return permissions;
+    }
+    permissions.__scalar = inline;
+    return permissions;
+  }
+  for (const raw of block.body.split("\n")) {
+    if (raw.trim() === "") continue;
+    const kv = yamlKeyValue(raw.trim());
+    if (kv) permissions[kv.key] = yamlScalar(kv.value);
+  }
+  return permissions;
+}
+
+function parseJobs(lines, section) {
+  const jobs = [];
+  if (!section) return jobs;
+  for (let i = section.start + 1; i < section.end; i += 1) {
+    if (isYamlIgnorable(lines[i]) || yamlIndent(lines[i]) !== 2) continue;
+    const match = /^ {2}([A-Za-z0-9_-]+):\s*(.*)$/.exec(lines[i]);
+    if (!match) continue;
+    let end = section.end;
+    for (let j = i + 1; j < section.end; j += 1) {
+      if (isYamlIgnorable(lines[j])) continue;
+      if (yamlIndent(lines[j]) === 2) {
+        end = j;
+        break;
+      }
+    }
+    jobs.push({
+      name: match[1],
+      start: i,
+      end,
+      lines: lines.slice(i + 1, end),
+    });
+  }
+  return jobs;
+}
+
+function jobField(job, key, indent) {
+  const pattern = new RegExp("^ {" + indent + "}" + key + ":\\s*(.*)$");
+  for (const line of job.lines) {
+    const match = pattern.exec(line);
+    if (match) return stripYamlComment(match[1]);
+  }
+  return null;
+}
+
+function jobPermissions(job) {
+  const blocks = collectKeyBlocks(job.lines, "permissions");
+  if (blocks.length === 0) return null;
+  return parsePermissions(blocks[0]);
+}
+
+function pushTriggersMain(onSection) {
+  if (!onSection) return false;
+  let inPush = false;
+  for (const raw of onSection.body) {
+    if (isYamlIgnorable(raw)) continue;
+    const indent = yamlIndent(raw);
+    if (indent === 2) {
+      inPush = /^ {2}push:\s*$/.test(raw);
+      continue;
+    }
+    if (
+      inPush &&
+      indent > 2 &&
+      /(^|[^A-Za-z0-9_-])main([^A-Za-z0-9_-]|$)/.test(raw)
+    )
+      return true;
+  }
+  return false;
+}
+
+function requireWorkflowStep(text, pattern, label, errors) {
+  if (!pattern.test(text)) {
+    errors.push("aurora sandbox workflow is missing a " + label + " step");
+  }
+}
+
+export function validateVex(state, options = {}) {
+  const errors = [];
+  const text = state.vexText;
+  if (typeof text !== "string" || text.trim() === "") {
+    errors.push("missing aurora sandbox VEX file: " + REL.vex);
+    return errors;
+  }
+  let vex;
+  try {
+    vex = JSON.parse(text);
+  } catch (error) {
+    errors.push("aurora sandbox VEX file is not valid JSON: " + error.message);
+    return errors;
+  }
+  checkExact(
+    "VEX schema",
+    vex.schema,
+    "com.multica.aurora.sandbox-vex",
+    errors,
+  );
+  if (vex.version !== 1) errors.push("aurora sandbox VEX version must be 1");
+  if (!Array.isArray(vex.entries)) {
+    errors.push("aurora sandbox VEX entries must be an array");
+    return errors;
+  }
+  const now = options.now ? new Date(options.now) : new Date();
+  const maxExpiry = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+  vex.entries.forEach(function (entry, index) {
+    const where = "aurora sandbox VEX entry " + index;
+    if (!isPlainObject(entry)) {
+      errors.push(where + " must be an object");
+      return;
+    }
+    const cve = entry.cve;
+    if (typeof cve !== "string" || cve.trim() === "") {
+      errors.push(where + " is missing the cve field");
+    } else if (/[*?]/.test(cve) || !/^CVE-[0-9]{4}-[0-9]{4,}$/.test(cve)) {
+      errors.push(where + " has a wildcard or invalid cve: " + cve);
+    }
+    for (const field of [
+      "package",
+      "version",
+      "image",
+      "approver",
+      "issue_url",
+      "justification",
+    ]) {
+      const value = entry[field];
+      if (typeof value !== "string" || value.trim() === "")
+        errors.push(where + " is missing the " + field + " field");
+      else if (/[*?]/.test(value))
+        errors.push(where + " has a wildcard " + field + ": " + value);
+    }
+    if (
+      typeof entry.image === "string" &&
+      entry.image.trim() !== "" &&
+      !AURORA_IMAGE.test(entry.image)
+    ) {
+      errors.push(where + " names an unknown image: " + entry.image);
+    }
+    if (entry.status !== "not_affected" && entry.status !== "fixed") {
+      errors.push(
+        where +
+          " status must be not_affected or fixed: " +
+          JSON.stringify(entry.status),
+      );
+    }
+    if (
+      typeof entry.issue_url === "string" &&
+      entry.issue_url.trim() !== "" &&
+      !/^https:\/\//.test(entry.issue_url)
+    ) {
+      errors.push(
+        where + " issue_url must be an https URL: " + entry.issue_url,
+      );
+    }
+    if (
+      typeof entry.justification === "string" &&
+      entry.justification.trim().length < 10
+    ) {
+      errors.push(where + " needs a technical justification");
+    }
+    const expires = entry.expires;
+    if (
+      typeof expires !== "string" ||
+      !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(expires)
+    ) {
+      errors.push(where + " is missing a valid expires date");
+    } else {
+      const expiry = new Date(expires + "T00:00:00Z");
+      if (Number.isNaN(expiry.getTime()))
+        errors.push(where + " has an invalid expires date: " + expires);
+      else if (expiry.getTime() <= now.getTime())
+        errors.push(where + " is expired (" + expires + ")");
+      else if (expiry.getTime() > maxExpiry.getTime())
+        errors.push(
+          where + " expires more than 30 days away (" + expires + ")",
+        );
+    }
+  });
+  return errors;
+}
+
+function validateReadme(state) {
+  const errors = [];
+  const text = state.readmeText;
+  if (typeof text !== "string") return errors;
+  const pattern =
+    /ghcr\.io\/eanfs\/multica-aurora-(?:sandbox|egress):[A-Za-z0-9._-]+/g;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const after = text.slice(match.index + match[0].length);
+    if (/^@sha256:[0-9a-f]{64}/.test(after)) continue;
+    errors.push(
+      "aurora sandbox README documents a tag-only fleet reference: " + match[0],
+    );
+  }
+  return errors;
+}
+
+export function validateWorkflow(state, options = {}) {
+  const errors = [];
+  const text = state.workflowText;
+  if (typeof text !== "string" || text.trim() === "") {
+    errors.push("missing aurora sandbox workflow: " + REL.workflow);
+    return errors;
+  }
+  const lines = yamlLines(text);
+
+  const onSection = findTopSection(lines, "on");
+  const triggers = [];
+  if (!onSection) {
+    errors.push("aurora sandbox workflow must declare an on: trigger");
+  } else {
+    if (onSection.inline) {
+      const flow = /^\[(.*)\]$/.exec(onSection.inline);
+      if (flow) {
+        for (const entry of flow[1].split(",")) triggers.push(entry.trim());
+      } else {
+        triggers.push(onSection.inline);
+      }
+    }
+    for (const raw of onSection.body) {
+      if (isYamlIgnorable(raw) || yamlIndent(raw) !== 2) continue;
+      const kv = yamlKeyValue(raw.trim());
+      if (kv) triggers.push(kv.key);
+    }
+  }
+  if (triggers.indexOf("pull_request_target") >= 0) {
+    errors.push("aurora sandbox workflow must not use pull_request_target");
+  }
+  if (triggers.indexOf("pull_request") < 0) {
+    errors.push("aurora sandbox workflow must run on pull_request");
+  }
+  if (triggers.indexOf("push") < 0) {
+    errors.push("aurora sandbox workflow must run on push to main");
+  } else if (!pushTriggersMain(onSection)) {
+    errors.push(
+      "aurora sandbox workflow push trigger must target the main branch",
+    );
+  }
+
+  for (const line of lines) {
+    const match = /^(\s*)(?:-\s*)?uses:\s*(\S.*)$/.exec(line);
+    if (!match) continue;
+    const ref = stripYamlComment(match[2]);
+    if (ref.startsWith("./")) continue;
+    if (ref.startsWith("docker://")) {
+      if (!FULL_SHA256_REF.test(ref))
+        errors.push(
+          "aurora sandbox workflow references an unpinned base image: " + ref,
+        );
+      continue;
+    }
+    if (!ACTION_SHA.test(ref)) {
+      errors.push(
+        "mutable action tag: " +
+          ref +
+          " (pin every action to a full commit SHA)",
+      );
+    }
+  }
+
+  for (const line of lines) {
+    const match = /^\s*(?:-\s*)?image:\s*(\S.*)$/.exec(line);
+    if (!match) continue;
+    const ref = stripYamlComment(match[1]);
+    if (ref === "scratch") continue;
+    if (!FULL_SHA256_REF.test(ref)) {
+      errors.push(
+        "aurora sandbox workflow references an unpinned base image: " + ref,
+      );
+    }
+  }
+
+  const topPermissionsSection = findTopSection(lines, "permissions");
+  if (!topPermissionsSection) {
+    errors.push(
+      "aurora sandbox workflow is missing least-privilege permissions",
+    );
+  } else {
+    const top = parsePermissions({
+      indent: 0,
+      inline: topPermissionsSection.inline,
+      body: topPermissionsSection.body.join("\n"),
+    });
+    const keys = Object.keys(top);
+    if (!(
+      keys.length === 1 &&
+      keys[0] === "contents" &&
+      top.contents === "read"
+    )) {
+      errors.push(
+        "aurora sandbox workflow top-level permissions must be exactly contents: read, got " +
+          JSON.stringify(top),
+      );
+    }
+  }
+
+  const jobsSection = findTopSection(lines, "jobs");
+  const jobs = parseJobs(lines, jobsSection);
+  if (jobs.length === 0)
+    errors.push("aurora sandbox workflow must declare jobs");
+  const publishPermissions = {
+    contents: "read",
+    packages: "write",
+    "id-token": "write",
+    attestations: "write",
+  };
+  let publishJob = null;
+  for (const job of jobs) {
+    const permissions = jobPermissions(job);
+    if (!permissions) continue;
+    const writeKeys = Object.keys(permissions).filter(function (key) {
+      return permissions[key] === "write";
+    });
+    if (writeKeys.length === 0) continue;
+    if (permissions.__scalar !== undefined || permissions.__all !== undefined) {
+      errors.push(
+        "job " + job.name + " uses a non-least-privilege permissions value",
+      );
+      continue;
+    }
+    for (const key of writeKeys) {
+      if (key !== "packages" && key !== "id-token" && key !== "attestations") {
+        errors.push(
+          "job " + job.name + " grants an unexpected write permission: " + key,
+        );
+      }
+    }
+    const expected = Object.keys(publishPermissions)
+      .sort()
+      .map(function (key) {
+        return key + ":" + publishPermissions[key];
+      })
+      .join(",");
+    const actual = Object.keys(permissions)
+      .sort()
+      .map(function (key) {
+        return key + ":" + permissions[key];
+      })
+      .join(",");
+    if (actual !== expected) {
+      errors.push(
+        "publish job " +
+          job.name +
+          " permissions must be " +
+          JSON.stringify(publishPermissions) +
+          ", got " +
+          JSON.stringify(permissions),
+      );
+    }
+    const gate = jobField(job, "if", 4) || "";
+    if (
+      gate.indexOf("eanfs/multica") < 0 ||
+      gate.indexOf("refs/heads/main") < 0
+    ) {
+      errors.push(
+        "publish job " +
+          job.name +
+          " must be gated to push to main in eanfs/multica",
+      );
+    }
+    publishJob = job;
+  }
+  if (!publishJob) {
+    errors.push(
+      "aurora sandbox workflow is missing a protected-main publish job with packages: write",
+    );
+  }
+
+  for (const block of collectKeyBlocks(lines, "build-args")) {
+    const content = block.inline + "\n" + block.body;
+    if (/secrets?\./i.test(content) || /\$\{\{\s*secrets?/i.test(content)) {
+      errors.push(
+        "aurora sandbox workflow interpolates a secret into build args: " +
+          content.trim().slice(0, 120),
+      );
+    }
+  }
+
+  for (const block of collectKeyBlocks(lines, "run")) {
+    const content = block.inline + "\n" + block.body;
+    const tagPattern =
+      /ghcr\.io\/eanfs\/multica-aurora-(?:sandbox|egress):[A-Za-z0-9._-]+/g;
+    let tagMatch;
+    while ((tagMatch = tagPattern.exec(content)) !== null) {
+      const after = content.slice(tagMatch.index + tagMatch[0].length);
+      if (/^@sha256:[0-9a-f]{64}/.test(after)) continue;
+      errors.push(
+        "aurora sandbox workflow emits a tag-only fleet example: " +
+          tagMatch[0],
+      );
+    }
+    const digestPattern = /@sha256:[0-9A-Fa-f]+/g;
+    let digestMatch;
+    while ((digestMatch = digestPattern.exec(content)) !== null) {
+      if (!/^@sha256:[0-9a-f]{64}$/.test(digestMatch[0])) {
+        errors.push(
+          "aurora sandbox workflow has a truncated or invalid digest reference: " +
+            digestMatch[0],
+        );
+      }
+    }
+  }
+
+  requireWorkflowStep(text, /trivy/i, "Trivy scan", errors);
+  requireWorkflowStep(text, /syft|sbom-action/i, "Syft SPDX SBOM", errors);
+  requireWorkflowStep(text, /provenance/i, "BuildKit provenance", errors);
+  requireWorkflowStep(text, /cosign-installer/i, "Cosign install", errors);
+  requireWorkflowStep(text, /cosign\s+sign/i, "keyless image signing", errors);
+  requireWorkflowStep(
+    text,
+    /cosign\s+verify/i,
+    "Cosign signature verification",
+    errors,
+  );
+  requireWorkflowStep(
+    text,
+    /verify-attestation/i,
+    "Cosign attestation verification",
+    errors,
+  );
+  requireWorkflowStep(
+    text,
+    /attest-build-provenance|attest\s/i,
+    "GitHub artifact attestation",
+    errors,
+  );
+
+  errors.push(...validateVex(state, options));
+  errors.push(...validateReadme(state));
+  return errors;
+}
+
+function workflowSummary(state) {
+  const lines = yamlLines(state.workflowText);
+  const jobCount = parseJobs(lines, findTopSection(lines, "jobs")).length;
+  const actionCount = (state.workflowText.match(/^\s*(?:-\s*)?uses:/gm) || [])
+    .length;
+  return (
+    "verified aurora sandbox workflow: " +
+    jobCount +
+    " jobs, " +
+    actionCount +
+    " action step(s), every action pinned to a commit SHA, digest-only fleet refs"
+  );
+}
+
+export async function verifyWorkflow(overrides = {}) {
+  const state = loadLockState(overrides.root || REPO_ROOT);
+  if (overrides.state) deepAssign(state, overrides.state);
+  if (overrides.workflow !== undefined) state.workflowText = overrides.workflow;
+  if (overrides.vex !== undefined) state.vexText = overrides.vex;
+  if (overrides.readme !== undefined) state.readmeText = overrides.readme;
+  const errors = validateWorkflow(state, { now: overrides.now });
+  if (errors.length > 0) throw new Error(errors.join("\n"));
+  return workflowSummary(state);
+}
+
 function summary(state) {
   let dockerCount = 0;
   if (state.dockerfile !== null && state.dockerfile !== undefined) dockerCount += 1;
@@ -721,8 +1315,9 @@ export async function verify(overrides = {}) {
 }
 
 async function main() {
+  const workflowMode = process.argv.slice(2).indexOf("--workflow") >= 0;
   try {
-    const result = await verify();
+    const result = workflowMode ? await verifyWorkflow() : await verify();
     console.log(result);
   } catch (error) {
     console.error(error.message);
