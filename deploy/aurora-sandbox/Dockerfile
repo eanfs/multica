@@ -30,22 +30,32 @@ RUN go test ./internal/aurorafleet ./internal/daemon \
       -run 'TestManagedSecret|TestProviderSecretMount' -count=1
 
 # ---------------------------------------------------------------------------
-# Stage 2: Node runtime dependencies. Fetches only the broker runtime package
-# graph from the frozen lockfile, then installs it offline without lifecycle
-# scripts (only esbuild/electron are allow-listed in the root manifest, and
-# neither belongs to the broker graph).
+# Stage 2: Node runtime dependencies. pnpm fetch ignores --filter and downloads
+# every package in the workspace lockfile, so the filtered install is used to
+# fetch and link only the broker runtime graph; a clean second install with
+# --offline then proves the store is complete for the production tree.
+# Lifecycle scripts stay disabled (only esbuild/electron are allow-listed in the
+# root manifest, and neither belongs to the broker graph). The one exception is
+# the Claude Code postinstall, run explicitly at the end: 2.1.282 ships a text
+# stub at bin/claude.exe and only that local step (no network) hardlinks the
+# platform-native binary over it.
 # ---------------------------------------------------------------------------
 FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS nodedeps
 WORKDIR /src
 COPY --from=reporoot package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc /src/
-COPY runtime/package.json runtime/src /src/deploy/aurora-sandbox/runtime/
-# pnpm purges a partially-populated node_modules after an interrupted fetch;
+# Keep the runtime package's src/ directory: its own tests and the smoke
+# fixture import ../src/*.mjs, and Docker COPY flattens a directory source.
+COPY runtime/package.json /src/deploy/aurora-sandbox/runtime/package.json
+COPY runtime/src /src/deploy/aurora-sandbox/runtime/src/
+# pnpm purges a partially-populated node_modules after an interrupted install;
 # without a TTY it aborts unless CI=true (ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY).
 ENV CI=true
 RUN corepack enable \
  && corepack prepare pnpm@10.28.2 --activate \
- && pnpm fetch --frozen-lockfile --filter @multica/aurora-runtime \
- && pnpm install --offline --prod --frozen-lockfile --filter @multica/aurora-runtime --ignore-scripts
+ && pnpm install --frozen-lockfile --prod --filter @multica/aurora-runtime --ignore-scripts \
+ && rm -rf node_modules deploy/aurora-sandbox/runtime/node_modules \
+ && pnpm install --offline --prod --frozen-lockfile --filter @multica/aurora-runtime --ignore-scripts \
+ && node node_modules/@anthropic-ai/claude-code/install.cjs
 
 # ---------------------------------------------------------------------------
 # Stage 3: Vendor verification and hardening. Re-runs the offline vendor
@@ -110,7 +120,20 @@ RUN set -eux; \
       tini=0.19.0-1+b3 \
       unzip=6.0-28+deb12u1 && \
     rm -f /etc/apt/apt.conf.d/99snapshot-tls && \
-    rm -rf /var/lib/apt/lists/* /var/cache/apt /var/cache/debconf /var/log/apt /tmp/*
+    rm -rf /var/lib/apt/lists/* /var/cache/apt /var/cache/debconf /var/log/apt /tmp/* && \
+    rm -rf \
+      /etc/apt /etc/dpkg /etc/perl \
+      /var/lib/apt /var/lib/dpkg \
+      /usr/lib/apt /usr/lib/dpkg /usr/libexec/dpkg /usr/share/apt /usr/share/dpkg \
+      /usr/share/perl /usr/share/perl5 \
+      /usr/bin/apt /usr/bin/apt-* /usr/bin/dpkg /usr/bin/dpkg-* \
+      /usr/bin/perl /usr/bin/perl5* /usr/bin/perlbug /usr/bin/perldoc \
+      /usr/bin/perlivp /usr/bin/perlthanks \
+      /usr/sbin/dpkg-fsys-usrunmess \
+      /usr/lib/*/perl-base /usr/lib/*/perl /usr/lib/*/perl5 \
+      /lib/systemd/system/apt-* /lib/systemd/system/dpkg-* \
+      /etc/cron.daily/apt-compat /etc/cron.daily/dpkg \
+      /etc/logrotate.d/apt /etc/logrotate.d/dpkg
 
 # Runtime payload, all root-owned and non-writable by the sandbox user.
 COPY --from=gobuilder --chown=0:0 /out/multica /usr/local/bin/multica
@@ -129,11 +152,13 @@ RUN set -eux; \
       /usr/local/lib/node_modules/npm \
       /usr/local/lib/node_modules/corepack \
       /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/pnpm /usr/local/bin/pnpx \
+      /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn-* \
       /root/.cache /root/.npm /root/.local/share/pnpm /root/.cache/node/corepack; \
     chown -R 0:0 /opt/aurora /usr/local/bin/multica; \
     chmod -R go-w /opt/aurora /usr/local/bin/multica; \
     find /opt/aurora -type d -exec chmod 0555 {} +; \
-    find /opt/aurora -type f -exec chmod 0444 {} +
+    find /opt/aurora -type f ! -perm /111 -exec chmod 0444 {} +; \
+    find /opt/aurora -type f -perm /111 -exec chmod 0555 {} +
 
 USER 10001:10001
 WORKDIR /workspace

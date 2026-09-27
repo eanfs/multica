@@ -52,10 +52,11 @@ CI builds each image independently with the same named contexts
 (`server=server`, `reporoot=.`, `scripts=scripts`) and the same
 `.dockerignore`. Pull requests build the host platform with `push: false`;
 the publish job builds `linux/amd64,linux/arm64` with BuildKit provenance
-`mode=max` and SBOM attestations. This macOS host has not produced a complete
-image yet: `pnpm fetch --filter` still pulls the whole workspace lockfile
-(follow-up #149), and the base retains `apt`/`apt-get`/`dpkg` in the final
-stage (follow-up #150, which the image verifier flags).
+`mode=max` and SBOM attestations. The runtime install is filtered to the
+broker package graph; the final stage drops the apt/dpkg/perl frontends, the
+Node package-manager shims (npm/npx/corepack/pnpm/yarn), and their caches; and
+the verifier requires the real platform-native Claude Code launcher rather than
+the npm install stub.
 
 ## Verifying an image
 
@@ -141,9 +142,5 @@ node scripts/verify-aurora-sandbox-locks.mjs --workflow
 
 ## Known follow-ups
 
-- #149 — `pnpm fetch` ignores `--filter` and pulls the whole workspace
-  lockfile, so the image build has not completed on this macOS host.
-- #150 — the base image retains `apt`/`apt-get`/`dpkg`; removing them is a
-  separate reviewed change.
 - #140 — the Seedance license gate remains an open distribution blocker; only
   the vendored Seedream tree ships today.
