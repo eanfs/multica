@@ -2,8 +2,9 @@
 # containers. AppArmor file rules are default-deny, so this profile grants only
 # the image's executables/libraries, the writable tmpfs surfaces, and the
 # read-only enrollment/provider secret files, and explicitly denies raw
-# networking, mounts, process memory, kernel/sysfs writes, and Docker socket
-# paths. A blanket `deny /**` rule must NOT be used here: an AppArmor deny
+# networking, process memory, kernel/sysfs writes, and Docker socket paths.
+# Mounts are owned by the seccomp KILL_PROCESS rules, not this profile. A
+# blanket `deny /**` rule must NOT be used here: an AppArmor deny
 # overrides the matching allow rules, including the writable tmpfs surfaces and
 # the execute permission the container's own init needs.
 #
@@ -29,10 +30,12 @@ profile multica-aurora-sandbox flags=(attach_disconnected,mediate_deleted) {
   network unix stream,
   network unix dgram,
 
-  # ---- Mount: deny every mount/umount/pivot from inside the container.
-  deny mount,
-  deny umount,
-  deny pivot_root,
+  # ---- Mount: owned by the seccomp profile, not AppArmor. seccomp.json's
+  # leading SCMP_ACT_KILL_PROCESS rules terminate mount, umount, pivot_root, and
+  # the rest of the mount syscall family at syscall entry, before Linux can run
+  # this AppArmor hook. An AppArmor mount deny could therefore only ever be an
+  # unobservable duplicate of a weaker action, so the single owner is
+  # deploy/aurora-sandbox/seccomp.json. Do not add a mount rule back here.
 
   # ---- Process memory and tracing.
   deny /proc/*/mem rwklx,
