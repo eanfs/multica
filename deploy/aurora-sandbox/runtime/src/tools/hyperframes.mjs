@@ -58,9 +58,14 @@ export async function renderVideoCaptions(broker, args) {
   writePrivateFile(composition, buildCaptionComposition({ cues, videoUrl: pathToFileURL(attachment.absolutePath).href }));
   const name = randomArtifactName(args.output_name, 0, '.mp4');
   const target = outputPathFor(broker, name);
+  // HyperFrames joins the -c value with the project directory (the child cwd)
+  // before reading it, so an absolute -c resolves to a doubled path such as
+  // captions-<id>/.../captions-<id>/index.html. Pass the entry file relative to
+  // that directory and let the cwd supply the project root.
+  const compositionEntry = path.relative(projectDirectory, composition);
   await broker.processRunner.run({
     command: 'hyperframes',
-    args: ['render', '-c', composition, '-o', target],
+    args: ['render', '-c', compositionEntry, '-o', target],
     cwd: projectDirectory,
     timeoutMs: broker.config.renderTimeoutMs,
   });

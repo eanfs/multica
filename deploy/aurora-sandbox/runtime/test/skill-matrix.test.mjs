@@ -213,8 +213,8 @@ function localProcessRunner() {
   const calls = [];
   return {
     calls,
-    async run({ command, args = [] }) {
-      calls.push({ command, args });
+    async run({ command, args = [], cwd }) {
+      calls.push({ command, args, cwd });
       if (command === 'ffprobe') {
         return {
           stdout: JSON.stringify({
@@ -526,6 +526,15 @@ test('video-captions chains the ASR transcript into the caption renderer without
 
   assert.deepEqual(scenario.processRunner.calls.map((entry) => entry.command), ['ffprobe', 'ffmpeg', 'hyperframes']);
   assert.deepEqual(scenario.router.counts(), { ark: 0, openai: 0, asr: 1 });
+
+  // HyperFrames resolves the entry as join(cwd, -c): an absolute -c would be
+  // joined twice and fail with "Entry file not found", so the argv must carry a
+  // cwd-relative entry that resolves under the hyperframes cwd.
+  const hyperframes = scenario.processRunner.calls.find((entry) => entry.command === 'hyperframes');
+  const composition = hyperframes.args[hyperframes.args.indexOf('-c') + 1];
+  assert.ok(!path.isAbsolute(composition), 'composition must be relative to the hyperframes cwd');
+  assert.equal(path.join(hyperframes.cwd, composition), path.resolve(hyperframes.cwd, composition));
+  assert.ok(fs.existsSync(path.join(hyperframes.cwd, composition)), 'hyperframes must resolve the composition entry under its cwd');
 
   const manifest = readManifest(ws.outputRoot);
   const transcript = manifest.artifacts.find((artifact) => artifact.role === 'transcript');

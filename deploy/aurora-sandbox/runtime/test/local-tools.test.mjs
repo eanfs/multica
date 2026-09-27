@@ -133,12 +133,53 @@ test('render_video_captions uses a fixed composition and never arbitrary source'
   assert.ok(call.args.includes('render'));
   assert.ok(call.args.includes('-c'));
   const composition = call.args[call.args.indexOf('-c') + 1];
-  const html = fs.readFileSync(composition, 'utf8');
+  // HyperFrames joins -c with the child cwd, so the value must be relative and
+  // resolve to exactly one entry file (an absolute -c was joined twice).
+  assert.ok(!path.isAbsolute(composition), 'composition must be relative to the hyperframes cwd');
+  assert.equal(path.join(call.cwd, composition), path.resolve(call.cwd, composition));
+  const html = fs.readFileSync(path.join(call.cwd, composition), 'utf8');
   assert.doesNotMatch(html, /<script>alert/);
   assert.equal(call.shell, undefined);
   const manifest = readManifest(ws.outputRoot);
   assert.equal(manifest.artifacts[0].kind, 'video');
   assert.doesNotMatch(JSON.stringify(result), /alert\(1\)/);
+});
+
+// Regression for the doubled HyperFrames composition path: the CLI reads
+// join(projectDir, entryFile), so an absolute -c together with cwd=projectDir
+// resolved to captions-<id>/.../captions-<id>/index.html and failed with
+// "Entry file not found". The argv must carry a cwd-relative entry that
+// resolves under the child cwd.
+test('render_video_captions passes a cwd-relative composition so HyperFrames resolves one path', async () => {
+  const ws = makeWorkspace();
+  writeInput(ws, 'clip.mp4', Buffer.alloc(32, 2));
+  const processRunner = {
+    calls: [],
+    async run(input) {
+      this.calls.push(input);
+      const outputIndex = input.args.indexOf('-o');
+      const output = input.args[outputIndex + 1];
+      fs.writeFileSync(output, Buffer.from('mp4'));
+      return { stdout: '', stderr: '', code: 0 };
+    },
+  };
+  const broker = makeBroker(ws, {
+    skillId: 'video-captions',
+    attachments: { [VIDEO_ID]: attachmentEntry('clip.mp4', 'video/mp4', 32) },
+    processRunner,
+  });
+  await broker.dispatch('aurora.render_video_captions', {
+    attachment_id: VIDEO_ID,
+    cues: [{ start: 0, end: 1, text: 'relative entry' }],
+  });
+  const call = processRunner.calls[0];
+  assert.equal(call.command, 'hyperframes');
+  const composition = call.args[call.args.indexOf('-c') + 1];
+  const resolved = path.join(call.cwd, composition);
+  assert.ok(!path.isAbsolute(composition), 'composition must be relative to the hyperframes cwd');
+  assert.equal(resolved, path.resolve(call.cwd, composition));
+  assert.ok(fs.existsSync(resolved), 'hyperframes must resolve the composition entry under its cwd');
+  assert.match(fs.readFileSync(resolved, 'utf8'), /<!doctype html>/);
 });
 
 test('render_resume escapes structured sections and prints PDF with network disabled', async () => {

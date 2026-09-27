@@ -845,8 +845,13 @@ func runFakeAuroraPipelines(t *testing.T, sandboxImage string) {
 		"--network", "none",
 		"--user", sandboxUser,
 		"--read-only",
-		"--tmpfs", "/tmp:rw,size=1g,mode=1777",
-		"--tmpfs", "/workspace:rw,size=1g,uid=10001,gid=10001,mode=0700",
+		// HyperFrames 0.8.75 preflights free disk on os.tmpdir() and on the
+		// output directory and aborts below 1024 MiB free; earlier pipelines in
+		// this smoke also leave data under /workspace. 4 GiB on both mounts is
+		// obviously sufficient for the fixtures. These sizes are test-only:
+		// production keeps its own policy-defined sandbox tmpfs.
+		"--tmpfs", "/tmp:rw,size=4g,mode=1777",
+		"--tmpfs", "/workspace:rw,size=4g,uid=10001,gid=10001,mode=0700",
 		"--shm-size", "512m",
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
