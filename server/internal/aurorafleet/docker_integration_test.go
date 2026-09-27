@@ -5,9 +5,11 @@
 // only on a Linux Docker Engine host; Docker Desktop on macOS is a functional
 // smoke platform and cannot satisfy the AppArmor, cgroup, or kernel gates.
 //
-// It requires AURORA_RUN_DOCKER_SECURITY_TEST=1 before any Docker lookup, plus
-// AURORA_SANDBOX_IMAGE, AURORA_PROXY_IMAGE, and AURORA_SECCOMP_PROFILE from
-// deploy/aurora-sandbox/docker-security-test.sh.
+// It requires AURORA_RUN_DOCKER_SECURITY_TEST=1 before any Docker lookup. The
+// boundary test needs AURORA_SANDBOX_IMAGE, AURORA_PROXY_IMAGE, and
+// AURORA_SECCOMP_PROFILE; the fake-pipeline smoke needs AURORA_PIPELINE_IMAGE,
+// the release sandbox image that carries the Node runtime the scratch fixture
+// omits. deploy/aurora-sandbox/docker-security-test.sh supplies all of them.
 package aurorafleet
 
 import (
@@ -35,11 +37,12 @@ import (
 )
 
 const (
-	dockerSecurityGateEnv    = "AURORA_RUN_DOCKER_SECURITY_TEST"
-	dockerSecurityImageEnv   = "AURORA_SANDBOX_IMAGE"
-	dockerSecurityProxyEnv   = "AURORA_PROXY_IMAGE"
-	dockerSecuritySeccompEnv = "AURORA_SECCOMP_PROFILE"
-	probeBinaryPath          = "/opt/aurora/bin/aurora-sandbox-probe"
+	dockerSecurityGateEnv     = "AURORA_RUN_DOCKER_SECURITY_TEST"
+	dockerSecurityImageEnv    = "AURORA_SANDBOX_IMAGE"
+	dockerSecurityProxyEnv    = "AURORA_PROXY_IMAGE"
+	dockerSecuritySeccompEnv  = "AURORA_SECCOMP_PROFILE"
+	dockerSecurityPipelineEnv = "AURORA_PIPELINE_IMAGE"
+	probeBinaryPath           = "/opt/aurora/bin/aurora-sandbox-probe"
 )
 
 // dockerSecurityConfig is the fixture configuration an operator supplies.
@@ -816,14 +819,14 @@ func TestDockerSandboxFakeAuroraPipelines(t *testing.T) {
 	if os.Getenv(dockerSecurityGateEnv) != "1" {
 		t.Skip("set " + dockerSecurityGateEnv + "=1 to run the containerized fake Aurora pipeline smoke")
 	}
-	cfg := loadDockerSecurityConfig(t)
-	if err := validateDigestPinnedImage(cfg.sandboxImage); err != nil {
-		t.Fatalf("%s %q must be digest-pinned: %v", dockerSecurityImageEnv, cfg.sandboxImage, err)
+	pipelineImage := requiredEnv(t, dockerSecurityPipelineEnv)
+	if err := validateDigestPinnedImage(pipelineImage); err != nil {
+		t.Fatalf("%s %q must be digest-pinned: %v", dockerSecurityPipelineEnv, pipelineImage, err)
 	}
 	if _, stderr, err := dockerAttempt(context.Background(), "info"); err != nil {
 		t.Fatalf("the Docker daemon is not reachable: %v: %s", err, stderr)
 	}
-	runFakeAuroraPipelines(t, cfg.sandboxImage)
+	runFakeAuroraPipelines(t, pipelineImage)
 }
 
 // runFakeAuroraPipelines mounts the committed fixtures and harness read-only in
