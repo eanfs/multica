@@ -800,3 +800,100 @@ func pinnedDigest(t *testing.T, image string) string {
 	}
 	return image[at+1:]
 }
+
+// TestDockerSandboxFakeAuroraPipelines runs the representative Aurora skill
+// pipelines inside the actual sandbox image against loopback fake providers. It
+// proves the real HyperFrames/FFmpeg, Chromium, and patched Seedream binaries
+// and the artifact network seam without any external provider. Isolation and
+// egress boundaries are covered by TestDockerSandboxLinuxSecurityBoundary; this
+// test additionally runs the container with --network none, so no external host
+// is reachable even if a fake endpoint were misconfigured.
+func TestDockerSandboxFakeAuroraPipelines(t *testing.T) {
+	if os.Getenv(dockerSecurityGateEnv) != "1" {
+		t.Skip("set " + dockerSecurityGateEnv + "=1 to run the containerized fake Aurora pipeline smoke")
+	}
+	cfg := loadDockerSecurityConfig(t)
+	if err := validateDigestPinnedImage(cfg.sandboxImage); err != nil {
+		t.Fatalf("%s %q must be digest-pinned: %v", dockerSecurityImageEnv, cfg.sandboxImage, err)
+	}
+	if _, stderr, err := dockerAttempt(context.Background(), "info"); err != nil {
+		t.Fatalf("the Docker daemon is not reachable: %v: %s", err, stderr)
+	}
+	runFakeAuroraPipelines(t, cfg.sandboxImage)
+}
+
+// runFakeAuroraPipelines mounts the committed fixtures and harness read-only in
+// a one-shot sandbox container and asserts the harness result marker.
+func runFakeAuroraPipelines(t *testing.T, sandboxImage string) {
+	t.Helper()
+	repoRoot := repoRootFromTest(t)
+	fixtures := filepath.Join(repoRoot, "deploy", "aurora-sandbox", "fixtures")
+	harness := filepath.Join(fixtures, "smoke", "aurora-fake-pipelines.mjs")
+	if _, err := os.Stat(harness); err != nil {
+		t.Fatalf("pipeline harness %s is missing: %v", harness, err)
+	}
+	container := "aurora-pipelines-" + randomHex(t, 6)
+	args := []string{
+		"run", "--rm", "--name", container,
+		"--network", "none",
+		"--user", sandboxUser,
+		"--read-only",
+		"--tmpfs", "/tmp:rw,size=1g,mode=1777",
+		"--tmpfs", "/workspace:rw,size=1g,uid=10001,gid=10001,mode=0700",
+		"--shm-size", "512m",
+		"--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges",
+		"--pids-limit", "256",
+		"--memory", "4g",
+		"--cpus", "2",
+		"-e", "HOME=/tmp",
+		"-v", fixtures + ":/opt/aurora/smoke:ro",
+		"--entrypoint", "/usr/local/bin/node",
+		sandboxImage,
+		"/opt/aurora/smoke/smoke/aurora-fake-pipelines.mjs",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	runErr := cmd.Run()
+	out := stdout.String()
+	if runErr != nil {
+		t.Fatalf("containerized fake pipeline smoke failed: %v\nstdout:\n%s\nstderr:\n%s", runErr, out, stderr.String())
+	}
+	const marker = "AURORA_SMOKE_RESULT "
+	index := strings.LastIndex(out, marker)
+	if index < 0 {
+		t.Fatalf("smoke printed no %q marker\nstdout:\n%s\nstderr:\n%s", "AURORA_SMOKE_RESULT", out, stderr.String())
+	}
+	line := strings.TrimSpace(out[index+len(marker):])
+	if newline := strings.IndexByte(line, '\n'); newline >= 0 {
+		line = line[:newline]
+	}
+	var result struct {
+		Ok        bool
+		Pipelines []string
+	}
+	if err := json.Unmarshal([]byte(line), &result); err != nil {
+		t.Fatalf("smoke result %q is not valid JSON: %v", line, err)
+	}
+	if !result.Ok {
+		t.Fatalf("smoke reported failure: %s", line)
+	}
+	for _, want := range []string{"xhs-image", "text-video", "video-captions", "resume", "provider-failure-refund-no-fallback"} {
+		if !containsString(result.Pipelines, want) {
+			t.Errorf("smoke did not report pipeline %q (got %v)", want, result.Pipelines)
+		}
+	}
+}
+
+// repoRootFromTest resolves the repository root from this test file's path.
+func repoRootFromTest(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatalf("cannot resolve the test file path")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+}

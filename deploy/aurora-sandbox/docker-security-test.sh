@@ -2,9 +2,11 @@
 # Aurora sandbox Linux Docker security acceptance entry point.
 #
 # This script builds the fixture sandbox and egress images, loads the AppArmor
-# profile, and runs the auroradocker-tagged acceptance test on a Linux Docker
-# Engine host. Docker Desktop on macOS cannot satisfy the AppArmor, cgroup, or
-# kernel gates, so this script fails loudly there.
+# profile, and runs the auroradocker-tagged acceptance tests on a Linux Docker
+# Engine host: the isolation/egress boundary plus Task 3's containerized fake
+# pipeline smoke (fake providers, real HyperFrames/FFmpeg/Chromium). Docker
+# Desktop on macOS cannot satisfy the AppArmor, cgroup, or kernel gates, so this
+# script fails loudly there.
 #
 # Usage:
 #   deploy/aurora-sandbox/docker-security-test.sh
@@ -106,6 +108,9 @@ export AURORA_APPARMOR_PROFILE="multica-aurora-sandbox"
 
 count="${AURORA_DOCKER_SECURITY_COUNT:-1}"
 cd "$server_dir"
+# Both auroradocker tests run against the same digest-pinned image pair: the
+# Linux isolation/egress boundary and Task 3's containerized fake pipelines
+# (fake Multica/Ark/OpenAI/ASR endpoints, real HyperFrames/FFmpeg/Chromium).
 "$go_bin" test -tags=auroradocker ./internal/aurorafleet \
-  -run '^TestDockerSandboxLinuxSecurityBoundary$' \
+  -run '^(TestDockerSandboxLinuxSecurityBoundary|TestDockerSandboxFakeAuroraPipelines)$' \
   -count="$count" -v "$@"
