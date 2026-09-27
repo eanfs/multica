@@ -47,7 +47,9 @@ for f in "$versions_json" "$apt_lock" "$vendor_lock"; do
 done
 
 work="$(mktemp -d)"
-cleanup() { rm -rf "$work"; }
+# docker export/tar preserves the image's read-only modes, so make the tree
+# writable before removing it; the EXIT trap must not emit permission errors.
+cleanup() { chmod -R u+w "$work" 2>/dev/null || true; rm -rf "$work"; }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
@@ -60,6 +62,25 @@ sk-proj-[A-Za-z0-9_-]{16,}
 sk-[A-Za-z0-9]{40,}
 AKIA[0-9A-Z]{16}
 -----BEGIN [A-Z ]*PRIVATE KEY-----
+ghp_[A-Za-z0-9]{30,}
+github_pat_[A-Za-z0-9_]{20,}
+xox[baprs]-[A-Za-z0-9-]{10,}
+mse_[0-9a-f]{16,}
+volc-[A-Za-z0-9]{20,}
+PATTERNS
+
+# File-content patterns. The config scan above stays deliberately broad, but
+# third-party sources shipped in the runtime legitimately contain key-shaped
+# bytes: a base64 blob can embed an AKIA run, and libraries like jose contain
+# the literal PEM header string. Require a standalone AKIA token and a PEM
+# header that fills its own line, so real credentials still match while those
+# library false positives do not.
+cat >"$work/secret-file-patterns" <<'PATTERNS'
+sk-ant-[A-Za-z0-9_-]{16,}
+sk-proj-[A-Za-z0-9_-]{16,}
+sk-[A-Za-z0-9]{40,}
+(^|[^A-Za-z0-9])AKIA[0-9A-Z]{16}([^A-Za-z0-9]|$)
+^-----BEGIN [A-Z ]*PRIVATE KEY-----[[:space:]]*$
 ghp_[A-Za-z0-9]{30,}
 github_pat_[A-Za-z0-9_]{20,}
 xox[baprs]-[A-Za-z0-9-]{10,}
@@ -198,8 +219,22 @@ echo "BINARIES ok"
 
 hyperframes="$(find /opt/aurora/runtime/node_modules -maxdepth 3 -path '*/.bin/hyperframes' -print -quit 2>/dev/null || true)"
 [ -n "$hyperframes" ] || fail "missing hyperframes CLI under node_modules/.bin"
-claude="$(find /opt/aurora/runtime/node_modules/@anthropic-ai/claude-code -maxdepth 1 -name 'cli.*' -print -quit 2>/dev/null || true)"
-[ -n "$claude" ] || fail "missing Claude Code CLI"
+# @anthropic-ai/claude-code 2.1.282 no longer ships a cli.* launcher. Its
+# bin/claude.exe is a text stub that the package postinstall replaces with the
+# platform-native binary from @anthropic-ai/claude-code-linux-{arm64,x64}; the
+# image runs that postinstall in the nodedeps stage. Require the real binary,
+# the pnpm shim that the runtime puts on PATH, and a runnable --version probe.
+claude_pkg=/opt/aurora/runtime/node_modules/@anthropic-ai/claude-code
+claude_bin="$claude_pkg/bin/claude.exe"
+[ -x "$claude_bin" ] || fail "missing Claude Code CLI launcher $claude_bin"
+claude_bytes="$(wc -c <"$claude_bin" 2>/dev/null || echo 0)"
+[ "$claude_bytes" -gt 1048576 ] || fail "Claude Code CLI is the ${claude_bytes}-byte install stub, want the platform-native binary"
+claude_shim=/opt/aurora/runtime/node_modules/.bin/claude
+[ -x "$claude_shim" ] || fail "missing executable claude shim $claude_shim"
+claude_version="$(HOME=/tmp timeout 30 "$claude_shim" --version 2>&1)" || fail "Claude Code CLI is not runnable: $claude_version"
+claude_version="$(printf '%s\n' "$claude_version" | head -n1)"
+[ -n "$claude_version" ] || fail "Claude Code CLI did not report a version"
+echo "CLAUDE $claude_version"
 [ -x /usr/local/bin/multica ] || fail "missing multica daemon"
 echo "CLIS ok"
 
@@ -274,7 +309,7 @@ docker export "$sandbox_cid" >"$work/sandbox-rootfs.tar"
 docker rm "$sandbox_cid" >/dev/null
 mkdir -p "$work/sandbox-rootfs"
 tar -xf "$work/sandbox-rootfs.tar" -C "$work/sandbox-rootfs"
-secret_files="$(grep -r -I -E -l -f "$work/secret-patterns" "$work/sandbox-rootfs" 2>/dev/null || true)"
+secret_files="$(grep -r -I -E -l -f "$work/secret-file-patterns" "$work/sandbox-rootfs" 2>/dev/null || true)"
 if [ -n "$secret_files" ]; then
   fail "sandbox rootfs files contain a token/key pattern:
 $secret_files"
@@ -304,12 +339,17 @@ done <"$work/version-expectations.tsv"
 pass "sandbox binaries and node packages match the locked versions"
 
 # --- vendor patched tree matches the lock ----------------------------------
-vendor_cid="$(docker create "$sandbox")"
-if ! docker cp "$vendor_cid:/opt/aurora/vendor" "$work/image-vendor" >/dev/null 2>&1; then
-  docker rm "$vendor_cid" >/dev/null
-  fail "image has no /opt/aurora/vendor tree"
-fi
-docker rm "$vendor_cid" >/dev/null
+# The runtime tree is root-owned with read-only (0555) directories, so a
+# docker cp of it cannot be untarred by an unprivileged host. Hash the in-image
+# tree inside a container and compare it to the host recomputation.
+cat >"$work/image-vendor-hash.sh" <<'IMAGE_HASH'
+set -eu
+cd /opt/aurora/vendor/volcengine
+find byted-ark-seedream-skill -type f -print0 | sort -z | while IFS= read -r -d '' f; do
+  printf '%s\0' "$f"
+  sha256sum "$f" | awk '{print $1}'
+done | sha256sum | awk '{print $1}'
+IMAGE_HASH
 mkdir -p "$work/patched"
 cp -a "$vendor_source/byted-ark-seedream-skill" "$work/patched/"
 (
@@ -328,7 +368,7 @@ manifest_hash() {
       sha256sum "$f" | awk '{print $1}'
     done | sha256sum | awk '{print $1}' )
 }
-image_vendor_hash="$(manifest_hash "$work/image-vendor/volcengine" "byted-ark-seedream-skill")"
+image_vendor_hash="$(docker run --rm -i --user 0:0 --entrypoint /bin/bash "$sandbox" - <"$work/image-vendor-hash.sh")" || fail "image has no /opt/aurora/vendor tree"
 locked_vendor_hash="$(manifest_hash "$work/patched" "byted-ark-seedream-skill")"
 [ "$image_vendor_hash" = "$locked_vendor_hash" ] || fail "vendor patched-tree hash $image_vendor_hash does not match the locked source+patches $locked_vendor_hash"
 
@@ -398,7 +438,7 @@ if [ -n "$egress_image" ]; then
   if [ "$file_count" -gt 3 ]; then
     fail "egress image carries $file_count regular files, want only the proxy and CA bundle"
   fi
-  secret_files="$(grep -r -I -E -l -f "$work/secret-patterns" "$work/egress-rootfs" 2>/dev/null || true)"
+  secret_files="$(grep -r -I -E -l -f "$work/secret-file-patterns" "$work/egress-rootfs" 2>/dev/null || true)"
   [ -z "$secret_files" ] || fail "egress rootfs files contain a token/key pattern:
 $secret_files"
   pass "egress image content, entrypoint, size and secret boundary are clean"
