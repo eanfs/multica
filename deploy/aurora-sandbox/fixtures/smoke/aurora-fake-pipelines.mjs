@@ -306,6 +306,11 @@ async function main() {
 
 try {
   await main();
+  // The loopback fake servers keep the event loop alive, so a successful run
+  // would otherwise hang the container instead of reporting a clean exit.
+  // Flush the success marker, then exit for real.
+  await new Promise(function (resolve) { process.stdout.write("", resolve); });
+  process.exit(0);
 } catch (error) {
   console.error("AURORA_SMOKE_FAILURE " + (error && error.message ? error.message : String(error)));
   process.exit(1);

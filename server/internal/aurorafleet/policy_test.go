@@ -165,12 +165,19 @@ func TestImageDigestRequired(t *testing.T) {
 	cases := map[string]bool{
 		"ghcr.io/eanfs/img@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": true,
 		"alpine@sha256:" + strings.Repeat("a", 64):                                                  true,
-		"ghcr.io/eanfs/img:latest":                                                                  false, // tag only
-		"ghcr.io/eanfs/img":                                                                         false, // no digest
+		// A locally built image on the classic image store exposes only its
+		// content-addressed image ID; it is pinned just as hard as a digest.
+		"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": true,  // bare image ID
+		"sha256:" + strings.Repeat("a", 64):                                       true,  // bare image ID
+		"ghcr.io/eanfs/img:latest":                                                false, // tag only
+		"ghcr.io/eanfs/img":                                                       false, // no digest
 		"ghcr.io/eanfs/img@sha256:0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF": false, // uppercase
+		"sha256:0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF":                   false, // uppercase ID
 		"ghcr.io/eanfs/img@sha256:0123456789abcdef":                                                 false, // truncated
+		"sha256:0123456789abcdef": false, // truncated ID
 		"ghcr.io/eanfs/img@md5:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef":    false, // wrong algorithm
 		"ghcr.io/eanfs/img@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeX": false, // non-hex
+		"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeX":                   false, // non-hex ID
 		"ghcr.io/eanfs/img extra@sha256:" + strings.Repeat("a", 64):                                 false, // whitespace smuggle
 	}
 	for image, want := range cases {

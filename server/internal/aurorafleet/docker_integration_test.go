@@ -5,9 +5,11 @@
 // only on a Linux Docker Engine host; Docker Desktop on macOS is a functional
 // smoke platform and cannot satisfy the AppArmor, cgroup, or kernel gates.
 //
-// It requires AURORA_RUN_DOCKER_SECURITY_TEST=1 before any Docker lookup, plus
-// AURORA_SANDBOX_IMAGE, AURORA_PROXY_IMAGE, and AURORA_SECCOMP_PROFILE from
-// deploy/aurora-sandbox/docker-security-test.sh.
+// It requires AURORA_RUN_DOCKER_SECURITY_TEST=1 before any Docker lookup. The
+// boundary test needs AURORA_SANDBOX_IMAGE, AURORA_PROXY_IMAGE, and
+// AURORA_SECCOMP_PROFILE; the fake-pipeline smoke needs AURORA_PIPELINE_IMAGE,
+// the release sandbox image that carries the Node runtime the scratch fixture
+// omits. deploy/aurora-sandbox/docker-security-test.sh supplies all of them.
 package aurorafleet
 
 import (
@@ -35,11 +37,12 @@ import (
 )
 
 const (
-	dockerSecurityGateEnv    = "AURORA_RUN_DOCKER_SECURITY_TEST"
-	dockerSecurityImageEnv   = "AURORA_SANDBOX_IMAGE"
-	dockerSecurityProxyEnv   = "AURORA_PROXY_IMAGE"
-	dockerSecuritySeccompEnv = "AURORA_SECCOMP_PROFILE"
-	probeBinaryPath          = "/opt/aurora/bin/aurora-sandbox-probe"
+	dockerSecurityGateEnv     = "AURORA_RUN_DOCKER_SECURITY_TEST"
+	dockerSecurityImageEnv    = "AURORA_SANDBOX_IMAGE"
+	dockerSecurityProxyEnv    = "AURORA_PROXY_IMAGE"
+	dockerSecuritySeccompEnv  = "AURORA_SECCOMP_PROFILE"
+	dockerSecurityPipelineEnv = "AURORA_PIPELINE_IMAGE"
+	probeBinaryPath           = "/opt/aurora/bin/aurora-sandbox-probe"
 )
 
 // dockerSecurityConfig is the fixture configuration an operator supplies.
@@ -257,7 +260,7 @@ func assertSandboxBoundary(t *testing.T, inspect ContainerInspect, raw []byte, s
 		t.Errorf("container inspect references a Docker socket")
 	}
 	if !strings.Contains(inspect.Config.Image, pinnedDigest(t, cfg.sandboxImage)) {
-		t.Errorf("Config.Image = %q, want the digest-pinned reference %q", inspect.Config.Image, cfg.sandboxImage)
+		t.Errorf("Config.Image = %q, want the pinned reference %q", inspect.Config.Image, cfg.sandboxImage)
 	}
 	assertNoSecret(t, secret, map[string]string{
 		"container inspect": string(raw),
@@ -791,14 +794,18 @@ func randomHex(t *testing.T, n int) string {
 	return hex.EncodeToString(b)
 }
 
-// pinnedDigest extracts the immutable digest from a digest-pinned reference.
+// pinnedDigest extracts the immutable digest from a digest-qualified
+// reference or a bare image ID.
 func pinnedDigest(t *testing.T, image string) string {
 	t.Helper()
-	at := strings.LastIndex(image, "@")
-	if at < 0 {
-		t.Fatalf("image %q is not digest-pinned", image)
+	if at := strings.LastIndex(image, "@"); at >= 0 {
+		return image[at+1:]
 	}
-	return image[at+1:]
+	if digestPattern.MatchString(image) {
+		return image
+	}
+	t.Fatalf("image %q is neither digest-qualified nor an image ID", image)
+	return ""
 }
 
 // TestDockerSandboxFakeAuroraPipelines runs the representative Aurora skill
@@ -812,14 +819,14 @@ func TestDockerSandboxFakeAuroraPipelines(t *testing.T) {
 	if os.Getenv(dockerSecurityGateEnv) != "1" {
 		t.Skip("set " + dockerSecurityGateEnv + "=1 to run the containerized fake Aurora pipeline smoke")
 	}
-	cfg := loadDockerSecurityConfig(t)
-	if err := validateDigestPinnedImage(cfg.sandboxImage); err != nil {
-		t.Fatalf("%s %q must be digest-pinned: %v", dockerSecurityImageEnv, cfg.sandboxImage, err)
+	pipelineImage := requiredEnv(t, dockerSecurityPipelineEnv)
+	if err := validateDigestPinnedImage(pipelineImage); err != nil {
+		t.Fatalf("%s %q must be digest-pinned: %v", dockerSecurityPipelineEnv, pipelineImage, err)
 	}
 	if _, stderr, err := dockerAttempt(context.Background(), "info"); err != nil {
 		t.Fatalf("the Docker daemon is not reachable: %v: %s", err, stderr)
 	}
-	runFakeAuroraPipelines(t, cfg.sandboxImage)
+	runFakeAuroraPipelines(t, pipelineImage)
 }
 
 // runFakeAuroraPipelines mounts the committed fixtures and harness read-only in
@@ -834,12 +841,17 @@ func runFakeAuroraPipelines(t *testing.T, sandboxImage string) {
 	}
 	container := "aurora-pipelines-" + randomHex(t, 6)
 	args := []string{
-		"run", "--rm", "--name", container,
+		"run", "--rm", "--pull", "never", "--name", container,
 		"--network", "none",
 		"--user", sandboxUser,
 		"--read-only",
-		"--tmpfs", "/tmp:rw,size=1g,mode=1777",
-		"--tmpfs", "/workspace:rw,size=1g,uid=10001,gid=10001,mode=0700",
+		// HyperFrames 0.8.75 preflights free disk on os.tmpdir() and on the
+		// output directory and aborts below 1024 MiB free; earlier pipelines in
+		// this smoke also leave data under /workspace. 4 GiB on both mounts is
+		// obviously sufficient for the fixtures. These sizes are test-only:
+		// production keeps its own policy-defined sandbox tmpfs.
+		"--tmpfs", "/tmp:rw,size=4g,mode=1777",
+		"--tmpfs", "/workspace:rw,size=4g,uid=10001,gid=10001,mode=0700",
 		"--shm-size", "512m",
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",

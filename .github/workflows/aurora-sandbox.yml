@@ -139,6 +139,8 @@ jobs:
         run: scripts/verify-aurora-sandbox-image.sh "${{ env.SANDBOX_IMAGE }}:ci" "${{ env.EGRESS_IMAGE }}:ci"
 
       - name: Run fake container smoke on Linux
+        env:
+          AURORA_PIPELINE_IMAGE: ${{ env.SANDBOX_IMAGE }}:ci
         run: deploy/aurora-sandbox/docker-security-test.sh
 
       - name: Install Syft
