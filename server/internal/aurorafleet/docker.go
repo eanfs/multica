@@ -93,7 +93,11 @@ func (d *DockerBackend) EnsureWorkspaceNode(ctx context.Context, spec WorkspaceN
 	ctx, cancel := context.WithTimeout(ctx, nodeProvisionTimeout)
 	defer cancel()
 
+	// node carries every resource name a partial ensure may have created, so
+	// each failure path below can roll the whole set back.
+	node := Node{ID: sandboxName, ProxyID: proxyName, NetworkID: network, State: StateStarting}
 	if err := d.ensureNetwork(ctx, network); err != nil {
+		d.rollback(ctx, node, spec.EnrollmentFile)
 		return Node{}, err
 	}
 
@@ -102,6 +106,9 @@ func (d *DockerBackend) EnsureWorkspaceNode(ctx context.Context, spec WorkspaceN
 	// otherwise collide on the container names and roll the node back.
 	existing, exists, err := d.existingSandboxState(ctx, sandboxName)
 	if err != nil {
+		// The network already exists here, so a failed state lookup must not
+		// leak it or the staged enrollment secret.
+		d.rollback(ctx, node, spec.EnrollmentFile)
 		return Node{}, err
 	}
 	if exists && existing == StateOnline {
@@ -114,7 +121,6 @@ func (d *DockerBackend) EnsureWorkspaceNode(ctx context.Context, spec WorkspaceN
 		_, _ = d.run(ctx, "rm", "-f", proxyName)
 	}
 
-	node := Node{ID: sandboxName, ProxyID: proxyName, NetworkID: network, State: StateStarting}
 	if err := d.createEgress(ctx, proxyName, network); err != nil {
 		d.rollback(ctx, node, spec.EnrollmentFile)
 		return Node{}, err
@@ -189,11 +195,21 @@ func (d *DockerBackend) waitRunning(ctx context.Context, container string) error
 	}
 }
 
+// rollbackTimeout bounds best-effort cleanup so one stuck docker call cannot
+// wedge a caller whose ensure has already failed.
+const rollbackTimeout = 30 * time.Second
+
 // rollback removes any containers, network, and staged secret created for a
-// failed ensure. Errors are ignored: rollback is best-effort cleanup of
-// best-effort state, and the controller also removes the secret after the
-// call, so the removal is idempotent.
+// failed ensure. Each removal is attempted independently even when an earlier
+// one fails: a leaked network keeps the deterministic name occupied and a
+// leaked enrollment secret is a credential left on the host, so stopping at the
+// first error is worse than a failed cleanup. The commands run on a context
+// detached from the provisioning deadline, so a timeout or cancellation of the
+// ensure cannot turn cleanup into a no-op. The controller also removes the
+// secret after the call, so the file removal stays idempotent.
 func (d *DockerBackend) rollback(ctx context.Context, node Node, secretPath string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+	defer cancel()
 	if node.ProxyID != "" {
 		_, _ = d.run(ctx, "rm", "-f", node.ProxyID)
 	}

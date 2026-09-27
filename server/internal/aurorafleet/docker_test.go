@@ -288,6 +288,113 @@ func TestEnsureWorkspaceNodeRollbackRemovesSecret(t *testing.T) {
 	}
 }
 
+// failedLookupDocker installs a fake docker that records every invocation,
+// fails the sandbox state lookup (ps), and fails the first removal so a test
+// can prove cleanup does not stop at the first error. Everything else succeeds,
+// including the workspace network create.
+func failedLookupDocker(t *testing.T) (dockerPath, record string) {
+	t.Helper()
+	dir := t.TempDir()
+	record = filepath.Join(dir, "record")
+	failed := filepath.Join(dir, "failed")
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> \"$DOCKER_RECORD\"\n" +
+		"if [ \"$1\" = \"ps\" ]; then echo 'ps unavailable' >&2; exit 1; fi\n" +
+		"if [ \"$1\" = \"rm\" ] && [ ! -f \"$DOCKER_FAILED\" ]; then : > \"$DOCKER_FAILED\"; echo 'rm failed' >&2; exit 1; fi\n" +
+		"echo fakecontainerid\n"
+	path := filepath.Join(dir, "docker")
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_RECORD", record)
+	t.Setenv("DOCKER_FAILED", failed)
+	return path, record
+}
+
+// TestEnsureWorkspaceNodeRollsBackAfterStateLookupFailure is the #159
+// regression: the workspace network is created before the sandbox state is
+// confirmed, so a failed ps lookup must still remove the network and the staged
+// secret. The fake also fails the first rm, proving every removal is attempted
+// instead of stopping at the first error.
+func TestEnsureWorkspaceNodeRollsBackAfterStateLookupFailure(t *testing.T) {
+	path, record := failedLookupDocker(t)
+	p := validTestPolicy(t)
+	b := NewDockerBackendWithPolicy(p)
+	b.dockerPath = path
+	spec := testSpec(p.SecretRoot)
+	writeTestEnrollmentFile(t, spec.EnrollmentFile)
+
+	if _, err := b.EnsureWorkspaceNode(context.Background(), spec); err == nil {
+		t.Fatal("expected ensure to fail when the sandbox state lookup fails")
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := string(data)
+	if !strings.Contains(joined, "network create --internal") {
+		t.Fatalf("the workspace network was not created before the injected failure:\n%s", joined)
+	}
+	for _, want := range []string{"rm -f aurora-egr-", "rm -f aurora-sbx-", "network rm aurora-ws-"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("rollback did not attempt %q after the failed state lookup:\n%s", want, joined)
+		}
+	}
+	if _, err := os.Stat(spec.EnrollmentFile); !os.IsNotExist(err) {
+		t.Errorf("enrollment secret survived the failed state lookup (stat err %v)", err)
+	}
+}
+
+// TestEnsureWorkspaceNodeRollsBackAfterNetworkCreateFailure covers the earliest
+// resource-creating failure. The network create and its ownership probe both
+// fail, so no network exists yet, but the staged enrollment secret must still be
+// removed and the network removal must still be attempted.
+func TestEnsureWorkspaceNodeRollsBackAfterNetworkCreateFailure(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "record")
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> \"$DOCKER_RECORD\"\n" +
+		"if [ \"$1\" = \"network\" ] && [ \"$2\" = \"create\" ]; then echo 'create failed' >&2; exit 1; fi\n" +
+		"if [ \"$1\" = \"network\" ] && [ \"$2\" = \"inspect\" ]; then echo 'inspect failed' >&2; exit 1; fi\n" +
+		"echo fakecontainerid\n"
+	path := filepath.Join(dir, "docker")
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_RECORD", record)
+
+	p := validTestPolicy(t)
+	b := NewDockerBackendWithPolicy(p)
+	b.dockerPath = path
+	spec := testSpec(p.SecretRoot)
+	writeTestEnrollmentFile(t, spec.EnrollmentFile)
+
+	if _, err := b.EnsureWorkspaceNode(context.Background(), spec); err == nil {
+		t.Fatal("expected ensure to fail when the workspace network cannot be created")
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "network rm aurora-ws-") {
+		t.Errorf("rollback did not attempt the network removal:\n%s", data)
+	}
+	if _, err := os.Stat(spec.EnrollmentFile); !os.IsNotExist(err) {
+		t.Errorf("enrollment secret survived the failed network create (stat err %v)", err)
+	}
+}
+
+// writeTestEnrollmentFile stages a secret for the non-gated cleanup tests.
+func writeTestEnrollmentFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("mse_test"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestSiblingNodeNamesDerivesPolicySiblings covers the name derivation the
 // delete path depends on.
 func TestSiblingNodeNamesDerivesPolicySiblings(t *testing.T) {
