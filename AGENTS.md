@@ -132,11 +132,30 @@ Workspace-scoped queries filter by `workspace_id`; membership gates access and `
 
 ## Aurora Roadmap
 
-Aurora (内容创作应用) is a new domain in this repo, built incrementally from plans under `docs/superpowers/plans/` (specs under `docs/superpowers/specs/`). The plans are the source of truth; scrum stories and tickets are tracked on the `eanfs/multica` fork.
+Aurora (内容创作应用) integrates the `aurora-ai-agents` 16-skill AI content-creation app, its credit billing and its consumer UI into this repo as the standalone Next.js app `apps/aurora`, targeting ordinary bilingual (en/zh-Hans) social-content creators worldwide while sharing Multica's auth / workspace / task-queue / usage-metering / billing infrastructure. Product goals and phasing are the spec `docs/superpowers/specs/2026-09-11-aurora-content-creation-app-design.md` (§9); plans under `docs/superpowers/plans/` are the source of truth for implementation; scrum stories and tickets live on the `eanfs/multica` fork.
 
-- Implemented: Plan 1 (领域骨架, story #3), Plan 2 (积分账本, story #16), Plan 3.5 (进度与作品库 API, story #31), Plan 4 (前端 `apps/aurora`, story #35), and Plan 3 (执行层, story #23) except Task 6.
-- **The Aurora safety and billing milestone is complete.** Plan safety's content moderation (story #61, PR #75) and Plan 5's subscriptions, Stripe billing, monthly settlement, signup bonus, local entitlement gates, and billing UI (story #62, PR #77; migrations `512`–`517`) are merged.
-- The intended end-to-end product flow is: create generation → local entitlement check + allowance/reserve → enqueue → managed agent executes → moderated asset writeback + credit settlement/refund → subscription/usage management in `apps/aurora`. The managed sandbox work below is still required to make that execution path operational.
-- **Plan 3 Task 6 (#29) remains in progress.** Its existing code-side launch narrowing (`MaxTurns`, reviewed Claude surface, fail-closed provider gating) is merged. Repository-owned planning for scoped enrollment, the real daemon claim set, workspace fleet lifecycle, isolation/egress, all 13 available skill routes, artifact staging, and signed multi-architecture images is complete in pr://eanfs/multica/84 and split across the master plan plus four child plans under `docs/superpowers/plans/2026-09-25-aurora-*`. Implementation has not started; Plan A (`aurora-managed-sandbox-control-plane`) is the next frontier. The previous external-infrastructure ownership boundary is superseded.
+### Development plan
+
+Priority order is top to bottom: make the 13 available skills run end to end, dogfood them internally, and only then open external sales. Selling to the public is deliberately deferred.
+
+| # | Milestone | Scope | Plan | Ticket | Status |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Technical MVP §9.1 #1–#7 | auth + personal-workspace provisioning, skill catalog, the 13 available skills, async task + progress + asset download, credit-ledger loop, asset library, security gates (sandbox / rate gate / moderation) | Plan 1 domain skeleton | #3 | ✅ merged |
+| | | | Plan 2 credit ledger | #16 | ✅ merged |
+| | | | Plan 3.5 progress + works API | #31 | ✅ merged |
+| | | | Plan 4 frontend `apps/aurora` | #35 | ✅ merged |
+| | | | Plan safety moderation + rate gate | #61 | ✅ merged |
+| 2 | Execution base — all 13 available skills run end to end (spec §4/§10; Plan 3 Task 6 → #29) | server-hosted sandbox, scoped enrollment, fleet lifecycle + isolation/egress, all 13 skill routes, artifact writeback, image supply chain + Linux acceptance | Plan A managed control plane | #85 (#89–#96) | ⏳ not started — frontier #89 |
+| | | | Plan B fleet lifecycle + isolation | #86 (#97–#103) | ⏳ not started |
+| | | | Plan C 13-skill runtime + artifacts | #87 (#104–#111) | ⏳ not started |
+| | | | Plan D image supply chain + acceptance | #88 (#112–#118) | ⏳ not started |
+| 3 | Internal dogfooding — small-scope team testing | self-hosted deployment on internal accounts, exercise the 13 skills on real prompts, operational runbook and refund/settlement drill; no public signup and no external sales | not split | — | 🔜 after Plan D |
+| 4 | Sellable / external launch (deferred) | subscription + Stripe go-live, public signup, server-side Stripe secrets and price IDs | Plan 5 subscriptions/payments (code merged) | #62 | ⏸ deferred — code merged (migrations `512`–`517`), launch postponed behind dogfooding |
+| 5 | Phase 2 §9.2 | `avatar-video` / `ppt` / `excel`, generative video (Veo/Runway), digital-human avatar, social publishing, more locales | not split | — | 🔜 planned |
+| 6 | Phase 3 §9.3 | team collaboration, template market, brand asset library, public API, mobile | not split | — | 🔜 planned |
+
+- End-to-end product flow: create generation → local entitlement check + allowance/reserve → enqueue → managed agent execute → moderated asset writeback + credit settlement/refund → subscription/usage management in `apps/aurora`. The execution path is not production-operational until Plans A–D land.
+- The near-term goal is internal usability, not go-to-market: Plan 5's subscription/Stripe code is merged but the external-launch milestone is deferred behind dogfooding. The three `available=false` skills stay out of scope for Plans A–D and remain in Phase 2.
+- **Plan 3 Task 6 (#29) remains in progress.** Its code-side launch narrowing (`MaxTurns`, reviewed Claude surface, fail-closed provider gating) is merged. Repository-owned planning completed in pr://eanfs/multica/84 across the master plan `docs/superpowers/plans/2026-09-22-aurora-sandbox-tool-surface.md` and the four `2026-09-25-aurora-*` child plans; implementation has not started, and Plan A is the next frontier. The previous external-infrastructure ownership boundary is superseded.
 - Cloud entitlement `GateAurora*` integration remains deferred; self-hosted deployments are bounded by Plan 5's local monthly-generation and concurrency gates. Operational billing still requires server-side Stripe secrets and price IDs.
 - Of the defects found while building Plan 4, OAuth login-CSRF (#53), the e2e workspace/baseline defects (#57, #58), the duplicated app modules (#54), the degraded-response fallback (#55) and the shared-core workspace-loss relocation (#56) are fixed.
