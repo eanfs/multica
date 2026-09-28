@@ -61,6 +61,10 @@ export const LOCKED = {
     openai: "7.23.0",
   },
   runtime_workspace_dependencies: { zod: "catalog:" },
+  esbuild_source: {
+    module: "github.com/evanw/esbuild/cmd/esbuild",
+    version: "0.25.12",
+  },
   hyperframes_source: {
     tag: "v0.8.75",
     commit: "a95cb96a5dd3c1f7b31266a4b470590c86ad231f",
@@ -486,6 +490,28 @@ function isExecutableVendorTree(skill) {
   });
 }
 
+// The sandbox image replaces esbuild's published binary with one rebuilt from
+// the locked esbuild release using the pinned Go toolchain, because the
+// published binaries are compiled with an older Go and carry stdlib CVEs.
+function checkEsbuildRebuild(state, versions, errors) {
+  const text = state.dockerfile;
+  if (typeof text !== "string") return;
+  const source = isPlainObject(versions.esbuild_source) ? versions.esbuild_source : {};
+  const moduleRef = LOCKED.esbuild_source.module;
+  const version = LOCKED.esbuild_source.version;
+  if (source.module !== moduleRef || source.version !== version) return;
+  const escaped = moduleRef.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const install = new RegExp("go\\s+install\\s+" + escaped + "@v" + version.replace(/\./g, "\\."));
+  if (!install.test(text)) {
+    errors.push(
+      "Dockerfile sandbox must rebuild " + moduleRef + "@v" + version + " with the pinned Go toolchain",
+    );
+  }
+  if (text.indexOf("/@esbuild/") < 0 || text.indexOf("bin/esbuild") < 0) {
+    errors.push("Dockerfile sandbox must overwrite the bundled @esbuild platform binary");
+  }
+}
+
 export function validate(state) {
   const errors = [];
   const versions = state.versions.value;
@@ -628,6 +654,34 @@ export function validate(state) {
     }
   }
 
+  // esbuild rebuild source. The published esbuild binaries are compiled with
+  // esbuild's own older Go toolchain; the sandbox rebuilds the locked release
+  // with the pinned toolchain so the shipped binary carries the fixed stdlib.
+  if (!isPlainObject(versions.esbuild_source)) {
+    errors.push("versions.json is missing the esbuild rebuild source lock");
+  } else {
+    checkExact("esbuild rebuild module", versions.esbuild_source.module, LOCKED.esbuild_source.module, errors);
+    checkExact("esbuild rebuild version", versions.esbuild_source.version, LOCKED.esbuild_source.version, errors);
+  }
+  if (typeof state.pnpmLockText === "string") {
+    const resolvedEsbuild = [
+      ...new Set(
+        Array.from(state.pnpmLockText.matchAll(/^  esbuild@([0-9]+\.[0-9]+\.[0-9]+):$/gm), function (match) {
+          return match[1];
+        }),
+      ),
+    ];
+    if (resolvedEsbuild.length !== 1) {
+      errors.push(
+        "pnpm-lock.yaml must resolve exactly one esbuild version, found " + JSON.stringify(resolvedEsbuild),
+      );
+    } else if (resolvedEsbuild[0] !== LOCKED.esbuild_source.version) {
+      errors.push(
+        "pnpm-lock.yaml esbuild version drift: lock=" + resolvedEsbuild[0] + " audited=" + LOCKED.esbuild_source.version,
+      );
+    }
+  }
+
   // Debian apt lock.
   const apt = state.aptLock.value;
   if (!isPlainObject(apt)) {
@@ -694,6 +748,7 @@ export function validate(state) {
   if (state.dockerfileEgress !== null && state.dockerfileEgress !== undefined) {
     checkDockerfile("egress", state.dockerfileEgress, versions, state, errors);
   }
+  checkEsbuildRebuild(state, versions, errors);
 
   return errors;
 }

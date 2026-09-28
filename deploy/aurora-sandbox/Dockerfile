@@ -30,7 +30,21 @@ RUN go test ./internal/aurorafleet ./internal/daemon \
       -run 'TestManagedSecret|TestProviderSecretMount' -count=1
 
 # ---------------------------------------------------------------------------
-# Stage 2: Node runtime dependencies. pnpm fetch ignores --filter and downloads
+# Stage 2: esbuild rebuild. hyperframes depends on esbuild, whose published
+# linux binaries are Go executables built with esbuild's own release toolchain
+# (0.25.12 ships go1.23.12). Trivy therefore flags the sandbox image with the
+# stdlib CVEs fixed since, including Critical CVE-2025-68121. Rebuild the same
+# locked esbuild release with this image's pinned Go toolchain so the shipped
+# binary carries go1.26.6, while the JavaScript API hyperframes imports stays
+# at the locked 0.25.12. scripts/verify-aurora-sandbox-locks.mjs pins this
+# version to versions.json and the pnpm lockfile.
+# ---------------------------------------------------------------------------
+FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS esbuildbuilder
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOBIN=/out go install github.com/evanw/esbuild/cmd/esbuild@v0.25.12
+
+# ---------------------------------------------------------------------------
+# Stage 3: Node runtime dependencies. pnpm fetch ignores --filter and downloads
 # every package in the workspace lockfile, so the filtered install is used to
 # fetch and link only the broker runtime graph; a clean second install with
 # --offline then proves the store is complete for the production tree.
@@ -57,8 +71,21 @@ RUN corepack enable \
  && pnpm install --offline --prod --frozen-lockfile --filter @multica/aurora-runtime --ignore-scripts \
  && node node_modules/@anthropic-ai/claude-code/install.cjs
 
+# Replace the published esbuild platform binary with the toolchain-rebuilt one.
+# esbuild resolves its executable from @esbuild/<platform>; exactly one must be
+# present or the fix silently regresses.
+COPY --from=esbuildbuilder /out/esbuild /out/esbuild
+RUN set -eux; \
+    replaced=0; \
+    for binary in $(find /src/node_modules -path '*/@esbuild/*/bin/esbuild' -type f); do \
+      cp /out/esbuild "$binary"; \
+      replaced=$((replaced + 1)); \
+    done; \
+    test "$replaced" -ge 1; \
+    rm -f /out/esbuild
+
 # ---------------------------------------------------------------------------
-# Stage 3: Vendor verification and hardening. Re-runs the offline vendor
+# Stage 4: Vendor verification and hardening. Re-runs the offline vendor
 # security tests (which apply the audited patch series to a throwaway tree and
 # exercise the hardened adapters) and writes the patched-tree hash.
 #
@@ -86,7 +113,7 @@ RUN node --test /src/deploy/aurora-sandbox/runtime/test/volc-vendor-security.tes
  && find /opt/aurora/vendor -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}' > /opt/aurora/vendor-tree.sha256
 
 # ---------------------------------------------------------------------------
-# Stage 4: Final runtime. Digest-pinned Debian snapshot apt set, root-owned
+# Stage 5: Final runtime. Digest-pinned Debian snapshot apt set, root-owned
 # non-writable runtime files, non-root user, fixed entrypoint and health check.
 # ---------------------------------------------------------------------------
 FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS sandbox

@@ -190,7 +190,13 @@ jobs:
         run: |
           set -euo pipefail
           failed=0
-          for report in trivy-fs.json trivy-sandbox.json trivy-egress.json; do
+          # The release policy gates the two published images. trivy-fs.json
+          # scans the whole monorepo repository and reports pre-existing
+          # dependencies (next, electron, @xmldom/xmldom, ...) that no Aurora
+          # change can fix; it is uploaded as an advisory report but does not
+          # gate publication. Both image scans keep scanners: vuln,secret, so a
+          # secret baked into an image and an unfixed Critical still block.
+          for report in trivy-sandbox.json trivy-egress.json; do
             [ -f "$report" ] || continue
             violations="$(jq -r --slurpfile vex .github/aurora-sandbox-vex.json \
               'def vexed($id; $pkg; $ver; $image):

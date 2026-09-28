@@ -151,6 +151,15 @@ test("rejects a Dockerfile network fetch for skills or HyperFrames source", asyn
   await assert.rejects(() => verify({ root }), /network fetch/);
 });
 
+test("rejects a Dockerfile that rebuilds a different esbuild version", async () => {
+  const text = readText(DOCKERFILE).replace(
+    /esbuild\/cmd\/esbuild@v[0-9.]+/,
+    "esbuild/cmd/esbuild@v0.24.0",
+  );
+  const root = writeFixture({ [DOCKERFILE]: text });
+  await assert.rejects(() => verify({ root }), /esbuild/);
+});
+
 // ---------------------------------------------------------------------------
 // Workflow supply-chain policy (--workflow mode). Each case mutates the
 // committed workflow and proves the policy rejects the drift. The committed
