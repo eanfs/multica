@@ -31,7 +31,7 @@
         {
           "path": "byted-ark-seedance-skill/LICENSE.upstream",
           "bytes": 1079,
-          "mode": "0600",
+          "mode": "0644",
           "sha256": "sha256:8a32047e9ee5270ab9f49e5d293b650bc0253e05bff2d81787b3276ea0d75935"
         },
         {
