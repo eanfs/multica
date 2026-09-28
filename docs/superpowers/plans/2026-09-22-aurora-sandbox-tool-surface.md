@@ -29,15 +29,15 @@
 - Repository code, comments, docs, test names, commits, workflow text, and image metadata remain in English.
 - Issue #29 and the roadmap remain partial until every acceptance gate in this master plan passes on a Linux Docker host.
 
-## Progress Status (2026-09-25)
+## Progress Status (2026-09-28)
 
 - [x] Root-cause audit, provider decisions, official Volcengine skill audit, master plan, and four child plans are complete in pr://eanfs/multica/84.
 - [x] Plan A — scoped enrollment, daemon managed mode, claim-set installation, and execution-provider mapping.
-- [ ] Plan B — workspace fleet lifecycle, hardened Docker policy, enforced egress, and Linux isolation acceptance.
-- [ ] Plan C — attachment inputs, all 13 available skill routes, hardened provider tools, and artifact staging/reporting.
-- [ ] Plan D — reproducible multi-architecture images, SBOM/provenance/signing, container smoke, and final acceptance.
+- [x] Plan B — workspace fleet lifecycle, hardened Docker policy, enforced egress, and Linux isolation acceptance.
+- [x] Plan C — attachment inputs, all 13 available skill routes, hardened provider tools, and artifact staging/reporting. Only the Seedance vendor half of Task 3 (ticket #106) remains in review, gated by #140.
+- [ ] Plan D — reproducible multi-architecture images, SBOM/provenance/signing, container smoke, and final acceptance. Tasks 1–5 are complete; Task 6 (#117) and Task 7 (#118) remain open.
 
-Tracker issue #29 remains open with `S2-InProgress`. Planning completion is not implementation completion; Plan A is implemented (see the child plan's completion evidence) and the next executable frontier is Plan B — workspace fleet lifecycle, hardened Docker policy, enforced egress, and Linux isolation acceptance.
+Tracker issue #29 remains open with `S2-InProgress`, and story #23 stays open. The verified evidence is recorded in [`2026-09-28-aurora-sandbox-acceptance-record.md`](2026-09-28-aurora-sandbox-acceptance-record.md). The overall sandbox boundary is **not closed**: the Seedance license text (#140) is still missing and the gated real provider/agent smokes (#117) are unimplemented and unauthorized, so the roadmap and Plan 3 Task 6 stay partial.
 
 ---
 
@@ -186,15 +186,15 @@ There is no `AURORA_SANDBOX_TOKEN` after Plan A. Configuration must reject a lit
 - Consumes: Existing daemon-token authentication, managed runtime rows, task claim/heartbeat/report APIs.
 - Produces: `mse_` enrollment issuance/consumption, `ManagedEnrollmentResponse`, managed-daemon bootstrap, one-runtime claim set, and `execution_provider=claude`.
 
-- [ ] **Step 1: Execute every unchecked task in child plan A in order**
+- [x] **Step 1: Execute every unchecked task in child plan A in order**
 
 Run the child plan with either required execution skill. Do not proceed on a partial test result.
 
-- [ ] **Step 2: Run child plan A’s final verification block**
+- [x] **Step 2: Run child plan A’s final verification block**
 
 Expected: all focused Go tests, sqlc checks, and the fake-runner managed lifecycle pass without a real Claude executable.
 
-- [ ] **Step 3: Record the narrower completion statement**
+- [x] **Step 3: Record the narrower completion statement**
 
 Update the old Plan 3 Task 6 status only to say that the managed control plane is complete and Plans B–D remain required. Do not mark issue #29 complete.
 
@@ -207,11 +207,11 @@ Update the old Plan 3 Task 6 status only to say that the managed control plane i
 - Consumes: Child plan A’s enrollment issuer and managed node identity.
 - Produces: authenticated fleet ensure/delete API, workspace node manager, hardened Docker policy, egress proxy, idle/hard-lifetime reaper.
 
-- [ ] **Step 1: Execute every unchecked task in child plan B in dependency order**
+- [x] **Step 1: Execute every unchecked task in child plan B in dependency order**
 
 The Docker argument-policy tasks may begin earlier, but server autoprovision integration consumes the merged Plan A types.
 
-- [ ] **Step 2: Run child plan B’s final verification block on Linux Docker**
+- [x] **Step 2: Run child plan B’s final verification block on Linux Docker**
 
 Expected: lifecycle, isolation, and network-denial tests pass. A macOS-only result does not satisfy this task.
 
@@ -224,11 +224,11 @@ Expected: lifecycle, isolation, and network-denial tests pass. A macOS-only resu
 - Consumes: Child plan A managed daemon and child plan B filesystem/network policy.
 - Produces: attachment-aware generation requests, fixed skill routes, narrow provider tools, versioned artifact manifest, task-scoped upload, all-skill fake-provider test matrix.
 
-- [ ] **Step 1: Execute every unchecked task in child plan C**
+- [x] **Step 1: Execute every unchecked task in child plan C**
 
 Keep official Volcengine scripts vendored and reviewed. Do not enable Bash or runtime package installation to accommodate a script.
 
-- [ ] **Step 2: Run child plan C’s final verification block**
+- [x] **Step 2: Run child plan C’s final verification block**
 
 Expected: the all-13 fake matrix passes; route failures do not invoke another provider; unsafe manifests are rejected and refunded.
 

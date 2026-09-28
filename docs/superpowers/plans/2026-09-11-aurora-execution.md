@@ -4,7 +4,7 @@
 >
 > 修订：2026-09-13（评审回写，详见文末「修订记录」）
 >
-> **2026-09-25 status:** Task 6's former external-infrastructure boundary is superseded by the repository-owned master plan at `docs/superpowers/plans/2026-09-22-aurora-sandbox-tool-surface.md` and its four `2026-09-25-aurora-*` child plans. Planning is complete in pr://eanfs/multica/84; implementation has not started.
+> **2026-09-28 status:** Task 6's former external-infrastructure boundary is superseded by the repository-owned master plan at [`docs/superpowers/plans/2026-09-22-aurora-sandbox-tool-surface.md`](2026-09-22-aurora-sandbox-tool-surface.md) and its four `2026-09-25-aurora-*` child plans. Plans A and B are implemented, merged, and accepted; Plan C is implemented except the Seedance vendor half of Task 3 (#106, gated by #140); Plan D Tasks 1–5 are implemented. Task 6 remains incomplete because Plan D Task 6 (#117, the gated real smokes) and the Seedance license gate (#140) are open, so issue #29 stays open with `S2-InProgress`. See the [2026-09-28 acceptance record](2026-09-28-aurora-sandbox-acceptance-record.md).
 
 **Goal:** 让一次 Aurora generation 真正跑起来：入队 → 托管 agent 执行 → 产物回写 asset、结算积分。含 self-host runtime fleet、沙箱节点镜像（infra）与创建端点频率闸门。
 
@@ -202,7 +202,7 @@ git commit -m "feat(aurora): self-host runtime fleet controller"
 
 ### Task 6（infra）: 沙箱节点镜像 + 工具面收窄（待建能力）
 
-> **Superseded implementation detail (2026-09-25):** Do not execute this section as written. The complete repository-owned scope, dependency order, interfaces, security controls, provider routing, and acceptance gates are defined in [`2026-09-22-aurora-sandbox-tool-surface.md`](2026-09-22-aurora-sandbox-tool-surface.md) and its four child plans. Issue #29 remains open; Plan A is the next executable frontier.
+> **Superseded implementation detail (2026-09-28):** Do not execute this section as written. The complete repository-owned scope, dependency order, interfaces, security controls, provider routing, and acceptance gates are defined in [`2026-09-22-aurora-sandbox-tool-surface.md`](2026-09-22-aurora-sandbox-tool-surface.md) and its four child plans. Plans A and B are done, Plan C is done except the Seedance vendor half (#140), and Plan D Tasks 1–5 are done. Issue #29 remains open because the gated real smokes (#117) and the Seedance license (#140) are unresolved.
 
 **Files:**
 - Create: `deploy/aurora-sandbox/`（Dockerfile、entrypoint、镜像构建脚本）
@@ -278,7 +278,7 @@ Plan 3 完成。后续顺序：Plan 3.5（进度与作品库 API）→ Plan 4（
 
 ## 完成记录（2026-09-23 回填）
 
-**Status: every task except Task 6 is complete. Task 6 now has a complete repository-owned implementation plan; code implementation has not started.**
+**Status (2026-09-28): every Plan 3 task except Task 6 is complete. Task 6 is implemented and accepted through Plans A–D except the Seedance vendor half (#140) and the gated real-provider smokes (#117).**
 
 | Task | Ticket | PR | 结果 |
 | --- | --- | --- | --- |
@@ -287,11 +287,11 @@ Plan 3 完成。后续顺序：Plan 3.5（进度与作品库 API）→ Plan 4（
 | Task 3 — managed runtime 注册 | #26 | #42 | 已合并 |
 | Task 4 — 完成回写 → asset + 结算/退款 | #27 | #45 | 已合并 |
 | Task 5（infra）— self-host fleet controller | #28 | #43 | 已合并 |
-| Task 6 (infra) — managed sandbox runtime + 13-skill tool surface | #29 | #47 (code-side narrowing, merged); #84 (complete plan, review) | **Planning complete; implementation pending** |
+| Task 6 (infra) — managed sandbox runtime + 13-skill tool surface | #29 | #47, #84, #89–#103, #104–#111, #112–#116 | **Implemented and accepted except Plan C Task 3's Seedance vendor half (#106/#140) and Plan D Task 6's gated real smokes (#117); issue #29 stays open** |
 | Task 7 — 创建端点频率闸门 | #30 | #44 | 已合并 |
 
 **The new Task 6 boundary.** Merged PR #47 covers only additive per-agent launch narrowing in `pkg/agent` (`PermissionMode` / `DisallowedTools`, with no default behavior change for existing user agents), `MaxTurns = 30` for Aurora system agents, and fail-closed rejection for providers that have not been reviewed. The remaining work is no longer classified as infrastructure outside this repository: scoped enrollment, daemon credentials and claim-set installation, `aurora_managed` → `claude` execution mapping, one node per workspace, Docker isolation and egress proxying, explicit provider routes for all 13 available skills, structured artifact staging/reporting, image version locks/SBOM/signing, and Linux/macOS/real-provider acceptance all belong in this repository. PR #84 contains the master plan and four child plans; implementation order is Plan A → B → C → D.
 
-**Current acceptance.** The fake-CLI launch-argument assertion is complete, and the detailed planning pass is complete. The managed-daemon lifecycle, 13-skill fake matrix, Linux Docker security boundary, signed images, and gated real-provider smoke are not implemented. Issue #29 remains open with `S2-InProgress`.
+**Current acceptance (2026-09-28).** The fake-CLI launch-argument assertion and the detailed planning pass are complete. The managed-daemon lifecycle, 13-skill fake matrix, hardened Docker/egress policy, Linux Docker security acceptance, image build/content verification, and the SBOM/Trivy/signing workflow are implemented; the Linux gates are evidenced by CI run 36422576420 (job "Verify, build, and scan", ID 108928656275) and the first main-branch publish is recorded in the [2026-09-28 acceptance record](2026-09-28-aurora-sandbox-acceptance-record.md). What remains open is the Seedance vendor half of Plan C Task 3 (#106, gated by #140) and Plan D Task 6's gated real agent/provider smokes (#117, unimplemented and unauthorized). Issue #29 remains open with `S2-InProgress`.
 
 **完成后的新发现**（在 Plan 4 期间发现，已单开 issue，不在此修复）：OAuth login-CSRF #53、core 的 workspace-loss 重定向 #56、`apps/web` 与 `apps/aurora` 的重复模块 #54、`parseWithFallback` 掩盖降级响应 #55、e2e 基线 #57 / #58。
