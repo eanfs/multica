@@ -73,18 +73,61 @@ package-manager/download/SSH/Git binaries; writable root-owned runtime
 directories; and any token/key pattern in files, config, labels, environment,
 or `docker history --no-trunc`.
 
-## Local fake smoke and Linux acceptance
+## Running the acceptance modes
 
-Run the Linux acceptance matrix on a Docker Engine host with AppArmor for the
-full isolation/egress boundary plus the fake-provider pipelines:
+Both scripts require image references that resolve to an immutable digest or
+content-addressed image ID. A caller may pass `sha256:<64 lowercase hex>`, a
+`<name>@sha256:<64 hex>` reference, or a tag already present in the local image
+store; the script resolves a local tag to its repository digest or
+content-addressed image ID and never pulls. A missing local image is an error.
+
+Each run writes a sanitized JSON report under
+`.scratch/aurora-sandbox-acceptance/` (override with
+`AURORA_ACCEPTANCE_REPORT_DIR`). A report carries the host platform, the Docker
+client and server versions, kernel, architecture, cgroup mode, AppArmor status,
+the resolved image digests, every test name and duration, pass/fail/skip counts,
+and the overall result. Reports contain no tokens, provider URLs, or prompts.
+The directory is gitignored; CI uploads its copies as workflow artifacts.
+
+### Linux security acceptance
+
+Run on a Linux Docker Engine host with AppArmor. The script builds the fixture
+probe and egress images unless `AURORA_FIXTURE_SANDBOX_REF` and
+`AURORA_FIXTURE_PROXY_REF` name a prebuilt digest-pinned pair, loads the
+AppArmor profile, records the inventory, and runs the isolation/egress boundary
+plus the containerized fake pipeline smoke inside the release sandbox image:
 
 ```bash
-AURORA_RUN_DOCKER_SECURITY_TEST=1 deploy/aurora-sandbox/docker-security-test.sh
+AURORA_PIPELINE_IMAGE='ghcr.io/eanfs/multica-aurora-sandbox@sha256:<index-digest>' \
+  deploy/aurora-sandbox/docker-security-test.sh
 ```
 
-On macOS, use the functional smoke instead. It prints
-`FUNCTIONAL SMOKE ONLY` and explicitly records that AppArmor/cgroup security
-acceptance was not evaluated.
+`AURORA_PIPELINE_IMAGE` names the release sandbox image that carries the Node,
+Chromium, and FFmpeg runtime; every container run uses `--pull never`. The
+report is `.scratch/aurora-sandbox-acceptance/linux-acceptance.json`. CI
+resolves the locally built sandbox image to its content-addressed image ID
+before invoking the script, so the workflow passes an immutable reference even
+though the image is never pushed to a registry.
+
+### macOS Docker Desktop functional smoke
+
+Run on macOS Docker Desktop:
+
+```bash
+AURORA_PIPELINE_IMAGE='ghcr.io/eanfs/multica-aurora-sandbox@sha256:<index-digest>' \
+  deploy/aurora-sandbox/docker-smoke.sh
+```
+
+The script starts fake Multica control and provider endpoints, provisions a
+workspace node through the authenticated fleet API, waits for the online/idle
+state, verifies the egress boundary, runs the real release sandbox image
+through the containerized fake `xhs-image` pipeline, confirms a repeat ensure is
+idempotent, and deletes the node. It prints `FUNCTIONAL SMOKE ONLY` and states
+that AppArmor/cgroup security acceptance was not evaluated; the report records
+`security_acceptance_evaluated: false` at
+`.scratch/aurora-sandbox-acceptance/macos-smoke.json`. Without
+`AURORA_PIPELINE_IMAGE`, or when the sandbox image has no Node runtime, the
+fake-pipeline step is recorded as `skip`, not `pass`.
 
 ## Digest-only deployment
 

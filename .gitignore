@@ -51,6 +51,9 @@ server/multica
 test-results/
 apps/web/test-results/
 
+# Local acceptance reports (CI uploads its own copies)
+.scratch/
+
 # context (agent workspace)
 .context
 .agent_context/
