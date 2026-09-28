@@ -1,8 +1,9 @@
 // Seedance adapter fake-provider contract tests.
 //
-// The Seedance vendor tree is deliberately absent (licence gate, issue #140),
-// so these tests drive the adapter against an injected fake vendor module and a
-// fake provider-run client. A missing vendor module must fail closed.
+// These tests drive the adapter against an injected fake vendor module and a
+// fake provider-run client so its create/poll/lease contract is deterministic.
+// The real patched module is exercised by the 13-skill matrix; a missing vendor
+// module must still fail closed.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

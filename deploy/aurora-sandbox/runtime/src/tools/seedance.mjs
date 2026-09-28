@@ -1,8 +1,8 @@
 // Hardened Seedance tool.
 //
-// The Seedance vendor tree is blocked by the licence gate (issue #140), so this
-// adapter is written against the patched-module interface and fails closed when
-// the module is absent. It never vendors or fabricates the tree.
+// The Seedance vendor tree is vendored and patched (issue #140 resolved), so
+// this adapter resolves the patched module from the broker vendor directory and
+// fails closed if it is absent. It never vendors or fabricates the tree.
 
 import { ALLOWED_MODELS, PROVIDER_RUN_OPERATIONS, assertToolAllowed, sanitizeError } from '../policy.mjs';
 import { assertProviderResultUrl } from '../importer.mjs';
@@ -12,7 +12,7 @@ import fs from 'node:fs';
 export function loadSeedanceModule(broker) {
   const vendor = broker.vendor && broker.vendor.seedance;
   if (!vendor || typeof vendor.createTask !== 'function' || typeof vendor.pollTask !== 'function') {
-    throw new Error('Seedance vendor adapter is unavailable: the vendored Seedance tree is blocked by the licence gate and is not present');
+    throw new Error('Seedance vendor adapter is unavailable: the vendored Seedance module is not present');
   }
   return vendor;
 }

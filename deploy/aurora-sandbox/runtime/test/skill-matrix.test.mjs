@@ -23,7 +23,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createBroker, TOOL_NAMES } from '../src/server.mjs';
 import { AVAILABLE_SKILLS, PROVIDER_ORIGINS, SKILL_ROUTES } from '../src/policy.mjs';
-import { readBoundedJson } from '../src/transport.mjs';
 import {
   attachmentEntry,
   baseContext,
@@ -54,11 +53,21 @@ const AUDIO_ID = uuid(7);
 const VIDEO_ID = uuid(6);
 const MAX_PROVIDER_BYTES = 1024 * 1024;
 
-// The patched Seedream adapter is materialized from the vendored tree exactly
-// as the image build does, so the matrix drives the real reviewed module.
+// The patched Seedream and Seedance adapters are materialized from the vendored
+// trees exactly as the image build does, so the matrix drives the real reviewed
+// modules rather than stand-in fakes.
 const PATCHED_DIR = materializePatchedVendor();
 const seedreamModule = loadCjsModule(path.join(PATCHED_DIR, 'byted-ark-seedream-skill/scripts/seedream-broker.js'));
+const seedanceModule = loadCjsModule(path.join(PATCHED_DIR, 'byted-ark-seedance-skill/scripts/seedance-broker.js'));
 after(() => fs.rmSync(PATCHED_DIR, { recursive: true, force: true }));
+
+// The real patched Seedance broker exposes no call log, so the matrix counts
+// the create submissions it actually performs on the Ark router.
+function seedanceCreateCalls(router) {
+  return router.calls.filter(
+    (entry) => entry.group === 'ark' && entry.method === 'POST' && entry.path === '/api/plan/v3/contents/generations/tasks',
+  );
+}
 
 function groupFor(origin) {
   if (origin === ARK) return 'ark';
@@ -138,50 +147,7 @@ function defaultHandlers() {
   return { ark: arkDefault, openai: openaiDefault, asr: asrDefault };
 }
 
-// The Seedance vendor tree is absent under the licence gate (issue #140), so
-// the matrix drives the adapter's exact create-then-poll interface with a fake
-// vendor that performs the same two bounded HTTP calls the real one will.
-function fakeSeedanceVendor() {
-  const calls = [];
-  return {
-    calls,
-    API_ORIGIN: ARK,
-    async createTask({ fetchImpl, env, input }) {
-      calls.push({ kind: 'create', input, env });
-      const response = await fetchImpl(ARK + '/api/plan/v3/contents/generations/tasks', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + env.ARK_API_KEY },
-        body: JSON.stringify({ model: input.model, content: [{ type: 'text', text: input.prompt }] }),
-      });
-      if (!response.ok) throw new Error('Seedance create failed with status ' + response.status);
-      const parsed = await readBoundedJson(response, MAX_PROVIDER_BYTES);
-      if (typeof parsed.id !== 'string' || parsed.id.length === 0) throw new Error('Seedance create returned no task id');
-      return { provider: 'volcengine-agentplan', model: input.model, external_id: parsed.id, status: 'queued', outputs: [] };
-    },
-    async pollTask({ fetchImpl, env, taskId }) {
-      calls.push({ kind: 'poll', taskId });
-      const response = await fetchImpl(ARK + '/api/plan/v3/contents/generations/tasks/' + encodeURIComponent(taskId), {
-        method: 'GET',
-        headers: { authorization: 'Bearer ' + env.ARK_API_KEY },
-      });
-      if (!response.ok) throw new Error('Seedance poll failed with status ' + response.status);
-      const parsed = await readBoundedJson(response, MAX_PROVIDER_BYTES);
-      if (parsed.status !== 'succeeded' || !parsed.content || typeof parsed.content.video_url !== 'string') {
-        throw new Error('Seedance task did not succeed');
-      }
-      return {
-        provider: 'volcengine-agentplan',
-        model: 'doubao-seedance-2.0',
-        external_id: taskId,
-        status: 'succeeded',
-        outputs: [{ kind: 'video', url: parsed.content.video_url }],
-      };
-    },
-    producerMetadata(treeSha256) {
-      return { id: 'byted-ark-seedance-skill', version: '5.0.0', tree_sha256: treeSha256 || null };
-    },
-  };
-}
+// The Seedance scenarios drive the real patched broker module loaded above.
 
 function writeSecrets(ws) {
   const secrets = {
@@ -350,7 +316,7 @@ function prepareScenario(ws, skillId, options = {}) {
   const context = baseContext(ws, { skill_id: skillId, attachments: scenario.attachments });
   const contextPath = writeContextFile(ws, context);
   const vendor = scenario.seedance
-    ? { seedanceModule: options.seedanceModule || fakeSeedanceVendor() }
+    ? { seedanceModule: options.seedanceModule || seedanceModule }
     : { seedreamModule };
   const broker = createBroker({
     contextPath,
@@ -498,13 +464,12 @@ test('image-video submits Seedance exactly once and records the external id befo
 test('a Seedance retry after a recorded create never submits a second create', async () => {
   const ws = makeWorkspace();
   const scenario = prepareScenario(ws, 'image-video');
-  const vendor = scenario.broker.vendor.seedance;
   // First dispatch creates exactly once.
   await scenario.run(scenario.broker);
-  assert.equal(vendor.calls.filter((entry) => entry.kind === 'create').length, 1);
+  assert.equal(seedanceCreateCalls(scenario.router).length, 1);
   // The retry finds the recorded submitted run and polls it again.
   await assert.rejects(scenario.run(scenario.broker), /already succeeded|refusing a second create|ambiguous/i);
-  assert.equal(vendor.calls.filter((entry) => entry.kind === 'create').length, 1, 'the retry must never create twice');
+  assert.equal(seedanceCreateCalls(scenario.router).length, 1, 'the retry must never create twice');
 });
 
 test('an ambiguous Seedance create lease fails closed without submitting', async () => {
@@ -513,8 +478,7 @@ test('an ambiguous Seedance create lease fails closed without submitting', async
   providerRun.begin = async (input) => ({ ...input, external_id: null, state: 'creating', create_allowed: false });
   const scenario = prepareScenario(ws, 'text-video', { providerRun });
   await assert.rejects(scenario.run(scenario.broker), /lease|ambig|refus/i);
-  const vendor = scenario.broker.vendor.seedance;
-  assert.equal(vendor.calls.filter((entry) => entry.kind === 'create').length, 0);
+  assert.equal(seedanceCreateCalls(scenario.router).length, 0);
   assert.deepEqual(scenario.router.counts(), { ark: 0, openai: 0, asr: 0 });
   assert.equal(scenario.router.groups.other.length, 0);
 });

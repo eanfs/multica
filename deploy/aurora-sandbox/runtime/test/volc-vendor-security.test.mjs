@@ -370,3 +370,11 @@ test('the patched upstream Seedream CLI refuses direct execution', () => {
   assert.equal(result.status, 2);
   assert.match(result.stderr, /disabled/);
 });
+
+test('the patched upstream Seedance CLIs refuse direct execution', () => {
+  for (const script of ['seedance.js', 'seedance-wrapper.js']) {
+    const result = spawnSync(process.execPath, [path.join(PATCHED_DIR, 'byted-ark-seedance-skill/scripts', script)], { encoding: 'utf8' });
+    assert.equal(result.status, 2, script + ' must exit 2');
+    assert.match(result.stderr, /disabled/);
+  }
+});
