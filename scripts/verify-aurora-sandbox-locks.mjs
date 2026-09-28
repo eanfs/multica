@@ -16,6 +16,7 @@
 // No network calls are made. The runtime package/lock checks read files only.
 
 import fs from "node:fs";
+import { isAcceptedLicenseException } from "./verify-aurora-volc-skills.mjs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -85,8 +86,8 @@ export const LOCKED = {
   vendor_trees: {
     "byted-ark-seedance-skill": {
       declared_version: "5.0.0",
-      vendored: false,
-      whole_tree_sha256: null,
+      vendored: true,
+      whole_tree_sha256: "sha256:d8d7b1ecd84093009510163f3321c40591eda080735867c4e97ab6716ea3a65d",
       license_sha256: null,
     },
     "byted-ark-seedream-skill": {
@@ -457,7 +458,7 @@ function checkVendorTrees(state, versions, errors) {
         );
       }
       const licenseHash = isPlainObject(skill.license) ? skill.license.sha256 : null;
-      if (isExecutableVendorTree(skill)) {
+      if (isExecutableVendorTree(skill) && !isAcceptedLicenseException(skillId, skill.license)) {
         if (!DIGEST.test(tree.license_sha256) || !DIGEST.test(licenseHash)) {
           errors.push(
             "executable vendor tree " + skillId + " is missing a license hash: versions=" + JSON.stringify(tree.license_sha256) + " vendor-lock=" + JSON.stringify(licenseHash),

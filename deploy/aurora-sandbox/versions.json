@@ -28,8 +28,8 @@
   "vendor_trees": {
     "byted-ark-seedance-skill": {
       "declared_version": "5.0.0",
-      "vendored": false,
-      "whole_tree_sha256": null,
+      "vendored": true,
+      "whole_tree_sha256": "sha256:d8d7b1ecd84093009510163f3321c40591eda080735867c4e97ab6716ea3a65d",
       "license_sha256": null
     },
     "byted-ark-seedream-skill": {

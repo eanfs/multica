@@ -10,13 +10,14 @@
 # is removed on exit unless --keep-temp is given.
 #
 # Seedance license gate (plan Step 4): the upstream Seedance package ships no
-# LICENSE file, so the tree is NOT vendored until the exact MIT text/copyright is
-# supplied with --seedance-license (or AURORA_SEEDANCE_LICENSE). In that state the
-# script records the skill as blocked and exits 2.
+# LICENSE file. Supply the exact upstream text with --seedance-license, or use
+# --accept-seedance-license-risk for the recorded owner exception for audited
+# Seedance 5.0.0 only. Without either, the script records blocked and exits 2.
 #
 # Usage:
 #   scripts/update-aurora-volc-skills.sh [--reviewer NAME]
-#     [--seedance-license PATH] [--reuse-project DIR] [--keep-temp]
+#     [--seedance-license PATH | --accept-seedance-license-risk]
+#     [--reuse-project DIR] [--keep-temp]
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -27,6 +28,7 @@ SOURCE_URL="https://skills.volces.com/skills/volcengine/agentplan"
 SECURITY_POLICY_VERSION="aurora-sandbox-skill-runtime/v1"
 REVIEWER="${AURORA_VOLC_REVIEWER:-$(git -C "$REPO_ROOT" config user.name 2>/dev/null || true)}"
 SEEDANCE_LICENSE="${AURORA_SEEDANCE_LICENSE:-}"
+ACCEPT_SEEDANCE_LICENSE_RISK="0"
 REUSE_PROJECT=""
 KEEP_TEMP="0"
 RETRIEVED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -39,6 +41,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --reviewer) REVIEWER="${2:?--reviewer needs a value}"; shift 2 ;;
     --seedance-license) SEEDANCE_LICENSE="${2:?--seedance-license needs a value}"; shift 2 ;;
+    --accept-seedance-license-risk) ACCEPT_SEEDANCE_LICENSE_RISK="1"; shift ;;
     --vendor-dir) VENDOR_DIR="${2:?--vendor-dir needs a value}"; shift 2 ;;
     --reuse-project) REUSE_PROJECT="${2:?--reuse-project needs a value}"; shift 2 ;;
     --keep-temp) KEEP_TEMP="1"; shift ;;
@@ -83,6 +86,7 @@ else
   export AURORA_SEEDANCE_LICENSE=""
 fi
 
+export AURORA_ACCEPT_SEEDANCE_LICENSE_RISK="$ACCEPT_SEEDANCE_LICENSE_RISK"
 export AURORA_VERIFIER="$VERIFIER"
 export AURORA_VENDOR_DIR="$VENDOR_DIR"
 export AURORA_PROJECT_DIR="$PROJECT_DIR"
@@ -98,6 +102,7 @@ import path from "node:path";
 
 const {
   AUDITED,
+  SEEDANCE_LICENSE_EXCEPTION,
   SOURCE_URL,
   SKILLS_CLI_VERSION,
   SECURITY_POLICY_VERSION,
@@ -163,17 +168,22 @@ for (const skillId of Object.keys(AUDITED)) {
     if (fs.existsSync(path.join(installDir, "LICENSE"))) {
       throw new Error("upstream now ships a Seedance LICENSE; re-audit before vendoring");
     }
-    vendored = false;
-    gateBlocked.push(skillId);
-    license = {
-      path: audited.licensePath,
-      sha256: null,
-      status: "blocked",
-      reason:
-        "The upstream Seedance package ships no LICENSE file; only the SKILL.md frontmatter declares MIT. " +
-        "The exact MIT text/copyright for Seedance 5.0.0 must be obtained from the Volcengine source owner and " +
-        "passed with --seedance-license before this tree may be vendored or embedded in an image.",
-    };
+    if (process.env.AURORA_ACCEPT_SEEDANCE_LICENSE_RISK === "1") {
+      replaceTree(installDir, targetDir);
+      license = structuredClone(SEEDANCE_LICENSE_EXCEPTION);
+    } else {
+      vendored = false;
+      gateBlocked.push(skillId);
+      license = {
+        path: audited.licensePath,
+        sha256: null,
+        status: "blocked",
+        reason:
+          "The upstream Seedance package ships no LICENSE file; only the SKILL.md frontmatter declares MIT. " +
+          "The exact MIT text/copyright for Seedance 5.0.0 must be obtained from the Volcengine source owner and " +
+          "passed with --seedance-license before this tree may be vendored or embedded in an image.",
+      };
+    }
   } else if (skillId === "byted-ark-seedance-skill") {
     replaceTree(installDir, targetDir);
     const licenseTarget = path.join(targetDir, "LICENSE.upstream");

@@ -258,7 +258,6 @@ echo "WRITABLE ok"
 residue=""
 for p in /root/.npm /root/.cache /root/.pnpm-store /root/.local/share/pnpm \
          /opt/aurora/runtime/.npmrc \
-         /opt/aurora/vendor/volcengine/byted-ark-seedance-skill \
          /opt/aurora/vendor/volcengine/patches \
          /opt/aurora/runtime/deploy/aurora-sandbox/vendor/volcengine/byted-ark-seedance-skill; do
   [ -e "$p" ] && residue="$residue $p" || true
@@ -267,6 +266,19 @@ gitdirs="$(find / -xdev -type d -name .git -print 2>/dev/null || true)"
 [ -z "$gitdirs" ] || residue="$residue $gitdirs"
 [ -z "$residue" ] || fail "forbidden build residue:$residue"
 echo "RESIDUE ok"
+
+seedance=/opt/aurora/vendor/volcengine/byted-ark-seedance-skill/scripts
+[ -f "$seedance/seedance-broker.js" ] || fail "missing hardened Seedance broker adapter"
+for entry in seedance.js seedance-wrapper.js; do
+  status=0
+  output="$(node "$seedance/$entry" --help 2>&1)" || status=$?
+  [ "$status" = 2 ] || fail "Seedance direct CLI is not disabled: $entry (exit $status)"
+  case "$output" in
+    *"direct Seedance CLI execution is disabled"*) ;;
+    *) fail "Seedance CLI guard message missing: $entry" ;;
+  esac
+done
+echo "SEEDANCE_CLI_GUARDS ok"
 
 generated="$(find /workspace /opt/aurora -xdev -name 'aurora-artifacts.v1.json' -print 2>/dev/null || true)"
 [ -z "$generated" ] || fail "generated artifact manifest present:$generated"

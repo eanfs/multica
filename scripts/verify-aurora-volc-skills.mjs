@@ -5,12 +5,10 @@
 // as server/pkg/skillbundle/hash.go (length-prefixed parts, sorted by path) and
 // rejects any drift between the committed trees and their locks.
 //
-// The Seedance license gate is enforced here: the upstream package ships no
-// LICENSE file, so the exact MIT text/copyright must be obtained from the
-// Volcengine source owner, committed as byted-ark-seedance-skill/LICENSE.upstream,
-// and its digest recorded in vendor-lock.json before the tree may be vendored.
-// While that evidence is missing the verifier fails with "missing Seedance
-// license text" and the Seedance tree stays out of the repository/image.
+// License evidence is verified when supplied. Only audited Seedance 5.0.0 has
+// a recorded owner-approved distribution exception for missing upstream text.
+// That exception emits a warning and retains null license evidence fields;
+// source identity, inventory, patch and security checks still apply.
 //
 // No network calls are made.
 
@@ -59,6 +57,27 @@ export const AUDITED = {
     upstreamShipsLicense: true,
   },
 };
+
+// Explicit owner decision, limited to the audited source version and digest.
+// This exception records missing evidence; it must never claim license verification.
+export const SEEDANCE_LICENSE_EXCEPTION = {
+  status: "accepted-risk", path: null, sha256: null,
+  exception: {
+    approved_by: "eanfs", approved_on: "2026-09-28",
+    issue: "https://github.com/eanfs/multica/issues/140",
+    version: "5.0.0", computed_hash: AUDITED["byted-ark-seedance-skill"].computedHash,
+    scope: ["source-distribution", "container-distribution"],
+    reason: "Owner accepts missing upstream MIT text and copyright evidence; this is not license verification.",
+  },
+};
+
+export function isAcceptedLicenseException(skillId, license) {
+  if (skillId !== "byted-ark-seedance-skill" || license?.status !== "accepted-risk" ||
+      license.path !== null || license.sha256 !== null) return false;
+  const expected = SEEDANCE_LICENSE_EXCEPTION.exception;
+  return Object.entries(expected).every(([key, value]) =>
+    JSON.stringify(license.exception?.[key]) === JSON.stringify(value));
+}
 
 const SKILL_IDS = Object.keys(AUDITED);
 const errors = [];
@@ -350,6 +369,10 @@ function main() {
     }
 
     const license = vendor.license || {};
+    if (isAcceptedLicenseException(skillId, license)) {
+      console.warn("WARNING: Seedance license evidence is missing; owner-approved distribution exception applies to audited 5.0.0 only (#140).");
+      continue;
+    }
     verifyField("license path for " + skillId, license.path, audited.licensePath);
     const licenseAbs = path.join(VENDOR_DIR, audited.licensePath);
     if (!fs.existsSync(licenseAbs)) {

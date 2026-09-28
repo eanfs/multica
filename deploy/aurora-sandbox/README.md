@@ -142,5 +142,29 @@ node scripts/verify-aurora-sandbox-locks.mjs --workflow
 
 ## Known follow-ups
 
-- #140 — the Seedance license gate remains an open distribution blocker; only
-  the vendored Seedream tree ships today.
+### Seedance distribution exception (#140)
+
+The repository owner approved source and container distribution of the audited
+Seedance 5.0.0 tree on 2026-09-28 despite missing upstream MIT text/copyright.
+This supersedes the stop-on-missing-license requirement in Plan C for that exact
+source digest only. It is a risk acceptance, **not verified license evidence**.
+The vendor lock records `accepted-risk`, null license path/hash, approval,
+version, source hash and distribution scope; verification prints a warning.
+Seedream still requires its real upstream license and digest.
+
+Use `scripts/update-aurora-volc-skills.sh --accept-seedance-license-risk` to
+reproduce this decision. Without the flag or an authentic license file, the
+updater remains blocked. Both raw Seedance CLIs are disabled in the patched
+image; provider execution goes through the hardened broker adapter. Source and
+patch hashes, security tests and the vulnerability release policy remain required.
+
+### Local SWR publication
+
+Use local Docker Buildx with the existing Bake registry override:
+
+`REGISTRY=swr.cn-east-3.myhuaweicloud.com/intetech TAG=sha-<commit>`
+
+Build and test candidate images before pushing immutable commit tags. Record
+architecture and the remote digest for each image. A local macOS smoke is not
+Linux isolation acceptance; a local build is not GitHub OIDC-signed provenance.
+Do not imply signing or security gates passed without collecting their evidence.

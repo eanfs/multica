@@ -1,0 +1,26 @@
+diff --git a/byted-ark-seedance-skill/scripts/seedance.js b/byted-ark-seedance-skill/scripts/seedance.js
+--- a/byted-ark-seedance-skill/scripts/seedance.js
++++ b/byted-ark-seedance-skill/scripts/seedance.js
+@@ -1,3 +1,9 @@
+ #!/usr/bin/env node
+ 
++// Sandbox execution is restricted to the hardened broker adapter.
++if (require.main === module) {
++  console.error('direct Seedance CLI execution is disabled; use the Multica Aurora broker adapter');
++  globalThis.process.exit(2);
++}
++
+ const fsp = require("node:fs/promises");
+diff --git a/byted-ark-seedance-skill/scripts/seedance-wrapper.js b/byted-ark-seedance-skill/scripts/seedance-wrapper.js
+--- a/byted-ark-seedance-skill/scripts/seedance-wrapper.js
++++ b/byted-ark-seedance-skill/scripts/seedance-wrapper.js
+@@ -1,3 +1,9 @@
+ #!/usr/bin/env node
+ 
++// Sandbox execution is restricted to the hardened broker adapter.
++if (require.main === module) {
++  console.error('direct Seedance CLI execution is disabled; use the Multica Aurora broker adapter');
++  globalThis.process.exit(2);
++}
++
+ /**

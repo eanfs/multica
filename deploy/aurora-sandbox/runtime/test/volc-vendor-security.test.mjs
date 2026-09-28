@@ -365,6 +365,16 @@ test('Seedream model allowlist, Data URIs and descriptors are enforced', async (
   assert.equal(body.image, DATA_URI_PNG);
 });
 
+for (const entry of ['seedance.js', 'seedance-wrapper.js']) {
+  test('the patched upstream Seedance CLI refuses direct execution: ' + entry, () => {
+    const result = spawnSync(process.execPath, [path.join(PATCHED_DIR, 'byted-ark-seedance-skill/scripts', entry), '--help'], {
+      encoding: 'utf8', timeout: 5000, env: {},
+    });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /disabled/);
+  });
+}
+
 test('the patched upstream Seedream CLI refuses direct execution', () => {
   const result = spawnSync(process.execPath, [path.join(PATCHED_DIR, 'byted-ark-seedream-skill/scripts/generate.js')], { encoding: 'utf8' });
   assert.equal(result.status, 2);

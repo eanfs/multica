@@ -114,6 +114,13 @@ test("rejects a missing locked production dependency", async () => {
   await assert.rejects(() => verify({ root }), /missing @anthropic-ai\/claude-code/);
 });
 
+test("rejects Seedance distribution without the approved exception", async () => {
+  const root = fixtureFrom(VENDOR_LOCK, (lock) => {
+    delete lock.skills["byted-ark-seedance-skill"].license.exception;
+  });
+  await assert.rejects(() => verify({ root }), /license hash/);
+});
+
 test("rejects an executable vendor tree without a license hash", async () => {
   const root = fixtureFrom(VENDOR_LOCK, (lock) => {
     lock.skills["byted-ark-seedream-skill"].license.sha256 = null;
