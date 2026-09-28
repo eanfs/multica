@@ -145,6 +145,8 @@ jobs:
       - name: Run Linux sandbox security acceptance
         env:
           AURORA_PIPELINE_IMAGE: ${{ steps.sandbox-image.outputs.id }}
+          # The plan requires the isolation matrix to pass twice, so -count=2.
+          AURORA_DOCKER_SECURITY_COUNT: "2"
         run: deploy/aurora-sandbox/docker-security-test.sh
 
       - name: Upload sandbox acceptance reports
