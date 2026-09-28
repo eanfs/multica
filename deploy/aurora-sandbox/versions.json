@@ -18,6 +18,10 @@
   "runtime_workspace_dependencies": {
     "zod": "catalog:"
   },
+  "esbuild_source": {
+    "module": "github.com/evanw/esbuild/cmd/esbuild",
+    "version": "0.25.12"
+  },
   "hyperframes_source": {
     "tag": "v0.8.75",
     "commit": "a95cb96a5dd3c1f7b31266a4b470590c86ad231f",
