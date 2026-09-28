@@ -185,5 +185,10 @@ node scripts/verify-aurora-sandbox-locks.mjs --workflow
 
 ## Known follow-ups
 
-- #140 — the Seedance license gate remains an open distribution blocker; only
-  the vendored Seedream tree ships today.
+- #117 — the gated real agent and provider smokes remain unimplemented and need
+  real provider credentials plus explicit authorization; they are recorded as
+  skipped, never failed or passed.
+- The Seedance and Seedream vendor trees (#140) are both vendored, patched, and
+  verified. The Seedance `LICENSE.upstream` is an owner-authorized
+  reconstruction of the standard MIT text, recorded as such in
+  `vendor/volcengine/vendor-lock.json`; it is not an upstream file.

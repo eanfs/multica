@@ -650,7 +650,7 @@ List each provider subtest as passed, failed, or skipped with its exact gate rea
 
 Change the roadmap and Plan 3 Task 6 from partial to complete only when lock/vendor tests, all default suites, image build/content, all-13 fake matrix, actual-container fake pipelines, Linux security acceptance, and supply-chain verification pass. Record the accepted sandbox/proxy digest refs and date; do not embed credentials or local machine paths.
 
-> **Stays partial (2026-09-28):** the status documents were updated, but the roadmap and Plan 3 Task 6 were deliberately **not** changed from partial to complete because the Seedance licence gate (#140) and the gated real smokes (#117) remain open and no verified signed digest is available. Issue #29 stays open with `S2-InProgress`.
+> **Stays partial (2026-09-28):** the status documents were updated, but the roadmap and Plan 3 Task 6 were deliberately **not** changed from partial to complete because the gated real smokes (#117) remain open and no verified signed digest is available. Issue #29 stays open with `S2-InProgress`. The Seedance licence gate (#140) is now resolved.
 
 - [ ] **Step 7: Ask before outward-facing tracker changes**
 
@@ -688,6 +688,6 @@ The full command outputs, the cited CI run/job, and the supply-chain verificatio
 - the published digest and whatever signature/attestation verification this host could and could not perform;
 - the real-smoke pass/fail/skip table (`SKIPPED` for every provider subtest, with the exact gate reason);
 - default frontend and backend suite outputs, including the one known `repocache` flake and its focused rerun;
-- the open gates: #140 (Seedance license) and #117 (real smokes).
+- the open gate: #117 (real smokes); #140 (Seedance license) is resolved.
 
-**Boundary status: not closed.** The Seedance license text (#140) and the gated real-smoke implementation (#117) remain open, so issue #29 and the roadmap stay partial. The cited Linux CI acceptance ran the tagged matrix once, so two consecutive Linux passes are not evidenced there.
+**Boundary status: not closed.** The gated real-smoke implementation (#117) remains open, so issue #29 and the roadmap stay partial; the Seedance license text (#140) is resolved. The cited Linux CI acceptance ran the tagged matrix once, so two consecutive Linux passes are not evidenced there.

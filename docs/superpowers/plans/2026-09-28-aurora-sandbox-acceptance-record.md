@@ -16,30 +16,40 @@ and [`2026-09-11-aurora-execution.md`](2026-09-11-aurora-execution.md).
 
 ## Boundary status
 
-The overall sandbox boundary is **not closed**.
+The overall sandbox boundary is **not closed**: only the gated real agent/provider smokes (#117) remain open. The Seedance vendor half (#140) is resolved.
 
 | Gate | State | Evidence or reason |
 | --- | --- | --- |
 | Plan A — managed control plane | accepted | all child tickets #89–#96 S4-Done; Plan A completion evidence |
 | Plan B — fleet, isolation, egress | accepted | all child tickets #97–#103 S4-Done; Linux CI job green |
-| Plan C — 13-skill runtime and artifacts | accepted except the Seedance vendor half | #104, #105, #107–#111 S4-Done; #106 in review, gated by #140 |
+| Plan C — 13-skill runtime and artifacts | accepted | #104–#111 S4-Done; #106 resolved by #140 |
 | Plan D Tasks 1–5 — images and acceptance | accepted | #112–#116 S4-Done; Linux CI job green |
 | Plan D Task 6 — gated real smokes | **open / skipped** | #117; unimplemented, unauthorized, no provider credentials |
-| Seedance licence text | **open** | #140; upstream ships no LICENSE file |
+| Seedance licence text | **resolved** | #140; owner-authorized MIT reconstruction recorded in `vendor-lock.json` |
 | Plan D Task 7 outward-facing tracker step | **deferred** | no tracker change requested; #29 unchanged |
 | Story #29 and story #23 | **open** | both `S2-InProgress` |
 
 ## Step 1 — lock, vendor, and runtime tests
 
-### `node scripts/verify-aurora-volc-skills.mjs` — exit 1 (expected, tracked #140)
+### `node scripts/verify-aurora-volc-skills.mjs` — exit 0 (resolved #140)
 
 ```text
-EXIT=1
-ERROR: missing Seedance license text: byted-ark-seedance-skill/LICENSE.upstream (upstream ships no LICENSE; the exact MIT text/copyright must be obtained from the Volcengine source owner before this tree is distributed)
-1 verification error(s)
+verified 2 vendored Volcengine skills against the audited source lock
+EXIT=0
 ```
 
-This is exactly the single expected error. The Seedance tree is deliberately not vendored (#140); the Seedream tree is vendored and verified. Do not weaken the verifier or substitute licence text.
+Both vendor trees are vendored and verified against the audited source lock. The
+Seedance tree was re-fetched on 2026-09-28 with the pinned `skills@1.7.0` CLI;
+its `computedHash` (`9aed265f…ca04eb`), `wellKnownDigest`
+(`sha256:97bfafe2…b42d6dd`), package name, declared version `5.0.0`, and MIT
+declaration all match the audited table. Upstream still ships no LICENSE file,
+so the committed `LICENSE.upstream` is the standard MIT text carrying the
+`volcengine/agentplan` copyright holder declared in the package metadata, and
+`vendor-lock.json` records it as an owner-authorized reconstruction
+(`status: authorized`, `provenance.kind:
+reconstructed-from-declared-license`, 2026-09-28) rather than a byte-identical
+upstream file. The verifier rejects a lock that presents the text as verified
+against upstream.
 
 ### `node scripts/verify-aurora-sandbox-locks.mjs --workflow` — exit 0
 
@@ -51,13 +61,18 @@ EXIT=0
 ### `pnpm --dir deploy/aurora-sandbox/runtime test` — exit 0
 
 ```text
-tests 120
-pass 120
+tests 121
+pass 121
 fail 0
 skipped 0
 ```
 
-This includes the 13-skill broker matrix, the fake-provider contract tests for Seedream, Seedance, Volc ASR, OpenAI, the local deterministic tools, manifest validation, and the vendor security regressions. No external provider or credential is touched.
+This includes the 13-skill broker matrix (which now drives the real patched
+Seedream and Seedance modules), the fake-provider contract tests for Seedream,
+Seedance, Volc ASR, OpenAI, the local deterministic tools, manifest validation,
+and 15 vendor security regressions, including the new Seedance direct-CLI
+refusal. Resolving #140 added one regression over the previous run's 120. No
+external provider or credential is touched.
 
 ## Step 2 — frontend and backend suites
 
@@ -183,7 +198,7 @@ No provider credentials exist in this environment, no credential file was create
 | --- | --- | --- |
 | Claude text (`AURORA_RUN_CLAUDE_SMOKE`) | **SKIPPED** | #117 unimplemented; no explicit authorization; no credential file |
 | Seedream (`AURORA_RUN_SEEDREAM_SMOKE`) | **SKIPPED** | #117 unimplemented; no explicit authorization; no credential file |
-| Seedance (`AURORA_RUN_SEEDANCE_SMOKE`) | **SKIPPED** | #117 unimplemented; no explicit authorization; no credential file; also gated by the #140 licence |
+| Seedance (`AURORA_RUN_SEEDANCE_SMOKE`) | **SKIPPED** | #117 unimplemented; no explicit authorization; no credential file |
 | Volc ASR (`AURORA_RUN_VOLC_ASR_SMOKE`) | **SKIPPED** | #117 unimplemented; no explicit authorization; no credential file |
 | OpenAI generation/edit (`AURORA_RUN_OPENAI_IMAGE_SMOKE`) | **SKIPPED** | #117 unimplemented; no explicit authorization; no credential file |
 | HyperFrames/FFmpeg (`AURORA_RUN_HYPERFRAMES_SMOKE`) | **SKIPPED** | #117 unimplemented; no explicit authorization |
@@ -194,5 +209,5 @@ These are recorded as **SKIPPED**, never as failure and never as success. The de
 ## Step 6/8 — documentation checks and commits
 
 - `git diff --check` is clean.
-- The plan and status documents were updated only to the extent the evidence above supports; the Seedance gate (#140) and the real-smoke gate (#117) are labeled and left open, and the boundary is stated as not closed.
+- The plan and status documents were updated only to the extent the evidence above supports; the Seedance vendor gate (#140) is recorded as resolved and the video routes as executable, while the real-smoke gate (#117) remains labeled and open and the boundary is stated as not closed. No real provider call was made for the video routes.
 - No build artifact, acceptance report, credential, or secret is committed. `.scratch/` remains ignored.
