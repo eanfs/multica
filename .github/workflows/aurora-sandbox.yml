@@ -138,10 +138,23 @@ jobs:
       - name: Verify built image contents
         run: scripts/verify-aurora-sandbox-image.sh "${{ env.SANDBOX_IMAGE }}:ci" "${{ env.EGRESS_IMAGE }}:ci"
 
-      - name: Run fake container smoke on Linux
+      - name: Resolve the built sandbox image to its content-addressed ID
+        id: sandbox-image
+        run: echo "id=$(docker image inspect --format '{{.Id}}' "${SANDBOX_IMAGE}:ci")" >> "$GITHUB_OUTPUT"
+
+      - name: Run Linux sandbox security acceptance
         env:
-          AURORA_PIPELINE_IMAGE: ${{ env.SANDBOX_IMAGE }}:ci
+          AURORA_PIPELINE_IMAGE: ${{ steps.sandbox-image.outputs.id }}
         run: deploy/aurora-sandbox/docker-security-test.sh
+
+      - name: Upload sandbox acceptance reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: aurora-sandbox-acceptance
+          path: .scratch/aurora-sandbox-acceptance/*.json
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Install Syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
