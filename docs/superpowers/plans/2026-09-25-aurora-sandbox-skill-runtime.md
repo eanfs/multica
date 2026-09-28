@@ -221,7 +221,7 @@ For a Volcengine URL imported by the server, `source` is `{ "type": "staged_obje
 - Consumes: Existing authenticated file upload and `EnqueueQuickCreateTask(..., attachmentIDs)`.
 - Produces: `CreateAuroraGenerationRequest{skillId,prompt,attachmentIds}`, catalog `attachment_rules`, and `ValidateSkillInputs`.
 
-- [ ] **Step 1: Write the server policy matrix test**
+- [x] **Step 1: Write the server policy matrix test**
 
 ```go
 func TestValidateSkillInputsMatrix(t *testing.T) {
@@ -246,11 +246,11 @@ func TestValidateSkillInputsMatrix(t *testing.T) {
 
 Add cases for all 13 skills, too many files, mixed kinds, unavailable skills, MIME/extension mismatch, missing storage object, and foreign workspace/owner.
 
-- [ ] **Step 2: Write UI/API failures first**
+- [x] **Step 2: Write UI/API failures first**
 
 Test that `attachmentIds` serialize, image/document/audio/video accept filters reflect the selected skill, required attachments disable submit, selected files can be removed, upload failure preserves prompt, and success submits only uploaded IDs. Read `packages/ui/docs/button.md` before modifying Button usage.
 
-- [ ] **Step 3: Run focused tests and observe missing attachment support**
+- [x] **Step 3: Run focused tests and observe missing attachment support**
 
 Run:
 
@@ -263,7 +263,7 @@ pnpm --filter @multica/views test -- generation-composer
 
 Expected: server and frontend tests fail because generation requests currently contain only `skillId` and `prompt`.
 
-- [ ] **Step 4: Implement one canonical execution policy**
+- [x] **Step 4: Implement one canonical execution policy**
 
 Define exact Go types:
 
@@ -291,19 +291,19 @@ An `AttachmentConstraint` counts all listed alternative kinds together; transcri
 
 Populate all 13 routes from the master matrix. Change `AssetKind` to return `(string, bool)` and reject an unlisted format instead of silently using the primary output.
 
-- [ ] **Step 5: Extend the generation request and enqueue call**
+- [x] **Step 5: Extend the generation request and enqueue call**
 
 Decode with a body limit and reject more than four IDs or duplicate IDs. Resolve every pure UUID with `parseUUIDOrBadRequest`, load files by workspace/user, sniff stored MIME metadata, run `ValidateSkillInputs`, then pass the validated IDs to the final `EnqueueQuickCreateTask` argument instead of `nil`. Complete validation before sandbox ensure, generation insert, or reserve.
 
-- [ ] **Step 6: Add accessible upload controls**
+- [x] **Step 6: Add accessible upload controls**
 
 Use the existing authenticated upload API and render one file input whose `accept` and label derive from the policy. Display file name, formatted size, upload state, and a remove button. Do not add descriptions that restate the label. Disable submit while required uploads are missing or any upload is pending/failed. Keep prompt and successful selections on submission failure.
 
-- [ ] **Step 7: Run focused tests**
+- [x] **Step 7: Run focused tests**
 
 Run the three commands from Step 3 again. Expected: all selected tests pass.
 
-- [ ] **Step 8: Commit attachment support**
+- [x] **Step 8: Commit attachment support**
 
 ```bash
 git add server/internal/aurora/catalog.go server/internal/aurora/catalog_test.go \
@@ -342,7 +342,7 @@ git commit -m "feat(aurora): accept skill input attachments"
 - Consumes: Task 1’s policy/tool names.
 - Produces: `Workflow(skillID) (string, bool)` and a per-task allowlist containing only tools required by that route.
 
-- [ ] **Step 1: Write completeness and denial tests**
+- [x] **Step 1: Write completeness and denial tests**
 
 Assert every available catalog skill has exactly one workflow, unavailable skills have none, every referenced tool appears in policy, and no workflow contains shell commands, URLs, API keys, provider selection, model selection, or dynamic package installation.
 
@@ -353,7 +353,7 @@ func TestWorkflowToolsMatchExecutionPolicy(t *testing.T)
 func TestAuroraSurfaceDeniesGeneralPurposeTools(t *testing.T)
 ```
 
-- [ ] **Step 2: Run tests and observe missing workflow bundle**
+- [x] **Step 2: Run tests and observe missing workflow bundle**
 
 Run:
 
@@ -363,7 +363,7 @@ cd server && go test ./internal/aurora ./internal/daemon -run 'TestAvailableSkil
 
 Expected: missing workflow functions/files.
 
-- [ ] **Step 3: Write each workflow as an exact procedure**
+- [x] **Step 3: Write each workflow as an exact procedure**
 
 Each Markdown brief states input IDs, the ordered MCP calls, required primary outputs, and failure behavior. Examples:
 
@@ -375,19 +375,19 @@ resume -> optional aurora.read_document -> aurora.render_resume -> require PDF +
 
 The brief must tell Claude to stop on any tool error, never retry a create tool, and never claim completion without the required artifact IDs returned by tools.
 
-- [ ] **Step 4: Embed and seed canonical content**
+- [x] **Step 4: Embed and seed canonical content**
 
 Use `//go:embed workflows/*.md`; map by exact filename/skill ID. `EnsureSystemAgents` creates/updates the system skill content from the embedded workflow and records required MCP tool names. Do not load vendor `SKILL.md` files into the model prompt.
 
-- [ ] **Step 5: Build the per-task allowlist**
+- [x] **Step 5: Build the per-task allowlist**
 
 The daemon derives allowed tools from trusted task `skill_id` plus `ExecutionPolicy`; it never trusts a tool list sent in prompt/context. Always deny Bash, browser/network tools, arbitrary file tools, generic MCP config, and vendor script execution.
 
-- [ ] **Step 6: Run workflow tests**
+- [x] **Step 6: Run workflow tests**
 
 Run the Step 2 command. Expected: all selected tests pass.
 
-- [ ] **Step 7: Commit workflows**
+- [x] **Step 7: Commit workflows**
 
 ```bash
 git add server/internal/aurora/workflows server/internal/aurora/workflows.go \
@@ -398,6 +398,8 @@ git commit -m "feat(aurora): define canonical skill workflows"
 ```
 
 ### Task 3: Vendor and Harden the Official Volcengine Skills
+
+> **Open gate (2026-09-28): #140 — the Seedance tree is deliberately not vendored.** Steps 1–3 and 9 are complete and the Seedream tree is vendored, hardened, and verified. Steps 4–8 stay unchecked because upstream ships no LICENSE file for Seedance and the exact MIT text/copyright has not been obtained; `node scripts/verify-aurora-volc-skills.mjs` exits 1 with exactly one expected error for that missing text. Ticket #106 remains in review and no generic license text may be substituted.
 
 **Files:**
 - Create: `scripts/update-aurora-volc-skills.sh`
@@ -413,11 +415,11 @@ git commit -m "feat(aurora): define canonical skill workflows"
 - Consumes: The exact audited source-lock table above.
 - Produces: Untouched upstream trees, deterministic inventory, license evidence, and a patch series that yields sandbox-safe adapters.
 
-- [ ] **Step 1: Write the verifier before copying source**
+- [x] **Step 1: Write the verifier before copying source**
 
 The verifier must reject wrong skill ID/package name/version/license, lock digest mismatch, missing/extra file, changed bytes/mode, unsorted inventory, missing patch digest, non-applying patch, and missing Seedance license text. It recomputes a deterministic whole-tree SHA-256 using the same sorted path/content approach as `server/pkg/skillbundle/hash.go`.
 
-- [ ] **Step 2: Run the verifier against an empty vendor directory**
+- [x] **Step 2: Run the verifier against an empty vendor directory**
 
 Run:
 
@@ -427,7 +429,7 @@ node scripts/verify-aurora-volc-skills.mjs
 
 Expected: FAIL with `missing vendor lock`.
 
-- [ ] **Step 3: Add the isolated update script with the requested commands**
+- [x] **Step 3: Add the isolated update script with the requested commands**
 
 The script creates a temporary HOME/project and runs exactly the pinned equivalents:
 
@@ -488,7 +490,7 @@ node --test deploy/aurora-sandbox/runtime/test/volc-vendor-security.test.mjs
 
 Expected: both commands pass and make no network call.
 
-- [ ] **Step 9: Commit vendor provenance separately**
+- [x] **Step 9: Commit vendor provenance separately**
 
 ```bash
 git add scripts/update-aurora-volc-skills.sh scripts/verify-aurora-volc-skills.mjs \
@@ -516,11 +518,11 @@ git commit -m "build(aurora): vendor hardened Volcengine skills"
 - Consumes: Task-scoped `mat_` authentication and Aurora task/generation context.
 - Produces: begin, record external ID, finish, and load provider-run operations with one create lease.
 
-- [ ] **Step 1: Write create-once state tests**
+- [x] **Step 1: Write create-once state tests**
 
 Cover first begin, repeated same fingerprint, conflicting fingerprint, crash-before-external-ID ambiguity, external ID record once, conflicting external ID, completion, failure, foreign task, and non-Aurora task.
 
-- [ ] **Step 2: Run tests and observe missing persistence**
+- [x] **Step 2: Run tests and observe missing persistence**
 
 Run:
 
@@ -531,7 +533,7 @@ cd server && go test ./internal/handler -run TestAuroraProviderRun -count=1
 
 Expected: missing endpoint/query types.
 
-- [ ] **Step 3: Add the provider-run table without inline indexes**
+- [x] **Step 3: Add the provider-run table without inline indexes**
 
 Migration 527:
 
@@ -556,7 +558,7 @@ CREATE TABLE aurora_provider_run (
 
 Migrations 528 and 530–531 create concurrent unique indexes on `id`, `(task_id, operation)`, and `(provider, external_id) WHERE external_id IS NOT NULL`. Migration 529 attaches the ID index as primary key. Register only the index migrations as non-transactional.
 
-- [ ] **Step 4: Implement task-token endpoints**
+- [x] **Step 4: Implement task-token endpoints**
 
 Expose:
 
@@ -569,11 +571,11 @@ GET  /api/agent/tasks/{taskID}/aurora-provider-runs/{operation}
 
 The task-token identity must match path task/agent/workspace, task must be Aurora, provider/operation/model must match server policy, and request SHA-256 is over canonical tool arguments excluding credentials. First begin returns `create_allowed=true`. A retry in `submitted` returns its external ID for polling. A retry in `creating` without external ID returns `state=ambiguous` and `create_allowed=false`; it never authorizes a second billable create.
 
-- [ ] **Step 5: Add client calls for the broker-facing local bridge**
+- [x] **Step 5: Add client calls for the broker-facing local bridge**
 
 The daemon exposes these operations to the MCP process through task-scoped context/token files; the model sees only tool success/failure. Never put the `mat_` token into tool arguments or model-visible context.
 
-- [ ] **Step 6: Generate and test**
+- [x] **Step 6: Generate and test**
 
 Run:
 
@@ -585,7 +587,7 @@ cd server && go test ./internal/handler -run TestAuroraProviderRun -count=1
 
 Expected: all selected tests pass.
 
-- [ ] **Step 7: Commit provider-run idempotency**
+- [x] **Step 7: Commit provider-run idempotency**
 
 ```bash
 git add server/migrations/527_aurora_provider_run.* \
@@ -618,7 +620,7 @@ git commit -m "feat(aurora): persist create-once provider runs"
 - Consumes: Task context file, secret files, provider-run API, hardened vendor adapters, and fixed policy.
 - Produces: MCP methods `aurora.seedream_generate`, `aurora.seedance_generate`, `aurora.openai_image`, `aurora.volc_asr_transcribe`, `aurora.read_document`, `aurora.id_photo`, `aurora.render_video_captions`, `aurora.render_resume`, and `aurora.write_text_artifact`.
 
-- [ ] **Step 1: Declare exact dependencies and schemas**
+- [x] **Step 1: Declare exact dependencies and schemas**
 
 Use exact versions, no ranges:
 
@@ -640,11 +642,11 @@ Use exact versions, no ranges:
 
 Add `deploy/aurora-sandbox/runtime` to `pnpm-workspace.yaml`. Use direct exact versions for the runtime-only MCP, HyperFrames, and OpenAI dependencies; use the repository’s existing `catalog:` entry for shared `zod`, with the frozen root lock providing the exact installed version. Keep the official Volcengine vendor trees dependency-free.
 
-- [ ] **Step 2: Write fake-provider contract tests first**
+- [x] **Step 2: Write fake-provider contract tests first**
 
 For each tool, start a local fake server and assert exact method/path/headers/body, fixed model/resource, proxy use, timeouts, size limits, sanitized errors, no redirect to an unapproved origin, create-once calls, and manifest/staging output. Include a test proving one provider failure causes no call to another fake provider.
 
-- [ ] **Step 3: Run broker tests and observe missing implementation**
+- [x] **Step 3: Run broker tests and observe missing implementation**
 
 Run:
 
@@ -654,11 +656,11 @@ pnpm --dir deploy/aurora-sandbox/runtime test
 
 Expected: test modules fail to import missing broker/tool files.
 
-- [ ] **Step 4: Implement bounded task context and secret access**
+- [x] **Step 4: Implement bounded task context and secret access**
 
 The runner writes a mode-`0400` JSON context containing task/generation/workspace/skill IDs, prompt, authorized attachment ID-to-relative-path/MIME/size mapping, output root, server origin, and task-token file path. Reject unknown fields, files over 1 MiB, symlinks, wrong task IDs, paths outside `/workspace/input`, unsupported attachment kinds, and mismatches with the fixed policy. Secret helper accepts only compiled file paths and trims at most 4 KiB; it never reads generic environment variables or home config.
 
-- [ ] **Step 5: Implement provider adapters without fallback**
+- [x] **Step 5: Implement provider adapters without fallback**
 
 - Seedream/Seedance invoke only patched modules with argv arrays and a minimal child environment. The Ark key is in child environment, never argv; stdout/stderr are bounded and sanitized.
 - Seedance begins a provider run before create, records `cgt-...` immediately, and resumes polling an existing submitted run rather than creating again.
@@ -666,7 +668,7 @@ The runner writes a mode-`0400` JSON context containing task/generation/workspac
 - ASR streams base64 from the authorized audio file, uses the fixed flash endpoint/resource ID, and validates `X-Api-Status-Code=20000000` plus bounded JSON.
 - FFmpeg extraction validates codecs/duration with ffprobe before ASR; process trees are terminated on timeout.
 
-- [ ] **Step 6: Implement deterministic local tools**
+- [x] **Step 6: Implement deterministic local tools**
 
 - `read_document`: bounded UTF-8/Markdown read, `pdftotext` for PDF, and fixed DOCX ZIP/XML extraction; return at most 200,000 Unicode characters.
 - `id_photo`: fixed ImageMagick/FFmpeg-backed center crop, resize, color-space normalization, and solid-background padding; no model/provider call and no arbitrary expression/filter arguments.
@@ -676,11 +678,11 @@ The runner writes a mode-`0400` JSON context containing task/generation/workspac
 
 Every producer calls the manifest library; the model cannot author manifest JSON.
 
-- [ ] **Step 7: Implement Volcengine output import calls**
+- [x] **Step 7: Implement Volcengine output import calls**
 
 When hardened Seedream/Seedance returns a provider URL, validate HTTPS syntax and pass it immediately to the task-scoped server importer from Task 6. Do not fetch it in the sandbox, return it to the model, print it, or persist it in local state. Convert the importer response into a `staged_object` manifest source.
 
-- [ ] **Step 8: Run offline broker tests**
+- [x] **Step 8: Run offline broker tests**
 
 Run:
 
@@ -691,7 +693,7 @@ pnpm --dir deploy/aurora-sandbox/runtime test
 
 Expected: all tests pass against local fakes; outbound test hooks record no unknown host.
 
-- [ ] **Step 9: Commit the broker**
+- [x] **Step 9: Commit the broker**
 
 ```bash
 git add deploy/aurora-sandbox/runtime package.json pnpm-workspace.yaml pnpm-lock.yaml
@@ -717,11 +719,11 @@ git commit -m "feat(aurora): add narrow sandbox media tools"
 - Consumes: Task-token identity, storage service, SSRF-safe URL screening, and artifact limits.
 - Produces: task-owned staging rows from streaming upload or controlled remote import.
 
-- [ ] **Step 1: Write upload/import security tests first**
+- [x] **Step 1: Write upload/import security tests first**
 
 Cover local stream success, foreign task/workspace, non-Aurora task, duplicate artifact ID, MIME mismatch, over-size stream, short/long declared size, hash mismatch, URL credentials, HTTP URL, private/direct/mixed DNS, redirect revalidation, excessive redirects, excessive response bytes, unsupported MIME, timeout, and cleanup after storage/DB failure.
 
-- [ ] **Step 2: Run focused tests and observe missing endpoint**
+- [x] **Step 2: Run focused tests and observe missing endpoint**
 
 Run:
 
@@ -732,21 +734,21 @@ cd server && go test ./internal/handler -run 'TestAuroraArtifactUpload|TestAuror
 
 Expected: missing routes/types.
 
-- [ ] **Step 3: Add staging and asset metadata schema**
+- [x] **Step 3: Add staging and asset metadata schema**
 
 Migration 532 creates `aurora_artifact_staging` without inline indexes: ID, task/generation/workspace IDs, manifest artifact ID, storage object key, name, kind, role, format, MIME, size, SHA-256, metadata JSONB, source type (`upload|provider_import`), status (`staged|committed|deleted`), and timestamps. Migrations 533/535 create concurrent unique ID and `(task_id, manifest_artifact_id)` indexes; 534 attaches the primary key.
 
 Migration 536 adds nullable `manifest_artifact_id`, `name`, `mime_type`, `size_bytes`, `sha256`, `role`, and `metadata jsonb NOT NULL DEFAULT '{}'` to `aurora_asset`. Migration 537 adds `CREATE UNIQUE INDEX CONCURRENTLY aurora_asset_generation_manifest_uidx ON aurora_asset(generation_id, manifest_artifact_id) WHERE manifest_artifact_id IS NOT NULL`.
 
-- [ ] **Step 4: Implement streaming local upload**
+- [x] **Step 4: Implement streaming local upload**
 
 Expose `POST /api/agent/tasks/{taskID}/aurora-artifacts/upload` as multipart metadata + file. Authenticate the task token, validate server policy, stream through SHA-256 and byte limiter into storage, sniff the first bounded bytes, and insert staging only after storage succeeds. On DB failure, delete the object. Never read a 500 MiB video fully into memory.
 
-- [ ] **Step 5: Implement SSRF-safe provider import**
+- [x] **Step 5: Implement SSRF-safe provider import**
 
 Expose `POST /api/agent/tasks/{taskID}/aurora-artifacts/import` with bounded JSON containing manifest artifact metadata and one HTTPS source URL. Resolve and pin public DNS, reject private/special/mixed answers, revalidate at most five redirects, strip Authorization/cookies, stream with per-kind cap, sniff MIME, hash, upload into Multica storage, then return staging ID/metadata. Do not persist the provider URL or include it in logs/errors.
 
-- [ ] **Step 6: Generate and run tests**
+- [x] **Step 6: Generate and run tests**
 
 Run:
 
@@ -758,7 +760,7 @@ cd server && go test ./internal/handler -run 'TestAuroraArtifactUpload|TestAuror
 
 Expected: all selected tests pass.
 
-- [ ] **Step 7: Commit artifact staging**
+- [x] **Step 7: Commit artifact staging**
 
 ```bash
 git add server/migrations/532_aurora_artifact_staging.* \
@@ -790,15 +792,15 @@ git commit -m "feat(aurora): stage task-owned artifacts"
 - Consumes: Task context, v1 manifest, Task 6 upload/import APIs, storage-owned staging rows, content moderation, and existing completion/refund logic.
 - Produces: `CollectAuroraArtifacts` and idempotent all-or-nothing asset report.
 
-- [ ] **Step 1: Write adversarial manifest tests**
+- [x] **Step 1: Write adversarial manifest tests**
 
 Cover malformed/oversized JSON, schema/version/task/skill/producer mismatch, no primary output, duplicate ID/path/name, absolute/traversal/volume/NUL path, symlink, hard link, device/socket/directory, changed-after-open/hash race, size/hash mismatch, MIME/extension/format mismatch, excessive file/count/total, unsupported metadata depth/size, foreign staging ID, and correct mixed local/staged manifest.
 
-- [ ] **Step 2: Write report idempotency tests**
+- [x] **Step 2: Write report idempotency tests**
 
 Prove identical retry creates no duplicate, conflicting retry fails closed, batch DB failure leaves no partial assets, moderation failure commits none and deletes staging objects, and successful report marks all staging rows committed in one transaction.
 
-- [ ] **Step 3: Run tests and observe current URL-trusting behavior**
+- [x] **Step 3: Run tests and observe current URL-trusting behavior**
 
 Run:
 
@@ -809,11 +811,11 @@ cd server && go test ./internal/daemon ./internal/handler -run 'TestAuroraManife
 
 Expected: failures because the daemon has no collector and the handler accepts arbitrary `media_url` and inserts rows one by one.
 
-- [ ] **Step 4: Implement safe local file collection**
+- [x] **Step 4: Implement safe local file collection**
 
 Read at most 1 MiB after atomic manifest publication. Open the artifact root directory once; resolve each file with no-follow/openat semantics where supported, reject links/non-regular files and `nlink != 1`, confirm containment from the opened descriptor, stream-recompute size/SHA-256/MIME, and upload through Task 6. Use the manifest only to identify expected files and metadata; never trust its hash/size as proof.
 
-- [ ] **Step 5: Replace URL artifacts with staging identity**
+- [x] **Step 5: Replace URL artifacts with staging identity**
 
 Change daemon wire type to:
 
@@ -834,11 +836,11 @@ type TaskArtifact struct {
 
 Remove model/daemon-supplied `media_url` from the report contract. The server resolves storage URL/object ownership from staging ID.
 
-- [ ] **Step 6: Make report all-or-nothing and idempotent**
+- [x] **Step 6: Make report all-or-nothing and idempotent**
 
 Before the transaction, load all staging rows by task/generation/workspace, validate exact metadata, and moderate each stored object. In one transaction, insert/upsert every asset by `(generation_id, manifest_artifact_id)`, mark staging committed, and reject a conflicting existing hash/metadata. If moderation or transaction fails, delete uncommitted storage objects and route the task to failure/refund once.
 
-- [ ] **Step 7: Integrate daemon completion ordering**
+- [x] **Step 7: Integrate daemon completion ordering**
 
 For Aurora tasks:
 
@@ -850,7 +852,7 @@ For Aurora tasks:
 
 Missing/invalid manifest, missing required output, upload/import/report/moderation failure, or successful provider process with no artifact reports task failure and triggers the existing refund path. Clean `/workspace/input` and `/workspace/output` after terminal reporting.
 
-- [ ] **Step 8: Run daemon/handler tests**
+- [x] **Step 8: Run daemon/handler tests**
 
 Run:
 
@@ -861,7 +863,7 @@ cd server && go test ./internal/daemon ./internal/handler ./internal/service -ru
 
 Expected: all selected tests pass.
 
-- [ ] **Step 9: Commit manifest delivery**
+- [x] **Step 9: Commit manifest delivery**
 
 ```bash
 git add server/internal/daemon/aurora_manifest.go server/internal/daemon/aurora_manifest_test.go \
@@ -883,7 +885,7 @@ git commit -m "feat(aurora): validate and commit task artifacts"
 - Consumes: Tasks 1–7 and local fake provider/storage/moderation servers.
 - Produces: Canonical route/output/failure matrix with no real provider or agent.
 
-- [ ] **Step 1: Add the Node broker matrix**
+- [x] **Step 1: Add the Node broker matrix**
 
 For each available skill, execute its exact tool chain with authorized fixture inputs and local fakes, then validate the produced v1 manifest and provider request count. Assertions include:
 
@@ -899,15 +901,15 @@ resume -> fixed Chromium render tool
 transcription -> Volc ASR only
 ```
 
-- [ ] **Step 2: Add failure/no-fallback cases**
+- [x] **Step 2: Add failure/no-fallback cases**
 
 For every external route, make the selected fake return 401, 429, 500, malformed JSON, oversized payload, and timeout. Assert task failure and zero calls to every non-selected provider. Add Seedance ambiguous-create retry and prove it never submits twice.
 
-- [ ] **Step 3: Add server fake lifecycle matrix**
+- [x] **Step 3: Add server fake lifecycle matrix**
 
 Use `TestApiClient`, database fixtures, a fake managed runner, fake storage/import/moderation, and table cases to create each skill, assert attachments reach the queued task, report expected staging artifacts, reach terminal generation status, debit exact catalog credits on success, and refund exact reserve on failure.
 
-- [ ] **Step 4: Run the all-skill matrix**
+- [x] **Step 4: Run the all-skill matrix**
 
 Run:
 
@@ -919,7 +921,7 @@ cd server && go test ./internal/handler -run 'TestAuroraSkillMatrix|TestAuroraFl
 
 Expected: 13 success cases plus named failure cases pass; no external host is contacted.
 
-- [ ] **Step 5: Run frontend, backend, and formatting verification**
+- [x] **Step 5: Run frontend, backend, and formatting verification**
 
 Run from repository root:
 
@@ -933,7 +935,7 @@ git diff --check
 
 Expected: every command exits 0. Report any known unrelated backend full-suite failure and its exact focused rerun rather than claiming a clean suite.
 
-- [ ] **Step 6: Verify forbidden surface and source locks**
+- [x] **Step 6: Verify forbidden surface and source locks**
 
 Run:
 
@@ -946,7 +948,7 @@ rg -n 'Bash|WebFetch|WebSearch|skills add|--api-key|media_url' \
 
 Expected: vendor update commands appear only in the update script/plan, no workflow exposes forbidden tools, no credential is passed in argv, and the task artifact report contains no `media_url` input.
 
-- [ ] **Step 7: Commit the matrix**
+- [x] **Step 7: Commit the matrix**
 
 ```bash
 git add deploy/aurora-sandbox/runtime/test/skill-matrix.test.mjs \
@@ -958,14 +960,8 @@ git commit -m "test(aurora): cover all available skill routes"
 
 ## Plan C Completion Evidence
 
-Preserve:
+Plan C Tasks 1, 2, and 4–8 are implemented and merged (tickets #104, #105, #107–#111). Task 3 (#106) is implemented except the Seedance vendor half and remains in review, gated by #140: the Seedream tree is vendored and hardened, while the Seedance tree is deliberately absent because upstream ships no LICENSE file and the exact MIT text has not been obtained.
 
-- upstream and Multica vendor-lock verification output;
-- exact Seedance license evidence;
-- official offline Volcengine test output;
-- patched security regression output;
-- all provider fake request/route counts;
-- 13-skill broker and server matrix output;
-- manifest/report adversarial and idempotency output;
-- frontend type/lint/test and backend test output;
-- confirmation that no real agent/provider call, dynamic skill install, or unrestricted shell tool ran in default verification.
+Verified evidence is preserved in the [2026-09-28 acceptance record](2026-09-28-aurora-sandbox-acceptance-record.md): the runtime suite executes exactly the 13 available skills with their fixed provider routes (120 Node tests pass, including the fake-provider broker matrix and the vendor security regressions); the server fake lifecycle matrix passes; and no real agent/provider call, dynamic skill install, or unrestricted shell tool ran in default verification.
+
+**Open gate:** `node scripts/verify-aurora-volc-skills.mjs` exits 1 with exactly one expected error, the missing Seedance license text (#140). The exact Seedance license evidence remains unavailable; no substitute text was used.
