@@ -1,0 +1,39 @@
+diff --git a/byted-ark-seedance-skill/scripts/seedance-wrapper.js b/byted-ark-seedance-skill/scripts/seedance-wrapper.js
+index f008e2c..54f65ea 100644
+--- a/byted-ark-seedance-skill/scripts/seedance-wrapper.js
++++ b/byted-ark-seedance-skill/scripts/seedance-wrapper.js
+@@ -1239,8 +1239,9 @@ Seedance Skill v5 - 豆包视频生成（模型路由版）
+ 
+ module.exports = { inferCapabilities, selectModel, checkModelCompatibility, normalizeArgs };
+ 
+-if (require.main === module) main().catch(e => {
+-  console.error('❌ 执行失败:', e.message);
+-  console.error(e.stack);
+-  process.exit(1);
+-});
+\ No newline at end of file
++if (require.main === module) {
++  // Hardened by Multica Aurora: the raw upstream CLI is never exposed to the
++  // model. Sandbox execution goes through scripts/seedance-broker.js.
++  console.error('direct Seedance CLI execution is disabled; use the Multica Aurora broker adapter');
++  process.exit(2);
++}
+diff --git a/byted-ark-seedance-skill/scripts/seedance.js b/byted-ark-seedance-skill/scripts/seedance.js
+index cbeb2c1..6cdac0c 100644
+--- a/byted-ark-seedance-skill/scripts/seedance.js
++++ b/byted-ark-seedance-skill/scripts/seedance.js
+@@ -1220,7 +1220,10 @@ function dedupeBy(items, keyFn) {
+ 
+ module.exports = { buildPayload, parseArgv, resolveSelectedModel, parseBoolean, sanitizeApiKeys, sanitizeErrorText, downloadToFile, createClient };
+ 
+-if (require.main === module) main().catch((error) => {
+-  console.error(sanitizeErrorText(error.stack || error.message || String(error)));
+-  process.exitCode = 1;
+-});
++if (require.main === module) {
++  // Hardened by Multica Aurora: the raw upstream CLI is never exposed to the
++  // model. Sandbox execution goes through scripts/seedance-broker.js.
++  console.error('direct Seedance CLI execution is disabled; use the Multica Aurora broker adapter');
++  process.exit(2);
++}
++

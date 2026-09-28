@@ -1,7 +1,7 @@
 {
   "schema": "com.multica.aurora.volcengine-skills-lock",
   "version": 1,
-  "retrieved_at": "2026-09-26T09:59:10Z",
+  "retrieved_at": "2026-09-28T13:47:02Z",
   "skills_cli_version": "1.7.0",
   "upstream_revision": null,
   "source": {

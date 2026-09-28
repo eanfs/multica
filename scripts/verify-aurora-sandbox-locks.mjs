@@ -89,9 +89,9 @@ export const LOCKED = {
   vendor_trees: {
     "byted-ark-seedance-skill": {
       declared_version: "5.0.0",
-      vendored: false,
-      whole_tree_sha256: null,
-      license_sha256: null,
+      vendored: true,
+      whole_tree_sha256: "sha256:9e03ffadf92598f41ee20864f357f2cd596319bc4146b534b89a4ea29bd5ec5d",
+      license_sha256: "sha256:8a32047e9ee5270ab9f49e5d293b650bc0253e05bff2d81787b3276ea0d75935",
     },
     "byted-ark-seedream-skill": {
       declared_version: "4.0.0",
