@@ -114,6 +114,15 @@ test("rejects a missing locked production dependency", async () => {
   await assert.rejects(() => verify({ root }), /missing @anthropic-ai\/claude-code/);
 });
 
+test("rejects coordinated Seedance tree hash drift across both locks", async () => {
+  const versions = readJson(VERSIONS);
+  const vendor = readJson(VENDOR_LOCK);
+  versions.vendor_trees["byted-ark-seedance-skill"].whole_tree_sha256 = "sha256:" + "a".repeat(64);
+  vendor.skills["byted-ark-seedance-skill"].whole_tree_sha256 = "sha256:" + "a".repeat(64);
+  const root = writeFixture({ [VERSIONS]: versions, [VENDOR_LOCK]: vendor });
+  await assert.rejects(() => verify({ root }), /audited.*hash/);
+});
+
 test("rejects Seedance distribution without the approved exception", async () => {
   const root = fixtureFrom(VENDOR_LOCK, (lock) => {
     delete lock.skills["byted-ark-seedance-skill"].license.exception;

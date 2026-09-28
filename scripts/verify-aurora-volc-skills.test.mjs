@@ -28,6 +28,18 @@ test('owner exception retains full source, patch and approval verification', (t)
   }
   const file = path.join(root, 'vendor-lock.json');
   const lock = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const source = path.join(root, 'byted-ark-seedance-skill/scripts/seedance.js');
+  const sourceBytes = fs.readFileSync(source);
+  fs.appendFileSync(source, '\n// coordinated source drift\n');
+  const inventory = verifier.inventoryTree(root, 'byted-ark-seedance-skill');
+  const coordinated = structuredClone(lock);
+  coordinated.skills['byted-ark-seedance-skill'].whole_tree_sha256 = inventory.whole_tree_sha256;
+  coordinated.skills['byted-ark-seedance-skill'].files = inventory.files.map(({content, ...entry}) => entry);
+  fs.writeFileSync(file, JSON.stringify(coordinated));
+  const drift = run();
+  assert.equal(drift.status, 1, 'coordinated source and lock drift must be rejected');
+  assert.match(drift.stderr, /audited.*hash/);
+  fs.writeFileSync(source, sourceBytes);
   delete lock.skills['byted-ark-seedance-skill'].license.exception;
   fs.writeFileSync(file, JSON.stringify(lock));
   const missing = run();

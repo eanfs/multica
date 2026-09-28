@@ -58,6 +58,8 @@ export const AUDITED = {
   },
 };
 
+export const SEEDANCE_AUDITED_TREE_HASH = "sha256:d8d7b1ecd84093009510163f3321c40591eda080735867c4e97ab6716ea3a65d";
+
 // Explicit owner decision, limited to the audited source version and digest.
 // This exception records missing evidence; it must never claim license verification.
 export const SEEDANCE_LICENSE_EXCEPTION = {
@@ -370,6 +372,7 @@ function main() {
 
     const license = vendor.license || {};
     if (isAcceptedLicenseException(skillId, license)) {
+      verifyField("audited Seedance tree hash", tree.whole_tree_sha256, SEEDANCE_AUDITED_TREE_HASH);
       console.warn("WARNING: Seedance license evidence is missing; owner-approved distribution exception applies to audited 5.0.0 only (#140).");
       continue;
     }

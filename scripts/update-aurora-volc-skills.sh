@@ -103,6 +103,7 @@ import path from "node:path";
 const {
   AUDITED,
   SEEDANCE_LICENSE_EXCEPTION,
+  SEEDANCE_AUDITED_TREE_HASH,
   SOURCE_URL,
   SKILLS_CLI_VERSION,
   SECURITY_POLICY_VERSION,
@@ -169,6 +170,10 @@ for (const skillId of Object.keys(AUDITED)) {
       throw new Error("upstream now ships a Seedance LICENSE; re-audit before vendoring");
     }
     if (process.env.AURORA_ACCEPT_SEEDANCE_LICENSE_RISK === "1") {
+      const sourceTree = inventoryTree(path.dirname(installDir), skillId);
+      if (sourceTree.whole_tree_sha256 !== SEEDANCE_AUDITED_TREE_HASH) {
+        throw new Error("audited Seedance tree hash mismatch; owner exception does not apply");
+      }
       replaceTree(installDir, targetDir);
       license = structuredClone(SEEDANCE_LICENSE_EXCEPTION);
     } else {
