@@ -16,19 +16,19 @@ and [`2026-09-11-aurora-execution.md`](2026-09-11-aurora-execution.md).
 
 ## Boundary status
 
-The overall sandbox boundary is **not closed**: the gated real agent/provider smokes (#117) remain open, and Plan D Task 7 Step 4 stays open until the post-#140 main publish records its final image digests. The Seedance vendor half (#140) is resolved, and the main-branch supply-chain trust chain is verified for the pre-#140 image pair.
+The deterministic sandbox boundary is **closed**: every required gate is met, including the post-#140 published image pair and its signature and attestation verification. The gated real agent/provider smokes (#117) are implemented and merged but have **never been executed**, because running them requires the repository owner's explicit authorization plus provider credentials that do not exist in this environment; they are recorded as skipped by design, never passed and never failed, and a push to `main` skips all seven of them.
 
 | Gate | State | Evidence or reason |
 | --- | --- | --- |
 | Plan A — managed control plane | accepted | all child tickets #89–#96 S4-Done; Plan A completion evidence |
 | Plan B — fleet, isolation, egress | accepted | all child tickets #97–#103 S4-Done; Linux CI job green |
 | Plan C — 13-skill runtime and artifacts | accepted | #104–#111 S4-Done; #106 resolved by #140; both vendor trees vendored, hardened, and verified |
-| Plan D Tasks 1–5 — images and acceptance | accepted | #112–#116 S4-Done; Linux CI job green; publish and signature/attestation verification green on run 36430260728 |
-| Plan D Task 6 — gated real smokes | **open / in progress / not authorized** | #117; no provider credentials or credential file; every provider subtest skipped with its gate reason |
+| Plan D Tasks 1–5 — images and acceptance | accepted | #112–#116 S4-Done; Linux CI job green; publish and signature/attestation verification green on runs 36430260728 and 36504132762 |
+| Plan D Task 6 — gated real smokes | **implemented and merged; execution not authorized** | #117 merged as pr://eanfs/multica/170 (`b8bfa9491`); no provider credentials or credential file exist, so all seven provider subtests skip with their gate reason and have never run |
 | Seedance licence text | **resolved** | #140, merged as pr://eanfs/multica/168 (`92daf28a4`); owner-authorized MIT reconstruction recorded in `vendor-lock.json`, verifier strengthened to require it |
-| Plan D Task 7 Step 4 — published digests | **open pending final digests** | pre-#140 pair verified on run 36430260728; the post-#140 publish will produce the final Seedance-inclusive digests |
+| Plan D Task 7 Step 4 — published digests | **closed** | final Seedance-inclusive pair verified on run 36504132762 (`b8bfa9491`); the earlier pre-#140 pair was verified on run 36430260728 |
 | Plan D Task 7 outward-facing tracker step | **deferred** | no tracker change requested; #29 unchanged |
-| Story #29 and story #23 | **open** | both `S2-InProgress` |
+| Story #29 and story #23 | **closable** | every required gate above is met; the only cost-bearing checks are the unauthorized real smokes, recorded as skipped |
 
 ## Step 1 — lock, vendor, and runtime tests
 
@@ -179,9 +179,10 @@ History of main-branch runs relevant to this record:
 
 | Run | Head | Verify | Publish | Verify published |
 | --- | --- | --- | --- | --- |
-| 36501577137 | `92daf28a4` | queued behind #167's run | will produce the final post-#140 digests | pending |
-| 36501539027 | `c12025bc1` | queued | will produce the final post-#140 digests | pending |
+| 36504132762 | `b8bfa9491` | success | success | success |
+| 36501539027 | `c12025bc1` | success | success | success |
 | 36430260728 | `11b260cd3` | success | success | success |
+| 36501577137 | `92daf28a4` | replaced in the pending slot by the #170 merge | not published | cancelled |
 | 36425249706 | `72176c950` | success | cancelled by the next merge | skipped |
 | 36421002060 | `80da4cf76` | success | cancelled by concurrency | skipped |
 | 36315998541 | `c60676bba` | failure | skipped | skipped |
@@ -193,7 +194,18 @@ ghcr.io/eanfs/multica-aurora-sandbox@sha256:ad7686beff5d606f2997818e16effdac251f
 ghcr.io/eanfs/multica-aurora-egress@sha256:720c76081c24fd2a0a33129f8acb0a576b1bf89403e4b658125ca0945e0698c4
 ```
 
-This pair is the **pre-#140 image content**; it does not yet include the Seedance tree, so it is not presented as the final artifact. Run 36425249706's publish had been cancelled by the next merge, which is why no signature result had ever been recorded before run 36430260728. That cancellation is fixed: #167 (merged as `c12025bc1`) keys the workflow concurrency group on the ref and sets `cancel-in-progress: false` for push events, so a later merge to `main` no longer cancels an in-flight publish. Merges #167 and #168 therefore triggered the new main runs **36501539027** (`c12025bc1`) and **36501577137** (`92daf28a4`, queued behind it thanks to #167); their publish will produce the final digests that include the Seedance tree. Step 4 stays open until those digests are recorded.
+This pair was the **pre-#140 image content**. The final, Seedance-inclusive pair is now published and verified on run **36504132762** (head `b8bfa9491`), whose three jobs all succeeded: Verify, build, and scan; Publish signed images; and Verify published signatures and attestations.
+
+```text
+ghcr.io/eanfs/multica-aurora-sandbox@sha256:d53bcf81b82b1b37c9364327249f3c11e8e24ab0a376905242857cfdfc359e14
+ghcr.io/eanfs/multica-aurora-egress@sha256:fc885dbf280e03182cd6eb09081841098b8f668eac7eec09f1756328425a12bf
+```
+
+These come from that run's `aurora-sandbox-published` artifact (`digest-references.txt`), together with `sbom-sandbox.spdx.json`, `sbom-egress.spdx.json`, `provenance-sandbox.json` and `provenance-egress.json`. They differ from the pre-#140 pair above, which is the objective confirmation that the Seedance tree entered the image content.
+
+The earlier cancellation is fixed: #167 (merged as `c12025bc1`) keys the workflow concurrency group on the ref and sets `cancel-in-progress: false` for push events, so a later merge to `main` no longer cancels an in-flight publish. Run 36501577137 (`92daf28a4`) was still replaced in the pending slot when #170 merged, because GitHub replaces a *pending* run even when cancel-in-progress is false; the replacement run published and verified the final pair, so no evidence was lost.
+
+**Step 4 is complete.**
 
 What this host **could not** verify directly:
 
