@@ -34,10 +34,10 @@
 - [x] Root-cause audit, provider decisions, official Volcengine skill audit, master plan, and four child plans are complete in pr://eanfs/multica/84.
 - [x] Plan A — scoped enrollment, daemon managed mode, claim-set installation, and execution-provider mapping.
 - [x] Plan B — workspace fleet lifecycle, hardened Docker policy, enforced egress, and Linux isolation acceptance.
-- [x] Plan C — attachment inputs, all 13 available skill routes, hardened provider tools, and artifact staging/reporting. The Seedance vendor half of Task 3 (ticket #106, #140) is vendored, patched, and verified.
-- [ ] Plan D — reproducible multi-architecture images, SBOM/provenance/signing, container smoke, and final acceptance. Tasks 1–5 are complete; Task 6 (#117) and Task 7 (#118) remain open.
+- [x] Plan C — attachment inputs, all 13 available skill routes, hardened provider tools, and artifact staging/reporting. The Seedance vendor half of Task 3 (ticket #106, #140, merged as pr://eanfs/multica/168 at `92daf28a4`) is vendored, patched, and verified, with the licence provenance enforced by the strengthened vendor verifier.
+- [ ] Plan D — reproducible multi-architecture images, SBOM/provenance/signing, container smoke, and final acceptance. Tasks 1–5 are complete and the main-branch publish trust chain is verified on run 36430260728 for the pre-#140 pair; Task 6 (#117) is open, in progress, and unauthorized, and Task 7 (#118) stays open on Step 4 pending the final Seedance-inclusive digests.
 
-Tracker issue #29 remains open with `S2-InProgress`, and story #23 stays open. The verified evidence is recorded in [`2026-09-28-aurora-sandbox-acceptance-record.md`](2026-09-28-aurora-sandbox-acceptance-record.md). The overall sandbox boundary is **not closed**: the gated real provider/agent smokes (#117) are unimplemented and unauthorized, so the roadmap and Plan 3 Task 6 stay partial; the Seedance license text (#140) is resolved.
+Tracker issue #29 remains open with `S2-InProgress`, and story #23 stays open. The verified evidence is recorded in [`2026-09-28-aurora-sandbox-acceptance-record.md`](2026-09-28-aurora-sandbox-acceptance-record.md). The overall sandbox boundary is **not closed**: the gated real provider/agent smokes (#117) are in progress and unauthorized, and the final Seedance-inclusive image digests await the post-#140 publish, so the roadmap and Plan 3 Task 6 stay partial; the Seedance license text (#140) is resolved and the main-branch publish is no longer cancellable (#167, `c12025bc1`).
 
 ---
 
