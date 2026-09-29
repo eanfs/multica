@@ -71,6 +71,7 @@ type ProviderSecretFiles struct {
 // configurable per workspace.
 var compiledEgressHosts = []string{
 	"api.anthropic.com:443",
+	"api.minimax.cn:443",
 	"ark.cn-beijing.volces.com:443",
 	"api.openai.com:443",
 	"openspeech.bytedance.com:443",
