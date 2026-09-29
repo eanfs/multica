@@ -46,7 +46,11 @@ on:
 
 concurrency:
   group: aurora-sandbox-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a push to main. The publish job builds and pushes multi-architecture
+  # index digests, signs them and attaches attestations, and its verify-published job is
+  # the supply-chain evidence the acceptance record depends on; cancelling it wastes the
+  # whole build and destroys that evidence. Pull-request runs are still superseded.
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 permissions:
   contents: read
