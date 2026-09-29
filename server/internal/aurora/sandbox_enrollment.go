@@ -142,7 +142,7 @@ func (s *SandboxEnrollmentService) Issue(ctx context.Context, workspaceID, runti
 			ID:                  nodeID,
 			WorkspaceID:         workspaceID,
 			RuntimeID:           runtimeID,
-			DaemonID:            "aurora-" + util.UUIDToString(nodeID),
+			DaemonID:            newSandboxDaemonID(),
 			ImageDigest:         imageDigest,
 			State:               "starting",
 			EnrollmentTokenHash: hash,

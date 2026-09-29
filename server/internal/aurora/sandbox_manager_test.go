@@ -2,7 +2,11 @@ package aurora_test
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -56,7 +60,7 @@ func TestSandboxManagerReturnsHealthyOnlineNodeWithoutFleetCall(t *testing.T) {
 	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
 	ctx := context.Background()
 
-	params := sandboxNodeParams(t, ws, runtimeID, "aurora-"+uuid.NewString())
+	params := sandboxNodeParams(t, ws, runtimeID, uuid.NewString())
 	params.ImageDigest = validSandboxImageDigest
 	created, err := q.CreateAuroraSandboxNode(ctx, params)
 	if err != nil {
@@ -243,5 +247,54 @@ func TestSandboxManagerDoesNotReturnEnrollmentToken(t *testing.T) {
 	stored := sandboxNodeByWorkspace(t, pool, ws)
 	if !stored.EnrollmentTokenHash.Valid || !stored.EnrollmentExpiresAt.Valid {
 		t.Fatal("Ensure returned before issuing a live enrollment")
+	}
+}
+
+// TestSandboxManagerEnsureSatisfiesFleetUUIDValidator is the server/fleet
+// daemon_id contract regression: the manager's real ControlClient request is
+// served by a real fleet Controller, and that controller rejects any identity
+// that is not a canonical UUID. A prefixed daemon identity therefore fails the
+// endpoint and no sandbox is ever provisioned.
+func TestSandboxManagerEnsureSatisfiesFleetUUIDValidator(t *testing.T) {
+	pool := auroraTestPool(t)
+	q := db.New(pool)
+	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
+	ctx := context.Background()
+
+	tokenRaw := []byte(strings.Repeat("m", 32))
+	tokenFile := filepath.Join(t.TempDir(), "fleet-control-token")
+	if err := os.WriteFile(tokenFile, []byte(hex.EncodeToString(tokenRaw)), 0o400); err != nil {
+		t.Fatalf("write control token: %v", err)
+	}
+	auth, err := aurorafleet.LoadControlAuth(tokenFile)
+	if err != nil {
+		t.Fatalf("load control auth: %v", err)
+	}
+	ctrl := aurorafleet.NewController(aurorafleet.Config{
+		Backend:    aurorafleet.NewMemoryBackend(),
+		Auth:       auth,
+		SecretRoot: t.TempDir(),
+	})
+	srv := httptest.NewServer(ctrl.Handler())
+	t.Cleanup(srv.Close)
+
+	client, err := aurorafleet.NewControlClient(srv.URL, tokenFile)
+	if err != nil {
+		t.Fatalf("new control client: %v", err)
+	}
+
+	mgr := aurora.NewSandboxManager(q, pool, client, validSandboxImageDigest, nil)
+	node, err := mgr.Ensure(ctx, ws, runtimeID)
+	if err != nil {
+		t.Fatalf("ensure through the fleet validator: %v", err)
+	}
+	if node.State != "starting" {
+		t.Fatalf("ensured node state = %q, want starting", node.State)
+	}
+	if _, err := uuid.Parse(node.DaemonID); err != nil {
+		t.Fatalf("ensured daemon id = %q, want a canonical UUID", node.DaemonID)
+	}
+	if !node.BackendNodeID.Valid || node.BackendNodeID.String == "" {
+		t.Fatalf("fleet backend id was not recorded: %+v", node.BackendNodeID)
 	}
 }
