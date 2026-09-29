@@ -53,6 +53,14 @@ func NewSandboxManager(queries *db.Queries, tx TxBeginner, fleet FleetControl, i
 	return &SandboxManager{queries: queries, tx: tx, fleet: fleet, imageDigest: imageDigest, now: now}
 }
 
+// newSandboxDaemonID mints the daemon identity bound to one sandbox node. The
+// fleet's control API validates node, workspace, runtime, and daemon identity as
+// canonical UUIDs, and the managed daemon adopts whatever identity the server
+// assigns at enrollment, so this is a plain UUID with no prefix or decoration.
+func newSandboxDaemonID() string {
+	return uuid.NewString()
+}
+
 // Ensure makes the workspace's sandbox node ready to run its managed runtime.
 //
 // The decision and any enrollment write happen under the same per-workspace
@@ -161,7 +169,7 @@ func (m *SandboxManager) arm(ctx context.Context, workspaceID, runtimeID pgtype.
 			ID:                  nodeID,
 			WorkspaceID:         workspaceID,
 			RuntimeID:           runtimeID,
-			DaemonID:            "aurora-" + util.UUIDToString(nodeID),
+			DaemonID:            newSandboxDaemonID(),
 			ImageDigest:         m.imageDigest,
 			State:               "starting",
 			EnrollmentTokenHash: hash,

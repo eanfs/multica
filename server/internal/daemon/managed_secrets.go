@@ -180,30 +180,29 @@ func readManagedSecretFile(path string, maxBytes int64) (string, error) {
 	return value, nil
 }
 
-// loadManagedProviderSecrets validates every fixed provider credential file.
-// All four are required because the sandbox advertises all thirteen skills; a
-// missing file returns a provider-specific error that prints neither the path
-// nor the value.
+// loadManagedProviderSecrets validates the managed provider credentials. Only
+// the Anthropic value is required: the managed daemon is the Claude agent and
+// cannot start without its own credential. The other three are MCP-broker file
+// paths read lazily at call time, so a missing file is tolerated — the tool
+// that needs it fails closed when it is invoked — while a supplied file that is
+// not a safe owner-only regular file still fails startup. Every error names
+// only the provider, never the path or the value.
 func loadManagedProviderSecrets(paths managedSecretPaths) (managedProviderSecrets, error) {
-	read := func(provider, path string) (string, error) {
-		value, err := readManagedSecretFile(path, managedSecretMaxBytes)
-		if err != nil {
-			return "", fmt.Errorf("managed mode requires the %s provider credential: %w", provider, err)
-		}
-		return value, nil
-	}
-	anthropic, err := read("anthropic", paths.AnthropicAPIKey)
+	anthropic, err := readManagedSecretFile(paths.AnthropicAPIKey, managedSecretMaxBytes)
 	if err != nil {
-		return managedProviderSecrets{}, err
+		return managedProviderSecrets{}, fmt.Errorf("managed mode requires the anthropic provider credential: %w", err)
 	}
-	if _, err := read("ark", paths.ArkAPIKey); err != nil {
-		return managedProviderSecrets{}, err
-	}
-	if _, err := read("openai", paths.OpenAIAPIKey); err != nil {
-		return managedProviderSecrets{}, err
-	}
-	if _, err := read("volc-asr", paths.VolcASRAPIKey); err != nil {
-		return managedProviderSecrets{}, err
+	for _, optional := range []struct {
+		provider string
+		path     string
+	}{
+		{"ark", paths.ArkAPIKey},
+		{"openai", paths.OpenAIAPIKey},
+		{"volc-asr", paths.VolcASRAPIKey},
+	} {
+		if _, err := readManagedSecretFile(optional.path, managedSecretMaxBytes); err != nil && !errors.Is(err, errManagedSecretMissing) {
+			return managedProviderSecrets{}, fmt.Errorf("managed mode provider credential %s is invalid: %w", optional.provider, err)
+		}
 	}
 	return managedProviderSecrets{
 		AnthropicAPIKey:   managedSecret{value: anthropic},

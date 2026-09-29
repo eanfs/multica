@@ -14,7 +14,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/auth"
-	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -84,19 +83,19 @@ func TestAuroraSandboxNodeUniquenessAndConsumption(t *testing.T) {
 
 	t.Run("identity uniqueness", func(t *testing.T) {
 		wsA, rtA := newSandboxNodeWorkspace(t, q, pool)
-		daemonA := "aurora-" + uuid.NewString()
+		daemonA := uuid.NewString()
 		if _, err := q.CreateAuroraSandboxNode(ctx, sandboxNodeParams(t, wsA, rtA, daemonA)); err != nil {
 			t.Fatalf("create first node: %v", err)
 		}
 
 		// A second row for the same workspace collides on workspace_id even
 		// though its runtime and daemon identities are fresh.
-		_, err := q.CreateAuroraSandboxNode(ctx, sandboxNodeParams(t, wsA, mustUUID(t, uuid.NewString()), "aurora-"+uuid.NewString()))
+		_, err := q.CreateAuroraSandboxNode(ctx, sandboxNodeParams(t, wsA, mustUUID(t, uuid.NewString()), uuid.NewString()))
 		requireUniqueViolation(t, err, "aurora_sandbox_node_workspace_uidx")
 
 		// A second workspace may not reuse the first row's runtime.
 		wsB, _ := newSandboxNodeWorkspace(t, q, pool)
-		_, err = q.CreateAuroraSandboxNode(ctx, sandboxNodeParams(t, wsB, rtA, "aurora-"+uuid.NewString()))
+		_, err = q.CreateAuroraSandboxNode(ctx, sandboxNodeParams(t, wsB, rtA, uuid.NewString()))
 		requireUniqueViolation(t, err, "aurora_sandbox_node_runtime_uidx")
 
 		// A second workspace may not reuse the first row's daemon identity.
@@ -109,7 +108,7 @@ func TestAuroraSandboxNodeUniquenessAndConsumption(t *testing.T) {
 		ws, rt := newSandboxNodeWorkspace(t, q, pool)
 		raw := "mse_" + uuid.NewString()
 		hash := auth.HashToken(raw)
-		params := sandboxNodeParams(t, ws, rt, "aurora-"+uuid.NewString())
+		params := sandboxNodeParams(t, ws, rt, uuid.NewString())
 		params.EnrollmentTokenHash = pgtype.Text{String: hash, Valid: true}
 		params.EnrollmentExpiresAt = pgtype.Timestamptz{Time: time.Now().Add(time.Minute), Valid: true}
 		if _, err := q.CreateAuroraSandboxNode(ctx, params); err != nil {
@@ -141,7 +140,7 @@ func TestAuroraSandboxNodeUniquenessAndConsumption(t *testing.T) {
 		// Expiry: a token past its expiry is not returned either.
 		wsExpired, rtExpired := newSandboxNodeWorkspace(t, q, pool)
 		expiredHash := auth.HashToken("mse_" + uuid.NewString())
-		expired := sandboxNodeParams(t, wsExpired, rtExpired, "aurora-"+uuid.NewString())
+		expired := sandboxNodeParams(t, wsExpired, rtExpired, uuid.NewString())
 		expired.EnrollmentTokenHash = pgtype.Text{String: expiredHash, Valid: true}
 		expired.EnrollmentExpiresAt = pgtype.Timestamptz{Time: time.Now().Add(-time.Minute), Valid: true}
 		if _, err := q.CreateAuroraSandboxNode(ctx, expired); err != nil {
@@ -197,9 +196,8 @@ func TestSandboxEnrollmentIssueCreatesStartingNode(t *testing.T) {
 	if !issued.Identity.NodeID.Valid {
 		t.Error("issued node id is NULL")
 	}
-	wantDaemonID := "aurora-" + util.UUIDToString(issued.Identity.NodeID)
-	if issued.Identity.DaemonID != wantDaemonID {
-		t.Errorf("issued daemon id = %q, want %q", issued.Identity.DaemonID, wantDaemonID)
+	if _, err := uuid.Parse(issued.Identity.DaemonID); err != nil {
+		t.Errorf("issued daemon id = %q, want a canonical UUID", issued.Identity.DaemonID)
 	}
 	if !strings.HasPrefix(issued.Token, "mse_") || len(issued.Token) != len("mse_")+40 {
 		t.Errorf("issued token %q is not mse_ + 40 hex chars", issued.Token)
