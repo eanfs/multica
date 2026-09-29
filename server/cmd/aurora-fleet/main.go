@@ -17,6 +17,19 @@
 //	AURORA_EGRESS_SERVER_ORIGIN        exact Multica server origin sandboxes call back to (required)
 //	AURORA_EGRESS_ALLOWED_HOSTS        extra exact host:443 egress allowlist entries (optional)
 //
+// The policy also mounts the operator-staged provider credential files. Each
+// variable is optional and names one absolute host file under
+// AURORA_FLEET_SECRET_ROOT; the file is mounted read-only at its fixed sandbox
+// destination and the value is never passed in the container environment:
+//
+//	ANTHROPIC_API_KEY_FILE   Claude agent credential  -> /run/secrets/anthropic-api-key
+//	ARK_API_KEY_FILE         Volcengine Ark credential -> /run/secrets/ark-api-key
+//	OPENAI_API_KEY_FILE      OpenAI credential        -> /run/secrets/openai-api-key
+//	VOLC_ASR_API_KEY_FILE    Volcengine ASR credential -> /run/secrets/volc-asr-api-key
+//
+// An unset variable mounts nothing rather than substituting a default path; a
+// set-but-missing or unsafe file fails the ensure instead of being invented.
+//
 // The control token file must be a regular file with mode 0400 or 0600
 // holding at least 32 random bytes as base64url or hex. The token is never
 // accepted from the environment and never logged.
@@ -117,6 +130,17 @@ func backendFromEnv() (aurorafleet.Backend, error) {
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("AURORA_FLEET_BACKEND")), "memory") {
 		return aurorafleet.NewMemoryBackend(), nil
 	}
+	policy, err := dockerPolicyFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	return aurorafleet.NewDockerBackendWithPolicy(policy), nil
+}
+
+// dockerPolicyFromEnv assembles and validates the immutable Docker policy from
+// the fleet process environment. It is a separate function so the provider
+// secret wiring is testable without a Docker daemon.
+func dockerPolicyFromEnv() (aurorafleet.Policy, error) {
 	policy := aurorafleet.Policy{
 		SandboxImage:     strings.TrimSpace(os.Getenv("AURORA_SANDBOX_IMAGE")),
 		ProxyImage:       strings.TrimSpace(os.Getenv("AURORA_PROXY_IMAGE")),
@@ -124,11 +148,28 @@ func backendFromEnv() (aurorafleet.Backend, error) {
 		ServerOrigin:     strings.TrimSpace(os.Getenv("AURORA_EGRESS_SERVER_ORIGIN")),
 		SecretRoot:       strings.TrimSpace(os.Getenv("AURORA_FLEET_SECRET_ROOT")),
 		ExtraEgressHosts: splitHosts(os.Getenv("AURORA_EGRESS_ALLOWED_HOSTS")),
+		// The control API can never choose a provider source or destination;
+		// these are operator-staged host paths read once from the environment.
+		ProviderSecretFiles: providerSecretFilesFromEnv(),
 	}
 	if err := policy.Validate(); err != nil {
-		return nil, fmt.Errorf("docker fleet policy: %w", err)
+		return aurorafleet.Policy{}, fmt.Errorf("docker fleet policy: %w", err)
 	}
-	return aurorafleet.NewDockerBackendWithPolicy(policy), nil
+	return policy, nil
+}
+
+// providerSecretFilesFromEnv reads the documented *_API_KEY_FILE variables. Each
+// names an absolute host file under AURORA_FLEET_SECRET_ROOT. An unset variable
+// stays empty, so providerSecretMountArgs mounts nothing for it and never
+// substitutes a default; a set-but-missing or unsafe file is rejected when the
+// sandbox argv is built.
+func providerSecretFilesFromEnv() aurorafleet.ProviderSecretFiles {
+	return aurorafleet.ProviderSecretFiles{
+		AnthropicAPIKey: strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY_FILE")),
+		ArkAPIKey:       strings.TrimSpace(os.Getenv("ARK_API_KEY_FILE")),
+		OpenAIAPIKey:    strings.TrimSpace(os.Getenv("OPENAI_API_KEY_FILE")),
+		VolcASRAPIKey:   strings.TrimSpace(os.Getenv("VOLC_ASR_API_KEY_FILE")),
+	}
 }
 
 // splitHosts parses a comma-separated egress host list, dropping empty entries.
