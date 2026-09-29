@@ -97,6 +97,9 @@ jobs:
       - name: Verify workflow supply-chain policy
         run: node scripts/verify-aurora-sandbox-locks.mjs --workflow
 
+      - name: Verify vendored Volcengine skills
+        run: node scripts/verify-aurora-volc-skills.mjs
+
       - name: Verify vendor patches and licenses
         run: pnpm --dir deploy/aurora-sandbox/runtime exec node --test test/volc-vendor-security.test.mjs
 

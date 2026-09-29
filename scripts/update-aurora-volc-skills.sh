@@ -10,9 +10,12 @@
 # is removed on exit unless --keep-temp is given.
 #
 # Seedance license gate (plan Step 4): the upstream Seedance package ships no
-# LICENSE file, so the tree is NOT vendored until the exact MIT text/copyright is
-# supplied with --seedance-license (or AURORA_SEEDANCE_LICENSE). In that state the
-# script records the skill as blocked and exits 2.
+# LICENSE file; only its SKILL.md frontmatter declares MIT. The repository owner
+# confirmed on 2026-09-28 that the source-declared MIT licence may be used. The
+# tree is NOT vendored until the authorized MIT text is supplied with
+# --seedance-license (or AURORA_SEEDANCE_LICENSE); without it the script records
+# the skill as blocked and exits 2. The granted licence is recorded as a
+# reconstruction, never as a byte-identical upstream file.
 #
 # Usage:
 #   scripts/update-aurora-volc-skills.sh [--reviewer NAME]
@@ -170,15 +173,32 @@ for (const skillId of Object.keys(AUDITED)) {
       sha256: null,
       status: "blocked",
       reason:
-        "The upstream Seedance package ships no LICENSE file; only the SKILL.md frontmatter declares MIT. " +
-        "The exact MIT text/copyright for Seedance 5.0.0 must be obtained from the Volcengine source owner and " +
-        "passed with --seedance-license before this tree may be vendored or embedded in an image.",
+        "The upstream Seedance package ships no LICENSE file; only the SKILL.md frontmatter declares MIT. The repository " +
+        "owner confirmed on 2026-09-28 that this source-declared MIT licence may be used, but the authorized text must be " +
+        "supplied with --seedance-license (AURORA_SEEDANCE_LICENSE) before this tree may be vendored or embedded in an image.",
     };
   } else if (skillId === "byted-ark-seedance-skill") {
     replaceTree(installDir, targetDir);
     const licenseTarget = path.join(targetDir, "LICENSE.upstream");
     fs.copyFileSync(seedanceLicense, licenseTarget);
-    license = { path: audited.licensePath, sha256: sha256Hex(fs.readFileSync(licenseTarget)), status: "verified" };
+    license = {
+      path: audited.licensePath,
+      sha256: sha256Hex(fs.readFileSync(licenseTarget)),
+      status: "authorized",
+      provenance: {
+        kind: "reconstructed-from-declared-license",
+        upstream_ships_license: false,
+        declared_spdx: meta.spdxLicense,
+        declared_in: "SKILL.md frontmatter (license: MIT)",
+        copyright_holder: "VolcEngine / AgentPlan",
+        copyright_holder_source: "SKILL.md frontmatter metadata.author: volcengine/agentplan",
+        authorization:
+          "The repository owner confirmed on 2026-09-28 that the source-declared MIT licence may be used.",
+        note:
+          "The upstream Seedance package ships no LICENSE file. LICENSE.upstream is the standard MIT text carrying the " +
+          "declared copyright holder; it is not a byte-identical copy of any upstream file.",
+      },
+    };
   } else {
     replaceTree(installDir, targetDir);
     license = {
@@ -257,8 +277,8 @@ fs.writeFileSync(path.join(vendorDir, "vendor-lock.json"), JSON.stringify(vendor
 
 if (gateBlocked.length > 0) {
   console.error(
-    "GATE: " + gateBlocked.join(", ") + " not vendored: upstream ships no LICENSE; obtain the exact MIT text/copyright " +
-      "from the Volcengine source owner and re-run with --seedance-license.",
+    "GATE: " + gateBlocked.join(", ") + " not vendored: upstream ships no LICENSE; pass the owner-authorized MIT text " +
+      "with --seedance-license.",
   );
   process.exit(2);
 }

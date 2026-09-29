@@ -10,17 +10,106 @@
       "package_name": "byted-ark-seedance-skill",
       "declared_version": "5.0.0",
       "spdx_license": "MIT",
-      "vendored": false,
+      "vendored": true,
       "license": {
         "path": "byted-ark-seedance-skill/LICENSE.upstream",
-        "sha256": null,
-        "status": "blocked",
-        "reason": "The upstream Seedance package ships no LICENSE file; only the SKILL.md frontmatter declares MIT. The exact MIT text/copyright for Seedance 5.0.0 must be obtained from the Volcengine source owner and passed with --seedance-license before this tree may be vendored or embedded in an image."
+        "sha256": "sha256:8a32047e9ee5270ab9f49e5d293b650bc0253e05bff2d81787b3276ea0d75935",
+        "status": "authorized",
+        "provenance": {
+          "kind": "reconstructed-from-declared-license",
+          "upstream_ships_license": false,
+          "declared_spdx": "MIT",
+          "declared_in": "SKILL.md frontmatter (license: MIT)",
+          "copyright_holder": "VolcEngine / AgentPlan",
+          "copyright_holder_source": "SKILL.md frontmatter metadata.author: volcengine/agentplan",
+          "authorization": "The repository owner confirmed on 2026-09-28 that the source-declared MIT licence may be used.",
+          "note": "The upstream Seedance package ships no LICENSE file. LICENSE.upstream is the standard MIT text carrying the declared copyright holder; it is not a byte-identical copy of any upstream file."
+        }
       },
+      "whole_tree_sha256": "sha256:9e03ffadf92598f41ee20864f357f2cd596319bc4146b534b89a4ea29bd5ec5d",
+      "files": [
+        {
+          "path": "byted-ark-seedance-skill/LICENSE.upstream",
+          "bytes": 1079,
+          "mode": "0644",
+          "sha256": "sha256:8a32047e9ee5270ab9f49e5d293b650bc0253e05bff2d81787b3276ea0d75935"
+        },
+        {
+          "path": "byted-ark-seedance-skill/SKILL.md",
+          "bytes": 7637,
+          "mode": "0644",
+          "sha256": "sha256:205315d84b00b24368932e353a83588c5fd97d0c67dd282b35c1b9bb90d1b9ac"
+        },
+        {
+          "path": "byted-ark-seedance-skill/package.json",
+          "bytes": 301,
+          "mode": "0644",
+          "sha256": "sha256:866806b348dd8f46f20ebded31bb2467630533df16b57b6310a0acb19133a726"
+        },
+        {
+          "path": "byted-ark-seedance-skill/references/README.md",
+          "bytes": 719,
+          "mode": "0644",
+          "sha256": "sha256:baca36290943bd5713d9b51e9bde04f50ca2d41f77b0d4e0967adf88cb67915e"
+        },
+        {
+          "path": "byted-ark-seedance-skill/references/seedance-2.5.md",
+          "bytes": 4489,
+          "mode": "0644",
+          "sha256": "sha256:26cb51cb04207293111295a76e317954d27f4e094ec72ca79cdce51d4a94ef17"
+        },
+        {
+          "path": "byted-ark-seedance-skill/references/seedance-model-matrix.json",
+          "bytes": 4528,
+          "mode": "0644",
+          "sha256": "sha256:c341000d92e5cd2c025a306970b06fad1825a343f5bc34be50140c90e1ef81a2"
+        },
+        {
+          "path": "byted-ark-seedance-skill/scripts/seedance-security.js",
+          "bytes": 3533,
+          "mode": "0644",
+          "sha256": "sha256:fb1457646d893ca4633bd631e292122d29c358df3b2f62df75a88985b14afb20"
+        },
+        {
+          "path": "byted-ark-seedance-skill/scripts/seedance-validation.js",
+          "bytes": 3818,
+          "mode": "0644",
+          "sha256": "sha256:98e2f9bf42e1c4a2610fa4455db6596edf6012d59749c5273e7edf8b8cd0d421"
+        },
+        {
+          "path": "byted-ark-seedance-skill/scripts/seedance-wrapper.js",
+          "bytes": 43569,
+          "mode": "0644",
+          "sha256": "sha256:b4151e6e17387b52be08a76872330ef3ead7542e3bff9abc285de7fd03a62c14"
+        },
+        {
+          "path": "byted-ark-seedance-skill/scripts/seedance.js",
+          "bytes": 42697,
+          "mode": "0644",
+          "sha256": "sha256:e8d157e9422cdc1d1f84f23345cbe593d093faf63dc003e2d162f738a1af8f75"
+        },
+        {
+          "path": "byted-ark-seedance-skill/tests/security.test.js",
+          "bytes": 4706,
+          "mode": "0644",
+          "sha256": "sha256:74c6946e8ab09444204448fe8f4044adba58cffd692341220da3146237ff0779"
+        },
+        {
+          "path": "byted-ark-seedance-skill/tests/seedance.test.js",
+          "bytes": 5748,
+          "mode": "0644",
+          "sha256": "sha256:7922a964441241debbac3fa4db9f13e12d65ea5de9d5967f7fccc8a8846cfeca"
+        }
+      ],
       "patches": [
         {
           "path": "patches/0001-seedance-broker-adapter.patch",
           "sha256": "sha256:7c8220cdd0cb60a5d08aac98563b59fe4aef76e531c8ccfcae30c868d4125bae",
+          "applies": true
+        },
+        {
+          "path": "patches/0004-seedance-fail-closed-cli.patch",
+          "sha256": "sha256:33e6d3bdb431ad0b6f8c708ff19b299d67067336710115821e08aff66735a44a",
           "applies": true
         }
       ]

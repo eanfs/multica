@@ -85,14 +85,10 @@ RUN set -eux; \
     rm -f /out/esbuild
 
 # ---------------------------------------------------------------------------
-# Stage 4: Vendor verification and hardening. Re-runs the offline vendor
-# security tests (which apply the audited patch series to a throwaway tree and
-# exercise the hardened adapters) and writes the patched-tree hash.
-#
-# The full scripts/verify-aurora-volc-skills.mjs is deliberately not invoked
-# here: at this revision it hard-fails on the Seedance license gate, which is a
-# separate, still-open distribution blocker recorded in vendor-lock.json. Only
-# the vendored Seedream tree is shipped.
+# Stage 4: Vendor verification and hardening. Re-runs the full offline vendor
+# gate (audited source digests, whole-tree hashes, and license provenance) and
+# the patch security suite, then materializes the patched Seedance and Seedream
+# trees and writes the patched-tree hash.
 # ---------------------------------------------------------------------------
 FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS vendor
 WORKDIR /src
@@ -100,15 +96,20 @@ COPY --from=nodedeps /usr/local/bin/node /usr/local/bin/node
 COPY --from=nodedeps /src /src
 COPY vendor /src/deploy/aurora-sandbox/vendor
 COPY runtime/test /src/deploy/aurora-sandbox/runtime/test
-RUN node --test /src/deploy/aurora-sandbox/runtime/test/volc-vendor-security.test.mjs \
+COPY --from=scripts verify-aurora-volc-skills.mjs /src/scripts/verify-aurora-volc-skills.mjs
+RUN node /src/scripts/verify-aurora-volc-skills.mjs \
+ && node --test /src/deploy/aurora-sandbox/runtime/test/volc-vendor-security.test.mjs \
  && rm -rf /tmp/patched && mkdir -p /tmp/patched \
+ && cp -a /src/deploy/aurora-sandbox/vendor/volcengine/byted-ark-seedance-skill /tmp/patched/ \
  && cp -a /src/deploy/aurora-sandbox/vendor/volcengine/byted-ark-seedream-skill /tmp/patched/ \
  && cd /tmp/patched && git init -q \
+ && git apply /src/deploy/aurora-sandbox/vendor/volcengine/patches/0001-seedance-broker-adapter.patch \
  && git apply /src/deploy/aurora-sandbox/vendor/volcengine/patches/0002-seedream-broker-adapter.patch \
  && git apply /src/deploy/aurora-sandbox/vendor/volcengine/patches/0003-seedream-fail-closed-cli.patch \
+ && git apply /src/deploy/aurora-sandbox/vendor/volcengine/patches/0004-seedance-fail-closed-cli.patch \
  && rm -rf /tmp/patched/.git \
  && mkdir -p /opt/aurora/vendor/volcengine \
- && cp -a /tmp/patched/byted-ark-seedream-skill /opt/aurora/vendor/volcengine/ \
+ && cp -a /tmp/patched/byted-ark-seedance-skill /tmp/patched/byted-ark-seedream-skill /opt/aurora/vendor/volcengine/ \
  && rm -rf /tmp/patched \
  && find /opt/aurora/vendor -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}' > /opt/aurora/vendor-tree.sha256
 

@@ -258,7 +258,6 @@ echo "WRITABLE ok"
 residue=""
 for p in /root/.npm /root/.cache /root/.pnpm-store /root/.local/share/pnpm \
          /opt/aurora/runtime/.npmrc \
-         /opt/aurora/vendor/volcengine/byted-ark-seedance-skill \
          /opt/aurora/vendor/volcengine/patches \
          /opt/aurora/runtime/deploy/aurora-sandbox/vendor/volcengine/byted-ark-seedance-skill; do
   [ -e "$p" ] && residue="$residue $p" || true
@@ -292,6 +291,7 @@ recomputed="$(find /opt/aurora/vendor -type f -print0 | sort -z | xargs -0 sha25
 echo "VENDOR_TREE_HASH $stored"
 
 node -e "const {createRequire}=require('node:module');const r=createRequire('/opt/aurora/vendor/volcengine/');const m=r('/opt/aurora/vendor/volcengine/byted-ark-seedream-skill/scripts/seedream-broker.js');if(typeof m.generate!=='function'){console.error('seedream-broker generate missing');process.exit(3);}console.log('SELFTEST seedream-broker ok');"
+node -e "const {createRequire}=require('node:module');const r=createRequire('/opt/aurora/vendor/volcengine/');const m=r('/opt/aurora/vendor/volcengine/byted-ark-seedance-skill/scripts/seedance-broker.js');if(typeof m.createTask!=='function'||typeof m.pollTask!=='function'){console.error('seedance-broker createTask/pollTask missing');process.exit(3);}console.log('SELFTEST seedance-broker ok');"
 node --input-type=module -e "const m=await import('/opt/aurora/runtime/deploy/aurora-sandbox/runtime/src/server.mjs');if(!Array.isArray(m.TOOL_NAMES)||m.TOOL_NAMES.length!==9){console.error('broker tool count',m.TOOL_NAMES&&m.TOOL_NAMES.length);process.exit(4);}console.log('SELFTEST broker tools='+m.TOOL_NAMES.length);"
 echo "SELFTEST ok"
 INSPECT
@@ -345,31 +345,34 @@ pass "sandbox binaries and node packages match the locked versions"
 cat >"$work/image-vendor-hash.sh" <<'IMAGE_HASH'
 set -eu
 cd /opt/aurora/vendor/volcengine
-find byted-ark-seedream-skill -type f -print0 | sort -z | while IFS= read -r -d '' f; do
+find byted-ark-seedance-skill byted-ark-seedream-skill -type f -print0 | sort -z | while IFS= read -r -d '' f; do
   printf '%s\0' "$f"
   sha256sum "$f" | awk '{print $1}'
 done | sha256sum | awk '{print $1}'
 IMAGE_HASH
 mkdir -p "$work/patched"
+cp -a "$vendor_source/byted-ark-seedance-skill" "$work/patched/"
 cp -a "$vendor_source/byted-ark-seedream-skill" "$work/patched/"
 (
   cd "$work/patched"
   git init -q
+  git apply "$vendor_source/patches/0001-seedance-broker-adapter.patch"
   git apply "$vendor_source/patches/0002-seedream-broker-adapter.patch"
   git apply "$vendor_source/patches/0003-seedream-fail-closed-cli.patch"
+  git apply "$vendor_source/patches/0004-seedance-fail-closed-cli.patch"
   rm -rf .git
 ) || fail "could not apply the locked vendor patch series on the host"
 
 manifest_hash() {
-  # manifest_hash <root> <relative-directory>
-  local root="$1" rel="$2"
-  ( cd "$root" && find "$rel" -type f -print0 | sort -z | while IFS= read -r -d '' f; do
+  # manifest_hash <root> <relative-directory>...
+  local root="$1"; shift
+  ( cd "$root" && find "$@" -type f -print0 | sort -z | while IFS= read -r -d '' f; do
       printf '%s\0' "$f"
       sha256sum "$f" | awk '{print $1}'
     done | sha256sum | awk '{print $1}' )
 }
 image_vendor_hash="$(docker run --rm -i --user 0:0 --entrypoint /bin/bash "$sandbox" - <"$work/image-vendor-hash.sh")" || fail "image has no /opt/aurora/vendor tree"
-locked_vendor_hash="$(manifest_hash "$work/patched" "byted-ark-seedream-skill")"
+locked_vendor_hash="$(manifest_hash "$work/patched" "byted-ark-seedance-skill" "byted-ark-seedream-skill")"
 [ "$image_vendor_hash" = "$locked_vendor_hash" ] || fail "vendor patched-tree hash $image_vendor_hash does not match the locked source+patches $locked_vendor_hash"
 
 node - "$vendor_lock" "$vendor_source" <<'NODE' || fail "vendored source files or patch hashes do not match vendor-lock.json"

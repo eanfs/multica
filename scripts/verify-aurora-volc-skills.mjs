@@ -6,11 +6,14 @@
 // rejects any drift between the committed trees and their locks.
 //
 // The Seedance license gate is enforced here: the upstream package ships no
-// LICENSE file, so the exact MIT text/copyright must be obtained from the
-// Volcengine source owner, committed as byted-ark-seedance-skill/LICENSE.upstream,
-// and its digest recorded in vendor-lock.json before the tree may be vendored.
-// While that evidence is missing the verifier fails with "missing Seedance
-// license text" and the Seedance tree stays out of the repository/image.
+// LICENSE file, so byted-ark-seedance-skill/LICENSE.upstream is the standard MIT
+// text carrying the holder declared in the package metadata. The repository owner
+// confirmed on 2026-09-28 that the source-declared MIT licence may be used; the
+// verifier requires vendor-lock.json to record that provenance as a
+// reconstruction, and rejects a lock that presents the text as a verified
+// upstream file. While the authorization evidence is missing the verifier fails
+// with "missing Seedance license text" and the Seedance tree stays out of the
+// repository/image.
 //
 // No network calls are made.
 
@@ -197,6 +200,47 @@ function verifyPatches(skillId, patches) {
   }
 }
 
+// The upstream Seedance package ships no LICENSE file, so the committed
+// LICENSE.upstream is reconstructed from the source-declared MIT licence. The
+// verifier refuses a lock that presents it as a verified upstream file and
+// requires the owner authorization provenance to be recorded.
+function verifySeedanceLicenseProvenance(license, text) {
+  if (license.status !== "authorized") {
+    fail(
+      "vendor-lock byted-ark-seedance-skill license.status must be \"authorized\" (the upstream package ships no LICENSE, so the text cannot be verified against an upstream file); lock=" +
+        JSON.stringify(license.status),
+    );
+  }
+  const provenance = license.provenance;
+  if (!provenance || typeof provenance !== "object" || Array.isArray(provenance)) {
+    fail("vendor-lock byted-ark-seedance-skill license.provenance is required");
+    return;
+  }
+  if (provenance.upstream_ships_license !== false) {
+    fail("vendor-lock byted-ark-seedance-skill provenance must record upstream_ships_license: false");
+  }
+  for (const field of [
+    "kind",
+    "declared_spdx",
+    "declared_in",
+    "copyright_holder",
+    "copyright_holder_source",
+    "authorization",
+    "note",
+  ]) {
+    if (!isNonEmptyString(provenance[field])) {
+      fail("vendor-lock byted-ark-seedance-skill license.provenance." + field + " is required");
+    }
+  }
+  if (!isNonEmptyString(text)) return;
+  for (const marker of ["MIT License", "Permission is hereby granted, free of charge", 'THE SOFTWARE IS PROVIDED "AS IS"']) {
+    if (!text.includes(marker)) fail("Seedance LICENSE.upstream is missing the standard MIT text marker: " + marker);
+  }
+  if (isNonEmptyString(provenance.copyright_holder) && !text.includes(provenance.copyright_holder)) {
+    fail("Seedance LICENSE.upstream does not name the declared copyright holder: " + provenance.copyright_holder);
+  }
+}
+
 function verifyField(label, actual, expected) {
   if (actual !== expected) {
     fail("wrong " + label + ": lock=" + JSON.stringify(actual) + " audited=" + JSON.stringify(expected));
@@ -294,7 +338,7 @@ function main() {
         fail(
           "missing Seedance license text: " +
             audited.licensePath +
-            " (upstream ships no LICENSE; the exact MIT text/copyright must be obtained from the Volcengine source owner before this tree is distributed)",
+            " (upstream ships no LICENSE; supply the owner-authorized MIT text with --seedance-license before this tree is distributed)",
         );
       } else {
         fail("vendor-lock " + skillId + " must declare vendored: true|false");
@@ -361,6 +405,9 @@ function main() {
       if (actual !== license.sha256) {
         fail("license hash mismatch for " + skillId + ": lock=" + license.sha256 + " actual=" + actual);
       }
+    }
+    if (skillId === "byted-ark-seedance-skill") {
+      verifySeedanceLicenseProvenance(license, fs.existsSync(licenseAbs) ? fs.readFileSync(licenseAbs, "utf8") : null);
     }
   }
 
