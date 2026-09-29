@@ -183,11 +183,70 @@ rejects expired, wildcard, or missing-field entries:
 node scripts/verify-aurora-sandbox-locks.mjs --workflow
 ```
 
+## Gated real provider and agent smokes
+
+`server/pkg/agent/aurora_sandbox_smoke_test.go` holds the real provider and
+agent smokes behind the `agentintegration` build tag. They are double-gated
+and never run by default:
+
+1. `MULTICA_RUN_REAL_AGENT_SMOKE=1` is checked as the first statement, before
+   any executable lookup, Docker image pull, credential-file read, account
+   access, or network call; and
+2. each subtest checks its own opt-in before reading its credential file:
+   `AURORA_RUN_CLAUDE_SMOKE`, `AURORA_RUN_SEEDREAM_SMOKE`,
+   `AURORA_RUN_SEEDANCE_SMOKE`, `AURORA_RUN_VOLC_ASR_SMOKE`,
+   `AURORA_RUN_OPENAI_IMAGE_SMOKE`, `AURORA_RUN_HYPERFRAMES_SMOKE`, and
+   `AURORA_RUN_CHROMIUM_SMOKE`.
+
+There is no run-everything switch: a missing opt-in skips its subtest before
+its secret is touched, and the default tagged run performs one immediate skip
+at the global gate.
+
+An enabled subtest drives a live Multica stack through the public Aurora HTTP
+API only. It creates a fresh workspace and generation, waits conditionally for
+a terminal status, verifies the artifact kind, format, SHA-256 and nonzero
+size, verifies the exact credit settlement from the ledger, and then deletes
+its assets and workspace. It never runs a vendor script or a provider CLI on
+the host, and it uses the digest-pinned sandbox image named by
+`AURORA_SANDBOX_IMAGE` (a tag-only reference is rejected).
+
+Configuration:
+
+| Variable | Purpose |
+| --- | --- |
+| `AURORA_SMOKE_BASE_URL` | Live Multica stack origin |
+| `AURORA_SMOKE_API_TOKEN` | Human API token for the smoke account |
+| `AURORA_SANDBOX_IMAGE` | Digest-pinned sandbox image; a tag-only reference is rejected |
+| `AURORA_SMOKE_WORKSPACE_ID` | Optional existing workspace; empty creates a fresh one |
+| `AURORA_SMOKE_ANTHROPIC_KEY_FILE` | Mode-0400 Anthropic credential file |
+| `AURORA_SMOKE_ARK_KEY_FILE` | Mode-0400 Volcengine ARK credential file |
+| `AURORA_SMOKE_VOLC_ASR_KEY_FILE` | Mode-0400 Volcengine ASR credential file |
+| `AURORA_SMOKE_OPENAI_KEY_FILE` | Mode-0400 OpenAI credential file |
+
+Run one subtest directly only when authorized and when the credential and live
+stack exist:
+
+```bash
+cd server && MULTICA_RUN_REAL_AGENT_SMOKE=1 \
+  go test -tags=agentintegration ./pkg/agent \
+  -run '^TestAuroraSandboxRealProviderSmoke$' -count=1 -v
+```
+
+`.github/workflows/aurora-sandbox.yml` exposes one `workflow_dispatch` boolean
+per subtest. Each smoke job requires the protected `aurora-provider-smoke`
+environment, is disabled for pull requests, materializes only the selected
+secret into a mode-0400 temporary file, applies a 35-minute test deadline,
+stops after one provider create per operation, and uploads a sanitized log
+report. Logs contain test and provider/model names, Multica IDs, duration,
+status, byte count, and credit delta only; never prompts, document text,
+keys, tokens, signed URLs, provider responses, or artifact bytes.
+
 ## Known follow-ups
 
-- #117 — the gated real agent and provider smokes remain unimplemented and need
-  real provider credentials plus explicit authorization; they are recorded as
-  skipped, never failed or passed.
+- #117 — the gated real agent and provider smokes are implemented and provably
+  skip by default; they have not been executed and remain unproven until an
+  authorized operator supplies provider credentials and a live stack. They are
+  recorded as skipped, never failed or passed.
 - The Seedance and Seedream vendor trees (#140) are both vendored, patched, and
   verified. The Seedance `LICENSE.upstream` is an owner-authorized
   reconstruction of the standard MIT text, recorded as such in
