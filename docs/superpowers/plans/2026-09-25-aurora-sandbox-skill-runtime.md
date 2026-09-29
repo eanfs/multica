@@ -399,7 +399,7 @@ git commit -m "feat(aurora): define canonical skill workflows"
 
 ### Task 3: Vendor and Harden the Official Volcengine Skills
 
-> **Resolved (2026-09-28): #140 — both vendor trees are vendored, hardened, and verified.** The repository owner confirmed that the source-declared Seedance MIT licence is usable; the committed `LICENSE.upstream` is the standard MIT text carrying the `volcengine/agentplan` holder and `vendor-lock.json` records it as an owner-authorized reconstruction rather than an upstream file. Steps 1–9 are complete and `node scripts/verify-aurora-volc-skills.mjs` exits 0; ticket #106 is resolved.
+> **Resolved (2026-09-28; merged as pr://eanfs/multica/168 at `92daf28a4`): #140 — both vendor trees are vendored, hardened, and verified.** The repository owner confirmed that the source-declared Seedance MIT licence is usable; the committed `LICENSE.upstream` is the standard MIT text carrying the `VolcEngine / AgentPlan` holder from the `SKILL.md` frontmatter `metadata.author: volcengine/agentplan`, byte-identical to the already-vendored Seedream licence, and `vendor-lock.json` records it as an owner-authorized reconstruction (`provenance.kind: reconstructed-from-declared-license`, `upstream_ships_license: false`) rather than an upstream file. The verifier was strengthened to require that provenance and reject a lock claiming verified, with status, provenance, and hash mutations each negative-tested to exit 1. Steps 1–9 are complete and `node scripts/verify-aurora-volc-skills.mjs` exits 0; ticket #106 is resolved.
 
 **Files:**
 - Create: `scripts/update-aurora-volc-skills.sh`
@@ -444,7 +444,7 @@ It verifies the two audited `computedHash` and `wellKnownDigest` values before r
 
 - [x] **Step 4: Record the authorized Seedance license before distribution**
 
-The upstream package ships no LICENSE file. The repository owner confirmed on 2026-09-28 that the source-declared MIT licence (SKILL.md frontmatter) may be used. The standard MIT text carrying the declared `volcengine/agentplan` copyright holder is committed as `byted-ark-seedance-skill/LICENSE.upstream`, with its SHA-256 and explicit reconstruction provenance in `vendor-lock.json`. No generic text was substituted, and no byte-identical upstream file is claimed.
+The upstream package ships no LICENSE file. The repository owner confirmed on 2026-09-28 that the source-declared MIT licence (SKILL.md frontmatter `metadata.author: volcengine/agentplan`) may be used. The standard MIT text carrying the declared `VolcEngine / AgentPlan` copyright holder is committed as `byted-ark-seedance-skill/LICENSE.upstream`, with its SHA-256 and explicit reconstruction provenance in `vendor-lock.json`. The text is byte-identical to the already-vendored Seedream licence because both are published by the same holder with the same copyright line. No generic text was substituted, and no byte-identical upstream file is claimed.
 
 - [x] **Step 5: Preserve upstream trees byte-for-byte**
 
@@ -960,8 +960,8 @@ git commit -m "test(aurora): cover all available skill routes"
 
 ## Plan C Completion Evidence
 
-Plan C Tasks 1–8 are implemented and merged (tickets #104–#111). Task 3 (#106) is complete: the Seedance and Seedream trees are both vendored, patched, and hardened. Upstream ships no Seedance LICENSE file, so the committed `LICENSE.upstream` is an owner-authorized reconstruction of the standard MIT text (2026-09-28); `vendor-lock.json` records that provenance explicitly rather than presenting it as an upstream file.
+Plan C Tasks 1–8 are implemented and merged (tickets #104–#111). Task 3 (#106) is complete and merged as pr://eanfs/multica/168 (`92daf28a4`): the Seedance and Seedream trees are both vendored, patched, and hardened. Upstream ships no Seedance LICENSE file, so the committed `LICENSE.upstream` is an owner-authorized reconstruction of the standard MIT text (2026-09-28), byte-identical to the Seedream licence and carrying the `VolcEngine / AgentPlan` holder from the `SKILL.md` frontmatter; `vendor-lock.json` records that provenance explicitly rather than presenting it as an upstream file, and the verifier requires it.
 
-Verified evidence is preserved in the [2026-09-28 acceptance record](2026-09-28-aurora-sandbox-acceptance-record.md): the runtime suite executes exactly the 13 available skills with their fixed provider routes (121 Node tests pass, including the broker matrix that drives the real patched Seedream and Seedance modules and 15 vendor security regressions, among them the Seedance direct-CLI refusal from #140); the server fake lifecycle matrix passes; and no real agent/provider call, dynamic skill install, or unrestricted shell tool ran in default verification.
+Verified evidence is preserved in the [2026-09-28 acceptance record](2026-09-28-aurora-sandbox-acceptance-record.md): the runtime suite executes exactly the 13 available skills with their fixed provider routes (121 Node tests pass, up from 120, including the broker matrix that drives the real patched Seedream and Seedance modules and 15 vendor security regressions, up from 14, among them the Seedance direct-CLI refusal from #140, which exits 2); the server fake lifecycle matrix passes; and no real agent/provider call, dynamic skill install, or unrestricted shell tool ran in default verification. `image-video` and `text-video` are executable again because the broker adapter resolves the vendored, patched Seedance module; no real provider call has been exercised for them.
 
 **Resolved gate:** `node scripts/verify-aurora-volc-skills.mjs` exits 0 and verifies both vendored trees. The Seedance license is recorded as an owner-authorized reconstruction (#140), not as a substitute for an upstream file.
