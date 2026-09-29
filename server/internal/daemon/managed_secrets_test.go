@@ -150,27 +150,67 @@ func TestManagedSecretFileValidation(t *testing.T) {
 	})
 }
 
-// TestManagedSecretLoaderRequiresEveryProvider proves a missing provider file
-// fails with a provider-specific error that names no path and no value.
-func TestManagedSecretLoaderRequiresEveryProvider(t *testing.T) {
+// TestManagedSecretLoaderRequiresOnlyAnthropic pins the startup requirement:
+// the managed daemon is the Claude agent, so its Anthropic value is required,
+// while the other three provider tools read their credential files lazily and
+// fail closed at call time. Those three may therefore be absent at startup, and
+// their configured paths are still handed to the MCP broker.
+func TestManagedSecretLoaderRequiresOnlyAnthropic(t *testing.T) {
+	t.Run("optional providers absent", func(t *testing.T) {
+		paths := managedSecretTestPaths(t)
+		writeManagedSecretFile(t, paths.AnthropicAPIKey, testAnthropicSecret, 0o400)
+
+		secrets, err := loadManagedProviderSecrets(paths)
+		if err != nil {
+			t.Fatalf("loadManagedProviderSecrets with optional files absent: %v", err)
+		}
+		if got := secrets.AnthropicAPIKey.Value(); got != testAnthropicSecret {
+			t.Errorf("anthropic value = %q, want the staged secret", got)
+		}
+		if secrets.ArkAPIKeyFile != paths.ArkAPIKey ||
+			secrets.OpenAIAPIKeyFile != paths.OpenAIAPIKey ||
+			secrets.VolcASRAPIKeyFile != paths.VolcASRAPIKey {
+			t.Errorf("optional provider paths were not preserved: %+v", secrets)
+		}
+	})
+
+	t.Run("anthropic absent", func(t *testing.T) {
+		paths := managedSecretTestPaths(t)
+		writeManagedSecretFile(t, paths.ArkAPIKey, testArkSecret, 0o400)
+
+		_, err := loadManagedProviderSecrets(paths)
+		if err == nil {
+			t.Fatal("loadManagedProviderSecrets accepted a missing Anthropic credential")
+		}
+		if !strings.Contains(err.Error(), "anthropic") {
+			t.Fatalf("error is not provider-specific: %v", err)
+		}
+		if strings.Contains(err.Error(), paths.AnthropicAPIKey) {
+			t.Fatalf("error leaks the missing path: %v", err)
+		}
+		if strings.Contains(err.Error(), testArkSecret) {
+			t.Fatalf("error leaks a secret value: %v", err)
+		}
+	})
+}
+
+// TestManagedSecretLoaderRejectsUnsafeOptionalProvider keeps the file safety
+// checks for provider files that are present: a supplied file that is not an
+// owner-only regular file still fails startup.
+func TestManagedSecretLoaderRejectsUnsafeOptionalProvider(t *testing.T) {
 	paths := managedSecretTestPaths(t)
 	writeManagedSecretFile(t, paths.AnthropicAPIKey, testAnthropicSecret, 0o400)
-	writeManagedSecretFile(t, paths.ArkAPIKey, testArkSecret, 0o400)
-	writeManagedSecretFile(t, paths.VolcASRAPIKey, testVolcASRSecret, 0o400)
-	// The OpenAI file is deliberately absent.
+	writeManagedSecretFile(t, paths.ArkAPIKey, testArkSecret, 0o440)
 
 	_, err := loadManagedProviderSecrets(paths)
 	if err == nil {
-		t.Fatal("loadManagedProviderSecrets accepted a missing provider file")
+		t.Fatal("loadManagedProviderSecrets accepted a group-readable optional provider file")
 	}
-	if !strings.Contains(err.Error(), "openai") {
+	if !strings.Contains(err.Error(), "ark") {
 		t.Fatalf("error is not provider-specific: %v", err)
 	}
-	if strings.Contains(err.Error(), paths.OpenAIAPIKey) {
-		t.Fatalf("error leaks the missing path: %v", err)
-	}
-	if strings.Contains(err.Error(), testAnthropicSecret) {
-		t.Fatalf("error leaks a secret value: %v", err)
+	if strings.Contains(err.Error(), paths.ArkAPIKey) {
+		t.Fatalf("error leaks the path: %v", err)
 	}
 }
 
@@ -294,9 +334,10 @@ func TestManagedSecretConfigLoadsProviderFiles(t *testing.T) {
 	}
 }
 
-// TestManagedSecretConfigReportsProviderSpecificFailure proves a missing
-// provider file fails managed startup without echoing the path or the value.
-func TestManagedSecretConfigReportsProviderSpecificFailure(t *testing.T) {
+// TestManagedSecretConfigReportsAnthropicFailure proves managed startup fails
+// without the credential the Claude agent itself needs, without echoing the
+// path or the value.
+func TestManagedSecretConfigReportsAnthropicFailure(t *testing.T) {
 	fakeClaude := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write fake claude: %v", err)
@@ -306,13 +347,13 @@ func TestManagedSecretConfigReportsProviderSpecificFailure(t *testing.T) {
 	t.Setenv("MULTICA_LAUNCHED_BY", "")
 
 	paths := managedSecretTestPaths(t)
-	missing := filepath.Join(filepath.Dir(paths.ArkAPIKey), "absent-ark-api-key")
-	writeManagedSecretFile(t, paths.AnthropicAPIKey, testAnthropicSecret, 0o400)
+	missing := filepath.Join(filepath.Dir(paths.AnthropicAPIKey), "absent-anthropic-api-key")
+	writeManagedSecretFile(t, paths.ArkAPIKey, testArkSecret, 0o400)
 	writeManagedSecretFile(t, paths.OpenAIAPIKey, testOpenAISecret, 0o400)
 	writeManagedSecretFile(t, paths.VolcASRAPIKey, testVolcASRSecret, 0o400)
 	setManagedSecretPathEnv(t, managedSecretPaths{
-		AnthropicAPIKey: paths.AnthropicAPIKey,
-		ArkAPIKey:       missing,
+		AnthropicAPIKey: missing,
+		ArkAPIKey:       paths.ArkAPIKey,
 		OpenAIAPIKey:    paths.OpenAIAPIKey,
 		VolcASRAPIKey:   paths.VolcASRAPIKey,
 	})
@@ -325,9 +366,9 @@ func TestManagedSecretConfigReportsProviderSpecificFailure(t *testing.T) {
 		WorkspacesRoot:             t.TempDir(),
 	})
 	if err == nil {
-		t.Fatal("LoadConfig(managed) accepted a missing provider file")
+		t.Fatal("LoadConfig(managed) accepted a missing Anthropic credential")
 	}
-	if !strings.Contains(err.Error(), "ark") {
+	if !strings.Contains(err.Error(), "anthropic") {
 		t.Fatalf("error is not provider-specific: %v", err)
 	}
 	if strings.Contains(err.Error(), missing) {
@@ -335,5 +376,42 @@ func TestManagedSecretConfigReportsProviderSpecificFailure(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), testAnthropicSecret) {
 		t.Fatalf("error leaks a provider secret: %v", err)
+	}
+}
+
+// TestManagedSecretConfigAllowsMissingOptionalProviders proves a single-route
+// deployment starts when only the Claude credential is staged: the absent
+// provider files do not fail managed startup.
+func TestManagedSecretConfigAllowsMissingOptionalProviders(t *testing.T) {
+	fakeClaude := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("MULTICA_CLAUDE_PATH", fakeClaude)
+	t.Setenv("MULTICA_DAEMON_ID", "")
+	t.Setenv("MULTICA_LAUNCHED_BY", "")
+
+	paths := managedSecretTestPaths(t)
+	writeManagedSecretFile(t, paths.AnthropicAPIKey, testAnthropicSecret, 0o400)
+	dir := filepath.Dir(paths.ArkAPIKey)
+	setManagedSecretPathEnv(t, managedSecretPaths{
+		AnthropicAPIKey: paths.AnthropicAPIKey,
+		ArkAPIKey:       filepath.Join(dir, "absent-ark-api-key"),
+		OpenAIAPIKey:    filepath.Join(dir, "absent-openai-api-key"),
+		VolcASRAPIKey:   filepath.Join(dir, "absent-volc-asr-api-key"),
+	})
+
+	cfg, err := LoadConfig(Overrides{
+		Managed:                    true,
+		ManagedEnrollmentTokenFile: writeManagedTokenFile(t, testManagedEnrollmentToken),
+		Foreground:                 true,
+		ServerURL:                  "http://localhost:0",
+		WorkspacesRoot:             t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig(managed) with optional provider files absent: %v", err)
+	}
+	if got := cfg.Managed.ProviderSecrets.AnthropicAPIKey.Value(); got != testAnthropicSecret {
+		t.Errorf("loaded anthropic value = %q, want the staged secret", got)
 	}
 }

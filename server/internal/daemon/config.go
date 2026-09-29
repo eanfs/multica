@@ -252,8 +252,10 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		if err := validateManagedOverrides(overrides); err != nil {
 			return Config{}, err
 		}
-		// Every advertised skill routes through a provider, so the sandbox
-		// refuses to start when any of the four credential files is missing.
+		// The Claude agent cannot run without its own credential, but the
+		// provider-tool files are optional per route: a missing one stays an
+		// absent path for the MCP broker, whose tool fails closed when called
+		// instead of blocking every other route at startup.
 		creds, err := loadManagedProviderSecrets(managedSecretPathsFromEnv())
 		if err != nil {
 			return Config{}, err
