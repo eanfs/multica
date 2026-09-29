@@ -504,7 +504,7 @@ git commit -m "test(aurora): codify sandbox acceptance"
 
 ### Task 6: Add Explicitly Gated Real Agent and Provider Smokes
 
-> **Open gate (2026-09-28): #117 — not implemented and not authorized.** No `server/pkg/agent/aurora_sandbox_smoke_test.go`, no `AURORA_RUN_*_SMOKE` opt-ins, and no workflow-dispatch real-smoke jobs exist in the tree, and no provider credentials or explicit cost authorization exist in this environment. Every subtest below is therefore recorded **SKIPPED** (never passed, never failed) in the [acceptance record](2026-09-28-aurora-sandbox-acceptance-record.md). Do not run providers or create credential files without explicit authorization.
+> **Open gate (2026-09-28; updated 2026-09-29): #117 — in progress and not authorized.** The gated real agent/provider smokes are not authorized to run: no provider credentials exist and no credential file was created, so every subtest below is recorded **SKIPPED** (never passed, never failed) in the [acceptance record](2026-09-28-aurora-sandbox-acceptance-record.md). Do not run providers or create credential files without explicit authorization.
 
 **Files:**
 - Create: `server/pkg/agent/aurora_sandbox_smoke_test.go`
@@ -632,25 +632,25 @@ Expected: all pass. If the known `repocache/TestGitEnv` environment leak or dead
 
 Run the exact Tasks 2–5 commands on Linux using digest refs. Expected: both architectures build; content verifier passes; 13-route fake matrix passes; representative actual-container pipelines pass; isolation test passes twice; cleanup leaves no managed resources.
 
-> **Note (2026-09-28):** these Linux gates cannot run on this macOS host. Their evidence is the Linux CI run cited in the [acceptance record](2026-09-28-aurora-sandbox-acceptance-record.md): run 36422576420, job "Verify, build, and scan" (ID 108928656275), green, plus run 36425249706 on this base commit. That run executed the tagged matrix once, so the "isolation test passes twice" wording is not evidenced there.
+> **Note (2026-09-28; updated 2026-09-29):** these Linux gates cannot run on this macOS host. Their evidence is the Linux CI runs cited in the [acceptance record](2026-09-28-aurora-sandbox-acceptance-record.md): run 36422576420, job "Verify, build, and scan" (ID 108928656275), green, plus run 36425249706 on the initial base commit. Run 36422576420 executed the tagged matrix once, so the "isolation test passes twice" wording was not evidenced there; the #140 run 36431624767 sets `AURORA_DOCKER_SECURITY_COUNT=2` and is green on the Seedance-inclusive image, which evidences the two passes.
 
 - [ ] **Step 4: Verify published supply-chain artifacts**
 
 For each sandbox/proxy index digest, preserve successful output from Cosign signature verification, SPDX attestation verification, provenance verification, Trivy policy, and architecture manifest inspection.
 
-> **Not fully verified (2026-09-28):** the publish job runs only on `main`. The first main-branch publish reached the publish job on run 36425249706 (merge commit `72176c950`) while this record was written. No signature or attestation was verified from this host: `cosign` is not installed, GHCR denies anonymous access, and the local `gh` token lacks package scope. Signature/attestation trust must come from that run's `verify-published` job; no signature is claimed here.
+> **Verified for the pre-#140 pair; stays open for the final digests (2026-09-29):** run **36430260728** (head `11b260cd3`) completed all three jobs green, including the `verify-published` job's Cosign, SPDX, provenance, and architecture checks. The published digests are `ghcr.io/eanfs/multica-aurora-sandbox@sha256:ad7686beff5d606f2997818e16effdac251ff7d76e3b8d39eb170b7217483e01` and `ghcr.io/eanfs/multica-aurora-egress@sha256:720c76081c24fd2a0a33129f8acb0a576b1bf89403e4b658125ca0945e0698c4`, with the SBOM and provenance artifacts in `aurora-sandbox-published/`; that pair is the **pre-#140 image content**. Merges #167 (`c12025bc1`) and #168 (`92daf28a4`) produced the new main runs 36501539027 and 36501577137, whose publish will produce the final Seedance-inclusive digests. Step 4 stays open until those are recorded. This host still cannot reproduce the checks locally: `cosign` is not installed, GHCR denies anonymous access, and the local `gh` token lacks package scope.
 
 - [x] **Step 5: Record optional real-smoke status truthfully**
 
 List each provider subtest as passed, failed, or skipped with its exact gate reason. Paid-provider smokes are operational validation and cannot replace deterministic fake tests; lack of explicit authorization must be recorded as skipped, not failure and not success.
 
-> **Recorded (2026-09-28):** every provider subtest is **SKIPPED** with its gate reason because Plan D Task 6 (#117) is unimplemented and unauthorized; see the real-smoke table in the [acceptance record](2026-09-28-aurora-sandbox-acceptance-record.md).
+> **Recorded (2026-09-28; updated 2026-09-29):** every provider subtest is **SKIPPED** with its gate reason because Plan D Task 6 (#117) is open, in progress, and unauthorized; see the real-smoke table in the [acceptance record](2026-09-28-aurora-sandbox-acceptance-record.md).
 
 - [ ] **Step 6: Update repository status only after required gates**
 
 Change the roadmap and Plan 3 Task 6 from partial to complete only when lock/vendor tests, all default suites, image build/content, all-13 fake matrix, actual-container fake pipelines, Linux security acceptance, and supply-chain verification pass. Record the accepted sandbox/proxy digest refs and date; do not embed credentials or local machine paths.
 
-> **Stays partial (2026-09-28):** the status documents were updated, but the roadmap and Plan 3 Task 6 were deliberately **not** changed from partial to complete because the gated real smokes (#117) remain open and no verified signed digest is available. Issue #29 stays open with `S2-InProgress`. The Seedance licence gate (#140) is now resolved.
+> **Stays partial (2026-09-28; updated 2026-09-29):** the status documents were updated, but the roadmap and Plan 3 Task 6 were deliberately **not** changed from partial to complete because the gated real smokes (#117) remain open and the final Seedance-inclusive signed digests are not yet published. Issue #29 stays open with `S2-InProgress`. The Seedance licence gate (#140) is resolved, and the pre-#140 pair's signature/attestation verification is green on run 36430260728.
 
 - [ ] **Step 7: Ask before outward-facing tracker changes**
 
@@ -678,16 +678,16 @@ git commit -m "docs(aurora): close sandbox runtime milestone"
 
 ## Plan D Completion Evidence
 
-Plan D Tasks 1–5 are implemented and merged (tickets #112–#116). Task 6 is open (#117): the gated real agent/provider smokes are not implemented and were not authorized. Task 7 is this verification task (#118).
+Plan D Tasks 1–5 are implemented and merged (tickets #112–#116), including the publish/signing workflow and its signature/attestation verification. Task 6 is open and in progress (#117): the gated real agent/provider smokes are not authorized to run. Task 7 is this verification task (#118), and its Step 4 stays open pending the final Seedance-inclusive digests.
 
-The full command outputs, the cited CI run/job, and the supply-chain verification are preserved in the [2026-09-28 Aurora sandbox acceptance record](2026-09-28-aurora-sandbox-acceptance-record.md), which carries:
+The full command outputs, the cited CI runs/jobs, and the supply-chain verification are preserved in the [2026-09-28 Aurora sandbox acceptance record](2026-09-28-aurora-sandbox-acceptance-record.md), which carries:
 
-- lock, vendor, and runtime verification output;
-- the cited Linux CI run and job, with the machine-readable acceptance report (9/9 checks pass, including the actual-container fake pipelines);
+- lock, vendor, and runtime verification output, including the strengthened Volcengine vendor verifier and the #140 CI run 36431624767;
+- the cited Linux CI runs and jobs, with the machine-readable acceptance report (9/9 checks pass, including the actual-container fake pipelines) and the `AURORA_DOCKER_SECURITY_COUNT=2` two-pass acceptance;
 - image content/history/secret scan output, SPDX SBOMs, and the Trivy release-policy counts;
-- the published digest and whatever signature/attestation verification this host could and could not perform;
+- the published pre-#140 digest pair from run 36430260728, with the signature/attestation verification now green and the local checks this host still could not perform;
 - the real-smoke pass/fail/skip table (`SKIPPED` for every provider subtest, with the exact gate reason);
 - default frontend and backend suite outputs, including the one known `repocache` flake and its focused rerun;
-- the open gate: #117 (real smokes); #140 (Seedance license) is resolved.
+- the open gates: #117 (real smokes, in progress and unauthorized) and Plan D Task 7 Step 4 (final post-#140 digests); #140 (Seedance license) is resolved.
 
-**Boundary status: not closed.** The gated real-smoke implementation (#117) remains open, so issue #29 and the roadmap stay partial; the Seedance license text (#140) is resolved. The cited Linux CI acceptance ran the tagged matrix once, so two consecutive Linux passes are not evidenced there.
+**Boundary status: not closed.** The gated real-smoke implementation (#117) remains open, so issue #29 and the roadmap stay partial; the Seedance license text (#140) is resolved. The pre-#140 publish trust chain is verified on run 36430260728; two consecutive Linux passes are evidenced by the #140 run 36431624767.
