@@ -35,10 +35,12 @@ coverage
 /docs/
 *.md
 
-# Only the web workspace is used by Dockerfile.web. Default-exclude future
-# app workspaces so they do not silently enter the build context.
+# Only apps/web (Dockerfile.web) and apps/aurora (Dockerfile.aurora) are built
+# into images. Default-exclude the other app workspaces so they do not silently
+# enter the build context.
 /apps/*
 !/apps/web/
+!/apps/aurora/
 
 # Repository-only tooling
 /.github/
