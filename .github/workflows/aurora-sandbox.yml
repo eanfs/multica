@@ -16,6 +16,8 @@ on:
       - "deploy/aurora-sandbox/**"
       - "scripts/update-aurora-sandbox-*"
       - "scripts/verify-aurora-sandbox-image.sh"
+      - "scripts/verify-aurora-sandbox-managed-agent.sh"
+      - "scripts/verify-aurora-sandbox-managed-agent.test.sh"
       - "scripts/verify-aurora-sandbox-locks.mjs"
       - "scripts/verify-aurora-sandbox-locks.test.mjs"
       - "server/cmd/aurora-egress-proxy/**"
@@ -33,6 +35,8 @@ on:
       - "deploy/aurora-sandbox/**"
       - "scripts/update-aurora-sandbox-*"
       - "scripts/verify-aurora-sandbox-image.sh"
+      - "scripts/verify-aurora-sandbox-managed-agent.sh"
+      - "scripts/verify-aurora-sandbox-managed-agent.test.sh"
       - "scripts/verify-aurora-sandbox-locks.mjs"
       - "scripts/verify-aurora-sandbox-locks.test.mjs"
       - "server/cmd/aurora-egress-proxy/**"
@@ -138,6 +142,9 @@ jobs:
       - name: Run focused Go secret-boundary tests
         working-directory: server
         run: go test ./internal/daemon ./internal/aurorafleet -run 'TestManagedSecret|TestProviderSecretMount' -count=1
+
+      - name: Test the managed-agent resolution verifier
+        run: bash scripts/verify-aurora-sandbox-managed-agent.test.sh
 
       - name: Build host-platform sandbox image without pushing
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6

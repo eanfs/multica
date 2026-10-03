@@ -303,6 +303,16 @@ printf '%s\n' "$inspect_out" | grep -q '^SELFTEST ok$' || fail "sandbox in-image
 pass "sandbox required binaries, forbidden-binary boundary, writable-directory boundary and build residue are clean"
 pass "sandbox in-image self-test passed"
 
+# Prove the daemon can actually resolve the agent launcher from its own
+# environment: the in-image check above proves the shim exists and runs as root,
+# but the daemon resolves exec.LookPath(envOrDefault("MULTICA_CLAUDE_PATH",
+# "claude")) as the sandbox user. That gap is why a container could exit 1 with
+# "managed mode requires a claude executable" while this verifier stayed green.
+managed_out="$("$script_dir/verify-aurora-sandbox-managed-agent.sh" --user "$sandbox_user" "$sandbox")" \
+  || fail "sandbox managed-agent resolution: $(printf '%s' "$managed_out" | tail -n1)"
+printf '%s\n' "$managed_out"
+pass "sandbox daemon resolves and runs its managed agent executable"
+
 # Token/key patterns over every regular, non-binary file in the image rootfs.
 sandbox_cid="$(docker create "$sandbox")"
 docker export "$sandbox_cid" >"$work/sandbox-rootfs.tar"
