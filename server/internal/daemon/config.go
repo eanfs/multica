@@ -255,8 +255,14 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		// The Claude agent cannot run without its own credential, but the
 		// provider-tool files are optional per route: a missing one stays an
 		// absent path for the MCP broker, whose tool fails closed when called
-		// instead of blocking every other route at startup.
-		creds, err := loadManagedProviderSecrets(managedSecretPathsFromEnv())
+		// instead of blocking every other route at startup. The optional
+		// ANTHROPIC_BASE_URL/ANTHROPIC_MODEL endpoint overrides are operator
+		// process configuration and are validated here, before startup.
+		endpoint, err := managedClaudeEndpointFromEnv()
+		if err != nil {
+			return Config{}, err
+		}
+		creds, err := loadManagedProviderSecrets(managedSecretPathsFromEnv(), endpoint)
 		if err != nil {
 			return Config{}, err
 		}
