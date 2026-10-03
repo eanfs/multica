@@ -105,7 +105,7 @@ func TestVerifyCodeRechecksSignupInvitation(t *testing.T) {
 				t.Fatal("signup must not accept the invitation or grant workspace membership")
 			}
 			changeSignupInvitation(t, id, "revoked")
-			_, isNew, err := h.findOrCreateUser(context.Background(), email)
+			_, isNew, err := h.findOrCreateUser(context.Background(), email, "")
 			if err != nil || isNew {
 				t.Fatalf("revocation must not block the existing account: isNew=%t, err=%v", isNew, err)
 			}
