@@ -68,7 +68,7 @@ func stageManagedProviderSecrets(t *testing.T) (managedSecretPaths, managedProvi
 	writeManagedSecretFile(t, paths.OpenAIAPIKey, testOpenAISecret+"\n", 0o400)
 	writeManagedSecretFile(t, paths.VolcASRAPIKey, testVolcASRSecret+"\n", 0o400)
 	setManagedSecretPathEnv(t, paths)
-	secrets, err := loadManagedProviderSecrets(paths)
+	secrets, err := loadManagedProviderSecrets(paths, managedClaudeEndpoint{})
 	if err != nil {
 		t.Fatalf("loadManagedProviderSecrets: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestManagedSecretLoaderRequiresOnlyAnthropic(t *testing.T) {
 		paths := managedSecretTestPaths(t)
 		writeManagedSecretFile(t, paths.AnthropicAPIKey, testAnthropicSecret, 0o400)
 
-		secrets, err := loadManagedProviderSecrets(paths)
+		secrets, err := loadManagedProviderSecrets(paths, managedClaudeEndpoint{})
 		if err != nil {
 			t.Fatalf("loadManagedProviderSecrets with optional files absent: %v", err)
 		}
@@ -178,7 +178,7 @@ func TestManagedSecretLoaderRequiresOnlyAnthropic(t *testing.T) {
 		paths := managedSecretTestPaths(t)
 		writeManagedSecretFile(t, paths.ArkAPIKey, testArkSecret, 0o400)
 
-		_, err := loadManagedProviderSecrets(paths)
+		_, err := loadManagedProviderSecrets(paths, managedClaudeEndpoint{})
 		if err == nil {
 			t.Fatal("loadManagedProviderSecrets accepted a missing Anthropic credential")
 		}
@@ -202,7 +202,7 @@ func TestManagedSecretLoaderRejectsUnsafeOptionalProvider(t *testing.T) {
 	writeManagedSecretFile(t, paths.AnthropicAPIKey, testAnthropicSecret, 0o400)
 	writeManagedSecretFile(t, paths.ArkAPIKey, testArkSecret, 0o440)
 
-	_, err := loadManagedProviderSecrets(paths)
+	_, err := loadManagedProviderSecrets(paths, managedClaudeEndpoint{})
 	if err == nil {
 		t.Fatal("loadManagedProviderSecrets accepted a group-readable optional provider file")
 	}
@@ -270,6 +270,135 @@ func TestManagedSecretChildEnvScoping(t *testing.T) {
 		if value == testAnthropicSecret {
 			t.Error("mcp broker env carries the Anthropic credential value")
 		}
+	}
+}
+
+// managedClaudeTestOverrides prepares a minimal valid managed startup so a test
+// can drive LoadConfig with its own ANTHROPIC_* environment. It stages the four
+// provider secret files and returns the required overrides.
+func managedClaudeTestOverrides(t *testing.T) Overrides {
+	t.Helper()
+	fakeClaude := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("MULTICA_CLAUDE_PATH", fakeClaude)
+	t.Setenv("MULTICA_DAEMON_ID", "")
+	t.Setenv("MULTICA_LAUNCHED_BY", "")
+	stageManagedProviderSecrets(t)
+	return Overrides{
+		Managed:                    true,
+		ManagedEnrollmentTokenFile: writeManagedTokenFile(t, testManagedEnrollmentToken),
+		Foreground:                 true,
+		ServerURL:                  "http://localhost:0",
+		WorkspacesRoot:             t.TempDir(),
+	}
+}
+
+// TestManagedClaudeChildEnvUnsetKeepsOnlyCredential pins the default contract:
+// when neither operator endpoint override is set, the Claude child still
+// receives exactly its credential and nothing else.
+func TestManagedClaudeChildEnvUnsetKeepsOnlyCredential(t *testing.T) {
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_MODEL", "")
+	_, secrets := stageManagedProviderSecrets(t)
+
+	claude := secrets.claudeChildEnv()
+	if len(claude) != 1 {
+		t.Fatalf("claude child env = %v, want only ANTHROPIC_API_KEY", claude)
+	}
+	if claude["ANTHROPIC_API_KEY"] != testAnthropicSecret {
+		t.Fatalf("claude child env value = %q, want the anthropic secret", claude["ANTHROPIC_API_KEY"])
+	}
+	if _, ok := claude["ANTHROPIC_BASE_URL"]; ok {
+		t.Error("claude child env carries ANTHROPIC_BASE_URL while it is unset")
+	}
+	if _, ok := claude["ANTHROPIC_MODEL"]; ok {
+		t.Error("claude child env carries ANTHROPIC_MODEL while it is unset")
+	}
+}
+
+// TestManagedClaudeConfigForwardsOperatorEndpoint proves the operator-set base
+// URL and model reach the managed Claude child.
+func TestManagedClaudeConfigForwardsOperatorEndpoint(t *testing.T) {
+	const baseURL = "https://ark.cn-beijing.volces.com/api/plan"
+	const model = "ark-code-latest"
+	t.Setenv("ANTHROPIC_BASE_URL", baseURL)
+	t.Setenv("ANTHROPIC_MODEL", model)
+
+	cfg, err := LoadConfig(managedClaudeTestOverrides(t))
+	if err != nil {
+		t.Fatalf("LoadConfig(managed) = %v", err)
+	}
+	claude := cfg.Managed.ProviderSecrets.claudeChildEnv()
+	if len(claude) != 3 {
+		t.Fatalf("claude child env = %v, want the credential, base URL, and model", claude)
+	}
+	if claude["ANTHROPIC_API_KEY"] != testAnthropicSecret {
+		t.Errorf("claude child env credential = %q, want the staged secret", claude["ANTHROPIC_API_KEY"])
+	}
+	if claude["ANTHROPIC_BASE_URL"] != baseURL {
+		t.Errorf("claude child env base URL = %q, want %q", claude["ANTHROPIC_BASE_URL"], baseURL)
+	}
+	if claude["ANTHROPIC_MODEL"] != model {
+		t.Errorf("claude child env model = %q, want %q", claude["ANTHROPIC_MODEL"], model)
+	}
+}
+
+// TestManagedMcpBrokerChildEnvIgnoresOperatorEndpoint keeps the broker scope
+// untouched: the Claude endpoint overrides never reach the MCP broker.
+func TestManagedMcpBrokerChildEnvIgnoresOperatorEndpoint(t *testing.T) {
+	t.Setenv("ANTHROPIC_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan")
+	t.Setenv("ANTHROPIC_MODEL", "ark-code-latest")
+
+	cfg, err := LoadConfig(managedClaudeTestOverrides(t))
+	if err != nil {
+		t.Fatalf("LoadConfig(managed) = %v", err)
+	}
+	broker := cfg.Managed.ProviderSecrets.mcpBrokerChildEnv()
+	if len(broker) != 3 {
+		t.Fatalf("mcp broker env = %v, want the three provider file paths", broker)
+	}
+	for _, name := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"} {
+		if _, ok := broker[name]; ok {
+			t.Errorf("mcp broker env carries Claude endpoint key %s", name)
+		}
+	}
+}
+
+// TestManagedClaudeConfigRejectsInvalidBaseURL pins the fail-closed startup
+// contract for the managed base URL, and that the rejection never echoes the
+// offending value.
+func TestManagedClaudeConfigRejectsInvalidBaseURL(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		leak  string
+	}{
+		{"plain http", "http://ark.cn-beijing.volces.com/api/plan", ""},
+		{"embedded credentials", "https://user:secret-pass@ark.cn-beijing.volces.com/api/plan", "secret-pass"},
+		{"query string", "https://ark.cn-beijing.volces.com/api/plan?token=secret-query", "secret-query"},
+		{"missing host", "https:///api/plan", ""},
+		{"relative", "/api/plan", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ANTHROPIC_BASE_URL", tc.value)
+
+			_, err := LoadConfig(managedClaudeTestOverrides(t))
+			if err == nil {
+				t.Fatalf("LoadConfig(managed) accepted an invalid ANTHROPIC_BASE_URL")
+			}
+			if !strings.Contains(err.Error(), "ANTHROPIC_BASE_URL") {
+				t.Fatalf("error does not name the invalid setting: %v", err)
+			}
+			if strings.Contains(err.Error(), tc.value) {
+				t.Fatalf("error leaks the configured value: %v", err)
+			}
+			if tc.leak != "" && strings.Contains(err.Error(), tc.leak) {
+				t.Fatalf("error leaks a credential embedded in the value: %v", err)
+			}
+		})
 	}
 }
 
