@@ -1,10 +1,11 @@
 # Aurora Sandbox Final Verification and Acceptance Record
 
-**Date:** 2026-09-28 (initial acceptance); updated 2026-09-29
+**Date:** 2026-09-28 (initial acceptance); updated 2026-09-29; updated 2026-10-04 (third attempt)
 **Task:** ticket #118 — Plan D Task 7, Run Final Verification and Close the Boundary
 **Base:** `main` at `92daf28a4` (merge commit of pr://eanfs/multica/168); the initial acceptance was taken at `72176c950` (merge commit of pr://eanfs/multica/164), branch `docs/aurora-118-final-verification` (updated on `docs/aurora-progress-update`)
 **Real-smoke attempt:** 2026-09-29, worktree `.worktrees/multica/aurora-smoke` on branch `feat/aurora-real-smoke-run`, base `8d3b9e644`; executed under the repository owner's authorization, one route attempted; the full result is in Step 5
 **Second real-smoke attempt:** 2026-10-04, worktree `.worktrees/aurora-ark-smoke` on branch `docs/aurora-ark-smoke-acceptance`, base `555c3ec05`; also owner-authorized, driven by the Volcengine ARK Anthropic-compatible endpoint. One route attempted; it reached the hardened sandbox container but the container exited at startup before any provider call. The full result is Step 5's second subsection.
+**Third real-smoke attempt:** 2026-10-04, worktree `.worktrees/ark-smoke-fix` on branch `ark-smoke-fix`, base `75fef4c93`; the two blockers from the second attempt were fixed and merged (pr://eanfs/multica/184 at `897b30c6b`). The managed daemon now starts and launches Claude, and the new fleet passthrough delivered the ARK endpoint — but the hardened egress sidecar refused the provider host because this host resolves it into the RFC 2544 benchmarking range `198.18.0.0/15`, which the SSRF policy correctly classifies as non-public. No provider request was issued. The full result is Step 5's third subsection.
 **Host:** macOS 27.0 (build 26A428), Darwin 27.0.0 arm64, Docker Desktop 29.8.0 (`aarch64`); no AppArmor and no Linux Docker Engine
 **Tooling:** Node `v24.15.0`, pnpm `10.28.2`, local Go `1.26.3` (`server/go.mod` requires `1.26.6`), `gh` 2.92.0; `cosign` is not installed
 
@@ -18,7 +19,7 @@ and [`2026-09-11-aurora-execution.md`](2026-09-11-aurora-execution.md).
 
 ## Boundary status
 
-The deterministic sandbox boundary is **closed**: every required gate is met, including the post-#140 published image pair and its signature and attestation verification. The gated real agent/provider smokes (#117) are implemented and merged. The repository owner authorized an execution attempt on 2026-09-29; it was carried out on a live local stack and is recorded in full under **Step 5**. No subtest passed: the Seedream route **failed** at generation creation before any provider call, blocked by a server↔fleet identity contract defect, and the remaining six **skipped** for missing provider credentials or because the first route failed. A second authorized attempt on 2026-10-04, after PRs #173 and #178, reached the hardened sandbox container but could not start its daemon because the image does not put the Claude launcher on PATH. Again no subtest passed and no provider create was issued.
+The deterministic sandbox boundary is **closed**: every required gate is met, including the post-#140 published image pair and its signature and attestation verification. The gated real agent/provider smokes (#117) are implemented and merged. The repository owner authorized an execution attempt on 2026-09-29; it was carried out on a live local stack and is recorded in full under **Step 5**. No subtest passed: the Seedream route **failed** at generation creation before any provider call, blocked by a server↔fleet identity contract defect, and the remaining six **skipped** for missing provider credentials or because the first route failed. A second authorized attempt on 2026-10-04, after PRs #173 and #178, reached the hardened sandbox container but could not start its daemon because the image does not put the Claude launcher on PATH. Again no subtest passed and no provider create was issued. A third authorized attempt on 2026-10-04, after the claude-resolution and fleet-passthrough fixes (pr://eanfs/multica/184 at `897b30c6b`), started the daemon and launched Claude, but the egress sidecar refused the provider host: the host's fake-IP DNS answers `198.18.0.7`, inside the non-public `198.18.0.0/15` range the SSRF policy rejects. No provider create was issued and the reservation was refunded in full.
 
 | Gate | State | Evidence or reason |
 | --- | --- | --- |
@@ -26,11 +27,11 @@ The deterministic sandbox boundary is **closed**: every required gate is met, in
 | Plan B — fleet, isolation, egress | accepted | all child tickets #97–#103 S4-Done; Linux CI job green |
 | Plan C — 13-skill runtime and artifacts | accepted | #104–#111 S4-Done; #106 resolved by #140; both vendor trees vendored, hardened, and verified |
 | Plan D Tasks 1–5 — images and acceptance | accepted | #112–#116 S4-Done; Linux CI job green; publish and signature/attestation verification green on runs 36430260728 and 36504132762 |
-| Plan D Task 6 — gated real smokes | **executed twice under owner authorization; no pass** | #117 merged as pr://eanfs/multica/170 (`b8bfa9491`). Attempt 2026-09-29: Seedream **failed** (HTTP 503 before any provider call) on a server↔fleet `daemon_id` contract defect; six **skipped**. Attempt 2026-10-04 (ARK endpoint, after #173/#178): Claude text **failed** at sandbox-container startup (Claude launcher not on PATH); six **skipped**. See Step 5 |
+| Plan D Task 6 — gated real smokes | **executed three times under owner authorization; no pass** | #117 merged as pr://eanfs/multica/170 (`b8bfa9491`). Attempt 2026-09-29: Seedream **failed** (HTTP 503 before any provider call) on a server↔fleet `daemon_id` contract defect; six **skipped**. Attempt 2026-10-04 (ARK endpoint, after #173/#178): Claude text **failed** at sandbox-container startup (Claude launcher not on PATH); six **skipped**. Third attempt 2026-10-04 (after pr://eanfs/multica/184 at `897b30c6b`): Claude text **failed** at the egress boundary — the host resolves the provider into the non-public `198.18.0.0/15` range, so the SSRF policy refuses it; six **skipped**, net settlement zero. See Step 5 |
 | Seedance licence text | **resolved** | #140, merged as pr://eanfs/multica/168 (`92daf28a4`); owner-authorized MIT reconstruction recorded in `vendor-lock.json`, verifier strengthened to require it |
 | Plan D Task 7 Step 4 — published digests | **closed** | final Seedance-inclusive pair verified on run 36504132762 (`b8bfa9491`); the earlier pre-#140 pair was verified on run 36430260728 |
 | Plan D Task 7 outward-facing tracker step | **deferred** | no tracker change requested; #29 unchanged |
-| Story #29 and story #23 | **closable** | every required deterministic gate above is met; the cost-bearing real smokes have no pass, but are blocked by recorded non-provider defects and genuinely absent credentials, not by unverified code paths |
+| Story #29 and story #23 | **closable** | every required deterministic gate above is met; the cost-bearing real smokes have no pass, but are blocked by recorded infrastructure and host-network conditions and genuinely absent credentials, not by unverified code paths |
 
 ## Step 1 — lock, vendor, and runtime tests
 
@@ -426,8 +427,96 @@ Server and fleet stopped, the `aurora-egress-uplink` network created for this ru
 removed, all `aurora-*` containers and networks removed, the worktree DB dropped, and
 the mode-0400 ARK files deleted. No key value appears in this record or in any commit.
 
+### Third authorized attempt — after the fixes (2026-10-04)
+
+The two blockers recorded in the second attempt were fixed and merged as
+pr://eanfs/multica/184 (`897b30c6b`): the image now pins
+`MULTICA_CLAUDE_PATH` to the verified launcher and the content verifier fails
+the build if the managed daemon cannot resolve that executable, and the fleet
+forwards `ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL` into the sandbox. The smoke
+was rerun the same day under the same owner authorization. For the first time
+the managed daemon started, launched Claude, and issued a request toward the ARK
+endpoint — but the hardened egress sidecar refused the provider host, so no
+provider request left the sandbox. The route failed at the network boundary,
+not at startup.
+
+#### Environment
+
+| Item | Value |
+| --- | --- |
+| Worktree / branch | `.worktrees/ark-smoke-fix` / `ark-smoke-fix` |
+| Base commit | `75fef4c93` (`origin/main`); fixes merged as pr://eanfs/multica/184 (`897b30c6b`) |
+| Sandbox image | `ghcr.io/eanfs/multica-aurora-sandbox@sha256:bae5b6725425b86107f0811097916099d5da1d8e5af8fcf6d1cc28835d007b28` (built locally with `docker buildx bake`, arm64) |
+| Egress image | `ghcr.io/eanfs/multica-aurora-egress@sha256:6549d17bbbe30c283f2b8a2c0ac6fc706f687ad79c563f87ec3d9ca272279e9b` |
+| Live stack | local `cmd/server` on `:18669` against worktree DB `multica_ark_smoke_fix_589`, plus `cmd/aurora-fleet --backend docker` on `127.0.0.1:18857` with `AURORA_EGRESS_SERVER_ORIGIN=http://host.docker.internal:18669`; the operator prerequisite `aurora-egress-uplink` network was created first |
+| Endpoint | `ANTHROPIC_BASE_URL=https://ark.cn-beijing.volces.com/api/plan`, `ANTHROPIC_MODEL=claude-sonnet-4-5`, delivered by the new fleet passthrough |
+| Credentials | the ARK Agent-Plan key staged mode-0400 as both `ANTHROPIC_API_KEY_FILE` and `ARK_API_KEY_FILE`; no Anthropic, OpenAI, or Volcengine ASR credential exists on the host |
+| Token / account | a fresh dev-auth session token for a freshly created user; the smoke created and deleted its own workspace |
+
+Invocation:
+
+```bash
+cd server && MULTICA_RUN_REAL_AGENT_SMOKE=1 AURORA_RUN_CLAUDE_SMOKE=1 \
+  AURORA_SMOKE_BASE_URL=http://127.0.0.1:18669 AURORA_SMOKE_API_TOKEN=<token> \
+  AURORA_SANDBOX_IMAGE='ghcr.io/eanfs/multica-aurora-sandbox@sha256:bae5...' \
+  AURORA_SMOKE_ANTHROPIC_KEY_FILE=<mode-0400 file> \
+  go test -tags=agentintegration ./pkg/agent -run '^TestAuroraSandboxRealProviderSmoke$' -count=1 -v
+```
+
+#### Per-route result
+
+| Route | Result | Exact reason |
+| --- | --- | --- |
+| Claude text (`AURORA_RUN_CLAUDE_SMOKE`) | **FAILED** | workspace `febf3496-9a2e-414e-b024-f787da54cda5`, generation `891cea61-71b3-4fc2-8a7c-f4a6d3f8663e`, task `01a1040b-fd86-7cd1-bc2c-7736f6ea4421`, status `failed` after 3m0s. The daemon logged `agent command ... exec=/opt/aurora/runtime/node_modules/.bin/claude` and `anthropic_base_url_configured=true`, and Claude exited 1 with `API Error: Couldn't connect through your proxy (ERR_PROXY_TUNNEL) — the proxy refused the tunnel: check its credentials and that it allows this host`. The egress log shows `decision=denied host=ark.cn-beijing.volces.com port=443 reason=target_refused`. No provider create was issued |
+| Seedream image (`AURORA_RUN_SEEDREAM_SMOKE`) | **SKIPPED** | not attempted after the first real failure; the same egress policy refuses the same `ark.cn-beijing.volces.com:443` target, so the route cannot pass either |
+| Seedance video (`AURORA_RUN_SEEDANCE_SMOKE`) | **SKIPPED** | same as Seedream |
+| Volc ASR (`AURORA_RUN_VOLC_ASR_SMOKE`) | **SKIPPED** | no Volcengine ASR credential exists, and the same egress block applies |
+| OpenAI images (`AURORA_RUN_OPENAI_IMAGE_SMOKE`) | **SKIPPED** | no OpenAI credential exists, and the same egress block applies |
+| HyperFrames captions (`AURORA_RUN_HYPERFRAMES_SMOKE`) | **SKIPPED** | its transcription step needs the Volcengine ASR credential, which does not exist |
+| Chromium resume (`AURORA_RUN_CHROMIUM_SMOKE`) | **SKIPPED** | it needs the managed daemon and the Anthropic endpoint, both blocked by the same egress denial |
+
+No route passed. No provider create was issued; spend is zero.
+
+#### Exact blocker
+
+`ark.cn-beijing.volces.com` resolves on this host to `198.18.0.7` (and
+`api.anthropic.com` to `198.18.0.104`). `198.18.0.0/15` is the RFC 2544
+benchmarking range, which the egress policy lists as non-public
+(`server/internal/auroraegress/policy.go`: `mustCIDR("198.18.0.0/15") //
+benchmarking`), so `Policy.Validate` refuses every provider target with
+`target_refused` before dialing. The host's transparent proxy answers DNS in
+fake-IP mode; even a direct query to `1.1.1.1` returns `198.18.0.7`, and the
+egress container can TCP-connect to `198.18.0.7:443`, so only the SSRF
+public-address invariant blocks it. This is a host-network property, not a
+repository defect, and the invariant was deliberately not weakened: allowing a
+benchmarking or private range through the egress sidecar would remove a security
+control for every deployment.
+
+#### Settlement
+
+The failed generation's ledger is exact (`credit_ledger`, reference = the
+generation id):
+
+```text
+deduction  -260000000  balance_after=440000000
+refund      260000000  balance_after=700000000
+```
+
+Net settlement **0 micro** — the reservation was refunded when the task failed.
+`aurora_provider_run` for the generation is **0**, confirming no provider
+create. The user's balance ended at `700000000` micro (a
+`500000000` signup adjustment plus a `200000000` subscription adjustment).
+
+#### Cleanup
+
+Server and fleet stopped; the workspace network, sandbox container, egress
+sidecar, and the `aurora-egress-uplink` network created for this run removed;
+the worktree DB dropped; the mode-0400 ARK files, the session token, and the
+staged secret root deleted; the worktree removed. Only resources created for
+this run were removed. No key value appears in this record or in any commit.
+
 ## Step 6/8 — documentation checks and commits
 
 - `git diff --check` is clean.
-- The plan and status documents were updated only to the extent the evidence above supports: the Seedance vendor gate (#140, merged as pr://eanfs/multica/168 at `92daf28a4`) is recorded as resolved with its licence provenance and strengthened verifier, the video routes as executable, the main-branch publish as no longer cancellable (#167, `c12025bc1`) with the pre-#140 trust chain verified on run 36430260728, and the real-smoke gate (#117) as open, in progress, and unauthorized. Plan D Task 7 Step 4 stays open pending the post-#140 final digests, and the boundary is stated as **not closed**.
+- The plan and status documents were updated only to the extent the evidence above supports: the Seedance vendor gate (#140, merged as pr://eanfs/multica/168 at `92daf28a4`) is recorded as resolved with its licence provenance and strengthened verifier, the video routes as executable, the main-branch publish as no longer cancellable (#167, `c12025bc1`) with the pre-#140 trust chain verified on run 36430260728, and the real-smoke gate (#117) as open and unauthorized at that time (it has since been authorized three times, and the third attempt is recorded above). Plan D Task 7 Step 4 stays open pending the post-#140 final digests, and the boundary is stated as **not closed**.
 - No build artifact, acceptance report, credential, or secret is committed. `.scratch/` remains ignored.
