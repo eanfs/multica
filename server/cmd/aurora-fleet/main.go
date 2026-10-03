@@ -17,6 +17,14 @@
 //	AURORA_EGRESS_SERVER_ORIGIN        exact Multica server origin sandboxes call back to (required)
 //	AURORA_EGRESS_ALLOWED_HOSTS        extra exact host:443 egress allowlist entries (optional)
 //
+// The docker backend also forwards the optional Anthropic-compatible endpoint
+// overrides the managed daemon reads from its own process environment
+// (server/internal/daemon/managed_secrets.go). They are not secrets and are
+// only passed through when set:
+//
+//	ANTHROPIC_BASE_URL   managed Claude endpoint base URL (optional, https)
+//	ANTHROPIC_MODEL      managed Claude model name (optional)
+//
 // The policy also mounts the operator-staged provider credential files. Each
 // variable is optional and names one absolute host file under
 // AURORA_FLEET_SECRET_ROOT; the file is mounted read-only at its fixed sandbox
@@ -148,6 +156,12 @@ func dockerPolicyFromEnv() (aurorafleet.Policy, error) {
 		ServerOrigin:     strings.TrimSpace(os.Getenv("AURORA_EGRESS_SERVER_ORIGIN")),
 		SecretRoot:       strings.TrimSpace(os.Getenv("AURORA_FLEET_SECRET_ROOT")),
 		ExtraEgressHosts: splitHosts(os.Getenv("AURORA_EGRESS_ALLOWED_HOSTS")),
+		// The managed Claude endpoint overrides are operator process
+		// configuration. The daemon validates them at startup; the fleet only
+		// forwards a supplied pair so a real endpoint is reachable through a
+		// fleet instead of the per-agent custom_env path.
+		AnthropicBaseURL: strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")),
+		AnthropicModel:   strings.TrimSpace(os.Getenv("ANTHROPIC_MODEL")),
 		// The control API can never choose a provider source or destination;
 		// these are operator-staged host paths read once from the environment.
 		ProviderSecretFiles: providerSecretFilesFromEnv(),

@@ -106,6 +106,49 @@ func TestSandboxArgsEnforceImmutablePolicy(t *testing.T) {
 	}
 }
 
+// TestSandboxArgsForwardManagedEndpointOverrides is the PR #178 reachability
+// regression: the operator's ANTHROPIC_BASE_URL/ANTHROPIC_MODEL must reach the
+// sandbox container env so the daemon can apply them to the managed Claude
+// child, and an unset pair must not emit empty -e flags.
+func TestSandboxArgsForwardManagedEndpointOverrides(t *testing.T) {
+	p := validTestPolicy(t)
+	p.AnthropicBaseURL = "https://ark.cn-beijing.volces.com/api/plan"
+	p.AnthropicModel = "claude-sonnet-4-5"
+	spec := testSpec(p.SecretRoot)
+	if err := os.MkdirAll(filepath.Dir(spec.EnrollmentFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(spec.EnrollmentFile, []byte("mse_test"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+
+	args, err := p.SandboxArgs(spec)
+	if err != nil {
+		t.Fatalf("SandboxArgs: %v", err)
+	}
+	for _, want := range [][]string{
+		{"-e", "ANTHROPIC_BASE_URL=" + p.AnthropicBaseURL},
+		{"-e", "ANTHROPIC_MODEL=" + p.AnthropicModel},
+	} {
+		if !containsSubslice(args, want) {
+			t.Errorf("sandbox args missing %v: %s", want, strings.Join(args, " "))
+		}
+	}
+
+	empty := validTestPolicy(t)
+	// Reuse the same secret root so the already-staged enrollment file is valid
+	// for the unset-override policy too.
+	empty.SecretRoot = p.SecretRoot
+	emptyArgs, err := empty.SandboxArgs(spec)
+	if err != nil {
+		t.Fatalf("SandboxArgs(empty): %v", err)
+	}
+	joined := strings.Join(emptyArgs, " ")
+	if strings.Contains(joined, "ANTHROPIC_BASE_URL") || strings.Contains(joined, "ANTHROPIC_MODEL") {
+		t.Errorf("unset endpoint overrides leaked into the sandbox env: %s", joined)
+	}
+}
+
 func TestProxyArgsEnforceSidecarPolicy(t *testing.T) {
 	p := validTestPolicy(t)
 	args, err := p.ProxyArgs("aurora-egr-test")
