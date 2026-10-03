@@ -4,6 +4,7 @@
 **Task:** ticket #118 — Plan D Task 7, Run Final Verification and Close the Boundary
 **Base:** `main` at `92daf28a4` (merge commit of pr://eanfs/multica/168); the initial acceptance was taken at `72176c950` (merge commit of pr://eanfs/multica/164), branch `docs/aurora-118-final-verification` (updated on `docs/aurora-progress-update`)
 **Real-smoke attempt:** 2026-09-29, worktree `.worktrees/multica/aurora-smoke` on branch `feat/aurora-real-smoke-run`, base `8d3b9e644`; executed under the repository owner's authorization, one route attempted; the full result is in Step 5
+**Second real-smoke attempt:** 2026-10-04, worktree `.worktrees/aurora-ark-smoke` on branch `docs/aurora-ark-smoke-acceptance`, base `555c3ec05`; also owner-authorized, driven by the Volcengine ARK Anthropic-compatible endpoint. One route attempted; it reached the hardened sandbox container but the container exited at startup before any provider call. The full result is Step 5's second subsection.
 **Host:** macOS 27.0 (build 26A428), Darwin 27.0.0 arm64, Docker Desktop 29.8.0 (`aarch64`); no AppArmor and no Linux Docker Engine
 **Tooling:** Node `v24.15.0`, pnpm `10.28.2`, local Go `1.26.3` (`server/go.mod` requires `1.26.6`), `gh` 2.92.0; `cosign` is not installed
 
@@ -17,7 +18,7 @@ and [`2026-09-11-aurora-execution.md`](2026-09-11-aurora-execution.md).
 
 ## Boundary status
 
-The deterministic sandbox boundary is **closed**: every required gate is met, including the post-#140 published image pair and its signature and attestation verification. The gated real agent/provider smokes (#117) are implemented and merged. The repository owner authorized an execution attempt on 2026-09-29; it was carried out on a live local stack and is recorded in full under **Step 5**. No subtest passed: the Seedream route **failed** at generation creation before any provider call, blocked by a server↔fleet identity contract defect, and the remaining six **skipped** for missing provider credentials or because the first route failed. No provider create was issued and no provider spend was incurred.
+The deterministic sandbox boundary is **closed**: every required gate is met, including the post-#140 published image pair and its signature and attestation verification. The gated real agent/provider smokes (#117) are implemented and merged. The repository owner authorized an execution attempt on 2026-09-29; it was carried out on a live local stack and is recorded in full under **Step 5**. No subtest passed: the Seedream route **failed** at generation creation before any provider call, blocked by a server↔fleet identity contract defect, and the remaining six **skipped** for missing provider credentials or because the first route failed. A second authorized attempt on 2026-10-04, after PRs #173 and #178, reached the hardened sandbox container but could not start its daemon because the image does not put the Claude launcher on PATH. Again no subtest passed and no provider create was issued.
 
 | Gate | State | Evidence or reason |
 | --- | --- | --- |
@@ -25,7 +26,7 @@ The deterministic sandbox boundary is **closed**: every required gate is met, in
 | Plan B — fleet, isolation, egress | accepted | all child tickets #97–#103 S4-Done; Linux CI job green |
 | Plan C — 13-skill runtime and artifacts | accepted | #104–#111 S4-Done; #106 resolved by #140; both vendor trees vendored, hardened, and verified |
 | Plan D Tasks 1–5 — images and acceptance | accepted | #112–#116 S4-Done; Linux CI job green; publish and signature/attestation verification green on runs 36430260728 and 36504132762 |
-| Plan D Task 6 — gated real smokes | **executed once under owner authorization; no pass** | #117 merged as pr://eanfs/multica/170 (`b8bfa9491`). Authorized attempt on 2026-09-29: Seedream **failed** (HTTP 503 before any provider call) on a server↔fleet `daemon_id` contract defect; six **skipped**. Three independent blockers identified; see Step 5 |
+| Plan D Task 6 — gated real smokes | **executed twice under owner authorization; no pass** | #117 merged as pr://eanfs/multica/170 (`b8bfa9491`). Attempt 2026-09-29: Seedream **failed** (HTTP 503 before any provider call) on a server↔fleet `daemon_id` contract defect; six **skipped**. Attempt 2026-10-04 (ARK endpoint, after #173/#178): Claude text **failed** at sandbox-container startup (Claude launcher not on PATH); six **skipped**. See Step 5 |
 | Seedance licence text | **resolved** | #140, merged as pr://eanfs/multica/168 (`92daf28a4`); owner-authorized MIT reconstruction recorded in `vendor-lock.json`, verifier strengthened to require it |
 | Plan D Task 7 Step 4 — published digests | **closed** | final Seedance-inclusive pair verified on run 36504132762 (`b8bfa9491`); the earlier pre-#140 pair was verified on run 36430260728 |
 | Plan D Task 7 outward-facing tracker step | **deferred** | no tracker change requested; #29 unchanged |
@@ -322,6 +323,108 @@ file and the whole staged secret root were deleted, and the smoke workspace was
 deleted through the API. `docker ps -a` / `docker network ls` show no
 `com.multica.aurora.managed` residue; `:18847` / `:18848` are free;
 `git status` is clean. No key value appears in this record or in any commit.
+
+### Second authorized attempt — Volcengine ARK Anthropic endpoint (2026-10-04)
+
+After PR #173 (consistent daemon identity, fleet provider-secret injection, and a
+single-required-Anthropic credential) and PR #178 (operator
+`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL` for the managed child) merged, the smoke was
+attempted again under the same owner authorization. The ARK Agent-Plan `claude-*`
+quota had reset, so `claude-*` names worked again. No subtest passed, and this time
+the blocker is at container startup, before any provider call.
+
+#### Environment
+
+| Item | Value |
+| --- | --- |
+| Worktree / branch | `.worktrees/aurora-ark-smoke` / `docs/aurora-ark-smoke-acceptance` |
+| Base commit | `555c3ec05` (`origin/main` when branched; `origin/main` later advanced to `4aa8bc080`, docs-only) |
+| Sandbox image | `ghcr.io/eanfs/multica-aurora-sandbox@sha256:2846568d22c8d3550a9c659648e9da97175d1d12a1004293d165a1526fccca67` (built locally from `origin/main` with `docker buildx bake`, arm64) |
+| Egress image | `ghcr.io/eanfs/multica-aurora-egress@sha256:717c5883cc6d0decddf6a453dbd05985c72ebacb677b0aab376125bbafcaa0f7` |
+| Live stack | local `cmd/server` on `:18388` against worktree DB `multica_aurora_ark_smoke_308`, plus `cmd/aurora-fleet --backend docker` on `127.0.0.1:18849` with `AURORA_EGRESS_SERVER_ORIGIN=http://host.docker.internal:18388`; both built from the same `origin/main` at `555c3ec05` |
+| Fleet secret injection | `ANTHROPIC_API_KEY_FILE` and `ARK_API_KEY_FILE` both pointed at a mode-0400 file holding the ARK Agent-Plan key (double quotes stripped). Both bind mounts are present in the real `docker run` argv |
+| Provider credentials | ARK Agent-Plan key only (from `~/.arkcli/.env`); no Anthropic, OpenAI, or Volcengine ASR credential exists |
+
+The image was verified to carry the post-#178 daemon before use: its
+`/usr/local/bin/multica` contains the PR #178 validation string
+`managed ANTHROPIC_BASE_URL must not include a query string`.
+
+#### Per-route result
+
+| Provider subtest | Result | Exact reason |
+| --- | --- | --- |
+| Claude text (`AURORA_RUN_CLAUDE_SMOKE`) | **FAILED** | `POST /api/aurora/generations` returned HTTP 503 `aurora_runtime_unavailable`. The server logged `ensure workspace sandbox: fleet control returned 500: node operation failed`; the fleet started the hardened sandbox container, which then exited 1 with `managed mode requires a claude executable: exec: "claude": executable file not found in $PATH`. No provider create was issued |
+| Seedream image (`AURORA_RUN_SEEDREAM_SMOKE`) | **SKIPPED** | opt-in not set; not attempted after the first route failed. Its ARK credential exists, but every route needs the same managed daemon, which cannot start |
+| Seedance video (`AURORA_RUN_SEEDANCE_SMOKE`) | **SKIPPED** | same as Seedream |
+| Volc ASR (`AURORA_RUN_VOLC_ASR_SMOKE`) | **SKIPPED** | no Volcengine ASR credential exists, and the ARK key is a different product. Same daemon blocker |
+| OpenAI images (`AURORA_RUN_OPENAI_IMAGE_SMOKE`) | **SKIPPED** | no OpenAI credential exists. Same daemon blocker |
+| HyperFrames captions (`AURORA_RUN_HYPERFRAMES_SMOKE`) | **SKIPPED** | its transcription step needs the Volcengine ASR credential, which does not exist. Same daemon blocker |
+| Chromium resume (`AURORA_RUN_CHROMIUM_SMOKE`) | **SKIPPED** | opt-in not set; it needs the managed daemon, which cannot start |
+
+No route passed. No provider create was issued; spend is zero.
+
+#### Exact blocker
+
+The `origin/main` sandbox image installs the real platform-native Claude Code
+launcher at `/opt/aurora/runtime/node_modules/.bin/claude`, but nothing puts it on
+the container PATH and nothing sets `MULTICA_CLAUDE_PATH`:
+
+- the final Dockerfile stage sets no `ENV PATH` and no `MULTICA_CLAUDE_PATH`, so the
+  container PATH is the base image's
+  `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`;
+- the fleet's immutable `SandboxArgs` env map (`server/internal/aurorafleet/policy.go`)
+  carries only `MULTICA_*`, proxy, and enrollment variables, never `PATH` or
+  `MULTICA_CLAUDE_PATH`;
+- `managedClaudeAgent` (`server/internal/daemon/config.go`) resolves
+  `envOrDefault("MULTICA_CLAUDE_PATH", "claude")` through
+  `resolveAgentExecutablePath`, which is `exec.LookPath` and therefore PATH-only.
+
+The image content verifier checks that the shim exists and runs at
+`/opt/aurora/runtime/node_modules/.bin/claude`, but it never checks that the managed
+daemon can resolve `claude` from the container PATH, so CI stayed green. The defect
+was latent in the 2026-09-29 attempt too: that run failed earlier, in
+`loadManagedProviderSecrets` (`managed mode requires the anthropic provider
+credential`), which runs before `managedClaudeAgent`, so it never reached the probe.
+
+Confirmed by reproducing the policy-generated `docker run` directly:
+
+```text
+managed mode requires a claude executable: exec: "claude": executable file not found in $PATH
+exited exit=1
+```
+
+and by inspecting the image:
+
+```text
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+NO_CLAUDE
+/opt/aurora/runtime/node_modules/.bin/claude
+```
+
+Positive findings from the same reproduction:
+
+- the fleet provider-secret injection (PR #173) works: the real argv mounts both
+  `anthropic-api-key` and `ark-api-key` read-only at the fixed destinations;
+- the daemon passed `loadManagedProviderSecrets`, so the ARK key was read and
+  accepted as the Anthropic secret, which is what let the run reach the claude
+  probe;
+- the post-#178 daemon is present in the image.
+
+#### Second deployment gap: endpoint env
+
+`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL` are read by the daemon from its own process
+environment, and the macOS fleet on `origin/main` has no passthrough for them. To
+stage the ARK endpoint at all, this run set both keys on the Aurora system agents'
+`custom_env` (the daemon layers agent `custom_env` onto the child before the managed
+override, and neither key is on the daemon blocklist). Because the daemon never
+started, that path was not exercised. Making the PR #178 feature reachable needs
+either a fleet passthrough or an image `MULTICA_CLAUDE_PATH`/PATH fix.
+
+#### Cleanup
+
+Server and fleet stopped, the `aurora-egress-uplink` network created for this run
+removed, all `aurora-*` containers and networks removed, the worktree DB dropped, and
+the mode-0400 ARK files deleted. No key value appears in this record or in any commit.
 
 ## Step 6/8 — documentation checks and commits
 
