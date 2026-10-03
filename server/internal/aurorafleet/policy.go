@@ -117,6 +117,14 @@ type Policy struct {
 	// ExtraEgressHosts are additional exact host:port entries the operator
 	// allows through the egress sidecar. Wildcards are rejected.
 	ExtraEgressHosts []string
+	// AnthropicBaseURL and AnthropicModel are the optional operator-configured
+	// Anthropic-compatible endpoint overrides for the managed Claude child. They
+	// are process configuration read from the fleet environment; the control API
+	// can never supply or override them. Empty preserves the provider default.
+	// The daemon validates and applies them (server/internal/daemon/managed_secrets.go);
+	// the fleet only forwards them so PR #178 is reachable through a fleet.
+	AnthropicBaseURL string
+	AnthropicModel   string
 	// ProviderSecretFiles are the operator-staged provider credential files
 	// mounted read-only at their fixed destinations. Empty entries mount
 	// nothing; API callers cannot influence this value.
@@ -235,7 +243,7 @@ func (p Policy) SandboxArgs(spec WorkspaceNodeSpec) ([]string, error) {
 	}
 	args = append(args, mount...)
 	args = append(args, providerMounts...)
-	args = append(args, envArgs(map[string]string{
+	env := map[string]string{
 		"MULTICA_SERVER_URL":                    p.ServerOrigin,
 		"MULTICA_MANAGED":                       "1",
 		"MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE": enrollmentSecretMountPath,
@@ -243,7 +251,17 @@ func (p Policy) SandboxArgs(spec WorkspaceNodeSpec) ([]string, error) {
 		"HTTP_PROXY":                            egressProxyEndpoint,
 		"HTTPS_PROXY":                           egressProxyEndpoint,
 		"NO_PROXY":                              "egress,127.0.0.1,localhost",
-	})...)
+	}
+	// The managed Claude endpoint overrides are read by the daemon from its own
+	// process environment. Only an operator-set value is forwarded, so an unset
+	// pair keeps the historical env intact.
+	if p.AnthropicBaseURL != "" {
+		env["ANTHROPIC_BASE_URL"] = p.AnthropicBaseURL
+	}
+	if p.AnthropicModel != "" {
+		env["ANTHROPIC_MODEL"] = p.AnthropicModel
+	}
+	args = append(args, envArgs(env)...)
 	args = append(args, labelArgs(labels)...)
 	// The image is the final argument so nothing can follow it as a command.
 	return append(args, p.SandboxImage), nil

@@ -188,6 +188,16 @@ RUN set -eux; \
     find /opt/aurora -type f ! -perm /111 -exec chmod 0444 {} +; \
     find /opt/aurora -type f -perm /111 -exec chmod 0555 {} +
 
+# The managed daemon resolves its one agent executable through
+# exec.LookPath(envOrDefault("MULTICA_CLAUDE_PATH", "claude")) in
+# server/internal/daemon/config.go. The pnpm shim installed by the nodedeps
+# stage is not on the base image PATH, so pin the daemon to its absolute path.
+# Without this the container exits 1 with "managed mode requires a claude
+# executable: exec: \"claude\": executable file not found in $PATH".
+# scripts/verify-aurora-sandbox-image.sh proves this exact resolution from the
+# image's own environment as the sandbox user.
+ENV MULTICA_CLAUDE_PATH=/opt/aurora/runtime/node_modules/.bin/claude
+
 USER 10001:10001
 WORKDIR /workspace
 # Fixed managed entrypoint. The fleet cannot override the command.

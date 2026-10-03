@@ -122,3 +122,39 @@ func TestProviderSecretFilesFromEnvAreEmptyWhenUnset(t *testing.T) {
 		t.Fatalf("providerSecretFilesFromEnv() = %+v, want the zero value", got)
 	}
 }
+
+// TestDockerPolicyFromEnvReadsManagedEndpointOverrides pins the PR #178
+// passthrough: the documented ANTHROPIC_BASE_URL/ANTHROPIC_MODEL variables must
+// reach the fleet policy so SandboxArgs can forward them. An unset pair stays
+// empty rather than inventing a default endpoint.
+func TestDockerPolicyFromEnvReadsManagedEndpointOverrides(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("AURORA_FLEET_SECRET_ROOT", root)
+	t.Setenv("AURORA_SANDBOX_IMAGE", testDigest)
+	t.Setenv("AURORA_PROXY_IMAGE", testDigest)
+	t.Setenv("AURORA_SECCOMP_PROFILE", filepath.Join(root, "seccomp.json"))
+	t.Setenv("AURORA_EGRESS_SERVER_ORIGIN", "http://127.0.0.1:9")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan")
+	t.Setenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+
+	policy, err := dockerPolicyFromEnv()
+	if err != nil {
+		t.Fatalf("dockerPolicyFromEnv: %v", err)
+	}
+	if policy.AnthropicBaseURL != "https://ark.cn-beijing.volces.com/api/plan" {
+		t.Fatalf("AnthropicBaseURL = %q", policy.AnthropicBaseURL)
+	}
+	if policy.AnthropicModel != "claude-sonnet-4-5" {
+		t.Fatalf("AnthropicModel = %q", policy.AnthropicModel)
+	}
+
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_MODEL", "")
+	unset, err := dockerPolicyFromEnv()
+	if err != nil {
+		t.Fatalf("dockerPolicyFromEnv(unset): %v", err)
+	}
+	if unset.AnthropicBaseURL != "" || unset.AnthropicModel != "" {
+		t.Fatalf("unset endpoint overrides = %q / %q, want empty", unset.AnthropicBaseURL, unset.AnthropicModel)
+	}
+}
