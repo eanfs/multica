@@ -261,7 +261,7 @@ CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS fleet_nodes_id_idx ON fleet_nodes
 
 **Interfaces:** `Store.CreateIntent(ctx, ownerID, model.CreateRequest) (model.Node,model.Operation,bool,error)`，bool 为 replayed；`Store.VerifyNodeToken(ctx, token string) (model.Node,error)`；`Store.RevokeNodeToken(ctx,nodeID) error`。`fleet.LoadProfile(path string) (model.Bootstrap,error)` 读取显式文件；profile reference 由 owner 配置匹配，不能从请求任意指定文件。
 
-- [ ] **Step 1:** 写 create twice same key 得同 node/op、不同 fingerprint 409、两个并发请求不突破限额、Token DB 无明文、revoke 即失效：
+- [x] **Step 1:** 写 create twice same key 得同 node/op、不同 fingerprint 409、两个并发请求不突破限额、Token DB 无明文、revoke 即失效：
 
 ```go
 func TestCreateIntentReplays(t *testing.T) {
@@ -280,8 +280,8 @@ func TestCreateIntentReplays(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2:** 跑 `go test ./internal/fleet/store -run 'TestCreateIntent|TestNodeToken' -count=1`，通过 make env-exec 的 server 工作目录；预期缺方法/断言 FAIL。
-- [ ] **Step 3:** WithTx 内先所有者级 advisory lock，再限额/幂等查询、节点/op 插入。Token 使用 crypto/rand 32 bytes，`mcn_` + base64url；hash 用既有 auth.HashToken。私密 bootstrap 写入前崩溃，重试撤销旧 hash 并推进 credential generation，不能反推 hash。profile 解析 `DisallowUnknownFields`、权限和 owner 校验；只保留引用/版本进 SQL。
+- [x] **Step 2:** 跑 `go test ./internal/fleet/store -run 'TestCreateIntent|TestNodeToken' -count=1`，通过 make env-exec 的 server 工作目录；预期缺方法/断言 FAIL。
+- [x] **Step 3:** WithTx 内先所有者级 advisory lock，再限额/幂等查询、节点/op 插入。Token 使用 crypto/rand 32 bytes，`mcn_` + base64url；hash 用既有 auth.HashToken。私密 bootstrap 写入前崩溃，重试撤销旧 hash 并推进 credential generation，不能反推 hash。profile 解析 `DisallowUnknownFields`、权限和 owner 校验；只保留引用/版本进 SQL。
 
 ```go
 func NewNodeToken() (token,hash string,err error) {
@@ -293,8 +293,8 @@ func NewNodeToken() (token,hash string,err error) {
 ```
 
 Store.MintNodeToken(ctx context.Context,nodeID pgtype.UUID) (token string,generation int64,err error) 调用上述NewNodeToken，再在事务中保存hash/generation；token 返回只供内部 bootstrap，不进入公开 DTO。
-- [ ] **Step 4:** store/profile 全测试 PASS；扫描测试 DB、HTTP JSON、logger 捕获无 marker key/token。`make sqlc` 如查询改变。
-- [ ] **Step 5:** 提交 `feat(fleet): add idempotent intents and node credentials`。
+- [x] **Step 4:** store/profile 全测试 PASS；扫描测试 DB、HTTP JSON、logger 捕获无 marker key/token。`make sqlc` 如查询改变。
+- [x] **Step 5:** 提交 `feat(fleet): add idempotent intents and node credentials`。
 
 ### Task 4: Fleet HTTP 契约和假 Provider 服务
 
