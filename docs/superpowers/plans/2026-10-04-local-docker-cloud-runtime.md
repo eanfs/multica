@@ -298,7 +298,11 @@ Store.MintNodeToken(ctx context.Context,nodeID pgtype.UUID) (token string,genera
 
 ### Task 4: Fleet HTTP 契约和假 Provider 服务
 
-**审查补充（本任务所有权与 canonical tests）：** 新增 Create: `server/internal/fleet/internal_dto.go`、`server/internal/fleet/internal_dto_test.go`。先于 Task 7/10 产出私有 `OperationRequestDTO{Namespace,NodeID,OperationID string; Generation int64; Action model.Action}`，JSON namespace/node_id/operation_id/generation/action；`DiagnosticResponseDTO{Request OperationRequestDTO; Observation model.Observation}`。Observation wire fields 为 container_id/status/daemon_id/start_epoch/ready/runtime_count/active_runs/pending_reports/failed_reports/report_stats_known/observed_at/offline/data_volume/layout_version，与公开 DTO 分离。`Service.Diagnose(ctx context.Context,ownerID pgtype.UUID,ref model.OperationRef)(model.Observation,error)` SQL 匹配 owner/namespace/node/op/generation/action 后事务外 Provider.Diagnose。路由 POST /internal/v1/nodes/diagnose，service key + trusted X-User-ID，跨 owner/namespace、错代次/action 拒绝。fake Provider 五方法；canonical TestDiagnoseOperationIdentityAndEpoch 在 http_test.go，含 future timestamp/旧 epoch/offline unknown。stop/reboot/delete 意图由 API Task 7 prepare/approve，Fleet 不重建意图。
+**执行接口补充（Task4 专属，不追溯 Task3）：** Modify model/types.go，仅在 Provider 加 `CheckAvailability(context.Context) error` 第六方法；测试 fake 同时实现，Task8 只读 Engine Ping 实现，不建资源/拉镜像/读模型账户。Create store/schema.go/schema_test.go 和对应 fleet.sql/sqlc probe（如需）：`Store.CheckSchema(ctx context.Context) error` 在2s预算内检查 PG17+、四表/必需列（含576资源快照和credential generation）与查询依赖可用，不执行DDL。readyz 分开调用 Schema 与 Provider availability，nil/failure=>503，只返回不敏感状态；healthz liveness保持200。不得用空 Node 的 Inspect/Ensure 代替 availability。
+
+**认证补充：** 所有业务路由要求非空 service secret 的 constant-time 验证。节点路由和诊断额外校验可信 X-User-ID；`/api/v1/pat/verify` 仅要求 service key（auth caller 尚未知道 owner），忽略 caller owner header并仅从 SQL凭证返回 owner，body严格 `{token}`。healthz/readyz 可匿名，但仅状态、不暴露 DB/路径/错误详情。PAT valid响应兼容既有 owner_id/instance_id/instance_record_id，instance_record_id 为Node UUID、instance_id可在初始化时为空；禁用/撤销不得从未验证 owner header 推断身份。Task5 在既有 verifier 对 local mode 注入 service key，不改变 SaaS。
+
+**审查补充（本任务所有权与 canonical tests）：** 新增 Create: `server/internal/fleet/internal_dto.go`、`server/internal/fleet/internal_dto_test.go`。先于 Task 7/10 产出私有 `OperationRequestDTO{Namespace,NodeID,OperationID string; Generation int64; Action model.Action}`，JSON namespace/node_id/operation_id/generation/action；`DiagnosticResponseDTO{Request OperationRequestDTO; Observation model.Observation}`。Observation wire fields 为 container_id/status/daemon_id/start_epoch/ready/runtime_count/active_runs/pending_reports/failed_reports/report_stats_known/observed_at/offline/data_volume/layout_version，与公开 DTO 分离。`Service.Diagnose(ctx context.Context,ownerID pgtype.UUID,ref model.OperationRef)(model.Observation,error)` SQL 匹配 owner/namespace/node/op/generation/action 后事务外 Provider.Diagnose。路由 POST /internal/v1/nodes/diagnose，service key + trusted X-User-ID，跨 owner/namespace、错代次/action 拒绝。fake Provider 完成本任务 availability 补充后六方法；canonical TestDiagnoseOperationIdentityAndEpoch 在 http_test.go，含 future timestamp/旧 epoch/offline unknown。stop/reboot/delete 意图由 API Task 7 prepare/approve，Fleet 不重建意图。
 
 **Dependencies:** Tasks 1–3。**Deliverable:** httptest 可验证全部公开 API、拒绝任意 exec；无需 Docker。
 
@@ -321,7 +325,7 @@ func TestServiceRequiresSecret(t *testing.T) {
 
 测试 secret 字符串只用于内存 httptest，不作为生产默认。create 必须有 idempotency header，list 精确 owner/namespace 过滤。
 - [ ] **Step 2:** `go test ./internal/fleet -run 'TestService|TestHTTP' -count=1`；预期路由/认证未实现 FAIL。
-- [ ] **Step 3:** Chi 固定路由；secret 用 constant-time 比较，body 上限 1 MiB，未知字段拒绝。注册 设计第5节的 routes；healthz 存活、readyz 需 DB/schema/Provider 检查。统一 map errors 到状态码；公开响应构造独立 DTO，绝不序列化 Bootstrap。fake Provider 五方法实现于本任务的测试文件并记录动作，不能调用用户 Docker。
+- [ ] **Step 3:** Chi 固定路由；secret 用 constant-time 比较，body 上限 1 MiB，未知字段拒绝。注册 设计第5节的 routes；healthz 存活、readyz 需 DB/schema/Provider 检查。统一 map errors 到状态码；公开响应构造独立 DTO，绝不序列化 Bootstrap。fake Provider 六方法（新增只读 availability）实现于本任务的测试文件并记录动作，不能调用用户 Docker。
 
 ```go
 if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Fleet-Service-Key")), secret) != 1 {
