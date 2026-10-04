@@ -96,6 +96,7 @@ type Node struct {
     Ready bool
     HealthAt time.Time
     CreatedAt, UpdatedAt time.Time
+    Resources Spec
     ActiveRuns, PendingReports, FailedReports int
     Maintenance bool
     Revoked bool
@@ -247,6 +248,8 @@ CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS fleet_nodes_id_idx ON fleet_nodes
 - [x] **Step 5:** 提交 `feat(fleet): persist node state in existing PostgreSQL`，明确 stage 本批 migrations、fleet.sql、生成代码、store 与 fixture。
 
 ### Task 3: 创建意图、幂等与节点凭证
+
+**执行澄清（规范优先）：** [Task 3 producer contract](<../specs/2026-10-04-local-docker-cloud-runtime-task-3-contract.md>) 定义 private profile/business owner、管理员配置注入、资源快照、独立 credential generation 与 per-owner upsert 版本协议；新增范围按该契约。此前示例 New(pool,namespace) 仅适用读取，创建测试必须注入 WithProvisioningConfig（fake image/positive declared specs）。Task6/8/9 使用持久 Node.Resources 及派生 FLEET_NODE_MAX_RUNS。
 
 **审查补充（本任务所有权与 canonical tests）：** 新增 Modify: `server/internal/fleet/store/store_test.go`，仅加强已审查 Task 2 的 M1 总事务时限回归：预算内第一次数据库调用必须成功、仅预算后调用失败；不复制矩阵或改事务生产逻辑。新增 Modify: `server/internal/testutil/fleet.go`、`server/internal/testutil/fleet_test.go`。Task 2 产出基础 fixture/FleetNode，Task 3 产出 FleetProfile，不追溯要求 Task 2 实现。canonical TestFleetProfileFixture 使用自有 profile 引用；intents_test.go 拥有 profile 缺失/并发限额/同键重放，无真实密钥。
 
