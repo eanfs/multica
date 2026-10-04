@@ -62,8 +62,17 @@ func TestFleetInvalidConcurrentIndexRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	files, err := filepath.Glob("../../migrations/*_fleet_*.up.sql")
-	if err != nil || len(files) != 12 {
-		t.Fatalf("want 12 Fleet migrations, got %d err=%v", len(files), err)
+	if err != nil || len(files) < 13 {
+		t.Fatalf("want at least 13 Fleet migrations, got %d err=%v", len(files), err)
+	}
+	snapshotFound := false
+	for _, file := range files {
+		if filepath.Base(file) == "576_fleet_provisioning_snapshot.up.sql" {
+			snapshotFound = true
+		}
+	}
+	if !snapshotFound {
+		t.Fatal("Fleet provisioning snapshot migration missing from recovery discovery")
 	}
 	sort.Strings(files)
 	opts := runOptions{Direction: "up", Files: files, SchemaMigrationsTable: schema + ".schema_migrations", AdvisoryLockKey: int64(rand.Uint64()&0x7fffffffffffffff) | 1}
@@ -90,6 +99,15 @@ func TestFleetInvalidConcurrentIndexRetry(t *testing.T) {
 	opts.Hooks = map[string]preMigrationHook{}
 	for _, file := range opts.Files {
 		version := strings.TrimSuffix(filepath.Base(file), ".up.sql")
+		if version == "576_fleet_provisioning_snapshot" {
+			if _, registered := concurrentIndexCleanups[version]; registered {
+				t.Fatal("non-index Fleet snapshot migration must not register index cleanup")
+			}
+			if _, registered := preMigrationHooks[version]; registered {
+				t.Fatal("non-index Fleet snapshot migration must not register a pre-migration hook")
+			}
+			continue
+		}
 		index := concurrentIndexCleanups[version]
 		if index == "" || preMigrationHooks[version] == nil {
 			t.Fatalf("missing Fleet cleanup registration: %s", version)
