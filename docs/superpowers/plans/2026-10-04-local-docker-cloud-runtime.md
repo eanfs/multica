@@ -298,6 +298,8 @@ Store.MintNodeToken(ctx context.Context,nodeID pgtype.UUID) (token string,genera
 
 ### Task 4: Fleet HTTP 契约和假 Provider 服务
 
+**Task4 审查修订契约：** NewService defensively copies Specs（Store snapshot 不被重配置）；新 create 必须先查同-key replay，再 SQL-bound GetProfile +既有 LoadProfile 在事务外检查有效可读私密文件，最后 owner-lock 下 recheck 完整 profile identity/ref/version 再创建。允许 store/intents.go 及旁边测试增加只读 `LookupCreateIntent` 与 `CreateIntentForProfile` trusted-snapshot admission seams，公共API不接受profile；共享原指纹/replay逻辑，原 CreateIntent 不做文件IO。文件丢失/权限/格式错误不写新node/op，已有matchingintent重放不因当前profile损坏而失败；并发winner也应重查replay。readyz Schema independent2s，Provider.CheckAvailability independent5s（父请求原5s并非旧plan硬性值，此处明确选择独立5s避免schema占用provider budget），均服从caller cancellation；总顺序最多7s，不扩展普通Docker/Diagnose预算。canonical helper/HTTP回归各属其层，不加liveconfig锁/回退。
+
 **Start 所有权澄清：** Task4 的 start 与 stop/reboot/delete 一样仅接受 SQL-bound `OperationRequestDTO`（action=start、owner/ns/node/op/generation 匹配、approved=true），返回异步接受，绝不调用 Provider.Apply/创建 start 意图。instance_id-only legacystart=>409。API Task7 负责 start-intent，Task10 物理启动/恢复；本任务假Provider断言 start 通知不产生副作用。
 
 **执行接口补充（Task4 专属，不追溯 Task3）：** Modify model/types.go，仅在 Provider 加 `CheckAvailability(context.Context) error` 第六方法；测试 fake 同时实现，Task8 只读 Engine Ping 实现，不建资源/拉镜像/读模型账户。Create store/schema.go/schema_test.go 和对应 fleet.sql/sqlc probe（如需）：`Store.CheckSchema(ctx context.Context) error` 在2s预算内检查 PG17+、四表/必需列（含576资源快照和credential generation）与查询依赖可用，不执行DDL。readyz 分开调用 Schema 与 Provider availability，nil/failure=>503，只返回不敏感状态；healthz liveness保持200。不得用空 Node 的 Inspect/Ensure 代替 availability。
