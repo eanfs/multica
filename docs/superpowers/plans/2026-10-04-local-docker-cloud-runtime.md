@@ -461,7 +461,7 @@ Task 7 产出 API POST /internal/local-fleet/operations/review 的专用 service
 
 **Interfaces:** `store.PrepareMaintenance(ctx,ownerID,nodeID,action,key) (model.Operation,error)`、`ApproveMaintenance(ctx context.Context,ownerID pgtype.UUID,ref model.OperationRef,baseline model.Node,observation model.Observation) error`、`AbortMaintenance(ctx,operationID,generation) error`。`fleetguard.Maintainer{Repo *store.Store, Diagnose func(context.Context,model.Node,model.OperationRef)(model.Observation,error)}`；`Maintainer.Request(ctx,ownerID,nodeID,action,key) (model.Operation,error)`。Diagnose 由 Task 4 的固定内部检查接口提供，测试用 function literal，无网络数据库事务混合。ApproveMaintenance 显式接收诊断前的 SQL 节点快照与可信诊断结果，在第二短事务中重新校验当前 SQL 身份、代次、报告证明和队列；无证明不批准，不增加上下文许可或兼容重载。
 
-- [ ] **Step 1:** active SQL row 拒绝、pending/failed reports 拒绝、未知 health 保留未批准屏障、删除 queued 拒绝、维护后 new enqueue 拒绝、两段之间 API crash 可重试：
+- [x] **Step 1:** active SQL row 拒绝、pending/failed reports 拒绝、未知 health 保留未批准屏障、删除 queued 拒绝、维护后 new enqueue 拒绝、两段之间 API crash 可重试：
 
 ```go
 func TestReportsBlockMaintenance(t *testing.T) {
@@ -474,8 +474,8 @@ func TestReportsBlockMaintenance(t *testing.T) {
 ```
 
 `BusyObservation(model.Observation) bool` 是本任务 helper，DB races 使用 Task 2 fixture 和 barriers/channels，不用 sleep 推测执行顺序。
-- [ ] **Step 2:** `go test ./internal/fleetguard ./internal/handler -run 'TestReportsBlock|TestFleetMaintenance|TestFleetDelete' -count=1`；预期维护逻辑/竞态断言 FAIL。
-- [ ] **Step 3:** 第一短事务 exclusive node lock、插入 preparing op、设置 maintenance=true、核验 SQL active/queued；busy 回滚。事务外固定诊断；明确 busy 在短事务 abort、返回 409，unknown health 保留 barrier/error。第二短事务重新取 exclusive lock，按 operation ID/generation CAS、重新核验 SQL active/queued，设置 approved=true。实现：
+- [x] **Step 2:** `go test ./internal/fleetguard ./internal/handler -run 'TestReportsBlock|TestFleetMaintenance|TestFleetDelete' -count=1`；预期维护逻辑/竞态断言 FAIL。
+- [x] **Step 3:** 第一短事务 exclusive node lock、插入 preparing op、设置 maintenance=true、核验 SQL active/queued；busy 回滚。事务外固定诊断；明确 busy 在短事务 abort、返回 409，unknown health 保留 barrier/error。第二短事务重新取 exclusive lock，按 operation ID/generation CAS、重新核验 SQL active/queued，设置 approved=true。实现：
 
 ```go
 func BusyObservation(o model.Observation) bool {
@@ -484,8 +484,8 @@ func BusyObservation(o model.Observation) bool {
 ```
 
 stop/reboot 不提前撤销 Token，保持结果回调；delete 批准后才 revoke，并在节点状态标记 terminating 防止新认证/准入。stopped/missing container 删除仍须 SQL 无活跃/排队及可信离线 data volume report-zero 证明，缺失/错误卷不是空卷；running container 必须有可信本代次诊断，不能沿用上一轮重启的健康。API 重审只处理同一未批准 op，服务密钥认证且 namespace 过滤。
-- [ ] **Step 4:** race suite PASS，断言诊断执行时 SQL tx 已释放；模拟 second tx/approval crash，Worker 不执行未批准 delete。普通 Runtime 删除 handler 对 managed nodes 返回冲突，不静默删除。
-- [ ] **Step 5:** 提交 `feat(fleet): authorize safe node maintenance and deletion`。
+- [x] **Step 4:** race suite PASS，断言诊断执行时 SQL tx 已释放；模拟 second tx/approval crash，Worker 不执行未批准 delete。普通 Runtime 删除 handler 对 managed nodes 返回冲突，不静默删除。
+- [x] **Step 5:** 提交 `feat(fleet): authorize safe node maintenance and deletion`。
 
 ### Task 8: Docker Engine Provider 与资源归属
 
