@@ -125,7 +125,7 @@ overrides:
   minimatch@10>brace-expansion: 5.0.9
   builder-util-runtime: 9.7.0
   fast-uri: 3.1.8
-  undici: 7.29.0
+  undici: 7.29.1
   hono: 4.12.25
   ip-address: 10.3.1
   router>path-to-regexp: 8.4.0
@@ -814,7 +814,7 @@ importers:
         version: 0.8.75(@types/node@25.5.0)(yauzl@2.10.0)
       openai:
         specifier: 7.23.0
-        version: 7.23.0(undici@7.29.0)(ws@8.21.3)(zod@4.3.6)
+        version: 7.23.0(undici@7.29.1)(ws@8.21.3)(zod@4.3.6)
       zod:
         specifier: 'catalog:'
         version: 4.3.6
@@ -9286,7 +9286,7 @@ packages:
       '@aws-sdk/credential-provider-node': '>=3.972.0 <4'
       '@smithy/hash-node': '>=4.3.0 <5'
       '@smithy/signature-v4': '>=5.4.0 <6'
-      undici: 7.29.0
+      undici: 7.29.1
       ws: ^8.21.0
       zod: ^3.25 || ^4.0
     peerDependenciesMeta:
@@ -11055,8 +11055,8 @@ packages:
   undici-types@7.18.2:
     resolution: {integrity: sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==}
 
-  undici@7.29.0:
-    resolution: {integrity: sha512-IDxfleLmmbSskfWSUATiN1nfn2rDuvnMOqb5CWR92iIfojA0Ud+ulOAAEQ57LPr9rWmsreUyf5lwyao+7GNNVw==}
+  undici@7.29.1:
+    resolution: {integrity: sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==}
     engines: {node: '>=20.18.1'}
 
   unicode-animations@1.0.3:
@@ -19738,7 +19738,7 @@ snapshots:
       saxes: 6.0.0
       symbol-tree: 3.2.4
       tough-cookie: 6.0.1
-      undici: 7.29.0
+      undici: 7.29.1
       w3c-xmlserializer: 5.0.0
       webidl-conversions: 8.0.1
       whatwg-mimetype: 5.0.0
@@ -21208,9 +21208,9 @@ snapshots:
       is-docker: 2.2.1
       is-wsl: 2.2.0
 
-  openai@7.23.0(undici@7.29.0)(ws@8.21.3)(zod@4.3.6):
+  openai@7.23.0(undici@7.29.1)(ws@8.21.3)(zod@4.3.6):
     optionalDependencies:
-      undici: 7.29.0
+      undici: 7.29.1
       ws: 8.21.3
       zod: 4.3.6
 
@@ -23416,7 +23416,7 @@ snapshots:
 
   undici-types@7.18.2: {}
 
-  undici@7.29.0: {}
+  undici@7.29.1: {}
 
   unicode-animations@1.0.3: {}
 

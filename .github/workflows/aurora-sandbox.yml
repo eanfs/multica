@@ -11,6 +11,8 @@ name: Aurora Sandbox Supply Chain
 on:
   pull_request:
     paths:
+      - "package.json"
+      - "pnpm-lock.yaml"
       - ".github/aurora-sandbox-vex.json"
       - ".github/workflows/aurora-sandbox.yml"
       - "deploy/aurora-sandbox/**"
@@ -30,6 +32,8 @@ on:
   push:
     branches: [main]
     paths:
+      - "package.json"
+      - "pnpm-lock.yaml"
       - ".github/aurora-sandbox-vex.json"
       - ".github/workflows/aurora-sandbox.yml"
       - "deploy/aurora-sandbox/**"
