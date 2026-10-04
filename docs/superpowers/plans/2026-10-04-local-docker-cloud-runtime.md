@@ -355,7 +355,7 @@ if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Fleet-Service-Key")), secre
 
 **Interfaces:** `resolveLocalFleet(cloudURL,localURL,secretFile string) (LocalFleetConfig,error)`；`LocalFleetConfig{URL string, Secret []byte, Enabled bool}`。现有 CloudPATVerifierConfig 增加 ServiceSecret []byte；本地组装 Redis:nil 禁用正向缓存，SaaS原默认不变；不新增兼容 shim。middleware 新 `CloudNodeIdentity(ctx) (auth.CloudPATIdentity,bool)` getter。注册只能按 identity.InstanceRecordID + owner + namespace 查本地 node，再核对固定 DaemonID。
 
-- [ ] **Step 1:** 配置回归：
+- [x] **Step 1:** 配置回归：
 
 ```go
 func TestLocalFleetRejectsMixedCloud(t *testing.T) {
@@ -365,8 +365,8 @@ func TestLocalFleetRejectsMixedCloud(t *testing.T) {
 ```
 
 另写本地仅构造节点/认证客户端，Billing/Entitlements/SeatCapacity 未启用；旧 SaaS 路径不变；撤销 local token 后同一缓存不能继续通过；普通 daemon 自报 managed metadata 被剥离。
-- [ ] **Step 2:** `go test ./cmd/server ./internal/auth ./internal/middleware ./internal/handler -run 'TestLocalFleet|TestCloudPAT' -count=1`；预期配置分离/身份保留断言 FAIL。
-- [ ] **Step 3:** resolveLocalFleet 的执行顺序先互斥、再 URL/secret 解析；secret 来源文件，private headers 在可信 client 内写，不允许转发用户提供同名 header。h.CloudRuntime 为节点专用，新增 SaaS Billing 客户端字段以保持 Billing 原行为，原 SaaS 客户端连接必须继续共享同一个真实 Cloud URL。本地 token verifier 不写正向缓存。认证 identity 存 context，不靠伪造 header。注册 metadata 用服务器值覆盖 client 管理字段，heartbeat/upsert 保留服务器管理字段。所有身份匹配失败为 401/403，不授予节点任意 owner/DaemonID。
+- [x] **Step 2:** `go test ./cmd/server ./internal/auth ./internal/middleware ./internal/handler -run 'TestLocalFleet|TestCloudPAT' -count=1`；预期配置分离/身份保留断言 FAIL。
+- [x] **Step 3:** resolveLocalFleet 的执行顺序先互斥、再 URL/secret 解析；secret 来源文件，private headers 在可信 client 内写，不允许转发用户提供同名 header。h.CloudRuntime 为节点专用，新增 SaaS Billing 客户端字段以保持 Billing 原行为，原 SaaS 客户端连接必须继续共享同一个真实 Cloud URL。本地 token verifier 不写正向缓存。认证 identity 存 context，不靠伪造 header。注册 metadata 用服务器值覆盖 client 管理字段，heartbeat/upsert 保留服务器管理字段。所有身份匹配失败为 401/403，不授予节点任意 owner/DaemonID。
 
 最小配置实现（Secret必须来自明确文件；附加filemode/URLlocality检查在同文件定向tests完成）：
 
@@ -388,8 +388,8 @@ func resolveLocalFleet(cloudURL,localURL,secretFile string) (LocalFleetConfig,er
 }
 ```
 
-- [ ] **Step 4:** 上述 package 测试 PASS，特别跑已有 seat capacity/CloudPAT/cache/registry tests；sqlc 查询若新增再次生成。不能只 mock config 然后不验证 actual router assembly。
-- [ ] **Step 5:** 提交 `feat(fleet): isolate local runtime integration from SaaS policies`。
+- [x] **Step 4:** 上述 package 测试 PASS，特别跑已有 seat capacity/CloudPAT/cache/registry tests；sqlc 查询若新增再次生成。不能只 mock config 然后不验证 actual router assembly。
+- [x] **Step 5:** 提交 `feat(fleet): isolate local runtime integration from SaaS policies`。
 
 ### Task 6: 在真实领取/入队事务接入维护与节点容量锁
 
