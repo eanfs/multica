@@ -125,6 +125,54 @@ func (s *Store) UpsertProfiles(ctx context.Context, profiles map[pgtype.UUID]str
 // CreateIntent locks owner before comparing identity, then validates current inputs only for NEW keys.
 // No profile file or provider I/O is permitted here. Node and operation are committed together.
 func (s *Store) CreateIntent(ctx context.Context, owner pgtype.UUID, req model.CreateRequest) (model.Node, model.Operation, bool, error) {
+	return s.createIntent(ctx, owner, req, nil)
+}
+
+// CreateIntentForProfile admits only the trusted SQL snapshot validated outside the transaction.
+// Matching durable replays win even when that snapshot is now stale or missing.
+func (s *Store) CreateIntentForProfile(ctx context.Context, owner pgtype.UUID, req model.CreateRequest, profile Profile) (model.Node, model.Operation, bool, error) {
+	return s.createIntent(ctx, owner, req, &profile)
+}
+
+func createFingerprint(req model.CreateRequest) string {
+	raw, _ := json.Marshal(struct{ Name, Spec string }{req.Name, req.Spec})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// LookupCreateIntent is read-only and never checks current provisioning/profile inputs.
+func (s *Store) LookupCreateIntent(ctx context.Context, owner pgtype.UUID, req model.CreateRequest) (model.Node, model.Operation, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, databaseTimeout)
+	defer cancel()
+	if !validOwner(owner) || strings.TrimSpace(req.IdempotencyKey) == "" {
+		return model.Node{}, model.Operation{}, false, model.ErrInvalidRequest
+	}
+	return s.lookupCreateIntent(ctx, db.New(s.pool), owner, req, createFingerprint(req))
+}
+
+func (s *Store) lookupCreateIntent(ctx context.Context, q *db.Queries, owner pgtype.UUID, req model.CreateRequest, fingerprint string) (model.Node, model.Operation, bool, error) {
+	existing, err := q.GetFleetIntentByKey(ctx, db.GetFleetIntentByKeyParams{Namespace: s.namespace, OwnerID: owner, IdempotencyKey: req.IdempotencyKey})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.Node{}, model.Operation{}, false, nil
+	}
+	if err != nil {
+		return model.Node{}, model.Operation{}, false, err
+	}
+	if existing.RequestHash != fingerprint || existing.Action != "create" {
+		return model.Node{}, model.Operation{}, false, model.ErrConflict
+	}
+	row, err := q.GetFleetNode(ctx, db.GetFleetNodeParams{Namespace: s.namespace, OwnerID: owner, NodeID: existing.NodeID})
+	if err != nil {
+		return model.Node{}, model.Operation{}, false, err
+	}
+	node, err := nodeFromRow(row)
+	if err != nil {
+		return model.Node{}, model.Operation{}, false, err
+	}
+	return node, operationFromRow(existing), true, nil
+}
+
+func (s *Store) createIntent(ctx context.Context, owner pgtype.UUID, req model.CreateRequest, admitted *Profile) (model.Node, model.Operation, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, databaseTimeout)
 	defer cancel()
 	var node model.Node
@@ -133,31 +181,14 @@ func (s *Store) CreateIntent(ctx context.Context, owner pgtype.UUID, req model.C
 	if !validOwner(owner) || strings.TrimSpace(req.IdempotencyKey) == "" {
 		return node, op, false, model.ErrInvalidRequest
 	}
-	raw, _ := json.Marshal(struct{ Name, Spec string }{req.Name, req.Spec})
-	sum := sha256.Sum256(raw)
-	fingerprint := hex.EncodeToString(sum[:])
+	fingerprint := createFingerprint(req)
 	err := s.WithTx(ctx, func(q *db.Queries) error {
 		if err := q.FleetOwnerExclusiveLock(ctx, db.FleetOwnerExclusiveLockParams{Namespace: s.namespace, OwnerID: owner}); err != nil {
 			return err
 		}
-		existing, err := q.GetFleetIntentByKey(ctx, db.GetFleetIntentByKeyParams{Namespace: s.namespace, OwnerID: owner, IdempotencyKey: req.IdempotencyKey})
-		if err == nil {
-			if existing.RequestHash != fingerprint || existing.Action != "create" {
-				return model.ErrConflict
-			}
-			row, e := q.GetFleetNode(ctx, db.GetFleetNodeParams{Namespace: s.namespace, OwnerID: owner, NodeID: existing.NodeID})
-			if e != nil {
-				return e
-			}
-			node, e = nodeFromRow(row)
-			if e != nil {
-				return e
-			}
-			op = operationFromRow(existing)
-			replayed = true
-			return nil
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
+		var err error
+		node, op, replayed, err = s.lookupCreateIntent(ctx, q, owner, req, fingerprint)
+		if err != nil || replayed {
 			return err
 		}
 		if !s.validProvisioning() {
@@ -179,6 +210,9 @@ func (s *Store) CreateIntent(ctx context.Context, owner pgtype.UUID, req model.C
 		}
 		if err != nil {
 			return err
+		}
+		if admitted != nil && *admitted != profileFromRow(profile) {
+			return model.ErrProfileMissing
 		}
 		count, err := q.CountFleetProvisionedNodes(ctx, db.CountFleetProvisionedNodesParams{Namespace: s.namespace, OwnerID: owner})
 		if err != nil {

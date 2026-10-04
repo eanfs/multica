@@ -8,11 +8,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/fleet/model"
 	"github.com/multica-ai/multica/server/internal/fleet/store"
 	"github.com/multica-ai/multica/server/internal/testutil"
@@ -523,26 +526,54 @@ func TestHTTPPATTransportRequiresServiceKey(t *testing.T) {
 	}
 }
 
-// A blocked availability check must honor readiness's two-second budget without exposing its error.
+// Availability has an independent five-second budget after schema, without exposing errors.
 func TestHTTPReadinessAvailabilityBudget(t *testing.T) {
 	pool, _ := testutil.NewFleetFixture(t)
+	cfg := pool.Config().Copy()
+	cfg.MaxConns = 1
+	scoped, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scoped.Close()
+	held, err := scoped.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	timer := time.AfterFunc(300*time.Millisecond, held.Release)
+	defer func() {
+		if timer.Stop() {
+			held.Release()
+		}
+	}()
 	entered := false
 	p := &fakeProvider{availability: func(ctx context.Context) error {
 		entered = true
 		deadline, ok := ctx.Deadline()
-		if !ok || time.Until(deadline) > 2*time.Second {
-			t.Error("readiness lacks two-second budget")
+		if !ok || time.Until(deadline) > 5*time.Second || time.Until(deadline) < 4500*time.Millisecond {
+			t.Error("readiness lacks independent five-second availability budget")
 		}
 		<-ctx.Done()
 		return errors.New("private-availability-marker")
 	}}
-	h := NewService(store.New(pool, "empty-budget"), model.Config{}, p).Handler(nil)
+	h := NewService(store.New(scoped, "empty-budget"), model.Config{}, p).Handler(nil)
 	w := httptest.NewRecorder()
 	start := time.Now()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/readyz", nil))
-	if !entered || w.Code != 503 || time.Since(start) > 3*time.Second || strings.Contains(w.Body.String(), "private-") {
+	if !entered || w.Code != 503 || time.Since(start) > 6*time.Second || time.Since(start) < 4500*time.Millisecond || strings.Contains(w.Body.String(), "private-") {
 		t.Fatalf("entered=%v status=%d elapsed=%s", entered, w.Code, time.Since(start))
 	}
+	t.Run("caller-cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		cancelled := NewService(store.New(pool, "cancel-budget"), model.Config{}, &fakeProvider{availability: func(ctx context.Context) error { cancel(); <-ctx.Done(); return nil }}).Handler(nil)
+		w := httptest.NewRecorder()
+		start := time.Now()
+		cancelled.ServeHTTP(w, httptest.NewRequest("GET", "/readyz", nil).WithContext(ctx))
+		if w.Code != 503 || time.Since(start) > time.Second {
+			t.Fatalf("caller cancellation status=%d elapsed=%s", w.Code, time.Since(start))
+		}
+	})
 	broken := NewService(store.New(nil, "broken"), model.Config{}, &fakeProvider{}).Handler(nil)
 	w = httptest.NewRecorder()
 	broken.ServeHTTP(w, httptest.NewRequest("GET", "/readyz", nil))
@@ -558,6 +589,109 @@ func cleanHTTPProduced(t *testing.T, f *testutil.Fixture, ns string) {
 		f.Cleanup(t, "DELETE FROM "+table+" WHERE namespace=$1 AND owner_id=$2", ns, f.UserID)
 	}
 }
+
+// Omitting private-file admission persists an intent for a known unusable profile.
+func TestHTTPCreateRejectsInvalidPrivateProfile(t *testing.T) {
+	for _, kind := range []string{"missing", "insecure", "unreadable", "malformed"} {
+		t.Run(kind, func(t *testing.T) {
+			pool, f := testutil.NewFleetFixture(t)
+			ns := "fix1-admission-" + f.UserID
+			cleanHTTPProduced(t, f, ns)
+			path := filepath.Join(t.TempDir(), "private-path-marker.json")
+			if kind != "missing" {
+				mode := os.FileMode(0600)
+				if kind == "insecure" {
+					mode = 0644
+				}
+				if kind == "unreadable" {
+					mode = 0200
+				}
+				raw := `{"api_key":"fake-fixture-marker"}`
+				if kind == "malformed" {
+					raw = `{"api_key":"private-key-marker", "unknown":true}`
+				}
+				if e := os.WriteFile(path, []byte(raw), mode); e != nil {
+					t.Fatal(e)
+				}
+			}
+			f.FleetProfile(t, ns, testutil.Cols{"profile_ref": path})
+			cfg := model.Config{Namespace: ns, Image: "approved-test-image", Specs: map[string]model.Spec{"small": {CPUs: 2, MemoryBytes: 4294967296, Pids: 256, MaxRuns: 1}}}
+			repo := store.New(pool, ns, store.WithProvisioningConfig(cfg))
+			h := NewService(repo, cfg, nil).Handler([]byte("test-only-service-secret"))
+			w := createHTTP(t, h, f.UserID, "new-key", `{"name":"node","spec":"small"}`)
+			if w.Code != 503 || !strings.Contains(w.Body.String(), "profile_missing") {
+				t.Errorf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), "private-") || strings.Contains(w.Body.String(), "fake-fixture-marker") {
+				t.Error("private profile leaked")
+			}
+			for _, table := range []string{"fleet_nodes", "fleet_node_operations", "fleet_node_credentials"} {
+				var count int
+				f.QueryRow(t, "SELECT count(*) FROM "+table+" WHERE namespace=$1 AND owner_id=$2", ns, f.UserID).Scan(&count)
+				if count != 0 {
+					t.Errorf("%s persisted %d rejected rows", table, count)
+				}
+			}
+		})
+	}
+}
+
+// A caller map mutation must change neither public capabilities nor persisted approved resources.
+func TestHTTPServiceSnapshotsSpecsAndReplaysAfterProfileLoss(t *testing.T) {
+	pool, f := testutil.NewFleetFixture(t)
+	ns := "fix1-snapshot-" + f.UserID
+	cleanHTTPProduced(t, f, ns)
+	f.FleetProfile(t, ns)
+	cfg := model.Config{Namespace: ns, Image: "approved-test-image", Specs: map[string]model.Spec{"small": {CPUs: 2, MemoryBytes: 4294967296, Pids: 256, MaxRuns: 1}}}
+	repo := store.New(pool, ns, store.WithProvisioningConfig(cfg))
+	h := NewService(repo, cfg, nil).Handler([]byte("test-only-service-secret"))
+	delete(cfg.Specs, "small")
+	cfg.Specs["unapproved"] = model.Spec{CPUs: 99}
+	w := call(t, h, "GET", "/api/v1/", "", "")
+	var caps struct {
+		Specs []struct {
+			ID   string `json:"id"`
+			CPUs int    `json:"cpus"`
+		} `json:"specs"`
+	}
+	w.Want(200).JSON(&caps)
+	if len(caps.Specs) != 1 || caps.Specs[0].ID != "small" || caps.Specs[0].CPUs != 2 {
+		t.Errorf("mutated capabilities: %+v", caps)
+	}
+	first := createHTTP(t, h, f.UserID, "once", `{"name":"node","spec":"small"}`)
+	first.Want(202)
+	nodes, e := repo.ListNodes(context.Background(), mustUUID(t, f.UserID), 10, 0)
+	if e != nil || len(nodes) != 1 || nodes[0].Resources.CPUs != 2 || nodes[0].Resources.Pids != 256 {
+		t.Fatalf("snapshot nodes=%+v err=%v", nodes, e)
+	}
+	profile, e := repo.GetProfile(context.Background(), mustUUID(t, f.UserID))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = os.Remove(profile.Ref); e != nil {
+		t.Fatal(e)
+	}
+	if e = repo.UpsertProfiles(context.Background(), map[pgtype.UUID]string{mustUUID(t, f.UserID): ""}, 2); e != nil {
+		t.Fatal(e)
+	}
+	replay := createHTTP(t, h, f.UserID, "once", `{"name":"node","spec":"small"}`)
+	replay.Want(202)
+	if replay.Body.String() != first.Body.String() {
+		t.Error("profile loss changed matching replay")
+	}
+	createHTTP(t, h, f.UserID, "once", `{"name":"different","spec":"small"}`).Want(409)
+	createHTTP(t, h, f.UserID, "new", `{"name":"node","spec":"small"}`).Want(503)
+}
+
+func createHTTP(t *testing.T, h http.Handler, owner, key, body string) *testutil.Response {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/api/v1/nodes", strings.NewReader(body))
+	req.Header.Set("X-Fleet-Service-Key", "test-only-service-secret")
+	req.Header.Set("X-User-ID", owner)
+	req.Header.Set("Idempotency-Key", key)
+	return testutil.Call(t, h.ServeHTTP, req)
+}
+
 func call(t *testing.T, h http.Handler, method, path, owner, body string) *testutil.Response {
 	t.Helper()
 	r := httptest.NewRequest(method, path, strings.NewReader(body))

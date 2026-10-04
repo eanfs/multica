@@ -3,6 +3,11 @@ package fleet
 import (
 	"context"
 	"errors"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +16,81 @@ import (
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
+
+// This tracer gates only the owned profile SELECT, after the initial no-replay lookup.
+// It adds no production hooks and lets another real Store commit during admission.
+type admissionQueryGate struct {
+	entered, release chan struct{}
+	once             sync.Once
+}
+
+func (g *admissionQueryGate) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(data.SQL, "-- name: GetFleetProfile") {
+		g.once.Do(func() {
+			close(g.entered)
+			select {
+			case <-g.release:
+			case <-ctx.Done():
+			}
+		})
+	}
+	return ctx
+}
+func (*admissionQueryGate) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// Dropping the failed-admission relookup hides a concurrently committed matching winner.
+func TestServiceCreateReplaysConcurrentWinnerAfterFailedAdmission(t *testing.T) {
+	pool, f := testutil.NewFleetFixture(t)
+	ns := "fix1-concurrent-" + f.UserID
+	cleanHTTPProduced(t, f, ns)
+	f.FleetProfile(t, ns, testutil.Cols{"profile_ref": t.TempDir() + "/missing-private-path-marker"})
+	cfg := model.Config{Namespace: ns, Image: "approved-test-image", Specs: map[string]model.Spec{"small": {CPUs: 2, MemoryBytes: 4294967296, Pids: 256, MaxRuns: 1}}}
+	gate := &admissionQueryGate{entered: make(chan struct{}), release: make(chan struct{})}
+	poolCfg := pool.Config().Copy()
+	poolCfg.ConnConfig.Tracer = gate
+	scoped, e := pgxpool.NewWithConfig(context.Background(), poolCfg)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer scoped.Close()
+	repo := store.New(scoped, ns, store.WithProvisioningConfig(cfg))
+	winner := store.New(pool, ns, store.WithProvisioningConfig(cfg))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	owner := mustUUID(t, f.UserID)
+	req := model.CreateRequest{Name: "node", Spec: "small", IdempotencyKey: "once"}
+	type result struct {
+		node   model.Node
+		op     model.Operation
+		replay bool
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() { n, o, r, e := NewService(repo, cfg, nil).Create(ctx, owner, req); done <- result{n, o, r, e} }()
+	select {
+	case <-gate.entered:
+	case <-ctx.Done():
+		close(gate.release)
+		<-done
+		t.Fatal("admission did not reach profile lookup")
+	}
+	n, o, _, e := winner.CreateIntent(ctx, owner, req)
+	if e == nil {
+		e = winner.UpsertProfiles(ctx, map[pgtype.UUID]string{owner: ""}, 2)
+	}
+	close(gate.release)
+	got := <-done
+	if e != nil {
+		t.Fatal(e)
+	}
+	if got.err != nil || !got.replay || got.node.ID != n.ID || got.op.ID != o.ID {
+		t.Fatalf("concurrent winner replay=%v err=%v", got.replay, got.err)
+	}
+	nodes, e := winner.ListNodes(context.Background(), owner, 10, 0)
+	if e != nil || len(nodes) != 1 {
+		t.Fatalf("winner count=%d err=%v", len(nodes), e)
+	}
+}
 
 // A provider call under a DB lock deadlocks this owned lock acquisition; missing post-check accepts a stale CAS.
 func TestServiceDiagnoseOutsideTransactionAndRechecksOperation(t *testing.T) {

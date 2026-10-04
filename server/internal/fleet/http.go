@@ -132,9 +132,14 @@ func (s *Service) Handler(secret []byte) http.Handler {
 	})
 	router.Get("/healthz", func(w http.ResponseWriter, r *http.Request) { jsonResponse(w, 200, map[string]string{"status": "ok"}) })
 	router.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		// CheckSchema owns its independent two-second acquisition/query budget.
+		if s.repo == nil || s.provider == nil || s.repo.CheckSchema(r.Context()) != nil {
+			jsonResponse(w, 503, map[string]string{"status": "unavailable"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
-		if s.repo == nil || s.provider == nil || s.repo.CheckSchema(ctx) != nil || s.provider.CheckAvailability(ctx) != nil {
+		if s.provider.CheckAvailability(ctx) != nil || ctx.Err() != nil {
 			jsonResponse(w, 503, map[string]string{"status": "unavailable"})
 			return
 		}
@@ -210,7 +215,7 @@ func (s *Service) Handler(secret []byte) http.Handler {
 			httpError(w, model.ErrUnavailable)
 			return
 		}
-		n, op, _, e := s.repo.CreateIntent(r.Context(), id, model.CreateRequest{Name: body.Name, Spec: body.Spec, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+		n, op, _, e := s.Create(r.Context(), id, model.CreateRequest{Name: body.Name, Spec: body.Spec, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 		if e != nil {
 			httpError(w, e)
 			return

@@ -19,7 +19,37 @@ type Service struct {
 }
 
 func NewService(repo *store.Store, cfg model.Config, provider model.Provider) *Service {
+	specs := make(map[string]model.Spec, len(cfg.Specs))
+	for name, spec := range cfg.Specs {
+		specs[name] = spec
+	}
+	cfg.Specs = specs
 	return &Service{repo: repo, cfg: cfg, provider: provider}
+}
+
+// Create validates the administrator's private file outside every transaction.
+// Replays are checked before admission, after failed admission, and again under the owner lock.
+func (s *Service) Create(ctx context.Context, ownerID pgtype.UUID, req model.CreateRequest) (model.Node, model.Operation, bool, error) {
+	if s.repo == nil {
+		return model.Node{}, model.Operation{}, false, model.ErrUnavailable
+	}
+	node, op, replayed, err := s.repo.LookupCreateIntent(ctx, ownerID, req)
+	if err != nil || replayed {
+		return node, op, replayed, err
+	}
+	profile, err := s.repo.GetProfile(ctx, ownerID)
+	if err == nil {
+		_, err = LoadProfile(profile.Ref)
+	}
+	if err != nil {
+		// A competing request may have committed while admission was checking the file.
+		node, op, replayed, lookupErr := s.repo.LookupCreateIntent(ctx, ownerID, req)
+		if lookupErr != nil || replayed {
+			return node, op, replayed, lookupErr
+		}
+		return model.Node{}, model.Operation{}, false, err
+	}
+	return s.repo.CreateIntentForProfile(ctx, ownerID, req, profile)
 }
 
 // Status returns the controller-persisted actual snapshot, not the desired state or a provider secret.

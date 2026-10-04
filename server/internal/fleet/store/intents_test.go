@@ -17,6 +17,79 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
+// A stale SQL profile snapshot must not authorize a new intent; durable replay still wins.
+func TestCreateIntentProfileAdmissionCAS(t *testing.T) {
+	pool, f := testutil.NewFleetFixture(t)
+	ns := "fix1-profile-cas-" + f.UserID
+	cleanProduced(t, f, ns)
+	f.FleetProfile(t, ns)
+	s := New(pool, ns, WithProvisioningConfig(fakeConfig(ns)))
+	ctx := context.Background()
+	owner := ownerUUID(t, f.UserID)
+	p, e := s.GetProfile(ctx, owner)
+	if e != nil {
+		t.Fatal(e)
+	}
+	req := model.CreateRequest{Name: "node", Spec: "local-small", IdempotencyKey: "new"}
+	if _, _, found, e := s.LookupCreateIntent(ctx, owner, req); e != nil || found {
+		t.Fatalf("absent lookup found=%v err=%v", found, e)
+	}
+	for _, field := range []string{"id", "owner", "namespace", "ref", "version"} {
+		t.Run(field, func(t *testing.T) {
+			bad := p
+			switch field {
+			case "id":
+				bad.ID = owner
+			case "owner":
+				bad.OwnerID = p.ID
+			case "namespace":
+				bad.Namespace += "-other"
+			case "ref":
+				bad.Ref += "-other"
+			case "version":
+				bad.Version++
+			}
+			if _, _, _, e := s.CreateIntentForProfile(ctx, owner, req, bad); !errors.Is(e, model.ErrProfileMissing) {
+				t.Errorf("stale %s accepted: %v", field, e)
+			}
+		})
+	}
+	nodes, e := s.ListNodes(ctx, owner, 10, 0)
+	if e != nil || len(nodes) != 0 {
+		t.Fatalf("CAS rejection persisted nodes=%d err=%v", len(nodes), e)
+	}
+	// Projection uses the same owner lock as creation. Version-only updates invalidate admission too.
+	if e = s.UpsertProfiles(ctx, map[pgtype.UUID]string{owner: p.Ref}, 2); e != nil {
+		t.Fatal(e)
+	}
+	if _, _, _, e = s.CreateIntentForProfile(ctx, owner, req, p); !errors.Is(e, model.ErrProfileMissing) {
+		t.Fatalf("changed persisted version accepted: %v", e)
+	}
+	current, e := s.GetProfile(ctx, owner)
+	if e != nil {
+		t.Fatal(e)
+	}
+	first, op, replay, e := s.CreateIntentForProfile(ctx, owner, req, current)
+	if e != nil || replay {
+		t.Fatalf("admitted create replay=%v err=%v", replay, e)
+	}
+	if e = s.UpsertProfiles(ctx, map[pgtype.UUID]string{owner: ""}, 3); e != nil {
+		t.Fatal(e)
+	}
+	again, op2, replay, e := s.CreateIntentForProfile(ctx, owner, req, Profile{})
+	if e != nil || !replay || again.ID != first.ID || op2.ID != op.ID {
+		t.Fatalf("concurrent winner/profile loss replay=%v err=%v", replay, e)
+	}
+	again, op2, replay, e = s.LookupCreateIntent(ctx, owner, req)
+	if e != nil || !replay || again.ID != first.ID || op2.ID != op.ID {
+		t.Fatalf("lookup replay=%v err=%v", replay, e)
+	}
+	req.Name = "different"
+	if _, _, _, e = s.LookupCreateIntent(ctx, owner, req); !errors.Is(e, model.ErrConflict) {
+		t.Fatalf("fingerprint mismatch=%v", e)
+	}
+}
+
 func fakeConfig(ns string) model.Config {
 	return model.Config{Namespace: ns, Image: "fake-image@sha256:test", Specs: map[string]model.Spec{"local-small": {CPUs: 2, MemoryBytes: 4294967296, Pids: 256, MaxRuns: 3}}}
 }
