@@ -526,7 +526,7 @@ type Engine interface {
 
 Create最后两参数为networkname/containername；InstallBootstrap只能接收本node已校验自有卷和固定bootstrap tar；FixedHealth只执行fleet-node health，無callercommand参数。Inspection.HealthJSON映射SDKhealth输出，ObservedAt由Fleet当前clock写，绝不接受任意futuretimestamp。volume名在CreateIntent持久化DataVolume/SecretsVolume，重试检查名字+全部labels+SQLowner。网络仅按namespace创建，删节点不删其他node仍使用的网络。
 
-- [ ] **Step 1:** mock Docker HTTP Transport 检查 create Config，测试纯 resource builder：
+- [x] **Step 1:** mock Docker HTTP Transport 检查 create Config，测试纯 resource builder：
 
 ```go
 func TestNodeHostConfigIsRestricted(t *testing.T) {
@@ -539,8 +539,8 @@ func TestNodeHostConfigIsRestricted(t *testing.T) {
 ```
 
 `NodeHostConfig(model.Spec,bool) container.HostConfig` 本任务定义；SDK package 路径按所选 SDK 版本固定，不能混用新/旧 module imports。断言 nonroot user、socket 不在 mounts、restart=no、labels 包含 namespace/node/role、secrets 只读。
-- [ ] **Step 2:** `go test ./internal/fleet/docker -run 'TestNodeHostConfig|TestOwnership|TestInspect' -count=1`；预期缺 builder/错误默认配置 FAIL，不访问 socket。
-- [ ] **Step 3:** 固定 image/tag/network/volumes 从 cfg + Node UUID 生成。Ensure 先 inspect labels/container identity，重复相同 node 不重复 create；一致才 adopt。Delete(ctx,node,ref) 使用原始持久化 approved operation 的 ref 与当前 SQL node，不依赖内存诊断许可；每次资源移除前校验 Store ID 与全套 labels，data volume 最后移除，所有节点资源经 SDK NotFound 且无 owned leftovers 才可幂等完成（不推断 report zero）；遇其他 namespace 返回 Forbidden，缺失自有资源视幂等成功。bootstrap 通过 fixed init container/tar 写 volumes，secret 不放 Config.Env。健康用固定 `fleet-node health` 命令，任意 cmd/body 禁止进入 exec；parse json 校验 DaemonID；固定 health 执行前后读取可信 SDK container 身份及 StartedAt，身份/epoch 变化视未知，Observation.StartEpoch 仅绑定该当前 SDK 值。
+- [x] **Step 2:** `go test ./internal/fleet/docker -run 'TestNodeHostConfig|TestOwnership|TestInspect' -count=1`；预期缺 builder/错误默认配置 FAIL，不访问 socket。
+- [x] **Step 3:** 固定 image/tag/network/volumes 从 cfg + Node UUID 生成。Ensure 先 inspect labels/container identity，重复相同 node 不重复 create；一致才 adopt。Delete(ctx,node,ref) 使用原始持久化 approved operation 的 ref 与当前 SQL node，不依赖内存诊断许可；每次资源移除前校验 Store ID 与全套 labels，data volume 最后移除，所有节点资源经 SDK NotFound 且无 owned leftovers 才可幂等完成（不推断 report zero）；遇其他 namespace 返回 Forbidden，缺失自有资源视幂等成功。bootstrap 通过 fixed init container/tar 写 volumes，secret 不放 Config.Env。健康用固定 `fleet-node health` 命令，任意 cmd/body 禁止进入 exec；parse json 校验 DaemonID；固定 health 执行前后读取可信 SDK container 身份及 StartedAt，身份/epoch 变化视未知，Observation.StartEpoch 仅绑定该当前 SDK 值。
 
 ```go
 func Owns(labels map[string]string,namespace,fleetID,nodeID,role string) bool {
@@ -551,8 +551,8 @@ func Owns(labels map[string]string,namespace,fleetID,nodeID,role string) bool {
 ```
 
 同时要匹配实际 resource ID，不能只凭标签删除。每个 Engine 调用独立 timeout，retry 前 inspect，不直接重跑 create。
-- [ ] **Step 4:** fake Engine tests PASS，覆盖 timeout-after-create、foreign resource、already stopped/removed、unknown health、resource labels 不全。Docker SDK 版本在 go.mod 精确锁定；不得新增 shell docker 管理节点。
-- [ ] **Step 5:** 提交 `feat(fleet): manage isolated nodes through Docker Engine`。
+- [x] **Step 4:** fake Engine tests PASS，覆盖 timeout-after-create、foreign resource、already stopped/removed、unknown health、resource labels 不全。Docker SDK 版本在 go.mod 精确锁定；不得新增 shell docker 管理节点。
+- [x] **Step 5:** 提交 `feat(fleet): manage isolated nodes through Docker Engine`。
 
 ### Task 9: 节点 bootstrap、固定 Claude 镜像与假 CLI
 
