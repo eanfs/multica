@@ -44,9 +44,11 @@ func TestLocalFleetRouterAssembly(t *testing.T) {
 }
 
 func TestLocalFleetRejectsMixedCloud(t *testing.T) {
-	_, err := resolveLocalFleet("https://cloud.example", "http://127.0.0.1:19001", "/missing-private-marker")
-	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Fatalf("mixed mode must reject before secret access: %v", err)
+	for _, path := range []string{"/missing-private-marker", "relative-private-marker", ""} {
+		_, err := resolveLocalFleet("https://cloud.example", "http://127.0.0.1:19001", path)
+		if err == nil || !strings.Contains(err.Error(), "mutually exclusive") || (path != "" && strings.Contains(err.Error(), path)) {
+			t.Fatalf("mixed mode must reject before secret access without exposing path: %v", err)
+		}
 	}
 }
 
@@ -83,7 +85,9 @@ func TestLocalFleetConfigSafety(t *testing.T) {
 			t.Fatalf("unsafe file mode %o accepted", mode)
 		}
 	}
-	_ = os.Chmod(path, 0600)
+	if err := os.Chmod(path, 0400); err != nil {
+		t.Fatal(err)
+	}
 	for _, u := range []string{"http://127.0.0.1:19001/", "https://localhost:19001", "http://[::1]:19001"} {
 		cfg, err := resolveLocalFleet("", u, path)
 		if err != nil || !cfg.Enabled || string(cfg.Secret) != "test-only-012345678901234567890123456789" {
@@ -93,11 +97,87 @@ func TestLocalFleetConfigSafety(t *testing.T) {
 	if _, err := resolveLocalFleet("", "", "missing"); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte("short"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := resolveLocalFleet("", "http://127.0.0.1:19001", path); err == nil {
 		t.Fatal("short secret accepted")
+	}
+}
+
+// A valid private key must not be selected relative to the process working directory.
+func TestLocalFleetConfigRejectsRelativeSecret(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relative-private-marker")
+	if err := os.WriteFile(path, []byte(strings.Repeat("k", 32)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(cwd, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{relative, " \t" + relative + "\n", "missing-relative-private-marker"} {
+		cfg, err := resolveLocalFleet("", "http://127.0.0.1:19001", ref)
+		if err == nil || cfg.Enabled || len(cfg.Secret) != 0 {
+			t.Fatal("relative private key reference accepted")
+		}
+		if !strings.Contains(err.Error(), "absolute") || strings.Contains(err.Error(), "private-marker") || strings.Contains(err.Error(), cwd) {
+			t.Fatalf("relative path must fail before file access with a path-free absolute-reference error: %v", err)
+		}
+	}
+}
+
+// The byte budget applies to the complete raw file, not a trimmed or truncated prefix.
+func TestLocalFleetConfigSecretByteBudget(t *testing.T) {
+	key := strings.Repeat("k", 32)
+	for _, tc := range []struct {
+		name, raw, want string
+		reject          bool
+	}{
+		{name: "minimum", raw: key, want: key},
+		{name: "LF", raw: key + "\n", want: key},
+		{name: "CRLF", raw: key + "\r\n", want: key},
+		{name: "exact_raw_boundary", raw: strings.Repeat("k", 65536), want: strings.Repeat("k", 65536)},
+		{name: "padded_raw_boundary", raw: key + strings.Repeat(" ", 65504), want: key},
+		{name: "sentinel_whitespace", raw: key + strings.Repeat(" ", 65505), reject: true},
+		{name: "oversized_whitespace", raw: key + strings.Repeat(" ", 65506), reject: true},
+		{name: "hidden_second_line", raw: key + strings.Repeat(" ", 65505) + "\nhidden-private-marker", reject: true},
+		{name: "visible_second_line", raw: key + "\nsecond-private-marker", reject: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "budget-private-marker")
+			if err := os.WriteFile(path, []byte(tc.raw), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := resolveLocalFleet("", "http://127.0.0.1:19001", " \t"+path+"\n")
+			if tc.reject {
+				if err == nil || cfg.Enabled || len(cfg.Secret) != 0 {
+					t.Fatalf("invalid raw key file accepted (%d bytes)", len(tc.raw))
+				}
+				if strings.Contains(err.Error(), path) || strings.Contains(err.Error(), "private-marker") {
+					t.Fatal("key validation error exposes private file data")
+				}
+			} else if err != nil || !cfg.Enabled || string(cfg.Secret) != tc.want {
+				t.Fatalf("valid raw key file rejected (%d bytes): %v", len(tc.raw), err)
+			}
+		})
+	}
+}
+
+func TestLocalFleetConfigDisabledDoesNotReadSecret(t *testing.T) {
+	for _, cloudURL := range []string{"", "https://cloud.example"} {
+		for _, path := range []string{"missing-relative-private-marker", t.TempDir()} {
+			cfg, err := resolveLocalFleet(cloudURL, " \t", path)
+			if err != nil || cfg.Enabled || cfg.URL != "" || len(cfg.Secret) != 0 {
+				t.Fatalf("disabled local mode must ignore key reference: %v", err)
+			}
+		}
 	}
 }
 

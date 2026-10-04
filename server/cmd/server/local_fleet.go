@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/multica-ai/multica/server/internal/auth"
@@ -34,11 +35,15 @@ func resolveLocalFleet(cloudURL, localURL, secretFile string) (LocalFleetConfig,
 	if u.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
 		return LocalFleetConfig{}, errors.New("local Fleet URL must use loopback")
 	}
-	pathInfo, err := os.Lstat(strings.TrimSpace(secretFile))
+	secretFile = strings.TrimSpace(secretFile)
+	if !filepath.IsAbs(secretFile) {
+		return LocalFleetConfig{}, errors.New("Fleet service key requires an absolute file reference")
+	}
+	pathInfo, err := os.Lstat(secretFile)
 	if err != nil || !pathInfo.Mode().IsRegular() {
 		return LocalFleetConfig{}, errors.New("Fleet service key requires a regular file reference")
 	}
-	f, err := os.Open(strings.TrimSpace(secretFile))
+	f, err := os.Open(secretFile)
 	if err != nil {
 		return LocalFleetConfig{}, errors.New("cannot open Fleet service key file")
 	}
@@ -51,8 +56,11 @@ func resolveLocalFleet(cloudURL, localURL, secretFile string) (LocalFleetConfig,
 	if err != nil {
 		return LocalFleetConfig{}, errors.New("cannot read Fleet service key file")
 	}
+	if len(secret) > 65536 {
+		return LocalFleetConfig{}, errors.New("Fleet service key file must not exceed 65536 bytes")
+	}
 	secret = bytes.TrimSpace(secret)
-	if len(secret) < 32 || len(secret) > 65536 || bytes.ContainsAny(secret, "\r\n") {
+	if len(secret) < 32 || bytes.ContainsAny(secret, "\r\n") {
 		return LocalFleetConfig{}, errors.New("Fleet service key must contain at least 32 bytes without line breaks")
 	}
 	return LocalFleetConfig{URL: strings.TrimRight(u.String(), "/"), Secret: secret, Enabled: true}, nil
