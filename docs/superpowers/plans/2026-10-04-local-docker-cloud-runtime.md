@@ -405,7 +405,7 @@ func resolveLocalFleet(cloudURL,localURL,secretFile string) (LocalFleetConfig,er
 
 **Interfaces:** `fleetguard.CheckClaim(ctx context.Context,q *db.Queries,namespace string,runtimeID pgtype.UUID,now time.Time) error`；`CheckEnqueue` 同签名。用 `GetFleetNodeForRuntime` 取得受管 node；ordinary Runtime 无受管 metadata 时直接返回 nil。metadata 有受管标记但无匹配 node 必须拒绝，不降级 ordinary。node capacity 锁与维护 shared lock 是不同锁域。
 
-- [ ] **Step 1:** DB 回归 setup 用 Task 2 fixture：创建 ready Fleet node、两个不同工作区 Runtime、分别绑定两个 Agent、各一 queued task；并发 `ClaimTaskForRuntime` 后只有一个 dispatched。再将 maintenance=true、revoked=true、health stale，所有单/批/WS/HTTP 入口均不得 claim。测试主干：
+- [x] **Step 1:** DB 回归 setup 用 Task 2 fixture：创建 ready Fleet node、两个不同工作区 Runtime、分别绑定两个 Agent、各一 queued task；并发 `ClaimTaskForRuntime` 后只有一个 dispatched。再将 maintenance=true、revoked=true、health stale，所有单/批/WS/HTTP 入口均不得 claim。测试主干：
 
 ```go
 func TestClaimBarrierSeesMaintenance(t *testing.T) {
@@ -425,8 +425,8 @@ func TestClaimBarrierSeesMaintenance(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2:** `go test ./internal/fleetguard ./internal/service ./internal/handler -run 'TestClaimBarrier|TestFleetClaim|TestFleetEnqueue' -count=1`；确认至少一个真实事务竞态测试红，不只纯 policy 测试红。
-- [ ] **Step 3:** 在 s.runInTx 内，先非锁定读取候选 agent/runtime ID，取得 shared node lock，再 capacity lock，再 GetAgentForClaimUpdate；锁定后重新核验 runtime 未重绑。CountFleetActiveRuns 覆盖 `dispatched/running/waiting_local_directory` 以及 preparation lease，不仅 Agent.MaxConcurrentTasks。旧 ClaimTaskForAgent 可走同一检查，不能跳过 runtime 空参路径。
+- [x] **Step 2:** `go test ./internal/fleetguard ./internal/service ./internal/handler -run 'TestClaimBarrier|TestFleetClaim|TestFleetEnqueue' -count=1`；确认至少一个真实事务竞态测试红，不只纯 policy 测试红。
+- [x] **Step 3:** 在 s.runInTx 内，先非锁定读取候选 agent/runtime ID，取得 shared node lock，再 capacity lock，再 GetAgentForClaimUpdate；锁定后重新核验 runtime 未重绑。CountFleetActiveRuns 覆盖 `dispatched/running/waiting_local_directory` 以及 preparation lease，不仅 Agent.MaxConcurrentTasks。旧 ClaimTaskForAgent 可走同一检查，不能跳过 runtime 空参路径。
 
 ```go
 if err := qtx.FleetNodeSharedLock(ctx,db.FleetNodeSharedLockParams{
@@ -439,11 +439,11 @@ if err := qtx.FleetNodeCapacityLock(ctx,db.FleetNodeCapacityLockParams{
 ```
 
 SQL/row 数据必须在 shared lock 后重读；capacity 计数在 capacity lock 后执行。EnqueueChat/Issue/Autopilot/QuickCreate 的最终插入事务用 CheckEnqueue；停止允许排队、terminating/terminated 不允许新任务。所有 cache 空队列 fast path 不得缓存放行许可。SQL upsert 明确保留 trusted managed keys，其他客户端传入 managed keys 不能覆盖。
-- [ ] **Step 4:** 再跑此矩阵及现有 claim races，`make sqlc`，`go test -race ./internal/fleetguard ./internal/service -run 'Fleet|Claim' -count=1`；预期无 double claim/死锁，ordinary Runtime 回归不查不存在的 Fleet node。验证固定锁顺序。
-- [ ] **Step 5:** 提交 `feat(fleet): guard node claims and capacity transactionally`。
+- [x] **Step 4:** 再跑此矩阵及现有 claim races，`make sqlc`，`go test -race ./internal/fleetguard ./internal/service -run 'Fleet|Claim' -count=1`；预期无 double claim/死锁，ordinary Runtime 回归不查不存在的 Fleet node。验证固定锁顺序。
+- [x] **Step 5:** 提交 `feat(fleet): guard node claims and capacity transactionally`。
 
 
-**登记与批量锁补充（本任务同时实现）：** `CheckRegister(ctx context.Context,q *db.Queries,namespace string,nodeID pgtype.UUID) error`，在handler注册/upsert的同一事务shared-lock后重读node；initializing允许注册，revoked/terminating/terminated拒绝，不能利用新工作区Runtime绕过屏障。多node批量先按UUID排序shared锁，再同序capacity锁，最后agent/task行锁。CheckEnqueue在delete准备态必须看到desired=terminating；AbortMaintenance按Operation.PriorDesired恢复，stop保留正常排队。WS每次claim重新查同库，不凭旧认证放行；Fleet HTTP不可达但有效健康/DB状态仍允许已有WS路径。
+**登记与批量锁补充（本任务同时实现）：** `CheckRegister(ctx context.Context,q *db.Queries,namespace string,nodeID pgtype.UUID) error`，在handler注册/upsert的同一事务shared-lock后重读node；initializing允许注册，revoked/terminating/terminated拒绝，不能利用新工作区Runtime绕过屏障。多node批量先按UUID排序shared锁，再同序capacity锁，最后agent/task行锁。CheckEnqueue在delete准备态通过同事务 node shared lock 下的 pending delete operation（namespace/owner/node/current control-generation）拒绝新入队；保留 prior desired 与 accepted report credential grace，不提前设置 terminating 作为代替；AbortMaintenance按Operation.PriorDesired恢复，stop保留正常排队。WS每次claim重新查同库，不凭旧认证放行；Fleet HTTP不可达但有效健康/DB状态仍允许已有WS路径。
 
 ### Task 7: 两段式维护授权、忙碌拒绝与删除准入
 
@@ -453,7 +453,7 @@ SQL/row 数据必须在 shared lock 后重读；capacity 计数在 capacity lock
 
 **审查补充（本任务所有权与 canonical tests）：** 新增 Modify: `server/internal/handler/runtime.go`、`server/internal/handler/runtime_test.go`（含 DeleteAgentRuntime/UnbindAgentsAndDeleteRuntime）、`server/cmd/server/router.go`、`server/internal/cloudruntime/client.go`、`server/internal/cloudruntime/client_test.go`、`server/internal/handler/handler.go`。`Maintainer.Diagnose func(context.Context,model.Node,model.OperationRef)(model.Observation,error)`；`Maintainer.Review(ctx context.Context,ownerID pgtype.UUID,ref model.OperationRef)(model.Operation,error)`。prepare commit→Diagnose(ref) tx 外→第二短 tx approve；unknown 先判，保留 barrier/ErrUnknownHealth，不当明确 busy abort；只有 known nonempty 409/abort prior desired，保留数据。stopped/missing delete 只接纳匹配 DataVolume/layout/current observation 的 offline report-zero，不以 SQL idle 替代报告。
 
-Task 7 产出 API POST /internal/local-fleet/operations/review 的专用 service auth/router（非浏览器公开接口）+ trusted owner，SQL 匹配 namespace/node/operation/generation/action/owner。`cloudruntime.Client.DiagnoseNode(ctx context.Context,ownerID string,ref model.OperationRef)(model.Observation,error)` 与 `ReviewOperation(ctx context.Context,ownerID string,ref model.OperationRef)(model.Operation,error)` 使用固定 route/Task 4 DTO，service secret 不来自 caller。CAS 只更新同 preparing op/generation；无 HTTP/Docker in tx。canonical local_fleet_operations_test.go: TestFleetReviewSameOperationCAS/TestFleetOfflineDeleteProof/tx-free diagnose；runtime_test.go: TestManagedRuntimeDeleteAndUnbindRejected 拦旧客户端直接绕过且保留业务实体。批准后恢复原操作，start 与 preparing/terminating 冲突。
+Task 7 产出 API POST /internal/local-fleet/operations/review 的专用 service auth/router（非浏览器公开接口）+ trusted owner，SQL 匹配 namespace/node/operation/generation/action/owner。`cloudruntime.Client.DiagnoseNode(ctx context.Context,ownerID string,ref model.OperationRef)(model.Observation,error)` 与 `ReviewOperation(ctx context.Context,ownerID string,ref model.OperationRef)(model.Operation,error)` 使用固定 route/Task 4 DTO，service secret 不来自 caller。CAS 只更新同 preparing op/generation；无 HTTP/Docker in tx。专用 private Review 成功响应使用显式 `OperationReviewResponseDTO` 投影八个 required scalar fields：`namespace/node_id/operation_id/owner_id/generation/action/phase/approved`，owner 与 namespace 来自已验证 SQL operation/node，严格校验 UUID、generation、action、实际 producer phase 和输入 ref/trusted owner 关联；不直接序列化 untagged domain Operation，不输出 key/hash/credentials。Modify `server/internal/fleet/internal_dto.go`、`internal_dto_test.go`，真实私有 handler→client round-trip 为 canonical；request `OperationRequestDTO`/`OperationRef` 仍五字段，不新增 owner request field。canonical local_fleet_operations_test.go: TestFleetReviewSameOperationCAS/TestFleetOfflineDeleteProof/tx-free diagnose；runtime_test.go: TestManagedRuntimeDeleteAndUnbindRejected 拦旧客户端直接绕过且保留业务实体。批准后恢复原操作，start 与 preparing/terminating 冲突。
 
 **Dependencies:** Tasks 1–6。**Deliverable:** fake Provider 测试证明 stop/reboot/delete 无检查后领取竞态，崩溃保持屏障。
 
