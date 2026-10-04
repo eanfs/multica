@@ -78,7 +78,7 @@ func validateNodeInspection(r container.InspectResponse, n model.Node, networkNa
 	if !inspectEnvironment(c.Env, n.Resources.MaxRuns) {
 		return model.ErrForbidden
 	}
-	if h.NanoCPUs != want.NanoCPUs || h.Memory != want.Memory || h.PidsLimit == nil || *h.PidsLimit != *want.PidsLimit || h.Privileged || h.PidMode != "" || len(h.Binds) != 0 || len(h.Devices) != 0 || len(h.DeviceRequests) != 0 || len(h.VolumesFrom) != 0 || len(h.PortBindings) != 0 || h.PublishAllPorts || h.NetworkMode != container.NetworkMode(networkName) || h.RestartPolicy.Name != container.RestartPolicyDisabled || len(h.CapAdd) != 0 || !reflect.DeepEqual(h.CapDrop, want.CapDrop) || !reflect.DeepEqual(h.SecurityOpt, want.SecurityOpt) || !reflect.DeepEqual(h.ExtraHosts, want.ExtraHosts) {
+	if h.ReadonlyRootfs != want.ReadonlyRootfs || h.NanoCPUs != want.NanoCPUs || h.Memory != want.Memory || h.PidsLimit == nil || *h.PidsLimit != *want.PidsLimit || h.Privileged || h.PidMode != "" || len(h.Binds) != 0 || len(h.Devices) != 0 || len(h.DeviceRequests) != 0 || len(h.VolumesFrom) != 0 || len(h.PortBindings) != 0 || h.PublishAllPorts || h.NetworkMode != container.NetworkMode(networkName) || h.RestartPolicy.Name != container.RestartPolicyDisabled || len(h.CapAdd) != 0 || !reflect.DeepEqual(h.CapDrop, want.CapDrop) || !reflect.DeepEqual(h.SecurityOpt, want.SecurityOpt) || !reflect.DeepEqual(h.ExtraHosts, want.ExtraHosts) {
 		return model.ErrForbidden
 	}
 	if len(r.NetworkSettings.Networks) != 1 || r.NetworkSettings.Networks[networkName] == nil || len(r.Mounts) != 2 {
@@ -162,6 +162,9 @@ func (p *Provider) Inspect(ctx context.Context, n model.Node) (model.Observation
 	}
 	if e != nil {
 		return model.Observation{}, safeError(e)
+	}
+	if e = p.validSDKSnapshot(n, i); e != nil {
+		return model.Observation{}, e
 	}
 	return p.observation(ctx, n, i), nil
 }

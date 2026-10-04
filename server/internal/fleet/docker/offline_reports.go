@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/containerd/errdefs"
@@ -119,7 +120,10 @@ func (p *Provider) Delete(ctx context.Context, n model.Node, ref model.Operation
 	if n.ContainerID != "" {
 		i, e := p.inspectOwned(ctx, n, n.ContainerID)
 		if e == nil {
-			if i.State == "running" || i.State == "paused" || i.State == "restarting" {
+			if e = p.validSDKSnapshot(n, i); e != nil {
+				return e
+			}
+			if i.State != "exited" && i.State != "created" {
 				return model.ErrUnknownHealth
 			}
 			if e = bounded(ctx, func(c context.Context) error { return p.engine.Remove(c, n.ContainerID) }); e != nil {
@@ -189,9 +193,21 @@ func (e *sdkEngine) nodeResourcesAbsent(ctx context.Context, n model.Node) (bool
 			return false, model.ErrForbidden
 		}
 		if r.ID != n.ContainerID {
-			return false, model.ErrUnknownHealth
+			if r.Role != "diagnostic" && r.Role != "bootstrap" {
+				return false, model.ErrUnknownHealth
+			}
+			absent = false
+			continue
 		}
 		absent = false
+	}
+	if absent && e.helpers != nil {
+		e.helpers.prune(n.Namespace+"\x00"+e.cfg.FleetID+"\x00"+nodeID(n), map[string]bool{})
+	}
+	if !absent {
+		if err := e.recoverHelpers(ctx, n); err != nil {
+			return false, err
+		}
 	}
 	return absent, nil
 }
@@ -200,6 +216,9 @@ func (e *sdkEngine) FixedOfflineReports(ctx context.Context, n model.Node, ref m
 	defer cancel()
 	if e.client == nil || !approvedImage.MatchString(e.cfg.Image) || e.cfg.FleetID == "" || n.Namespace != e.cfg.Namespace || !validRef(n, ref) || ref.Action != model.Delete {
 		return nil, model.ErrUnknownHealth
+	}
+	if err := e.recoverHelpers(ctx, n); err != nil {
+		return nil, err
 	}
 	if err := e.offlineRoot(ctx, n); err != nil {
 		return nil, err
@@ -225,6 +244,12 @@ func diagnosticHost() container.HostConfig {
 	return container.HostConfig{NetworkMode: "none", ReadonlyRootfs: true, CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges:true"}, RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled}, Resources: container.Resources{NanoCPUs: 250000000, Memory: 64 << 20, PidsLimit: &pids}}
 }
 func (e *sdkEngine) offlineRoot(ctx context.Context, n model.Node) error {
+	if err := e.offlineIdentity(ctx, n); err != nil {
+		return err
+	}
+	return e.noWriter(ctx, n.DataVolume)
+}
+func (e *sdkEngine) offlineIdentity(ctx context.Context, n model.Node) error {
 	if !volumeName.MatchString(n.DataVolume) {
 		return model.ErrUnknownHealth
 	}
@@ -244,23 +269,153 @@ func (e *sdkEngine) offlineRoot(ctx context.Context, n model.Node) error {
 			if c.State.Running || c.State.Paused || c.State.Restarting || c.Config.Image != n.Image {
 				return model.ErrUnknownHealth
 			}
-			count := 0
-			for _, m := range c.Mounts {
-				if m.Destination == model.DataMount {
-					count++
-					if m.Type != mount.TypeVolume || m.Name != n.DataVolume {
-						return model.ErrUnknownHealth
-					}
-				}
+			p := Provider{cfg: e.cfg}
+			if err := validateNodeInspection(c, n, p.networkName()); err != nil {
+				return err
 			}
-			if count != 1 {
+			if c.State.Status != "exited" && c.State.Status != "created" {
 				return model.ErrUnknownHealth
 			}
 		} else if !errdefs.IsNotFound(err) {
 			return model.ErrUnknownHealth
 		}
 	}
-	return e.noWriter(ctx, n.DataVolume)
+	return nil
+}
+
+// Only an unchanged lifecycle observed by this Engine for 65 monotonic seconds
+// outlives every helper execution+cleanup (30s+30s+5s grace). Created is never
+// elapsed-time authority. Fresh processes conservatively restart observation.
+func (e *sdkEngine) recoverHelpers(ctx context.Context, n model.Node) error {
+	resources, err := e.Find(ctx, map[string]string{"multica.fleet.node": nodeID(n)})
+	if err != nil {
+		return model.ErrUnknownHealth
+	}
+	candidates := []Resource{}
+	present := map[string]bool{}
+	for _, r := range resources {
+		if r.ID == n.ContainerID {
+			continue
+		}
+		if !Owns(r.Labels, n.Namespace, e.cfg.FleetID, nodeID(n), r.Role) {
+			return model.ErrForbidden
+		}
+		if r.Role != "diagnostic" && r.Role != "bootstrap" {
+			return model.ErrUnknownHealth
+		}
+		candidates = append(candidates, r)
+		present[r.ID] = true
+	}
+	if e.helpers == nil {
+		return model.ErrUnknownHealth
+	}
+	key := n.Namespace + "\x00" + e.cfg.FleetID + "\x00" + nodeID(n)
+	e.helpers.prune(key, present)
+	if len(candidates) == 0 {
+		return nil
+	}
+	if len(candidates) > 5 || !approvedImage.MatchString(e.cfg.Image) {
+		return model.ErrUnknownHealth
+	}
+	if err = e.offlineIdentity(ctx, n); err != nil {
+		return err
+	}
+	// Same-daemon SystemTime only rejects invalid/future Created. Neither a
+	// clock offset nor a wall-clock jump can shortcut the monotonic observation.
+	info, err := e.client.Info(ctx)
+	if err != nil {
+		return model.ErrUnknownHealth
+	}
+	daemonNow, err := time.Parse(time.RFC3339Nano, info.SystemTime)
+	if err != nil || daemonNow.IsZero() {
+		return model.ErrUnknownHealth
+	}
+	ready := true
+	for _, r := range candidates {
+		actual, err := e.client.ContainerInspect(ctx, r.ID)
+		if err != nil {
+			return model.ErrUnknownHealth
+		}
+		if err = e.validateRecoveryHelper(ctx, actual, r, n, daemonNow); err != nil {
+			return err
+		}
+		if !e.helpers.quiescent(actual, key) {
+			ready = false
+		}
+	}
+	if !ready {
+		return model.ErrUnknownHealth
+	}
+	for _, r := range candidates {
+		actual, err := e.client.ContainerInspect(ctx, r.ID)
+		if errdefs.IsNotFound(err) {
+			e.helpers.forget(r.ID)
+			continue
+		}
+		if err != nil {
+			return model.ErrUnknownHealth
+		}
+		if err = e.validateRecoveryHelper(ctx, actual, r, n, daemonNow); err != nil {
+			return err
+		}
+		if !e.helpers.quiescent(actual, key) {
+			return model.ErrUnknownHealth
+		}
+		if err = e.client.ContainerRemove(ctx, r.ID, container.RemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {
+			return model.ErrUnknownHealth
+		}
+		e.helpers.forget(r.ID)
+	}
+	return nil
+}
+func (e *sdkEngine) validateRecoveryHelper(ctx context.Context, actual container.InspectResponse, r Resource, n model.Node, daemonNow time.Time) error {
+	if actual.ContainerJSONBase == nil || actual.ID != r.ID || actual.Config == nil || actual.State == nil || !reflect.DeepEqual(actual.Config.Labels, labels(n.Namespace, e.cfg.FleetID, nodeID(n), r.Role)) {
+		return model.ErrForbidden
+	}
+	created, err := time.Parse(time.RFC3339Nano, actual.Created)
+	if err != nil || created.IsZero() || created.After(daemonNow) {
+		return model.ErrUnknownHealth
+	}
+	if actual.State.Status != "created" && actual.State.Status != "exited" && actual.State.Status != "running" {
+		return model.ErrUnknownHealth
+	}
+	if actual.State.Paused || actual.State.Restarting || actual.State.Running != (actual.State.Status == "running") || (actual.State.Running && actual.State.StartedAt == "") {
+		return model.ErrUnknownHealth
+	}
+	if actual.State.Running {
+		started, err := time.Parse(time.RFC3339Nano, actual.State.StartedAt)
+		if err != nil || started.IsZero() {
+			return model.ErrUnknownHealth
+		}
+	}
+	name := strings.TrimPrefix(actual.Name, "/")
+	if !strings.HasPrefix(name, "multica-fleet-helper-") {
+		return model.ErrUnknownHealth
+	}
+	if parsed, err := uuid.Parse(strings.TrimPrefix(name, "multica-fleet-helper-")); err != nil || parsed.String() != strings.TrimPrefix(name, "multica-fleet-helper-") {
+		return model.ErrUnknownHealth
+	}
+	h := diagnosticHost()
+	h.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: n.DataVolume, Target: model.DataMount, ReadOnly: true}}
+	cmd := "report-stats"
+	if r.Role == "bootstrap" {
+		if !volumeName.MatchString(n.SecretsVolume) || n.SecretsVolume == n.DataVolume {
+			return model.ErrForbidden
+		}
+		p := Provider{cfg: e.cfg}
+		v, err := e.client.VolumeInspect(ctx, n.SecretsVolume)
+		if err != nil {
+			return model.ErrUnknownHealth
+		}
+		if err = validateVolume(v, p.volume(n, "secrets")); err != nil {
+			return err
+		}
+		h.Mounts[0].ReadOnly = false
+		h.Mounts = append(h.Mounts, mount.Mount{Type: mount.TypeVolume, Source: n.SecretsVolume, Target: "/secrets"})
+		cmd = "bootstrap"
+	}
+	c := &container.Config{Image: e.cfg.Image, User: "10001:10001", Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{cmd}, Labels: labels(n.Namespace, e.cfg.FleetID, nodeID(n), r.Role), NetworkDisabled: true}
+	return validateHelper(actual, c, &h)
 }
 func (e *sdkEngine) noWriter(ctx context.Context, name string) error {
 	// No label filter: a foreign container may be writing this volume.
@@ -287,6 +442,21 @@ func (e *sdkEngine) noWriter(ctx context.Context, name string) error {
 	return nil
 }
 func (e *sdkEngine) runHelper(ctx context.Context, c *container.Config, h *container.HostConfig, archive []byte) (raw []byte, retErr error) {
+	// Execution and synchronous cleanup share the original whole-attempt deadline.
+	// Reserve up to one second (half of short caller budgets) for cleanup.
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return nil, model.ErrUnknownHealth
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 || ctx.Err() != nil {
+		return nil, model.ErrUnknownHealth
+	}
+	reserve := min(time.Second, remaining/2)
+	cleanupCtx, cleanupCancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
+	defer cleanupCancel()
+	ctx, cancel := context.WithDeadline(ctx, deadline.Add(-reserve))
+	defer cancel()
 	name := "multica-fleet-helper-" + uuid.NewString()
 	id, createErr := e.Create(ctx, c, h, "", name)
 	lookup := id
@@ -303,16 +473,16 @@ func (e *sdkEngine) runHelper(ctx context.Context, c *container.Config, h *conta
 	if actual.ContainerJSONBase == nil || actual.ID == "" || actual.Config == nil || !sameLabels(actual.Config.Labels, c.Labels) || (id != "" && actual.ID != id) {
 		return nil, model.ErrForbidden
 	}
+	if err = validateHelper(actual, c, h); err != nil {
+		return nil, err
+	}
 	id = actual.ID
 	defer func() {
-		if err := e.cleanupHelper(context.WithoutCancel(ctx), id, c.Labels); err != nil {
+		if err := e.cleanupHelper(cleanupCtx, id, c, h); err != nil {
 			raw = nil
 			retErr = model.ErrUnknownHealth
 		}
 	}()
-	if err = validateHelper(actual, c, h); err != nil {
-		return nil, err
-	}
 	if archive != nil {
 		if err = e.client.CopyToContainer(ctx, id, "/", bytes.NewReader(archive), container.CopyToContainerOptions{CopyUIDGID: true}); err != nil {
 			return nil, err
@@ -353,8 +523,15 @@ func sameLabels(a, b map[string]string) bool {
 	return true
 }
 func validateHelper(actual container.InspectResponse, c *container.Config, h *container.HostConfig) error {
-	if actual.Config == nil || actual.HostConfig == nil || actual.Config.Image != c.Image || actual.Config.User != c.User || actual.Config.Tty || !inspectEnvironment(actual.Config.Env, 0) || !reflect.DeepEqual(actual.Config.Entrypoint, c.Entrypoint) || !reflect.DeepEqual(actual.Config.Cmd, c.Cmd) {
+	if actual.Config == nil || actual.HostConfig == nil || actual.NetworkSettings == nil || actual.Config.Image != c.Image || actual.Config.User != c.User || actual.Config.Tty || actual.Config.OpenStdin || len(actual.Config.ExposedPorts) != 0 || !actual.Config.NetworkDisabled || !inspectEnvironment(actual.Config.Env, 0) || !reflect.DeepEqual(actual.Config.Entrypoint, c.Entrypoint) || !reflect.DeepEqual(actual.Config.Cmd, c.Cmd) {
 		return model.ErrForbidden
+	}
+	if actual.NetworkSettings != nil {
+		for name := range actual.NetworkSettings.Networks {
+			if name != "none" {
+				return model.ErrForbidden
+			}
+		}
 	}
 	ah := actual.HostConfig
 	if ah.NetworkMode != "none" || !ah.ReadonlyRootfs || ah.Privileged || ah.PidMode != "" || len(ah.CapAdd) != 0 || len(ah.ExtraHosts) != 0 || len(ah.Devices) != 0 || len(ah.DeviceRequests) != 0 || ah.RestartPolicy.Name != container.RestartPolicyDisabled || len(ah.Binds) != 0 || len(ah.PortBindings) != 0 || len(ah.VolumesFrom) != 0 || ah.PublishAllPorts || !reflect.DeepEqual(ah.CapDrop, h.CapDrop) || !reflect.DeepEqual(ah.SecurityOpt, h.SecurityOpt) || ah.NanoCPUs != h.NanoCPUs || ah.Memory != h.Memory || ah.PidsLimit == nil || *ah.PidsLimit != *h.PidsLimit || len(actual.Mounts) != len(h.Mounts) {
@@ -373,7 +550,7 @@ func validateHelper(actual container.InspectResponse, c *container.Config, h *co
 	}
 	return nil
 }
-func (e *sdkEngine) cleanupHelper(ctx context.Context, id string, want map[string]string) error {
+func (e *sdkEngine) cleanupHelper(ctx context.Context, id string, c *container.Config, h *container.HostConfig) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	r, err := e.client.ContainerInspect(ctx, id)
@@ -383,8 +560,11 @@ func (e *sdkEngine) cleanupHelper(ctx context.Context, id string, want map[strin
 	if err != nil {
 		return err
 	}
-	if r.ContainerJSONBase == nil || r.ID != id || r.Config == nil || !sameLabels(r.Config.Labels, want) {
+	if r.ContainerJSONBase == nil || r.ID != id || r.Config == nil || !reflect.DeepEqual(r.Config.Labels, c.Labels) {
 		return model.ErrForbidden
+	}
+	if err = validateHelper(r, c, h); err != nil {
+		return err
 	}
 	return e.client.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
 }

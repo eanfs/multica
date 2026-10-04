@@ -100,14 +100,22 @@ func TestInspectInheritedEnvironmentIsFixedAndCredentialFree(t *testing.T) {
 	}
 }
 func TestInspectHelperCannotGainPrivilegesOrHostResources(t *testing.T) {
-	for _, kind := range []string{"valid", "cap-add", "restart", "extra-host", "device", "volume-from", "pid-sharing"} {
+	for _, kind := range []string{"valid", "cap-add", "restart", "extra-host", "device", "volume-from", "pid-sharing", "missing-network", "extra-network", "stdin", "network-enabled"} {
 		t.Run(kind, func(t *testing.T) {
 			h := diagnosticHost()
 			h.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: "data-vol", Target: "/data", ReadOnly: true}}
 			want := h
 			c := &container.Config{Image: fixtureConfig().Image, User: "10001:10001", NetworkDisabled: true, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"report-stats"}}
-			actual := container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "helper", HostConfig: &h}, Config: c, Mounts: []container.MountPoint{{Type: mount.TypeVolume, Name: "data-vol", Destination: "/data", RW: false}}}
+			actual := container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "helper", HostConfig: &h}, Config: c, NetworkSettings: &container.NetworkSettings{}, Mounts: []container.MountPoint{{Type: mount.TypeVolume, Name: "data-vol", Destination: "/data", RW: false}}}
 			switch kind {
+			case "missing-network":
+				actual.NetworkSettings = nil
+			case "extra-network":
+				actual.NetworkSettings.Networks = map[string]*network.EndpointSettings{"foreign": {}}
+			case "stdin":
+				actual.Config.OpenStdin = true
+			case "network-enabled":
+				actual.Config.NetworkDisabled = false
 			case "cap-add":
 				h.CapAdd = []string{"SYS_ADMIN"}
 			case "restart":

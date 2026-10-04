@@ -15,6 +15,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/network"
 	"github.com/multica-ai/multica/server/internal/fleet/model"
 )
 
@@ -29,6 +30,22 @@ func framed(raw string) string {
 
 // This stateful transport models Docker HTTP, not the provider or future CLI.
 type offlineHTTP struct {
+	nodeInspectCount                                                                 int
+	nodeMutationAt                                                                   int
+	daemonTime                                                                       string
+	waitEntered                                                                      chan struct{}
+	leftovers                                                                        map[string]container.InspectResponse
+	recovered                                                                        []string
+	helperName                                                                       string
+	crashStage                                                                       string
+	crashCleanup                                                                     bool
+	cleanupPhase                                                                     string
+	attemptDeadline                                                                  time.Time
+	cleanupExited                                                                    chan struct{}
+	waitExited                                                                       chan struct{}
+	cleanupBudgetBad                                                                 bool
+	nodeMutation                                                                     func(*container.InspectResponse)
+	afterLogs                                                                        func()
 	afterSecrets                                                                     func()
 	t                                                                                *testing.T
 	nodeMount                                                                        string
@@ -51,7 +68,28 @@ type offlineHTTP struct {
 func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 	s.t.Helper()
 	path := strings.TrimPrefix(r.URL.Path, "/v1.51")
+	for id, snapshot := range s.leftovers {
+		if r.Method == "GET" && path == "/containers/"+id+"/json" {
+			raw, _ := json.Marshal(snapshot)
+			return response(200, string(raw)), nil
+		}
+		if r.Method == "DELETE" && path == "/containers/"+id {
+			delete(s.leftovers, id)
+			s.recovered = append(s.recovered, id)
+			return response(204, ""), nil
+		}
+	}
+	if s.crashCleanup && ((r.Method == "DELETE" && path == "/containers/helper") || (s.crashStage == "create" && r.Method == "GET" && strings.HasSuffix(path, "/json") && path != "/containers/cid/json")) {
+		return nil, context.DeadlineExceeded
+	}
 	switch {
+	case r.Method == "GET" && path == "/info":
+		now := s.daemonTime
+		if now == "" {
+			now = time.Now().Format(time.RFC3339Nano)
+		}
+		raw, _ := json.Marshal(map[string]any{"SystemTime": now})
+		return response(200, string(raw)), nil
 	case r.Method == "PUT" && path == "/containers/helper/archive":
 		if r.URL.Query().Get("path") != "/" || r.URL.Query().Get("copyUIDGID") != "true" {
 			s.t.Fatal("unsafe copy destination/ownership")
@@ -88,7 +126,16 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 		if name == "" {
 			name = "data-vol"
 		}
-		raw, _ := json.Marshal(map[string]any{"Id": "cid", "State": map[string]any{"Status": "exited", "Running": false}, "Config": map[string]any{"Image": "node-snapshot", "Labels": l}, "Mounts": []map[string]any{{"Type": "volume", "Name": name, "Destination": "/data", "RW": true}}})
+		n := fixtureNode()
+		net := (&Provider{cfg: fixtureConfig()}).networkName()
+		h := NodeHostConfig(n.Resources, true)
+		h.NetworkMode = container.NetworkMode(net)
+		snapshot := container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "cid", State: &container.State{Status: "exited"}, HostConfig: &h}, Config: &container.Config{Image: n.Image, Labels: l, User: "10001:10001", Env: []string{"HOME=/data/home", "FLEET_NODE_MAX_RUNS=1"}, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"run"}}, NetworkSettings: &container.NetworkSettings{Networks: map[string]*network.EndpointSettings{net: {}}}, Mounts: []container.MountPoint{{Type: mount.TypeVolume, Name: name, Destination: "/data", RW: true}, {Type: mount.TypeVolume, Name: n.SecretsVolume, Destination: "/secrets"}}}
+		s.nodeInspectCount++
+		if s.nodeMutation != nil && s.nodeInspectCount >= s.nodeMutationAt {
+			s.nodeMutation(&snapshot)
+		}
+		raw, _ := json.Marshal(snapshot)
 		return response(200, string(raw)), nil
 	case r.Method == "GET" && path == "/containers/json":
 		if r.URL.Query().Get("all") != "1" {
@@ -97,7 +144,12 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 		if s.writer {
 			return response(200, `[{"Id":"foreign-writer","State":"running","Mounts":[{"Type":"volume","Name":"data-vol","Destination":"/elsewhere","RW":true}]}]`), nil
 		}
-		return response(200, "[]"), nil
+		items := []map[string]any{}
+		for id, c := range s.leftovers {
+			items = append(items, map[string]any{"Id": id, "Labels": c.Config.Labels, "State": c.State.Status})
+		}
+		raw, _ := json.Marshal(items)
+		return response(200, string(raw)), nil
 	case r.Method == "GET" && path == "/containers/foreign-writer/json":
 		return response(200, `{"Id":"foreign-writer","State":{"Running":true,"Status":"running"},"Config":{"Labels":{}},"Mounts":[{"Type":"volume","Name":"data-vol","Destination":"/elsewhere","RW":true}]}`), nil
 	case r.Method == "POST" && path == "/containers/create":
@@ -105,10 +157,15 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 		if e := json.NewDecoder(r.Body).Decode(&req); e != nil {
 			s.t.Fatal(e)
 		}
+		s.helperName = r.URL.Query().Get("name")
 		s.helperConfig = req.Config
 		s.helperHost = req.HostConfig
 		s.created = true
 		s.helperCreates++
+		if s.crashStage == "create" {
+			s.crashCleanup = true
+			return nil, context.DeadlineExceeded
+		}
 		if s.createTimeout {
 			return nil, context.DeadlineExceeded
 		}
@@ -116,6 +173,9 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 	case r.Method == "GET" && strings.HasPrefix(path, "/containers/") && strings.HasSuffix(path, "/json"):
 		if !s.created || s.helperMissing {
 			return response(404, `{"message":"no such helper"}`), nil
+		}
+		if s.started && s.cleanupPhase == "inspect" {
+			return s.stalledCleanup(r)
 		}
 		c := *s.helperConfig
 		if s.cleanupForeign && s.started {
@@ -125,19 +185,36 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 		for _, m := range s.helperHost.Mounts {
 			mounts = append(mounts, map[string]any{"Type": m.Type, "Name": m.Source, "Destination": m.Target, "RW": !m.ReadOnly})
 		}
-		raw, _ := json.Marshal(map[string]any{"Id": "helper", "State": map[string]any{"Status": "exited", "Running": false}, "Config": c, "HostConfig": s.helperHost, "Mounts": mounts})
+		raw, _ := json.Marshal(map[string]any{"Id": "helper", "State": map[string]any{"Status": "exited", "Running": false}, "Config": c, "HostConfig": s.helperHost, "NetworkSettings": map[string]any{"Networks": map[string]any{}}, "Mounts": mounts})
 		return response(200, string(raw)), nil
 	case r.Method == "POST" && path == "/containers/helper/start":
 		s.started = true
+		if s.crashStage == "start" {
+			s.crashCleanup = true
+			return nil, context.DeadlineExceeded
+		}
 		return response(204, ""), nil
 	case r.Method == "POST" && path == "/containers/helper/wait":
 		if r.URL.Query().Get("condition") != "not-running" {
 			s.t.Fatal("wrong wait condition")
 		}
 		s.waitDeadline, _ = r.Context().Deadline()
+		if s.crashStage == "wait" {
+			s.crashCleanup = true
+			return nil, context.DeadlineExceeded
+		}
+		if s.waitEntered != nil {
+			close(s.waitEntered)
+		}
 		if s.waitBlocked {
 			<-r.Context().Done()
+			if s.waitExited != nil {
+				close(s.waitExited)
+			}
 			return nil, r.Context().Err()
+		}
+		if s.crashStage == "cleanup" {
+			s.crashCleanup = true
 		}
 		raw, _ := json.Marshal(map[string]any{"StatusCode": s.exit})
 		return response(200, string(raw)), nil
@@ -145,12 +222,21 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 		if r.URL.Query().Get("stdout") != "1" || r.URL.Query().Get("stderr") != "1" {
 			s.t.Fatal("must account for both streams")
 		}
+		if s.crashStage == "cleanup" {
+			s.crashCleanup = true
+		}
+		if s.afterLogs != nil {
+			s.afterLogs()
+		}
 		return response(200, framed(s.output)), nil
 	case r.Method == "DELETE" && path == "/containers/cid":
 		s.nodeRemoved = true
 		s.removalOrder = append(s.removalOrder, "container")
 		return response(204, ""), nil
 	case r.Method == "DELETE" && path == "/containers/helper":
+		if s.cleanupPhase == "remove" {
+			return s.stalledCleanup(r)
+		}
 		if r.URL.Query().Get("v") != "" {
 			s.t.Fatal("cleanup must never remove volumes")
 		}
@@ -177,12 +263,377 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 		return nil, errors.New("unexpected fake request")
 	}
 }
+func (s *offlineHTTP) stalledCleanup(r *http.Request) (*http.Response, error) {
+	defer close(s.cleanupExited)
+	d, ok := r.Context().Deadline()
+	if !ok || d.After(s.attemptDeadline) {
+		s.cleanupBudgetBad = true
+		return nil, context.DeadlineExceeded
+	}
+	<-r.Context().Done()
+	return nil, r.Context().Err()
+}
+func TestOfflineWholeAttemptIncludesStalledCleanup(t *testing.T) {
+	for _, phase := range []string{"inspect", "remove"} {
+		t.Run(phase, func(t *testing.T) {
+			s := &offlineHTTP{cleanupPhase: phase, waitBlocked: true, cleanupExited: make(chan struct{}), waitExited: make(chan struct{})}
+			p := offlineProvider(t, s)
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			s.attemptDeadline, _ = ctx.Deadline()
+			start := time.Now()
+			o, e := p.Diagnose(ctx, fixtureNode(), fixtureRef())
+			if e == nil || o.ReportStatsKnown || s.cleanupBudgetBad || time.Since(start) > 300*time.Millisecond {
+				t.Fatalf("whole cleanup deadline escaped: err=%v bad=%v elapsed=%v", e, s.cleanupBudgetBad, time.Since(start))
+			}
+			select {
+			case <-s.cleanupExited:
+			default:
+				t.Fatal("owned cleanup peer remains blocked")
+			}
+			select {
+			case <-s.waitExited:
+			default:
+				t.Fatal("owned wait peer remains blocked")
+			}
+			if s.volumeDeletes != 0 || s.nodeRemoved {
+				t.Fatal("unknown cleanup mutated data/node")
+			}
+		})
+	}
+}
+func (s *offlineHTTP) leftoverSnapshot() container.InspectResponse {
+	h := *s.helperHost
+	c := *s.helperConfig
+	r := container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "crashed-helper", Name: "/" + s.helperName, Created: time.Now().Add(-2 * time.Minute).Format(time.RFC3339Nano), State: &container.State{Status: "running", Running: true, StartedAt: "2026-01-01T00:00:00Z"}, HostConfig: &h}, Config: &c, NetworkSettings: &container.NetworkSettings{}}
+	for _, m := range h.Mounts {
+		r.Mounts = append(r.Mounts, container.MountPoint{Type: m.Type, Name: m.Source, Destination: m.Target, RW: !m.ReadOnly})
+	}
+	return r
+}
+func TestOfflineFreshDeleteRecoversAdapterCreatedHelpers(t *testing.T) {
+	for _, role := range []string{"diagnostic", "bootstrap"} {
+		for _, stage := range []string{"create", "start", "wait", "cleanup"} {
+			t.Run(role+"/"+stage, func(t *testing.T) {
+				s := &offlineHTTP{crashStage: stage}
+				p := offlineProvider(t, s)
+				n := fixtureNode()
+				if role == "diagnostic" {
+					_, _ = p.Diagnose(context.Background(), n, fixtureRef())
+				} else {
+					raw, e := bootstrapTar(n, fixtureConfig(), model.Bootstrap{NodeToken: "fake-token", APIKey: "fake-key", DaemonID: n.DaemonID, ServerURL: fixtureConfig().APIURL})
+					if e != nil {
+						t.Fatal(e)
+					}
+					s.archive = raw
+					_ = p.engine.InstallBootstrap(context.Background(), []Resource{p.volume(n, "data"), p.volume(n, "secrets")}, raw)
+				}
+				if !s.created || s.removed {
+					t.Fatal("fixture did not leave adapter-created helper")
+				}
+				s.leftovers = map[string]container.InspectResponse{"crashed-helper": s.leftoverSnapshot()}
+				s.crashStage = ""
+				s.crashCleanup = false
+				n.Revoked = true
+				n.Desired = "terminating"
+				q := offlineProvider(t, s)
+				base := time.Now()
+				clock := base
+				q.engine.(*sdkEngine).helpers.now = func() time.Time { return clock }
+				if e := q.Delete(context.Background(), n, fixtureRef()); e == nil || len(s.recovered) != 0 || s.volumeDeletes != 0 {
+					t.Fatalf("first observation must preserve resources: %v", e)
+				}
+				clock = base.Add(helperQuiescence)
+				q = New(q.engine, fixtureConfig()) // Fresh Provider shares only the explicit Engine lifecycle arbitration.
+				if e := q.Delete(context.Background(), n, fixtureRef()); e != nil || len(s.recovered) != 1 || !s.volumeMissing || strings.Join(s.removalOrder, ",") != "container,secrets,data" {
+					t.Fatalf("fresh same-ref recovery failed: %v recovered=%v order=%v", e, s.recovered, s.removalOrder)
+				}
+				if e := offlineProvider(t, s).Delete(context.Background(), n, fixtureRef()); e != nil {
+					t.Fatalf("same ref completed replay: %v", e)
+				}
+			})
+		}
+	}
+}
+func TestOfflineRecoveryWaitResetsAndNeverCachesProof(t *testing.T) {
+	for _, kind := range []string{"restart", "new-engine", "wall-jump", "current-pending", "multiple-roles"} {
+		t.Run(kind, func(t *testing.T) {
+			s := &offlineHTTP{}
+			p := offlineProvider(t, s)
+			_, e := p.Diagnose(context.Background(), fixtureNode(), fixtureRef())
+			if e != nil {
+				t.Fatal(e)
+			}
+			c := s.leftoverSnapshot()
+			s.leftovers = map[string]container.InspectResponse{"crashed-helper": c}
+			if kind == "multiple-roles" {
+				b := s.leftoverSnapshot()
+				b.ID = "bootstrap-leftover"
+				b.Config = &container.Config{Image: fixtureConfig().Image, User: "10001:10001", Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"bootstrap"}, Labels: fixtureLabels("bootstrap"), NetworkDisabled: true}
+				bh := diagnosticHost()
+				bh.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: "data-vol", Target: "/data"}, {Type: mount.TypeVolume, Source: "secrets-vol", Target: "/secrets"}}
+				b.HostConfig = &bh
+				b.Mounts = []container.MountPoint{{Type: mount.TypeVolume, Name: "data-vol", Destination: "/data", RW: true}, {Type: mount.TypeVolume, Name: "secrets-vol", Destination: "/secrets", RW: true}}
+				s.leftovers[b.ID] = b
+			}
+			q := offlineProvider(t, s)
+			base := time.Now()
+			clock := base
+			q.engine.(*sdkEngine).helpers.now = func() time.Time { return clock }
+			n := fixtureNode()
+			n.Revoked = true
+			n.Desired = "terminating"
+			if e = q.Delete(context.Background(), n, fixtureRef()); e == nil || len(s.recovered) != 0 {
+				t.Fatal("first observation granted cleanup")
+			}
+			if kind == "wall-jump" {
+				s.daemonTime = time.Now().Add(365 * 24 * time.Hour).Format(time.RFC3339Nano)
+				if e = q.Delete(context.Background(), n, fixtureRef()); e == nil || len(s.recovered) != 0 {
+					t.Fatal("daemon wallclock aged monotonic observation")
+				}
+			}
+			clock = base.Add(helperQuiescence)
+			if kind == "restart" {
+				c.State.StartedAt = "2026-02-01T00:00:00Z"
+				s.leftovers[c.ID] = c
+			}
+			if kind == "new-engine" {
+				q = offlineProvider(t, s)
+				q.engine.(*sdkEngine).helpers.now = func() time.Time { return clock }
+			}
+			if kind == "restart" || kind == "new-engine" {
+				if e = q.Delete(context.Background(), n, fixtureRef()); e == nil || len(s.recovered) != 0 {
+					t.Fatal("changed lifecycle/process reused elapsed permission")
+				}
+				clock = clock.Add(helperQuiescence)
+			}
+			if kind == "current-pending" {
+				s.output = strings.Replace(goodOffline, "\"pending\":0", "\"pending\":1", 1)
+			}
+			e = q.Delete(context.Background(), n, fixtureRef())
+			if kind == "current-pending" {
+				if e == nil || len(s.recovered) != 1 || s.volumeDeletes != 0 || s.nodeRemoved {
+					t.Fatalf("recovery substituted old proof: %v", e)
+				}
+			} else if e != nil || !s.volumeMissing {
+				t.Fatalf("eventual recovery failed: %v", e)
+			}
+			if len(q.engine.(*sdkEngine).helpers.seen) != 0 {
+				t.Fatal("removed helper observation retained")
+			}
+		})
+	}
+}
+func TestOfflineDefaultBudgetIncludesStalledCleanup(t *testing.T) {
+	for _, phase := range []string{"inspect", "remove"} {
+		t.Run(phase, func(t *testing.T) {
+			s := &offlineHTTP{cleanupPhase: phase, waitBlocked: true, cleanupExited: make(chan struct{}), waitExited: make(chan struct{})}
+			p := offlineProvider(t, s)
+			start := time.Now()
+			s.attemptDeadline = start.Add(5100 * time.Millisecond)
+			o, e := p.Diagnose(context.Background(), fixtureNode(), fixtureRef())
+			if e == nil || o.ReportStatsKnown || s.cleanupBudgetBad || time.Since(start) > 5500*time.Millisecond {
+				t.Fatalf("fixed5s whole attempt escaped: %v bad=%v elapsed=%v", e, s.cleanupBudgetBad, time.Since(start))
+			}
+			select {
+			case <-s.cleanupExited:
+			default:
+				t.Fatal("cleanup peer not terminated")
+			}
+			select {
+			case <-s.waitExited:
+			default:
+				t.Fatal("wait peer not terminated")
+			}
+		})
+	}
+}
+func TestOfflineCurrentCallHelperSurvivesConcurrentFreshProvider(t *testing.T) {
+	s := &offlineHTTP{waitBlocked: true, waitEntered: make(chan struct{}), waitExited: make(chan struct{})}
+	p := offlineProvider(t, s)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); _, _ = p.Diagnose(ctx, fixtureNode(), fixtureRef()) }()
+	select {
+	case <-s.waitEntered:
+	case <-ctx.Done():
+		t.Fatal("current helper did not enter wait")
+	}
+	c := s.leftoverSnapshot()
+	c.ID = "helper"
+	c.Created = time.Now().Format(time.RFC3339Nano)
+	s.leftovers = map[string]container.InspectResponse{"helper": c}
+	n := fixtureNode()
+	n.Revoked = true
+	n.Desired = "terminating"
+	q := New(p.engine, fixtureConfig())
+	if e := q.Delete(context.Background(), n, fixtureRef()); e == nil || len(s.recovered) != 0 || s.removed || s.nodeRemoved || s.volumeDeletes != 0 {
+		t.Fatalf("concurrent active helper removed: %v", e)
+	}
+	s.leftovers = nil
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("owned caller/SDK wait did not terminate")
+	}
+	select {
+	case <-s.waitExited:
+	default:
+		t.Fatal("wait transport peer remains blocked")
+	}
+}
+func TestOfflineUnknownLeftoversPreserveAllResources(t *testing.T) {
+	for _, kind := range []string{"fresh-active", "future", "bad-time", "missing-time", "foreign", "missing-label", "unsafe", "wrong-mount", "wrong-image", "unknown-role", "bad-argv", "credential", "wrong-id", "arbitrary-name", "network", "stdin", "cpu", "memory", "pids", "root-write", "caps", "security", "data-rw", "user", "network-snapshot", "mount-extra", "restart", "bad-start", "missing-start", "state-mismatch"} {
+		t.Run(kind, func(t *testing.T) {
+			s := &offlineHTTP{}
+			p := offlineProvider(t, s)
+			_, e := p.Diagnose(context.Background(), fixtureNode(), fixtureRef())
+			if e != nil {
+				t.Fatal(e)
+			}
+			c := s.leftoverSnapshot()
+			s.leftovers = map[string]container.InspectResponse{"crashed-helper": c}
+			q := offlineProvider(t, s)
+			base := time.Now()
+			clock := base
+			q.engine.(*sdkEngine).helpers.now = func() time.Time { return clock }
+			n := fixtureNode()
+			n.Revoked = true
+			n.Desired = "terminating"
+			if e := q.Delete(context.Background(), n, fixtureRef()); e == nil || len(s.recovered) != 0 {
+				t.Fatal("initial observation removed helper")
+			}
+			switch kind {
+			case "fresh-active":
+				c.Created = time.Now().Format(time.RFC3339Nano)
+			case "future":
+				c.Created = time.Now().Add(time.Hour).Format(time.RFC3339Nano)
+			case "bad-time":
+				c.Created = "invalid"
+			case "missing-time":
+				c.Created = ""
+			case "arbitrary-name":
+				c.Name = "/not-an-adapter-helper"
+			case "network":
+				c.Config.NetworkDisabled = false
+			case "stdin":
+				c.Config.OpenStdin = true
+			case "bad-start":
+				c.State.StartedAt = "invalid"
+			case "missing-start":
+				c.State.StartedAt = ""
+			case "state-mismatch":
+				c.State.Running = false
+			case "cpu":
+				c.HostConfig.NanoCPUs++
+			case "memory":
+				c.HostConfig.Memory++
+			case "pids":
+				*c.HostConfig.PidsLimit++
+			case "root-write":
+				c.HostConfig.ReadonlyRootfs = false
+			case "caps":
+				c.HostConfig.CapDrop = nil
+			case "security":
+				c.HostConfig.SecurityOpt = nil
+			case "data-rw":
+				c.Mounts[0].RW = true
+			case "user":
+				c.Config.User = "root"
+			case "network-snapshot":
+				c.NetworkSettings = nil
+			case "mount-extra":
+				c.Mounts = append(c.Mounts, container.MountPoint{Type: mount.TypeBind, Destination: "/socket"})
+			case "restart":
+				c.HostConfig.RestartPolicy.Name = "always"
+			case "foreign":
+				c.Config.Labels["multica.fleet.namespace"] = "foreign"
+			case "missing-label":
+				delete(c.Config.Labels, "multica.fleet.fleet_id")
+			case "unsafe":
+				c.HostConfig.Privileged = true
+			case "wrong-mount":
+				c.Mounts[0].Name = "foreign"
+			case "wrong-image":
+				c.Config.Image = "other"
+			case "unknown-role":
+				c.Config.Labels["multica.fleet.role"] = "other"
+			case "bad-argv":
+				c.Config.Cmd = []string{"other"}
+			case "credential":
+				c.Config.Env = []string{"API_KEY=private"}
+			case "wrong-id":
+				c.ID = "replacement"
+			}
+			s.leftovers = map[string]container.InspectResponse{"crashed-helper": c}
+			for attempt := 1; attempt <= 2; attempt++ {
+				if kind != "fresh-active" {
+					clock = base.Add(time.Duration(attempt) * helperQuiescence)
+				}
+				if e := q.Delete(context.Background(), n, fixtureRef()); e == nil || len(s.recovered) != 0 || s.nodeRemoved || s.volumeDeletes != 0 {
+					t.Fatalf("unknown leftover mutated resources on expired retry%d: %v", attempt, e)
+				}
+			}
+		})
+	}
+}
 func offlineProvider(t *testing.T, s *offlineHTTP) *Provider {
 	s.t = t
 	if s.output == "" {
 		s.output = goodOffline
 	}
 	return New(fakeEngine(t, s.roundTrip, false), fixtureConfig())
+}
+func TestOfflineStoppedSnapshotTamperingNeverProvesOrMutates(t *testing.T) {
+	mutations := map[string]func(*container.InspectResponse){
+		"user":       func(r *container.InspectResponse) { r.Config.User = "root" },
+		"cpu":        func(r *container.InspectResponse) { r.HostConfig.NanoCPUs++ },
+		"memory":     func(r *container.InspectResponse) { r.HostConfig.Memory++ },
+		"pids":       func(r *container.InspectResponse) { *r.HostConfig.PidsLimit++ },
+		"env":        func(r *container.InspectResponse) { r.Config.Env = append(r.Config.Env, "API_KEY=private") },
+		"network":    func(r *container.InspectResponse) { r.HostConfig.NetworkMode = "host" },
+		"secret-rw":  func(r *container.InspectResponse) { r.Mounts[1].RW = true },
+		"data-ro":    func(r *container.InspectResponse) { r.Mounts[0].RW = false },
+		"privileged": func(r *container.InspectResponse) { r.HostConfig.Privileged = true },
+		"caps":       func(r *container.InspectResponse) { r.HostConfig.CapAdd = []string{"SYS_ADMIN"} },
+		"security":   func(r *container.InspectResponse) { r.HostConfig.SecurityOpt = nil },
+		"restart":    func(r *container.InspectResponse) { r.HostConfig.RestartPolicy.Name = "always" },
+		"argv":       func(r *container.InspectResponse) { r.Config.Cmd = []string{"other"} },
+		"image":      func(r *container.InspectResponse) { r.Config.Image = "other" },
+		"read-only":  func(r *container.InspectResponse) { r.HostConfig.ReadonlyRootfs = true },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			s := &offlineHTTP{nodeMutation: mutate}
+			p := offlineProvider(t, s)
+			n := fixtureNode()
+			o, e := p.Diagnose(context.Background(), n, fixtureRef())
+			if e == nil || o.ReportStatsKnown || s.created {
+				t.Fatalf("tampered snapshot diagnosed: %v %+v", e, o)
+			}
+			n.Revoked = true
+			n.Desired = "terminating"
+			if e = p.Delete(context.Background(), n, fixtureRef()); e == nil || s.created || s.nodeRemoved || s.volumeDeletes != 0 {
+				t.Fatalf("tampered node mutated: %v", e)
+			}
+		})
+	}
+}
+func TestOfflineStoppedSnapshotRecheckedAfterProof(t *testing.T) {
+	for _, at := range []int{4, 5} {
+		t.Run(string(rune('0'+at)), func(t *testing.T) {
+			s := &offlineHTTP{nodeMutationAt: at, nodeMutation: func(r *container.InspectResponse) { r.Config.User = "root" }}
+			p := offlineProvider(t, s)
+			n := fixtureNode()
+			n.Revoked = true
+			n.Desired = "terminating"
+			if e := p.Delete(context.Background(), n, fixtureRef()); e == nil || !s.created || s.nodeRemoved || s.volumeDeletes != 0 || s.nodeInspectCount < at {
+				t.Fatalf("postproof snapshot changed at inspect%d: %v count=%d", at, e, s.nodeInspectCount)
+			}
+		})
+	}
 }
 func TestOfflineHelperHasNoCredentialsOrNetwork(t *testing.T) {
 	s := &offlineHTTP{}

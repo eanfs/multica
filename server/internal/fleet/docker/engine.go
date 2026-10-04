@@ -9,6 +9,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/containerd/errdefs"
@@ -50,12 +51,71 @@ type Engine interface {
 	FixedOfflineReports(context.Context, model.Node, model.OperationRef) ([]byte, error)
 }
 type sdkEngine struct {
-	client *client.Client
-	cfg    model.Config
+	client  *client.Client
+	cfg     model.Config
+	helpers *helperLifecycles
 }
 
+// Lifecycle arbitration stores no approval, ref, reports, or deletion permit.
+// Configured Providers share only this explicit Engine's synchronized registry.
+type helperLifecycle struct {
+	identity            string
+	firstSeen, lastSeen time.Time
+	node                string
+}
+type helperLifecycles struct {
+	mu   sync.Mutex
+	now  func() time.Time
+	seen map[string]helperLifecycle
+}
+
+const helperQuiescence = 65 * time.Second
+const helperTrackingLimit = 128
+
+func (l *helperLifecycles) quiescent(r container.InspectResponse, node string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	stamp, _ := json.Marshal(struct {
+		Created, StartedAt, FinishedAt, Status, Name string
+		Running                                      bool
+		RestartCount                                 int
+	}{r.Created, r.State.StartedAt, r.State.FinishedAt, r.State.Status, r.Name, r.State.Running, r.RestartCount})
+	identity := string(stamp)
+	previous, ok := l.seen[r.ID]
+	if !ok || previous.identity != identity || previous.node != node {
+		if len(l.seen) >= helperTrackingLimit {
+			for id, v := range l.seen {
+				if now.Sub(v.lastSeen) > helperQuiescence {
+					delete(l.seen, id)
+				}
+			}
+		}
+		if len(l.seen) >= helperTrackingLimit {
+			return false
+		}
+		l.seen[r.ID] = helperLifecycle{identity: identity, firstSeen: now, lastSeen: now, node: node}
+		return false
+	}
+	previous.lastSeen = now
+	l.seen[r.ID] = previous
+	return now.Sub(previous.firstSeen) >= helperQuiescence
+}
+func (l *helperLifecycles) prune(node string, present map[string]bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for id, v := range l.seen {
+		if v.node == node && !present[id] {
+			delete(l.seen, id)
+		}
+	}
+}
+func (l *helperLifecycles) forget(id string) { l.mu.Lock(); defer l.mu.Unlock(); delete(l.seen, id) }
+
 // NewEngine adapts only the supplied client; it never discovers hosts, credentials, or options.
-func NewEngine(c *client.Client) Engine { return &sdkEngine{client: c} }
+func NewEngine(c *client.Client) Engine {
+	return &sdkEngine{client: c, helpers: &helperLifecycles{now: time.Now, seen: map[string]helperLifecycle{}}}
+}
 func (e *sdkEngine) Find(ctx context.Context, labels map[string]string) ([]Resource, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
