@@ -30,6 +30,7 @@ var (
 )
 
 type Node struct {
+	CreatedAt, UpdatedAt                                            time.Time
 	ID, OwnerID                                                     pgtype.UUID
 	Namespace, ContainerID, DaemonID, Name, Spec, Image, ProfileRef string
 	StartEpoch, DataVolume, SecretsVolume, ErrorCode, ErrorMessage  string
@@ -43,6 +44,7 @@ type Node struct {
 }
 
 type Operation struct {
+	CreatedAt, UpdatedAt                             time.Time
 	ID, NodeID, OwnerID                              pgtype.UUID
 	Action                                           Action
 	Phase, IdempotencyKey, RequestHash, PriorDesired string
