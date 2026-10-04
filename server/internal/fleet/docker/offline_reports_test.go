@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -30,6 +31,10 @@ func framed(raw string) string {
 
 // This stateful transport models Docker HTTP, not the provider or future CLI.
 type offlineHTTP struct {
+	recoveryPhase                                                                    string
+	accumulateBootstrap                                                              bool
+	helperID                                                                         string
+	recoveryInspects                                                                 int
 	nodeInspectCount                                                                 int
 	nodeMutationAt                                                                   int
 	daemonTime                                                                       string
@@ -70,13 +75,39 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 	path := strings.TrimPrefix(r.URL.Path, "/v1.51")
 	for id, snapshot := range s.leftovers {
 		if r.Method == "GET" && path == "/containers/"+id+"/json" {
+			if s.recoveryPhase == "inspect" {
+				return s.stalledCleanup(r)
+			}
+			s.recoveryInspects++
 			raw, _ := json.Marshal(snapshot)
 			return response(200, string(raw)), nil
 		}
 		if r.Method == "DELETE" && path == "/containers/"+id {
+			if s.recoveryPhase == "remove" {
+				return s.stalledCleanup(r)
+			}
 			delete(s.leftovers, id)
 			s.recovered = append(s.recovered, id)
 			return response(204, ""), nil
+		}
+	}
+	if s.accumulateBootstrap {
+		if s.helperID != "" {
+			path = strings.Replace(path, "/containers/"+s.helperID, "/containers/helper", 1)
+		}
+		if r.Method == "GET" && strings.HasPrefix(path, "/networks/") {
+			raw, _ := json.Marshal(map[string]any{"Name": (&Provider{cfg: fixtureConfig()}).networkName(), "Id": "network-id", "Driver": "bridge", "Labels": labels("ns", "fleet", "namespace", "network")})
+			return response(200, string(raw)), nil
+		}
+		if r.Method == "GET" && strings.HasPrefix(path, "/containers/multica-fleet-") {
+			return response(404, `{ "message":"missing" }`), nil
+		}
+		if r.Method == "DELETE" && path == "/containers/helper" {
+			c := s.leftoverSnapshot()
+			c.ID = s.helperID
+			c.State = &container.State{Status: "exited"}
+			s.leftovers[c.ID] = c
+			return nil, context.DeadlineExceeded
 		}
 	}
 	if s.crashCleanup && ((r.Method == "DELETE" && path == "/containers/helper") || (s.crashStage == "create" && r.Method == "GET" && strings.HasSuffix(path, "/json") && path != "/containers/cid/json")) {
@@ -84,6 +115,12 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 	}
 	switch {
 	case r.Method == "GET" && path == "/info":
+		if s.recoveryPhase == "info" {
+			return s.stalledCleanup(r)
+		}
+		if s.recoveryPhase == "record" {
+			s.attemptDeadline, _ = r.Context().Deadline()
+		}
 		now := s.daemonTime
 		if now == "" {
 			now = time.Now().Format(time.RFC3339Nano)
@@ -169,6 +206,10 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 		if s.createTimeout {
 			return nil, context.DeadlineExceeded
 		}
+		if s.accumulateBootstrap {
+			s.helperID = fmt.Sprintf("adapter-%04d", s.helperCreates)
+			return response(201, fmt.Sprintf(`{"Id":%q}`, s.helperID)), nil
+		}
 		return response(201, `{"Id":"helper"}`), nil
 	case r.Method == "GET" && strings.HasPrefix(path, "/containers/") && strings.HasSuffix(path, "/json"):
 		if !s.created || s.helperMissing {
@@ -186,6 +227,9 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 			mounts = append(mounts, map[string]any{"Type": m.Type, "Name": m.Source, "Destination": m.Target, "RW": !m.ReadOnly})
 		}
 		raw, _ := json.Marshal(map[string]any{"Id": "helper", "State": map[string]any{"Status": "exited", "Running": false}, "Config": c, "HostConfig": s.helperHost, "NetworkSettings": map[string]any{"Networks": map[string]any{}}, "Mounts": mounts})
+		if s.accumulateBootstrap {
+			raw = bytes.Replace(raw, []byte(`"Id":"helper"`), []byte(fmt.Sprintf(`"Id":%q`, s.helperID)), 1)
+		}
 		return response(200, string(raw)), nil
 	case r.Method == "POST" && path == "/containers/helper/start":
 		s.started = true
@@ -273,6 +317,106 @@ func (s *offlineHTTP) stalledCleanup(r *http.Request) (*http.Response, error) {
 	<-r.Context().Done()
 	return nil, r.Context().Err()
 }
+
+func TestOfflinePrimaryDeleteRecoverySharesProofBudget(t *testing.T) {
+	for _, budget := range []time.Duration{0, 100 * time.Millisecond} {
+		for _, phase := range []string{"info", "inspect", "remove"} {
+			t.Run(fmt.Sprintf("%v/%s", budget, phase), func(t *testing.T) {
+				s := &offlineHTTP{}
+				p := offlineProvider(t, s)
+				if _, err := p.Diagnose(context.Background(), fixtureNode(), fixtureRef()); err != nil {
+					t.Fatal(err)
+				}
+				c := s.leftoverSnapshot()
+				s.leftovers = map[string]container.InspectResponse{c.ID: c}
+				q := offlineProvider(t, s)
+				clock := time.Now()
+				q.engine.(*sdkEngine).helpers.now = func() time.Time { return clock }
+				n := fixtureNode()
+				n.Revoked = true
+				n.Desired = "terminating"
+				if err := q.Delete(context.Background(), n, fixtureRef()); err == nil || len(s.recovered) != 0 {
+					t.Fatal("warm observation granted proof")
+				}
+				clock = clock.Add(helperQuiescence)
+				s.recoveryPhase = phase
+				s.cleanupExited = make(chan struct{})
+				ctx := context.Background()
+				cancel := func() {}
+				start := time.Now()
+				s.attemptDeadline = start.Add(5100 * time.Millisecond)
+				if budget != 0 {
+					ctx, cancel = context.WithTimeout(ctx, budget)
+					s.attemptDeadline, _ = ctx.Deadline()
+				}
+				defer cancel()
+				creates := s.helperCreates
+				err := q.Delete(ctx, n, fixtureRef())
+				limit := 5500 * time.Millisecond
+				if budget != 0 {
+					limit = 300 * time.Millisecond
+				}
+				if err == nil || s.cleanupBudgetBad || time.Since(start) > limit || s.volumeDeletes != 0 || s.nodeRemoved || len(s.recovered) != 0 || s.helperCreates != creates {
+					t.Fatalf("primary recovery escaped original proof budget: err=%v bad=%v elapsed=%v", err, s.cleanupBudgetBad, time.Since(start))
+				}
+				select {
+				case <-s.cleanupExited:
+				default:
+					t.Fatal("recovery transport peer remains blocked")
+				}
+			})
+		}
+	}
+}
+
+func TestOfflinePrimaryDeleteRecoveryExecutionCleanupOneDeadline(t *testing.T) {
+	for _, budget := range []time.Duration{0, 100 * time.Millisecond} {
+		t.Run(fmt.Sprint(budget), func(t *testing.T) {
+			s := &offlineHTTP{}
+			p := offlineProvider(t, s)
+			if _, err := p.Diagnose(context.Background(), fixtureNode(), fixtureRef()); err != nil {
+				t.Fatal(err)
+			}
+			c := s.leftoverSnapshot()
+			s.leftovers = map[string]container.InspectResponse{c.ID: c}
+			q := offlineProvider(t, s)
+			clock := time.Now()
+			q.engine.(*sdkEngine).helpers.now = func() time.Time { return clock }
+			n := fixtureNode()
+			n.Revoked = true
+			n.Desired = "terminating"
+			_ = q.Delete(context.Background(), n, fixtureRef())
+			clock = clock.Add(helperQuiescence)
+			s.recoveryPhase = "record"
+			s.cleanupPhase = "remove"
+			s.cleanupExited = make(chan struct{})
+			s.waitBlocked = true
+			s.waitExited = make(chan struct{})
+			ctx := context.Background()
+			cancel := func() {}
+			if budget != 0 {
+				ctx, cancel = context.WithTimeout(ctx, budget)
+			}
+			defer cancel()
+			start := time.Now()
+			err := q.Delete(ctx, n, fixtureRef())
+			if err == nil || s.cleanupBudgetBad || s.attemptDeadline.IsZero() || s.waitDeadline.After(s.attemptDeadline) || time.Since(start) > 5500*time.Millisecond || s.volumeDeletes != 0 || s.nodeRemoved {
+				t.Fatalf("recovery and execution/cleanup received different proof budgets: %v", err)
+			}
+			select {
+			case <-s.cleanupExited:
+			default:
+				t.Fatal("cleanup peer remains blocked")
+			}
+			select {
+			case <-s.waitExited:
+			default:
+				t.Fatal("execution peer remains blocked")
+			}
+		})
+	}
+}
+
 func TestOfflineWholeAttemptIncludesStalledCleanup(t *testing.T) {
 	for _, phase := range []string{"inspect", "remove"} {
 		t.Run(phase, func(t *testing.T) {
@@ -311,6 +455,134 @@ func (s *offlineHTTP) leftoverSnapshot() container.InspectResponse {
 	}
 	return r
 }
+
+func TestOfflineDeleteAccumulatedBootstrapHelpersProgressInBoundedBatches(t *testing.T) {
+	for _, count := range []int{6, 129} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			s := &offlineHTTP{accumulateBootstrap: true, leftovers: map[string]container.InspectResponse{}}
+			p := offlineProvider(t, s)
+			n := fixtureNode()
+			n.ContainerID = ""
+			n.Maintenance = false
+			n.Desired = "running"
+			b := model.Bootstrap{NodeToken: "fake-token", APIKey: "fake-key", DaemonID: n.DaemonID, ServerURL: fixtureConfig().APIURL}
+			s.archive, _ = bootstrapTar(n, fixtureConfig(), b)
+			for i := 0; i < count; i++ {
+				if _, err := p.Ensure(context.Background(), n, b); err == nil {
+					t.Fatal("cleanup failure unexpectedly succeeded")
+				}
+			}
+			if len(s.leftovers) != count || !s.copied || s.helperCreates != count {
+				t.Fatalf("adapter accumulation failed: %d", len(s.leftovers))
+			}
+			s.accumulateBootstrap = false
+			s.created = false
+			s.started = false
+			s.helperID = ""
+			n = fixtureNode()
+			n.Maintenance = true
+			n.Revoked = true
+			n.Desired = "terminating"
+			q := offlineProvider(t, s)
+			clock := time.Now()
+			q.engine.(*sdkEngine).helpers.now = func() time.Time { return clock }
+			if err := q.Delete(context.Background(), n, fixtureRef()); err == nil || len(s.recovered) != 0 || s.volumeDeletes != 0 {
+				t.Fatal("first fresh Engine observation must remain unknown")
+			}
+			done := false
+			for attempt := 0; attempt < count*3; attempt++ {
+				clock = clock.Add(helperQuiescence)
+				before := len(s.recovered)
+				inspections := s.recoveryInspects
+				creates := s.helperCreates
+				err := New(q.engine, fixtureConfig()).Delete(context.Background(), n, fixtureRef())
+				if len(q.engine.(*sdkEngine).helpers.seen) > 128 {
+					t.Fatal("lifecycle registry exceeded bound")
+				}
+				if len(s.recovered)-before > 5 || s.recoveryInspects-inspections > 10 {
+					t.Fatal("per-attempt recovery work exceeded bounded batch")
+				}
+				if len(s.leftovers) > 0 && (err == nil || s.volumeDeletes != 0 || s.nodeRemoved || s.helperCreates != creates) {
+					t.Fatal("partial cleanup fabricated completion/proof")
+				}
+				if err == nil {
+					done = true
+					break
+				}
+			}
+			if !done || len(s.recovered) != count || len(s.leftovers) != 0 || strings.Join(s.removalOrder, ",") != "container,secrets,data" || s.helperCreates != count+2 {
+				t.Fatalf("bounded eventual fresh-proof recovery failed: recovered=%d remaining=%d order=%v", len(s.recovered), len(s.leftovers), s.removalOrder)
+			}
+		})
+	}
+}
+
+func TestOfflineMixedBatchPreservesBadHelpersWithoutStarvingNeighbors(t *testing.T) {
+	for _, kind := range []string{"tampered", "current", "foreign"} {
+		t.Run(kind, func(t *testing.T) {
+			s := &offlineHTTP{accumulateBootstrap: true, leftovers: map[string]container.InspectResponse{}}
+			p := offlineProvider(t, s)
+			n := fixtureNode()
+			n.ContainerID = ""
+			n.Maintenance = false
+			n.Desired = "running"
+			b := model.Bootstrap{NodeToken: "fake-token", APIKey: "fake-key", DaemonID: n.DaemonID, ServerURL: fixtureConfig().APIURL}
+			s.archive, _ = bootstrapTar(n, fixtureConfig(), b)
+			for i := 0; i < 10; i++ {
+				if _, err := p.Ensure(context.Background(), n, b); err == nil {
+					t.Fatal("expected cleanup failure")
+				}
+			}
+			if len(s.leftovers) != 10 {
+				t.Fatal("missing actual adapter leftovers")
+			}
+			s.accumulateBootstrap = false
+			s.created = false
+			s.started = false
+			q := offlineProvider(t, s)
+			clock := time.Now()
+			q.engine.(*sdkEngine).helpers.now = func() time.Time { return clock }
+			n = fixtureNode()
+			n.Revoked = true
+			n.Desired = "terminating"
+			// Observe all members before corrupting the early-ID helper.
+			for i := 0; i < 2; i++ {
+				_ = q.Delete(context.Background(), n, fixtureRef())
+			}
+			bad := s.leftovers["adapter-0001"]
+			if kind == "tampered" {
+				bad.Config.User = "root"
+			}
+			if kind == "foreign" {
+				bad.Config.Labels["multica.fleet.namespace"] = "foreign"
+			}
+			s.leftovers[bad.ID] = bad
+			for i := 0; i < 12; i++ {
+				clock = clock.Add(helperQuiescence)
+				if kind == "current" {
+					bad.State = &container.State{Status: "running", Running: true, StartedAt: clock.Format(time.RFC3339Nano)}
+					s.daemonTime = clock.Format(time.RFC3339Nano)
+					s.leftovers[bad.ID] = bad
+				}
+				before := len(s.recovered)
+				inspects := s.recoveryInspects
+				if err := q.Delete(context.Background(), n, fixtureRef()); err == nil {
+					t.Fatal("bad helper fabricated all-absence")
+				}
+				if len(s.recovered)-before > 5 || s.recoveryInspects-inspects > 10 || s.volumeDeletes != 0 || s.nodeRemoved {
+					t.Fatal("mixed batch escaped bounds/preservation")
+				}
+				if _, ok := s.leftovers[bad.ID]; !ok {
+					t.Fatal("bad/current helper removed")
+				}
+			}
+			if kind != "foreign" && (len(s.recovered) != 9 || len(s.leftovers) != 1) {
+				t.Fatalf("early bad helper starved its verified neighbors: recovered=%d", len(s.recovered))
+			}
+		})
+	}
+}
+
 func TestOfflineFreshDeleteRecoversAdapterCreatedHelpers(t *testing.T) {
 	for _, role := range []string{"diagnostic", "bootstrap"} {
 		for _, stage := range []string{"create", "start", "wait", "cleanup"} {

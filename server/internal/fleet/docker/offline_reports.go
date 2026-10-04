@@ -204,11 +204,8 @@ func (e *sdkEngine) nodeResourcesAbsent(ctx context.Context, n model.Node) (bool
 	if absent && e.helpers != nil {
 		e.helpers.prune(n.Namespace+"\x00"+e.cfg.FleetID+"\x00"+nodeID(n), map[string]bool{})
 	}
-	if !absent {
-		if err := e.recoverHelpers(ctx, n); err != nil {
-			return false, err
-		}
-	}
+	// Inventory is non-mutating. Helper recovery belongs to the single
+	// FixedOfflineReports proof deadline, not this ordinary absence budget.
 	return absent, nil
 }
 func (e *sdkEngine) FixedOfflineReports(ctx context.Context, n model.Node, ref model.OperationRef) ([]byte, error) {
@@ -311,10 +308,12 @@ func (e *sdkEngine) recoverHelpers(ctx context.Context, n model.Node) error {
 	}
 	key := n.Namespace + "\x00" + e.cfg.FleetID + "\x00" + nodeID(n)
 	e.helpers.prune(key, present)
+	partial := len(candidates) > 5
+	candidates = e.helpers.batch(key, candidates)
 	if len(candidates) == 0 {
 		return nil
 	}
-	if len(candidates) > 5 || !approvedImage.MatchString(e.cfg.Image) {
+	if !approvedImage.MatchString(e.cfg.Image) {
 		return model.ErrUnknownHealth
 	}
 	if err = e.offlineIdentity(ctx, n); err != nil {
@@ -330,43 +329,86 @@ func (e *sdkEngine) recoverHelpers(ctx context.Context, n model.Node) error {
 	if err != nil || daemonNow.IsZero() {
 		return model.ErrUnknownHealth
 	}
-	ready := true
+	uncertain := partial
+	eligible := make([]Resource, 0, len(candidates))
 	for _, r := range candidates {
-		actual, err := e.client.ContainerInspect(ctx, r.ID)
-		if err != nil {
-			return model.ErrUnknownHealth
-		}
-		if err = e.validateRecoveryHelper(ctx, actual, r, n, daemonNow); err != nil {
+		if err := e.recoveryVolumes(ctx, r, n); err != nil {
 			return err
 		}
-		if !e.helpers.quiescent(actual, key) {
-			ready = false
+		actual, err := e.client.ContainerInspect(ctx, r.ID)
+		if ctx.Err() != nil {
+			return model.ErrUnknownHealth
 		}
+		if err != nil {
+			e.helpers.forget(r.ID)
+			uncertain = true
+			continue
+		}
+		if err = e.validateRecoveryHelper(ctx, actual, r, n, daemonNow); err != nil {
+			e.helpers.forget(r.ID) // Invalid observations cannot occupy capacity or retain waiting.
+			uncertain = true
+			continue
+		}
+		if !e.helpers.quiescent(actual, key) {
+			uncertain = true
+			continue
+		}
+		eligible = append(eligible, r)
 	}
-	if !ready {
-		return model.ErrUnknownHealth
-	}
-	for _, r := range candidates {
+	for _, r := range eligible {
+		if err := e.recoveryVolumes(ctx, r, n); err != nil {
+			return err
+		}
 		actual, err := e.client.ContainerInspect(ctx, r.ID)
 		if errdefs.IsNotFound(err) {
 			e.helpers.forget(r.ID)
 			continue
 		}
-		if err != nil {
+		if ctx.Err() != nil {
 			return model.ErrUnknownHealth
+		}
+		if err != nil {
+			e.helpers.forget(r.ID)
+			uncertain = true
+			continue
 		}
 		if err = e.validateRecoveryHelper(ctx, actual, r, n, daemonNow); err != nil {
-			return err
+			e.helpers.forget(r.ID)
+			uncertain = true
+			continue
 		}
 		if !e.helpers.quiescent(actual, key) {
-			return model.ErrUnknownHealth
+			uncertain = true
+			continue
 		}
 		if err = e.client.ContainerRemove(ctx, r.ID, container.RemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {
 			return model.ErrUnknownHealth
 		}
 		e.helpers.forget(r.ID)
 	}
+	if uncertain {
+		return model.ErrUnknownHealth
+	}
 	return nil
+}
+
+// Expected SQL volume failure halts the whole batch, not just one helper.
+func (e *sdkEngine) recoveryVolumes(ctx context.Context, r Resource, n model.Node) error {
+	if err := e.offlineIdentity(ctx, n); err != nil {
+		return err
+	}
+	if r.Role != "bootstrap" {
+		return nil
+	}
+	if !volumeName.MatchString(n.SecretsVolume) || n.SecretsVolume == n.DataVolume {
+		return model.ErrForbidden
+	}
+	p := Provider{cfg: e.cfg}
+	v, err := e.client.VolumeInspect(ctx, n.SecretsVolume)
+	if err != nil {
+		return model.ErrUnknownHealth
+	}
+	return validateVolume(v, p.volume(n, "secrets"))
 }
 func (e *sdkEngine) validateRecoveryHelper(ctx context.Context, actual container.InspectResponse, r Resource, n model.Node, daemonNow time.Time) error {
 	if actual.ContainerJSONBase == nil || actual.ID != r.ID || actual.Config == nil || actual.State == nil || !reflect.DeepEqual(actual.Config.Labels, labels(n.Namespace, e.cfg.FleetID, nodeID(n), r.Role)) {
@@ -401,14 +443,6 @@ func (e *sdkEngine) validateRecoveryHelper(ctx context.Context, actual container
 	if r.Role == "bootstrap" {
 		if !volumeName.MatchString(n.SecretsVolume) || n.SecretsVolume == n.DataVolume {
 			return model.ErrForbidden
-		}
-		p := Provider{cfg: e.cfg}
-		v, err := e.client.VolumeInspect(ctx, n.SecretsVolume)
-		if err != nil {
-			return model.ErrUnknownHealth
-		}
-		if err = validateVolume(v, p.volume(n, "secrets")); err != nil {
-			return err
 		}
 		h.Mounts[0].ReadOnly = false
 		h.Mounts = append(h.Mounts, mount.Mount{Type: mount.TypeVolume, Source: n.SecretsVolume, Target: "/secrets"})

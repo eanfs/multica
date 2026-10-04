@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -64,9 +65,10 @@ type helperLifecycle struct {
 	node                string
 }
 type helperLifecycles struct {
-	mu   sync.Mutex
-	now  func() time.Time
-	seen map[string]helperLifecycle
+	mu      sync.Mutex
+	now     func() time.Time
+	seen    map[string]helperLifecycle
+	cursors map[string]string
 }
 
 const helperQuiescence = 65 * time.Second
@@ -84,14 +86,10 @@ func (l *helperLifecycles) quiescent(r container.InspectResponse, node string) b
 	identity := string(stamp)
 	previous, ok := l.seen[r.ID]
 	if !ok || previous.identity != identity || previous.node != node {
-		if len(l.seen) >= helperTrackingLimit {
-			for id, v := range l.seen {
-				if now.Sub(v.lastSeen) > helperQuiescence {
-					delete(l.seen, id)
-				}
-			}
-		}
-		if len(l.seen) >= helperTrackingLimit {
+		// Still-present lifecycles must not lose their waiting interval merely
+		// because a large inventory takes multiple bounded batches to revisit.
+		// Disappearance pruning and verified removal free capacity instead.
+		if !ok && len(l.seen) >= helperTrackingLimit {
 			return false
 		}
 		l.seen[r.ID] = helperLifecycle{identity: identity, firstSeen: now, lastSeen: now, node: node}
@@ -104,11 +102,43 @@ func (l *helperLifecycles) quiescent(r container.InspectResponse, node string) b
 func (l *helperLifecycles) prune(node string, present map[string]bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if len(present) == 0 {
+		delete(l.cursors, node)
+	}
 	for id, v := range l.seen {
 		if v.node == node && !present[id] {
 			delete(l.seen, id)
 		}
 	}
+}
+
+// Batch cursors affect scheduling only, never elapsed waiting or deletion authority.
+func (l *helperLifecycles) batch(node string, candidates []Resource) []Resource {
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.cursors == nil {
+		l.cursors = map[string]string{}
+	}
+	if len(candidates) == 0 {
+		delete(l.cursors, node)
+		return nil
+	}
+	if _, ok := l.cursors[node]; !ok && len(l.cursors) >= helperTrackingLimit {
+		keys := make([]string, 0, len(l.cursors))
+		for k := range l.cursors {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		delete(l.cursors, keys[0]) // Losing a scheduling cursor cannot grant quiescence.
+	}
+	start := sort.Search(len(candidates), func(i int) bool { return candidates[i].ID > l.cursors[node] }) % len(candidates)
+	batch := make([]Resource, 0, min(5, len(candidates)))
+	for i := 0; i < min(5, len(candidates)); i++ {
+		batch = append(batch, candidates[(start+i)%len(candidates)])
+	}
+	l.cursors[node] = batch[len(batch)-1].ID
+	return batch
 }
 func (l *helperLifecycles) forget(id string) { l.mu.Lock(); defer l.mu.Unlock(); delete(l.seen, id) }
 
