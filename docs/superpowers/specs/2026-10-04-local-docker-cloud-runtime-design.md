@@ -1,7 +1,7 @@
 # 本地 Docker Cloud Runtime 设计
 
 日期：2026-10-04
-状态：四节方案已逐节确认；本文等待最终审阅。尚未开始实现。
+状态：四节方案已逐节确认；按用户要求改为复用现有 PostgreSQL 数据库，修订版等待最终审阅。尚未开始实现。
 
 ## 1. 目标与已确认决策
 
@@ -15,7 +15,7 @@
 - 不安装 Omp、Codex 或其他智能体 CLI，不自动创建业务智能体。
 - Claude 模型凭证独立配置，不继承宿主机登录信息。
 - 节点专属持久卷保存身份、会话和工作目录。
-- Fleet 用独立 SQLite 卷保存基础设施状态，不新增 PostgreSQL 业务表，不复制运行队列。
+- Fleet 与 API 使用当前 checkout 的同一个 PostgreSQL 数据库，新增 Fleet 专用表；不新建数据库、SQLite 或独立数据库卷，不复制运行队列。
 - 本地 Fleet 配置与原 SaaS Cloud 配置分离、互斥。
 - 忙碌节点不能停止、重启或删除；删除永久移除节点容器、配置和数据卷。
 - 本轮仅交付设计；最终文档批准后进入实施规划。
@@ -45,10 +45,10 @@
 | `server/cmd/fleet/` | 配置、依赖组装、独立进程生命周期 | Fleet 包 |
 | `server/internal/fleet/` | 所有者校验、节点/操作服务、HTTP 契约、恢复协调 | Store、Provider |
 | `server/internal/fleet/docker/` | Docker Engine API；以小接口提供容器、卷、检查操作 | Docker Engine |
-| `server/internal/fleet/store/` | SQLite 事务、迁移、幂等和恢复记录 | 独立数据卷 |
+| `server/internal/fleet/store/` | PostgreSQL 事务、幂等和恢复记录 | 现有 pgx/sqlc、当前 checkout 数据库 |
 | `docker/fleet/`、`docker/runtime/` | Fleet/Claude 节点镜像、固定 bootstrap 和健康工具 | 当前源码、固定 CLI 版本 |
 
-单一 Compose 定义部署 Fleet 和固定网络；动态节点由 Fleet 创建，不成为静态 Compose 服务。使用 Docker Engine SDK 和纯 Go SQLite 驱动，依赖只加入所属 Go module；不引入通用云 Provider 框架。
+单一 Compose 定义部署 Fleet 和固定网络；动态节点由 Fleet 创建，不成为静态 Compose 服务，也不新增数据库服务或 Fleet 数据库卷。使用 Docker Engine SDK，数据库复用现有 pgx/sqlc；不引入 SQLite 驱动或通用云 Provider 框架。
 
 接入现有 Cloud HTTP 客户端、认证中间件、节点 handler 和 TaskService。前端逻辑归 core，共享界面归 views，平台接线归 Web/Desktop。环境脚本接入可选 Fleet 组件。
 
@@ -62,7 +62,7 @@ API 新增 `MULTICA_LOCAL_FLEET_URL` 和 `MULTICA_LOCAL_FLEET_SECRET_FILE`，只
 4. 本地模式不启用 Billing、entitlement、seat capacity；不提供假计费响应，不让 Billing handler 使用本地 Fleet 客户端。
 5. 本地节点验证不使用正向缓存，以免凭证撤销延迟；不修改 SaaS 原有缓存规则。既有 WebSocket 的领取也要经过独立屏障检查。
 
-Fleet 配置包括当前 checkout 命名空间、Docker socket、固定镜像、容器可达的 API 地址、资源白名单及用户 UUID 到 Claude 凭证 profile 的映射。只读取显式私密配置，不读取用户 home。模板无真实密钥，配置不进入 Git。
+Fleet 配置包括当前 checkout 命名空间、Docker socket、固定镜像、容器可达的 API 地址、现有数据库连接、资源白名单及用户 UUID 到 Claude 凭证 profile 的映射。数据库沿用当前环境的 `DATABASE_URL`，Fleet 使用独立、有界连接池；容器启动脚本只转换宿主机地址为可达网关，保留相同 database 名、凭证和端口，不能连接其他 checkout 的数据库。只读取显式私密配置，不读取用户 home。模板无真实密钥，配置不进入 Git。
 
 默认一个本地规格：2 CPU、4 GiB 内存、256 个进程，每节点同时 1 次运行，每个配置用户最多 2 个节点；管理员可调整，客户端只能选白名单。Docker named volume 不承诺硬磁盘容量配额，界面不提供 EC2 的磁盘大小参数。
 
@@ -100,16 +100,26 @@ Health/ready 接口不返回敏感详情，可用于本地探针。`/api/v1/node
 
 ## 6. Store、身份与私密配置
 
-SQLite 是单 Fleet 实例的事实来源，使用事务、WAL 和有界 busy timeout；本版不运行多副本。无外键和级联清理，由应用校验关系；独立 SQLite 迁移不套用 PostgreSQL concurrent index 语法。
+现有 PostgreSQL 数据库是 API 与 Fleet 共同的事实来源。本版仍运行单 Fleet 实例，独立 pgx 连接池使用有界查询、锁等待和事务超时；连接池总预算计入现有后端容量。不复用任务队列表保存基础设施对象。
 
-- Node：UUID、owner、container ID、固定 Daemon UUID、规格、命名空间、目标/观察状态、代次、时间和脱敏错误。
-- Operation：UUID、node、类型、幂等键、请求指纹、阶段、是否已批准维护、重试数和错误。
-- NodeCredential：Token 哈希、node、撤销时间；无明文。
-- CredentialProfile：仅引用和配置版本，不将模型密钥存入 SQLite。
+拟新增专用表：
+
+- `fleet_nodes`：UUID、owner、container ID、固定 Daemon UUID、规格、命名空间、目标/观察状态、代次、时间和脱敏错误。
+- `fleet_node_operations`：UUID、node、类型、幂等键、请求指纹、阶段、是否已批准维护、重试数和错误。
+- `fleet_node_credentials`：Token 哈希、node、撤销时间；无明文。
+- `fleet_credential_profiles`：所有者到 profile 的引用和配置版本，不存模型密钥。
+
+所有读写限定 Fleet 命名空间；用户资源查询额外限定 owner，关联运行时和任务时保留工作区权限校验。无外键、级联删除或更新；清理由应用事务完成。
+
+迁移进入现有 `server/migrations/`，查询进入 `server/pkg/db/queries/`，使用 sqlc 生成共享查询代码。现有环境启动流程先迁移，再启动 API/Fleet；Fleet 不启动另一套迁移，不建立数据库。Fleet 模式下缺表/版本不满足时明确不就绪，不回退到文件存储。
+
+新增索引使用 `CREATE [UNIQUE] INDEX CONCURRENTLY`，每个独立单语句迁移、事务外运行；唯一索引和主键约束也按仓库规则拆分，不以表内约束绕过索引创建规则。条件迁移和幂等 DDL 沿用既有规则；SQL 变更后运行 `make sqlc`。
+
+数据库去重范围包括节点身份、凭证哈希及命名空间/owner/幂等键。节点限额检查和创建意图在同一事务内，通过所有者级事务锁避免并发超额。
 
 每节点有独立 data volume 和 secrets volume。data 保存 CLI 配置、固定 Daemon ID、Claude 会话/配置和运行工作目录；secrets 由固定 bootstrap 写入，节点只读挂载。权限限制到节点非 root UID。
 
-模型密钥不进入镜像层、Docker Config.Env、命令参数、浏览器响应、SQLite 或日志。入口程序读取私密文件后，仅在进程内提供 Claude 所需环境。实际模型进程能访问自己的密钥，不能宣称智能体与凭证强隔离。
+模型密钥不进入镜像层、Docker Config.Env、命令参数、浏览器响应、PostgreSQL 或日志。入口程序读取私密文件后，仅在进程内提供 Claude 所需环境。实际模型进程能访问自己的密钥，不能宣称智能体与凭证强隔离。
 
 节点生成的 `mcn_` 明文可暂存私密 bootstrap 卷以支持崩溃恢复，初始化后专属 Multica CLI 配置持有节点 Token；Fleet 数据库只存哈希。若崩溃发生在哈希提交后、私密文件写入前，恢复时撤销缺失文件对应凭证并以新凭证代次重新初始化，不能从哈希推导明文。删除移除两类卷；这是逻辑删除，不保证物理磁盘密码学擦除。
 
@@ -142,17 +152,19 @@ SQLite 是单 Fleet 实例的事实来源，使用事务、WAL 和有界 busy ti
 
 ### 屏障机制
 
-单次 health 检查存在检查后领取的竞态。SQLite 中目标状态和未完成维护操作是持久化领取屏障；API 用稳定 node UUID 的 PostgreSQL advisory lock 协调领取与维护，不新增业务表。
+单次 health 检查存在检查后领取的竞态。`fleet_nodes` 的目标状态与 `fleet_node_operations` 的维护记录是持久化屏障。API/Fleet 使用命名空间与稳定 node UUID 派生的同一 PostgreSQL 事务级 advisory lock；状态与业务任务在同库协调，不再通过跨服务 HTTP 查询领取许可。相关状态写入遵守同一锁顺序。
 
-1. 全部本地节点领取入口，包括 WS、HTTP、批量及旧单 Runtime，在实际领取事务中取得共享节点锁，并在锁内查询 Fleet 的无缓存领取许可。锁持有到领取提交/回滚；批量节点锁按 UUID 排序。不能只锁 handler 预检后释放。
-2. stop/reboot/delete 的 API 协调取得同一节点排他锁，让 Fleet 持久化准备态屏障，再检查跨工作区关联 Runtime 的已领取/活跃运行和健康诊断中的待回传结果。
-3. 忙碌则明确撤销准备态并返回 409。容器仍运行而健康未知，拒绝危险操作；不能当作空闲。
-4. 空闲则在持锁时批准 operation ID，批准提交成功才释放锁。Worker 只能执行已批准操作。
-5. API 崩溃留下未批准准备态时，禁止新领取；协调器以同一 operation ID 重试授权，不凭超时自动执行或解锁。
-6. 已批准但 Docker 结果不确定，观察实际状态并重复同一操作。恢复到运行且 Daemon 就绪后解除屏障；删除屏障永久保留。
-7. 节点注册和新运行准入也使用共享节点锁并检查 Fleet 状态，不能通过新工作区 Runtime 或并发入队绕过维护/删除；initializing 可以注册但未就绪不能领取。删除准备态拒绝新运行入队，并在排他锁内确认无排队/延后运行；停止不拒绝正常排队。
+1. 全部本地节点领取入口，包括 WS、HTTP、批量及旧单 Runtime，在实际领取事务中取得共享节点锁，直接读 Fleet 专用表中的目标状态、就绪、凭证撤销和未完成操作。锁持有到领取提交/回滚；批量节点锁按 UUID 排序。不能只锁 handler 预检后释放，也不能使用缓存绕过屏障。
+2. stop/reboot/delete 的 API 协调取得同一节点排他锁，在一个短事务内持久化准备态和 operation ID，检查跨工作区 Runtime 的已领取/活跃任务；忙碌则不提交维护状态并返回 409。删除同时检查无排队/延后运行。
+3. 提交准备态后，在事务和数据库锁之外通过 Fleet 的固定诊断接口检查待回传结果。新领取已被持久化屏障阻止。诊断明确忙碌时，通过短事务撤销准备态并返回 409；容器仍运行且诊断不可读/健康未知时，保留屏障、记录未批准错误并拒绝操作，等待显式恢复，绝不自动授权。
+4. 健康检查通过后，开启第二个短事务、获取排他节点锁，再核验操作 ID/代次、屏障、忙碌状态和删除准入；原子批准 operation ID。Worker 只能执行已批准操作。
+5. API 崩溃留下未批准准备态时，禁止新领取；协调器以同一 operation ID 请求 API 重新授权检查，不凭超时执行或解锁。
+6. 已批准但 Docker 结果不确定，观察实际状态并重复同一操作。状态与操作完成记录在事务内更新；恢复到运行且 Daemon 就绪后解除屏障，删除屏障永久保留。
+7. 节点注册和新运行准入也使用共享节点锁并读取同库状态，不能通过新工作区 Runtime 或并发入队绕过维护/删除；initializing 可注册但未就绪不能领取。删除准备态拒绝新入队；停止允许正常排队。
 
-Fleet 内部提供 node 状态/领取许可及 operation prepare/approve/abort 接口，均服务密钥认证。领取要求期望 running、凭证未撤销且没有维护屏障；查询失败关闭本地领取，不影响普通非 Fleet Runtime。API 从已验证 Token 和可信 Runtime 元数据确定 node UUID，不接受客户端任意绑定。
+领取要求期望 running、凭证未撤销、健康/就绪成立且没有维护屏障；节点健康默认在 30 秒后过期，并叠加现有 Runtime 心跳新鲜度检查，不能用旧 running 快照长期放行。缺失节点、数据库错误或不确定状态时拒绝本地领取；普通非 Fleet Runtime 不依赖 Fleet HTTP 服务。API 从已验证 Token 和可信 Runtime 元数据确定 node UUID，不接受客户端任意绑定。
+
+Fleet 内部保留固定节点诊断接口；API 提供带服务认证的操作重审入口，以恢复未批准意图。prepare/approve/abort 由共享数据库事务完成，不新增 HTTP 领取许可接口。数据库事务内不调用 Docker/Fleet HTTP，以免持锁等待外部服务。
 
 维护准备期间正常结果回调继续允许，以便送达最终结果；删除确认无待回传后才撤销 Token。已建立 WS 同样每次检查许可，不能利用旧认证继续领取。不向 Daemon 增加新的 pause/任务协议。
 
@@ -174,11 +186,12 @@ Fleet 内部提供 node 状态/领取许可及 operation prepare/approve/abort �
 
 ## 10. 故障恢复
 
-每次操作分阶段持久化，Docker 调用有界，SQLite 事务不等待外部网络。浏览器断开不取消已接受意图，Worker 使用自己的有界上下文。默认内部许可查询超时 2 秒、普通 Docker 操作超时 30 秒、初始化窗口 5 分钟、协调周期 5 秒；有界重试最多 5 次。状态仍不确定时记录失败并保留屏障，显式恢复继续同一操作，不将超时当作授权。
+每次操作分阶段持久化，Docker 调用有界，PostgreSQL 事务不等待外部网络。浏览器断开不取消已接受意图，Worker 使用自己的有界上下文。默认数据库查询/锁等待超时 2 秒、固定诊断超时 5 秒、普通 Docker 操作超时 30 秒、初始化窗口 5 分钟、协调周期 5 秒；有界重试最多 5 次。状态仍不确定时记录失败并保留屏障，显式恢复继续同一操作，不将超时当作授权。
 
 - 创建结果超时先检查固定标签和资源身份，不重复建容器。
 - Fleet 启动及协调周期比较 Store 与 Docker，恢复操作/屏障，不改变 Node/Daemon/container identity。
-- Docker 不可达时不就绪、状态未确认、领取失败关闭；不猜测删除成功或批量撤销凭证。
+- Docker 不可达时 Fleet 不就绪，协调器在数据库中标记状态未确认，受管领取失败关闭；不猜测删除成功或批量撤销凭证。Daemon 既有心跳新鲜度和节点健康记录共同约束领取，不能只相信历史 running 状态。
+- 数据库不可达时 API/Fleet 不猜测节点操作成功，不启动新的 Docker 生命周期操作；已发出的调用可能已完成，恢复连接后按原 operation ID 检查对账。Fleet HTTP 不可达本身不影响已建立认证的 WS 领取；同库节点状态和健康仍有效时，该路径可继续执行。新认证和依赖 Fleet HTTP 的诊断/管理可能失败，不保证所有节点请求都可用。
 - API 不可达时 initializing 有界退避，超出初始化窗口记录失败，不无限隐藏错误。
 - 创建失败撤销该节点 Token，只清理本次操作新建且归属明确的资源；不误删已有卷。
 - 节点默认禁用 Docker 自动 restart policy，避免显式停止被自动启动覆盖；意外停止由用户显式启动恢复。
@@ -191,7 +204,7 @@ Fleet 内部提供 node 状态/领取许可及 operation prepare/approve/abort �
 
 - `make status` 报告本 checkout 的 Fleet/节点、实际端口和就绪状态，无凭证输出。
 - `make down` 先建立屏障，确认无活跃运行和待回传，再停止节点、Fleet、API/Web；忙碌/状态未知不强制停机，返回恢复说明。保留卷和数据库。
-- `make destroy` 对 Fleet 数据单独明确确认，只清理经标签和 Store 双重校验的自有资源，不执行全局 prune，不删除其他 checkout 或共享 PostgreSQL。
+- `make destroy` 对 Fleet 数据单独明确确认，先清理经标签和 Store 双重校验的自有 Docker 资源，再通过应用事务清理当前命名空间 Fleet 表数据，并遵循原 checkout 数据库销毁流程。Docker 清理未完成时保留恢复记录，不先删数据库。不得全局 prune，不删除其他 checkout 数据或共享 PostgreSQL 实例。
 - 私密配置模板提供 owner/profile/API 地址字段而非密钥，不要求聊天发送或命令参数公开密钥。
 
 Web/Desktop 复用节点界面，能力发现后显示 Docker 规格；新增启停、重启、失败原因及不可恢复删除确认。受管标识和普通 Runtime 删除保护在前后端都生效。
@@ -202,7 +215,7 @@ TanStack Query 管服务器数据，新增响应过 zod/parseWithFallback；未�
 
 ### 默认测试：无真实模型、无 Docker 要求
 
-- Store：事务、幂等、同键冲突、恢复、撤销、用户隔离。
+- Store：使用现有 `server/internal/testutil` 数据库 fixture，覆盖事务、迁移、索引约束、幂等、并发限额、同键冲突、恢复、撤销、用户/命名空间隔离。无需 Docker/模型；数据库测试沿用仓库现有 PostgreSQL 测试环境。
 - 节点服务：fake Provider 的创建/启停/删除/超时/归属校验/失败清理。
 - API：配置互斥、Billing/配额/席位不被本地启用、服务认证、伪造 owner、节点 Token 与受管标识。
 - 领取屏障：并发领取/停止，WS/HTTP/批量/旧入口，跨工作区，API 准备/批准边界崩溃，待回传，未知健康，删除后准入。
@@ -227,9 +240,10 @@ TanStack Query 管服务器数据，新增响应过 zod/parseWithFallback；未�
 5. 忙碌及结果未回传时拒绝危险操作，并发领取不能穿透屏障。
 6. 删除撤销凭证、清理专属资源，不删除业务实体和其他 checkout。
 7. 操作中 Fleet/API 重启安全恢复，不重复创建或猜测解除屏障。
-8. 模型密钥不出现在镜像、Docker Config.Env、浏览器响应、日志、SQLite 或 Git。
+8. 模型密钥不出现在镜像、Docker Config.Env、浏览器响应、日志、PostgreSQL 或 Git。
 9. Docker Desktop/Linux 网关配置可诊断，Web/Desktop 共用能力与保护。
 10. 默认测试无真实模型调用，集成和真实烟测分别显式授权。
+11. Fleet 与 API 使用当前 checkout 同一个 PostgreSQL 数据库，迁移复用现有 runner/sqlc，无 SQLite、第二套数据库或独立数据库卷。
 
 ## 13. 后续步骤
 
