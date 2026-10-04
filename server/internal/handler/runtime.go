@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/fleetguard"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -1014,6 +1015,11 @@ func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := uuidToString(member.UserID)
 
+	if fleetguard.Managed(rt) {
+		writeErrorCode(w, http.StatusConflict, "managed_runtime_delete_unsupported", "use the managed node lifecycle to delete this runtime")
+		return
+	}
+
 	profile, hasLiveProfile, err := h.runtimeLiveProfile(r.Context(), rt)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to check runtime profile")
@@ -1061,8 +1067,13 @@ func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
 	// Revalidate under the runtime row lock. Agent/task inserts take a
 	// KEY SHARE lock through their runtime FK, so no active agent can appear
 	// after this check and then be silently unbound by the teardown.
-	if _, err := qtx.LockAgentRuntime(r.Context(), rt.ID); err != nil {
+	locked, err := qtx.LockAgentRuntime(r.Context(), rt.ID)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to lock runtime")
+		return
+	}
+	if fleetguard.Managed(locked) {
+		writeErrorCode(w, http.StatusConflict, "managed_runtime_delete_unsupported", "use the managed node lifecycle to delete this runtime")
 		return
 	}
 	if _, err := qtx.ListUserAgentsByRuntimeForUpdate(r.Context(), rt.ID); err != nil {
@@ -1232,6 +1243,11 @@ func (h *Handler) UnbindAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.Re
 	}
 	userID := uuidToString(member.UserID)
 
+	if fleetguard.Managed(rt) {
+		writeErrorCode(w, http.StatusConflict, "managed_runtime_delete_unsupported", "use the managed node lifecycle to delete this runtime")
+		return
+	}
+
 	profile, hasLiveProfile, err := h.runtimeLiveProfile(r.Context(), rt)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to check runtime profile")
@@ -1264,8 +1280,13 @@ func (h *Handler) UnbindAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.Re
 	// UPDATE that would point a new/moved agent at this runtime now
 	// blocks until our tx finishes. This is the "兜底" lock that keeps
 	// new actives from appearing between our snapshot and our unbind.
-	if _, err := qtx.LockAgentRuntime(r.Context(), rt.ID); err != nil {
+	locked, err := qtx.LockAgentRuntime(r.Context(), rt.ID)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to lock runtime")
+		return
+	}
+	if fleetguard.Managed(locked) {
+		writeErrorCode(w, http.StatusConflict, "managed_runtime_delete_unsupported", "use the managed node lifecycle to delete this runtime")
 		return
 	}
 	if _, err := qtx.ListUserAgentsByRuntimeForUpdate(r.Context(), rt.ID); err != nil {

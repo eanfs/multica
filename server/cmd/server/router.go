@@ -1447,6 +1447,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		MaxAge:           300,
 	}))
 
+	// The private maintenance callback uses service authentication, never browser/PAT middleware.
+	if localFleet.URL != "" {
+		r.Handle("/internal/local-fleet/operations/review", h.LocalFleetOperationsHandler(localFleet.Secret))
+	}
+
 	// Health / readiness checks
 	r.Get("/health", health.liveHandler)
 	r.Get("/readyz", health.readyHandler)

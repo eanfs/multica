@@ -181,7 +181,7 @@ func TestLocalFleetConfigDisabledDoesNotReadSecret(t *testing.T) {
 	}
 }
 
-// The complete production router must map public create through real Fleet admission.
+// The production router maps public create and separately mounts service-only review.
 func TestLocalFleetRouterCreateFullHop(t *testing.T) {
 	pool, f := testutil.NewFleetFixture(t)
 	ns := "task5-router-" + f.UserID
@@ -235,6 +235,17 @@ func TestLocalFleetRouterCreateFullHop(t *testing.T) {
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &node); err != nil || node.ID == "" || node.OperationID == "" {
 		t.Fatalf("router node response: %s err=%v", w.Body.String(), err)
+	}
+	if browser := call("POST", "/internal/local-fleet/operations/review", "{}", ""); browser.Code != 403 {
+		t.Fatalf("browser reached private review=%d", browser.Code)
+	}
+	private := httptest.NewRequest("POST", "/internal/local-fleet/operations/review", strings.NewReader("{}"))
+	private.Header.Set("X-Fleet-Service-Key", string(secret))
+	private.Header.Set("X-User-ID", f.UserID)
+	pw := httptest.NewRecorder()
+	router.ServeHTTP(pw, private)
+	if pw.Code != 400 {
+		t.Fatalf("private route not mounted independently=%d %s", pw.Code, pw.Body.String())
 	}
 }
 

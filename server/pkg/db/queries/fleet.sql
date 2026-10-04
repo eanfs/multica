@@ -207,6 +207,41 @@ VALUES (@namespace, @owner_id, @name, @spec, @image, @profile_ref, @spec_config)
 INSERT INTO fleet_node_operations (namespace, owner_id, node_id, action, idempotency_key, request_hash)
 VALUES (@namespace, @owner_id, @node_id, 'create', @idempotency_key, @request_hash) RETURNING *;
 
+-- name: FleetUnfinishedOperations :one
+SELECT count(*) FROM fleet_node_operations WHERE namespace = @namespace AND owner_id = @owner_id AND node_id = @node_id
+ AND phase NOT IN ('completed','failed');
+
+-- name: InsertFleetLifecycleOperation :one
+INSERT INTO fleet_node_operations(namespace,owner_id,node_id,action,idempotency_key,request_hash,phase,prior_desired,generation,approved)
+VALUES(@namespace,@owner_id,@node_id,@action,@idempotency_key,@request_hash,@phase,@prior_desired,@generation,@approved) RETURNING *;
+
+-- name: FleetAdvanceIntent :execrows
+UPDATE fleet_nodes SET generation = @next_generation,desired = @desired,maintenance = @maintenance,ready=false,updated_at=now()
+WHERE namespace = @namespace AND owner_id = @owner_id AND id = @node_id AND generation = @generation;
+
+-- name: FleetApproveOperation :execrows
+UPDATE fleet_node_operations SET approved=true,phase='queued',updated_at=now()
+WHERE namespace = @namespace AND owner_id = @owner_id AND id = @operation_id AND generation = @generation AND phase='preparing' AND NOT approved;
+
+-- name: FleetAbortOperation :execrows
+UPDATE fleet_node_operations SET approved=false,phase='failed',error_code='busy',updated_at=now()
+WHERE namespace = @namespace AND owner_id = @owner_id AND id = @operation_id AND generation = @generation AND phase='preparing' AND NOT approved;
+
+-- name: FleetRestoreMaintenance :execrows
+UPDATE fleet_nodes SET desired = @desired,maintenance=false,ready=false,updated_at=now()
+WHERE namespace = @namespace AND owner_id = @owner_id AND id = @node_id AND generation = @generation AND maintenance;
+
+-- name: FleetSetMaintenanceDesired :execrows
+UPDATE fleet_nodes SET desired = @desired,ready=false,updated_at=now()
+WHERE namespace = @namespace AND owner_id = @owner_id AND id = @node_id AND generation = @generation AND maintenance;
+
+-- name: FleetApproveDelete :execrows
+UPDATE fleet_nodes SET desired='terminating',status='terminating',revoked=true,ready=false,updated_at=now()
+WHERE namespace = @namespace AND owner_id = @owner_id AND id = @node_id AND generation = @generation AND maintenance;
+
+-- name: FleetOperationLocator :one
+SELECT * FROM fleet_node_operations WHERE namespace = @namespace AND id = @operation_id;
+
 -- name: GetFleetNodeIdentity :one
 -- The globally unique node ID locates its trusted namespace, never caller metadata.
 SELECT * FROM fleet_nodes WHERE id = @node_id AND owner_id = @owner_id;

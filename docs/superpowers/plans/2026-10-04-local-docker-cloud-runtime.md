@@ -459,7 +459,7 @@ Task 7 产出 API POST /internal/local-fleet/operations/review 的专用 service
 
 **Files:** Create `server/internal/fleetguard/maintenance.go`、`maintenance_test.go`、`server/internal/fleet/store/maintenance.go`、`maintenance_test.go`、`server/internal/handler/local_fleet_operations.go`、`local_fleet_operations_test.go`；Modify `fleet.sql`、[Cloud handler](<../../../server/internal/handler/cloud_runtime.go>)。
 
-**Interfaces:** `store.PrepareMaintenance(ctx,ownerID,nodeID,action,key) (model.Operation,error)`、`ApproveMaintenance(ctx,operationID,generation) error`、`AbortMaintenance(ctx,operationID,generation) error`。`fleetguard.Maintainer{Repo *store.Store, Diagnose func(context.Context,model.Node,model.OperationRef)(model.Observation,error)}`；`Maintainer.Request(ctx,ownerID,nodeID,action,key) (model.Operation,error)`。Diagnose 由 Task 4 的固定内部检查接口提供，测试用 function literal，无网络数据库事务混合。
+**Interfaces:** `store.PrepareMaintenance(ctx,ownerID,nodeID,action,key) (model.Operation,error)`、`ApproveMaintenance(ctx context.Context,ownerID pgtype.UUID,ref model.OperationRef,baseline model.Node,observation model.Observation) error`、`AbortMaintenance(ctx,operationID,generation) error`。`fleetguard.Maintainer{Repo *store.Store, Diagnose func(context.Context,model.Node,model.OperationRef)(model.Observation,error)}`；`Maintainer.Request(ctx,ownerID,nodeID,action,key) (model.Operation,error)`。Diagnose 由 Task 4 的固定内部检查接口提供，测试用 function literal，无网络数据库事务混合。ApproveMaintenance 显式接收诊断前的 SQL 节点快照与可信诊断结果，在第二短事务中重新校验当前 SQL 身份、代次、报告证明和队列；无证明不批准，不增加上下文许可或兼容重载。
 
 - [ ] **Step 1:** active SQL row 拒绝、pending/failed reports 拒绝、未知 health 保留未批准屏障、删除 queued 拒绝、维护后 new enqueue 拒绝、两段之间 API crash 可重试：
 

@@ -13,6 +13,7 @@ import (
 
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/multica-ai/multica/server/internal/cloudruntime"
+	"github.com/multica-ai/multica/server/internal/fleet/model"
 	"github.com/multica-ai/multica/server/internal/logger"
 )
 
@@ -158,6 +159,19 @@ func (h *Handler) proxyCloudRuntime(w http.ResponseWriter, r *http.Request, meth
 			Name string `json:"name"`
 			Spec string `json:"spec"`
 		}{in.Name, in.InstanceType})
+	}
+	if h.cfg.LocalFleetURL != "" && mutation && !(method == http.MethodPost && path == "/api/v1/nodes") {
+		action := model.Delete
+		switch path {
+		case "/api/v1/nodes/start":
+			action = model.Start
+		case "/api/v1/nodes/stop":
+			action = model.Stop
+		case "/api/v1/nodes/reboot":
+			action = model.Reboot
+		}
+		h.requestLocalOperation(w, r, userID, body, action, method, path)
+		return
 	}
 	var query url.Values
 	if opts.withQuery {

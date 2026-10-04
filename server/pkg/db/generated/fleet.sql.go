@@ -73,6 +73,31 @@ func (q *Queries) CountFleetQueuedRuns(ctx context.Context, arg CountFleetQueued
 	return count, err
 }
 
+const fleetAbortOperation = `-- name: FleetAbortOperation :execrows
+UPDATE fleet_node_operations SET approved=false,phase='failed',error_code='busy',updated_at=now()
+WHERE namespace = $1 AND owner_id = $2 AND id = $3 AND generation = $4 AND phase='preparing' AND NOT approved
+`
+
+type FleetAbortOperationParams struct {
+	Namespace   string      `json:"namespace"`
+	OwnerID     pgtype.UUID `json:"owner_id"`
+	OperationID pgtype.UUID `json:"operation_id"`
+	Generation  int64       `json:"generation"`
+}
+
+func (q *Queries) FleetAbortOperation(ctx context.Context, arg FleetAbortOperationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, fleetAbortOperation,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.OperationID,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const fleetAdmissionLocksHeld = `-- name: FleetAdmissionLocksHeld :one
 WITH keys AS (
  SELECT hashtextextended($1::text || ':' || $2::uuid::text,0) AS key,'ShareLock'::text AS mode
@@ -100,6 +125,87 @@ func (q *Queries) FleetAdmissionLocksHeld(ctx context.Context, arg FleetAdmissio
 	var bool_and bool
 	err := row.Scan(&bool_and)
 	return bool_and, err
+}
+
+const fleetAdvanceIntent = `-- name: FleetAdvanceIntent :execrows
+UPDATE fleet_nodes SET generation = $1,desired = $2,maintenance = $3,ready=false,updated_at=now()
+WHERE namespace = $4 AND owner_id = $5 AND id = $6 AND generation = $7
+`
+
+type FleetAdvanceIntentParams struct {
+	NextGeneration int64       `json:"next_generation"`
+	Desired        string      `json:"desired"`
+	Maintenance    bool        `json:"maintenance"`
+	Namespace      string      `json:"namespace"`
+	OwnerID        pgtype.UUID `json:"owner_id"`
+	NodeID         pgtype.UUID `json:"node_id"`
+	Generation     int64       `json:"generation"`
+}
+
+func (q *Queries) FleetAdvanceIntent(ctx context.Context, arg FleetAdvanceIntentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, fleetAdvanceIntent,
+		arg.NextGeneration,
+		arg.Desired,
+		arg.Maintenance,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.NodeID,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const fleetApproveDelete = `-- name: FleetApproveDelete :execrows
+UPDATE fleet_nodes SET desired='terminating',status='terminating',revoked=true,ready=false,updated_at=now()
+WHERE namespace = $1 AND owner_id = $2 AND id = $3 AND generation = $4 AND maintenance
+`
+
+type FleetApproveDeleteParams struct {
+	Namespace  string      `json:"namespace"`
+	OwnerID    pgtype.UUID `json:"owner_id"`
+	NodeID     pgtype.UUID `json:"node_id"`
+	Generation int64       `json:"generation"`
+}
+
+func (q *Queries) FleetApproveDelete(ctx context.Context, arg FleetApproveDeleteParams) (int64, error) {
+	result, err := q.db.Exec(ctx, fleetApproveDelete,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.NodeID,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const fleetApproveOperation = `-- name: FleetApproveOperation :execrows
+UPDATE fleet_node_operations SET approved=true,phase='queued',updated_at=now()
+WHERE namespace = $1 AND owner_id = $2 AND id = $3 AND generation = $4 AND phase='preparing' AND NOT approved
+`
+
+type FleetApproveOperationParams struct {
+	Namespace   string      `json:"namespace"`
+	OwnerID     pgtype.UUID `json:"owner_id"`
+	OperationID pgtype.UUID `json:"operation_id"`
+	Generation  int64       `json:"generation"`
+}
+
+func (q *Queries) FleetApproveOperation(ctx context.Context, arg FleetApproveOperationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, fleetApproveOperation,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.OperationID,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const fleetFenceTaskOwners = `-- name: FleetFenceTaskOwners :one
@@ -285,6 +391,39 @@ func (q *Queries) FleetNodeSharedLock(ctx context.Context, arg FleetNodeSharedLo
 	return err
 }
 
+const fleetOperationLocator = `-- name: FleetOperationLocator :one
+SELECT id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message FROM fleet_node_operations WHERE namespace = $1 AND id = $2
+`
+
+type FleetOperationLocatorParams struct {
+	Namespace   string      `json:"namespace"`
+	OperationID pgtype.UUID `json:"operation_id"`
+}
+
+func (q *Queries) FleetOperationLocator(ctx context.Context, arg FleetOperationLocatorParams) (FleetNodeOperation, error) {
+	row := q.db.QueryRow(ctx, fleetOperationLocator, arg.Namespace, arg.OperationID)
+	var i FleetNodeOperation
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.NodeID,
+		&i.Action,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.Phase,
+		&i.PriorDesired,
+		&i.Generation,
+		&i.Approved,
+		&i.Attempts,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+	)
+	return i, err
+}
+
 const fleetOwnerExclusiveLock = `-- name: FleetOwnerExclusiveLock :exec
 SELECT pg_advisory_xact_lock(hashtextextended('fleet-owner:' || $1::text || ':' || $2::uuid::text, 0))
 `
@@ -371,6 +510,33 @@ func (q *Queries) FleetReclaimBindings(ctx context.Context, runtimeIds []pgtype.
 		return nil, err
 	}
 	return items, nil
+}
+
+const fleetRestoreMaintenance = `-- name: FleetRestoreMaintenance :execrows
+UPDATE fleet_nodes SET desired = $1,maintenance=false,ready=false,updated_at=now()
+WHERE namespace = $2 AND owner_id = $3 AND id = $4 AND generation = $5 AND maintenance
+`
+
+type FleetRestoreMaintenanceParams struct {
+	Desired    string      `json:"desired"`
+	Namespace  string      `json:"namespace"`
+	OwnerID    pgtype.UUID `json:"owner_id"`
+	NodeID     pgtype.UUID `json:"node_id"`
+	Generation int64       `json:"generation"`
+}
+
+func (q *Queries) FleetRestoreMaintenance(ctx context.Context, arg FleetRestoreMaintenanceParams) (int64, error) {
+	result, err := q.db.Exec(ctx, fleetRestoreMaintenance,
+		arg.Desired,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.NodeID,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const fleetSchemaProbe = `-- name: FleetSchemaProbe :exec
@@ -460,6 +626,51 @@ func (q *Queries) FleetSchemaVersion(ctx context.Context) (bool, error) {
 	var supported bool
 	err := row.Scan(&supported)
 	return supported, err
+}
+
+const fleetSetMaintenanceDesired = `-- name: FleetSetMaintenanceDesired :execrows
+UPDATE fleet_nodes SET desired = $1,ready=false,updated_at=now()
+WHERE namespace = $2 AND owner_id = $3 AND id = $4 AND generation = $5 AND maintenance
+`
+
+type FleetSetMaintenanceDesiredParams struct {
+	Desired    string      `json:"desired"`
+	Namespace  string      `json:"namespace"`
+	OwnerID    pgtype.UUID `json:"owner_id"`
+	NodeID     pgtype.UUID `json:"node_id"`
+	Generation int64       `json:"generation"`
+}
+
+func (q *Queries) FleetSetMaintenanceDesired(ctx context.Context, arg FleetSetMaintenanceDesiredParams) (int64, error) {
+	result, err := q.db.Exec(ctx, fleetSetMaintenanceDesired,
+		arg.Desired,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.NodeID,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const fleetUnfinishedOperations = `-- name: FleetUnfinishedOperations :one
+SELECT count(*) FROM fleet_node_operations WHERE namespace = $1 AND owner_id = $2 AND node_id = $3
+ AND phase NOT IN ('completed','failed')
+`
+
+type FleetUnfinishedOperationsParams struct {
+	Namespace string      `json:"namespace"`
+	OwnerID   pgtype.UUID `json:"owner_id"`
+	NodeID    pgtype.UUID `json:"node_id"`
+}
+
+func (q *Queries) FleetUnfinishedOperations(ctx context.Context, arg FleetUnfinishedOperationsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, fleetUnfinishedOperations, arg.Namespace, arg.OwnerID, arg.NodeID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const getFleetIntentByKey = `-- name: GetFleetIntentByKey :one
@@ -800,6 +1011,59 @@ func (q *Queries) InsertFleetCredential(ctx context.Context, arg InsertFleetCred
 		arg.Generation,
 	)
 	return err
+}
+
+const insertFleetLifecycleOperation = `-- name: InsertFleetLifecycleOperation :one
+INSERT INTO fleet_node_operations(namespace,owner_id,node_id,action,idempotency_key,request_hash,phase,prior_desired,generation,approved)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message
+`
+
+type InsertFleetLifecycleOperationParams struct {
+	Namespace      string      `json:"namespace"`
+	OwnerID        pgtype.UUID `json:"owner_id"`
+	NodeID         pgtype.UUID `json:"node_id"`
+	Action         string      `json:"action"`
+	IdempotencyKey string      `json:"idempotency_key"`
+	RequestHash    string      `json:"request_hash"`
+	Phase          string      `json:"phase"`
+	PriorDesired   string      `json:"prior_desired"`
+	Generation     int64       `json:"generation"`
+	Approved       bool        `json:"approved"`
+}
+
+func (q *Queries) InsertFleetLifecycleOperation(ctx context.Context, arg InsertFleetLifecycleOperationParams) (FleetNodeOperation, error) {
+	row := q.db.QueryRow(ctx, insertFleetLifecycleOperation,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.NodeID,
+		arg.Action,
+		arg.IdempotencyKey,
+		arg.RequestHash,
+		arg.Phase,
+		arg.PriorDesired,
+		arg.Generation,
+		arg.Approved,
+	)
+	var i FleetNodeOperation
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.NodeID,
+		&i.Action,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.Phase,
+		&i.PriorDesired,
+		&i.Generation,
+		&i.Approved,
+		&i.Attempts,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+	)
+	return i, err
 }
 
 const insertFleetNode = `-- name: InsertFleetNode :one
