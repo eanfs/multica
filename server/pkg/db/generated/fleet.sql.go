@@ -142,6 +142,95 @@ func (q *Queries) FleetOwnerExists(ctx context.Context, ownerID pgtype.UUID) (bo
 	return exists, err
 }
 
+const fleetSchemaProbe = `-- name: FleetSchemaProbe :exec
+SELECT n.id,
+ n.namespace,
+ n.owner_id,
+ n.created_at,
+ n.updated_at,
+ n.container_id,
+ n.daemon_id,
+ n.name,
+ n.spec,
+ n.image,
+ n.profile_ref,
+ n.start_epoch,
+ n.data_volume,
+ n.secrets_volume,
+ n.desired,
+ n.status,
+ n.generation,
+ n.ready,
+ n.health_at,
+ n.active_runs,
+ n.pending_reports,
+ n.failed_reports,
+ n.maintenance,
+ n.revoked,
+ n.error_code,
+ n.error_message,
+ n.spec_config,
+ o.id,
+ o.namespace,
+ o.owner_id,
+ o.created_at,
+ o.updated_at,
+ o.node_id,
+ o.action,
+ o.idempotency_key,
+ o.request_hash,
+ o.phase,
+ o.prior_desired,
+ o.generation,
+ o.approved,
+ o.attempts,
+ o.error_code,
+ o.error_message,
+ c.id,
+ c.namespace,
+ c.owner_id,
+ c.created_at,
+ c.updated_at,
+ c.node_id,
+ c.token_hash,
+ c.revoked_at,
+ c.generation,
+ p.id,
+ p.namespace,
+ p.owner_id,
+ p.created_at,
+ p.updated_at,
+ p.profile_ref,
+ p.config_version,
+ u.id,
+ r.id,
+ r.owner_id,
+ r.metadata,
+ t.runtime_id,
+ t.status
+FROM fleet_nodes n CROSS JOIN fleet_node_operations o
+ CROSS JOIN fleet_node_credentials c CROSS JOIN fleet_credential_profiles p
+ CROSS JOIN "user" u CROSS JOIN agent_runtime r CROSS JOIN agent_task_queue t
+WHERE false
+`
+
+// Parse and permission-check required fields and query dependencies without reading rows.
+func (q *Queries) FleetSchemaProbe(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, fleetSchemaProbe)
+	return err
+}
+
+const fleetSchemaVersion = `-- name: FleetSchemaVersion :one
+SELECT current_setting('server_version_num')::integer >= 170000 AS supported
+`
+
+func (q *Queries) FleetSchemaVersion(ctx context.Context) (bool, error) {
+	row := q.db.QueryRow(ctx, fleetSchemaVersion)
+	var supported bool
+	err := row.Scan(&supported)
+	return supported, err
+}
+
 const getFleetIntentByKey = `-- name: GetFleetIntentByKey :one
 SELECT id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message FROM fleet_node_operations WHERE namespace = $1 AND owner_id = $2 AND idempotency_key = $3
 `
@@ -576,6 +665,25 @@ func (q *Queries) MaxFleetCredentialGeneration(ctx context.Context, arg MaxFleet
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const resolveFleetNodeReference = `-- name: ResolveFleetNodeReference :one
+SELECT id FROM fleet_nodes WHERE namespace = $1 AND owner_id = $2
+ AND (id::text = $3::text OR (container_id <> '' AND container_id = $3::text))
+ORDER BY (id::text = $3::text) DESC LIMIT 1
+`
+
+type ResolveFleetNodeReferenceParams struct {
+	Namespace string      `json:"namespace"`
+	OwnerID   pgtype.UUID `json:"owner_id"`
+	Reference string      `json:"reference"`
+}
+
+func (q *Queries) ResolveFleetNodeReference(ctx context.Context, arg ResolveFleetNodeReferenceParams) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, resolveFleetNodeReference, arg.Namespace, arg.OwnerID, arg.Reference)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const revokeFleetCredentials = `-- name: RevokeFleetCredentials :exec

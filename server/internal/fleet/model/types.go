@@ -86,6 +86,8 @@ type Observation struct {
 }
 
 type Provider interface {
+	// CheckAvailability is read-only and must not create resources or inspect a fabricated node.
+	CheckAvailability(context.Context) error
 	Ensure(context.Context, Node, Bootstrap) (Observation, error)
 	Inspect(context.Context, Node) (Observation, error)
 	Apply(context.Context, Node, Action) (Observation, error)

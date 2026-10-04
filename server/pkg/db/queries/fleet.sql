@@ -1,3 +1,78 @@
+-- name: FleetSchemaVersion :one
+SELECT current_setting('server_version_num')::integer >= 170000 AS supported;
+
+-- name: FleetSchemaProbe :exec
+-- Parse and permission-check required fields and query dependencies without reading rows.
+SELECT n.id,
+ n.namespace,
+ n.owner_id,
+ n.created_at,
+ n.updated_at,
+ n.container_id,
+ n.daemon_id,
+ n.name,
+ n.spec,
+ n.image,
+ n.profile_ref,
+ n.start_epoch,
+ n.data_volume,
+ n.secrets_volume,
+ n.desired,
+ n.status,
+ n.generation,
+ n.ready,
+ n.health_at,
+ n.active_runs,
+ n.pending_reports,
+ n.failed_reports,
+ n.maintenance,
+ n.revoked,
+ n.error_code,
+ n.error_message,
+ n.spec_config,
+ o.id,
+ o.namespace,
+ o.owner_id,
+ o.created_at,
+ o.updated_at,
+ o.node_id,
+ o.action,
+ o.idempotency_key,
+ o.request_hash,
+ o.phase,
+ o.prior_desired,
+ o.generation,
+ o.approved,
+ o.attempts,
+ o.error_code,
+ o.error_message,
+ c.id,
+ c.namespace,
+ c.owner_id,
+ c.created_at,
+ c.updated_at,
+ c.node_id,
+ c.token_hash,
+ c.revoked_at,
+ c.generation,
+ p.id,
+ p.namespace,
+ p.owner_id,
+ p.created_at,
+ p.updated_at,
+ p.profile_ref,
+ p.config_version,
+ u.id,
+ r.id,
+ r.owner_id,
+ r.metadata,
+ t.runtime_id,
+ t.status
+FROM fleet_nodes n CROSS JOIN fleet_node_operations o
+ CROSS JOIN fleet_node_credentials c CROSS JOIN fleet_credential_profiles p
+ CROSS JOIN "user" u CROSS JOIN agent_runtime r CROSS JOIN agent_task_queue t
+WHERE false;
+
 -- name: FleetNodeSharedLock :exec
 SELECT pg_advisory_xact_lock_shared(hashtextextended(sqlc.arg(namespace)::text || ':' || sqlc.arg(node_id)::uuid::text, 0));
 
@@ -13,6 +88,11 @@ SELECT * FROM fleet_nodes WHERE namespace = @namespace AND owner_id = @owner_id 
 -- name: ListFleetNodesByOwner :many
 SELECT * FROM fleet_nodes WHERE namespace = @namespace AND owner_id = @owner_id
 ORDER BY created_at, id LIMIT @page_limit OFFSET @page_offset;
+
+-- name: ResolveFleetNodeReference :one
+SELECT id FROM fleet_nodes WHERE namespace = @namespace AND owner_id = @owner_id
+ AND (id::text = @reference::text OR (container_id <> '' AND container_id = @reference::text))
+ORDER BY (id::text = @reference::text) DESC LIMIT 1;
 
 -- name: GetFleetOperation :one
 SELECT * FROM fleet_node_operations WHERE namespace = @namespace AND owner_id = @owner_id AND id = @operation_id;
