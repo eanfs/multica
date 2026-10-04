@@ -341,7 +341,7 @@ if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Fleet-Service-Key")), secre
 
 ### Task 5: API 本地组装、SaaS 隔离和可信节点身份
 
-**审查补充（本任务所有权与 canonical tests）：** 新增 Modify: `server/internal/handler/cloud_runtime.go`、`server/internal/handler/cloud_runtime_test.go`、`server/internal/cloudruntime/client_test.go`。proxy create/start/stop/reboot/delete 仅 allowlist Idempotency-Key；本地拒绝缺失/重复/>128 bytes key，SaaS 无 key 兼容。可信 client 最后写 X-Fleet-Service-Key/X-User-ID，caller Headers 不能覆盖身份，保留 Stripe-Signature 等非身份 passthrough。canonical TestCloudRuntimeIdempotencyFullHop 在 cloud_runtime_test.go：真实 API router/测试认证→真实 client→httptest Fleet/Store；五 actions 表驱动，同 key retry 同 op、异 body 409、伪造身份不能覆盖。Task 11 client.test.ts 拥有浏览器发 key，Task 14 trace 验全跳复用，不以单跳测试代替。
+**审查补充（本任务所有权与 canonical tests）：** 新增 Modify: `server/internal/handler/cloud_runtime.go`、`server/internal/handler/cloud_runtime_test.go`、`server/internal/cloudruntime/client_test.go`。proxy create/start/stop/reboot/delete 仅 allowlist Idempotency-Key；本地拒绝缺失/重复/>128 bytes key，SaaS 无 key 兼容。可信 client 最后写 X-Fleet-Service-Key/X-User-ID，caller Headers 不能覆盖身份，保留 Stripe-Signature 等非身份 passthrough。canonical TestCloudRuntimeIdempotencyFullHop 在 cloud_runtime_test.go：Task5 实际 create 用真实 API router/测试认证→真实 client→httptest Fleet/Store，same-key重放/不同body409/身份不覆盖；五 actions 的 key/可信 header forwarding 在 Task5 client/proxy层验证。其余 lifecycle 的真实同-op重放/不同payload冲突在 Task7 同 canonical test 扩充为五 actions（start/maintenance producer 尚未产出，Task5 不伪造该链路或超范围创建 intent）。Task 11 client.test.ts 拥有浏览器发 key，Task 14 trace 验全跳复用，不以单跳测试代替。
 
 **Dependencies:** Tasks 1–4。**Deliverable:** 原 API 可代理 fake Fleet，本地验证 mcn，Billing 无误启用。
 
@@ -436,6 +436,8 @@ SQL/row 数据必须在 shared lock 后重读；capacity 计数在 capacity lock
 **登记与批量锁补充（本任务同时实现）：** `CheckRegister(ctx context.Context,q *db.Queries,namespace string,nodeID pgtype.UUID) error`，在handler注册/upsert的同一事务shared-lock后重读node；initializing允许注册，revoked/terminating/terminated拒绝，不能利用新工作区Runtime绕过屏障。多node批量先按UUID排序shared锁，再同序capacity锁，最后agent/task行锁。CheckEnqueue在delete准备态必须看到desired=terminating；AbortMaintenance按Operation.PriorDesired恢复，stop保留正常排队。WS每次claim重新查同库，不凭旧认证放行；Fleet HTTP不可达但有效健康/DB状态仍允许已有WS路径。
 
 ### Task 7: 两段式维护授权、忙碌拒绝与删除准入
+
+**Full-hop canonical test ownership:** 本任务在既有 cloud_runtime_test.go 的 TestCloudRuntimeIdempotencyFullHop 上扩充实际五 actions，用本任务 start/maintenance producers+已批准 Task4 HTTP，真实同 key/op、异payload409；Task5 已验证 create 与五 actions headers，不重复其头传递矩阵。此测试不是 Task14 的组合 trace 替代。
 
 **Start producer（本任务已有 API lifecycle 所有权）：** 新增 `Store.CreateStartIntent(ctx context.Context,ownerID,nodeID pgtype.UUID,key string)(model.Operation,error)` 于 store/maintenance.go；API local start 经 `Maintainer.Request(action=Start)` 路由该 producer。节点 exclusive-lock 后校验 owner/ns、幂等key（同payload/action重放，冲突409）、非revoked/terminating/terminated且无 preparing/prepared/applying/其他未完成操作；按同节点 generation CAS 原子产生 queued/approved=true/start op，将 desired=running、ready=false，保留卷、profile/resource快照。Start 不做破坏性 maintenance prepare/diagnose/取消队列，不凭未知健康解除既有屏障；stopped/failed/missing 可请求安全恢复，运行中状态或既有 intent 冲突不再创建。操作写入与 generation advancement 同短事务，无IO。API 给 Fleet Task4 发送固定 OperationRequestDTO；Task10 才物理启动。canonical test 在本任务 maintenance_test.go：并发same-key replay、preparing/terminating冲突、owned跨ns隔离、卷/快照保持与无破坏性授权IO。
 
