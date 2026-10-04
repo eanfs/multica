@@ -42,7 +42,7 @@ func (p *fakeProvider) Apply(context.Context, model.Node, model.Action) (model.O
 	p.record("apply")
 	return model.Observation{}, model.ErrUnavailable
 }
-func (p *fakeProvider) Delete(context.Context, model.Node) error {
+func (p *fakeProvider) Delete(context.Context, model.Node, model.OperationRef) error {
 	p.record("delete")
 	return model.ErrUnavailable
 }

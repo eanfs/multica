@@ -134,7 +134,7 @@ type Provider interface {
     Ensure(context.Context, Node, Bootstrap) (Observation, error)
     Inspect(context.Context, Node) (Observation, error)
     Apply(context.Context, Node, Action) (Observation, error)
-    Delete(context.Context, Node) error
+    Delete(context.Context, Node, OperationRef) error
     Diagnose(context.Context, Node, OperationRef) (Observation, error)
 }
 ```
@@ -540,7 +540,7 @@ func TestNodeHostConfigIsRestricted(t *testing.T) {
 
 `NodeHostConfig(model.Spec,bool) container.HostConfig` 本任务定义；SDK package 路径按所选 SDK 版本固定，不能混用新/旧 module imports。断言 nonroot user、socket 不在 mounts、restart=no、labels 包含 namespace/node/role、secrets 只读。
 - [ ] **Step 2:** `go test ./internal/fleet/docker -run 'TestNodeHostConfig|TestOwnership|TestInspect' -count=1`；预期缺 builder/错误默认配置 FAIL，不访问 socket。
-- [ ] **Step 3:** 固定 image/tag/network/volumes 从 cfg + Node UUID 生成。Ensure 先 inspect labels/container identity，重复相同 node 不重复 create；一致才 adopt。Delete 在每次资源移除前校验 Store ID 与全套 labels；遇其他 namespace 返回 Forbidden，缺失自有资源视幂等成功。bootstrap 通过 fixed init container/tar 写 volumes，secret 不放 Config.Env。健康用固定 `fleet-node health` 命令，任意 cmd/body 禁止进入 exec；parse json 校验 DaemonID 和 start epoch。
+- [ ] **Step 3:** 固定 image/tag/network/volumes 从 cfg + Node UUID 生成。Ensure 先 inspect labels/container identity，重复相同 node 不重复 create；一致才 adopt。Delete(ctx,node,ref) 使用原始持久化 approved operation 的 ref 与当前 SQL node，不依赖内存诊断许可；每次资源移除前校验 Store ID 与全套 labels，data volume 最后移除，所有节点资源经 SDK NotFound 且无 owned leftovers 才可幂等完成（不推断 report zero）；遇其他 namespace 返回 Forbidden，缺失自有资源视幂等成功。bootstrap 通过 fixed init container/tar 写 volumes，secret 不放 Config.Env。健康用固定 `fleet-node health` 命令，任意 cmd/body 禁止进入 exec；parse json 校验 DaemonID；固定 health 执行前后读取可信 SDK container 身份及 StartedAt，身份/epoch 变化视未知，Observation.StartEpoch 仅绑定该当前 SDK 值。
 
 ```go
 func Owns(labels map[string]string,namespace,fleetID,nodeID,role string) bool {

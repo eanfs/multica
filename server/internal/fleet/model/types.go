@@ -91,6 +91,6 @@ type Provider interface {
 	Ensure(context.Context, Node, Bootstrap) (Observation, error)
 	Inspect(context.Context, Node) (Observation, error)
 	Apply(context.Context, Node, Action) (Observation, error)
-	Delete(context.Context, Node) error
+	Delete(context.Context, Node, OperationRef) error
 	Diagnose(context.Context, Node, OperationRef) (Observation, error)
 }

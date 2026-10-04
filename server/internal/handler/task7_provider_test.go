@@ -18,7 +18,7 @@ func (task7DiagnosticProvider) Inspect(context.Context, model.Node) (model.Obser
 func (task7DiagnosticProvider) Apply(context.Context, model.Node, model.Action) (model.Observation, error) {
 	panic("physical Apply unauthorized")
 }
-func (task7DiagnosticProvider) Delete(context.Context, model.Node) error {
+func (task7DiagnosticProvider) Delete(context.Context, model.Node, model.OperationRef) error {
 	panic("physical Delete unauthorized")
 }
 func (task7DiagnosticProvider) Diagnose(_ context.Context, n model.Node, _ model.OperationRef) (model.Observation, error) {
