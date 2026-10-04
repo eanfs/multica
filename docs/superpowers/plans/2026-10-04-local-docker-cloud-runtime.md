@@ -205,7 +205,7 @@ func CanEnqueue(n Node) bool {
 
 **Interfaces:** `testutil.NewFleetFixture(t *testing.T) (*pgxpool.Pool,*testutil.Fixture)` 要求环境已有 DATABASE_URL，使用 f.User/Workspace/Member 建自有测试行并注册 Cleanup；不自行建库。新增 `Fixture.FleetNode(t TB, namespace string, over ...Cols) string` 创建默认 ready node。SQL 提供 `FleetNodeSharedLock`、`FleetNodeExclusiveLock`、`FleetNodeCapacityLock`、`GetFleetNode`、`ListFleetNodesByOwner`、`GetFleetNodeForRuntime`、`CountFleetActiveRuns`、`CountFleetQueuedRuns`。跨表 busy 查询覆盖所有关联工作区，不只当前 header。
 
-- [ ] **Step 1:** 在 store_test 用 fixture 检查 namespace/owner 隔离与重复 ID/幂等键，测试需要的核心形状：
+- [x] **Step 1:** 在 store_test 用 fixture 检查 namespace/owner 隔离与重复 ID/幂等键，测试需要的核心形状：
 
 ```go
 func TestFleetNodeOwnerIsolation(t *testing.T) {
@@ -222,8 +222,8 @@ func TestFleetNodeOwnerIsolation(t *testing.T) {
 ```
 
 `Store.ListNodes(ctx, ownerID, limit, offset) ([]model.Node,error)` 在本任务定义。增加第二个 owner 和 namespace 断言，不在测试打印秘密。
-- [ ] **Step 2:** `make env-exec ARGS='-- bash -c "cd server && go test ./internal/fleet/store -run TestFleetNodeOwnerIsolation -count=1"'`；迁移未有表/方法未有时 FAIL。
-- [ ] **Step 3:** 先建四表，所有表含 `id uuid NOT NULL DEFAULT gen_random_uuid()`、`namespace text`、`owner_id uuid`、时间字段。字段完整取自 Spec 第6节；profile 只含引用，凭证只含 hash。锁 SQL：
+- [x] **Step 2:** `make env-exec ARGS='-- bash -c "cd server && go test ./internal/fleet/store -run TestFleetNodeOwnerIsolation -count=1"'`；迁移未有表/方法未有时 FAIL。
+- [x] **Step 3:** 先建四表，所有表含 `id uuid NOT NULL DEFAULT gen_random_uuid()`、`namespace text`、`owner_id uuid`、时间字段。字段完整取自 Spec 第6节；profile 只含引用，凭证只含 hash。锁 SQL：
 
 ```sql
 -- name: FleetNodeSharedLock :exec
@@ -243,12 +243,12 @@ SELECT pg_advisory_xact_lock(hashtextextended(
 CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS fleet_nodes_id_idx ON fleet_nodes(id);
 ```
 
-- [ ] **Step 4:** `make sqlc`，`make env-exec ARGS='-- bash -c "cd server && go run ./cmd/migrate up && go test ./internal/fleet/store ./internal/testutil -count=1"'`。确认测试未因数据库不达被 skip；检查 pg_indexes 与无 FK。只在测试自有数据验证 down/up，不对现有业务库运行 migrate down。
-- [ ] **Step 5:** 提交 `feat(fleet): persist node state in existing PostgreSQL`，明确 stage 本批 migrations、fleet.sql、生成代码、store 与 fixture。
+- [x] **Step 4:** `make sqlc`，`make env-exec ARGS='-- bash -c "cd server && go run ./cmd/migrate up && go test ./internal/fleet/store ./internal/testutil -count=1"'`。确认测试未因数据库不达被 skip；检查 pg_indexes 与无 FK。只在测试自有数据验证 down/up，不对现有业务库运行 migrate down。
+- [x] **Step 5:** 提交 `feat(fleet): persist node state in existing PostgreSQL`，明确 stage 本批 migrations、fleet.sql、生成代码、store 与 fixture。
 
 ### Task 3: 创建意图、幂等与节点凭证
 
-**审查补充（本任务所有权与 canonical tests）：** 新增 Modify: `server/internal/testutil/fleet.go`、`server/internal/testutil/fleet_test.go`。Task 2 产出基础 fixture/FleetNode，Task 3 产出 FleetProfile，不追溯要求 Task 2 实现。canonical TestFleetProfileFixture 使用自有 profile 引用；intents_test.go 拥有 profile 缺失/并发限额/同键重放，无真实密钥。
+**审查补充（本任务所有权与 canonical tests）：** 新增 Modify: `server/internal/fleet/store/store_test.go`，仅加强已审查 Task 2 的 M1 总事务时限回归：预算内第一次数据库调用必须成功、仅预算后调用失败；不复制矩阵或改事务生产逻辑。新增 Modify: `server/internal/testutil/fleet.go`、`server/internal/testutil/fleet_test.go`。Task 2 产出基础 fixture/FleetNode，Task 3 产出 FleetProfile，不追溯要求 Task 2 实现。canonical TestFleetProfileFixture 使用自有 profile 引用；intents_test.go 拥有 profile 缺失/并发限额/同键重放，无真实密钥。
 
 **Dependencies:** Tasks 1–2。**Deliverable:** 无 Docker 的原子 create/list intent 和凭证生命周期。
 
