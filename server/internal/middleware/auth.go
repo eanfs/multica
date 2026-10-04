@@ -15,6 +15,14 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
+type cloudNodeIdentityKey struct{}
+
+// CloudNodeIdentity returns only an identity verified by the authentication middleware.
+func CloudNodeIdentity(ctx context.Context) (auth.CloudPATIdentity, bool) {
+	identity, ok := ctx.Value(cloudNodeIdentityKey{}).(auth.CloudPATIdentity)
+	return identity, ok
+}
+
 func uuidToString(u pgtype.UUID) string { return util.UUIDToString(u) }
 
 func rejectTemporarilyDisabledUser(w http.ResponseWriter, r *http.Request, userID, email, authPath string) bool {
@@ -193,7 +201,7 @@ func Auth(queries *db.Queries, patCache *auth.PATCache, cloudPAT *auth.CloudPATV
 				// treated as the owner having approved an account-
 				// level action.
 				r.Header.Set("X-Actor-Source", "cloud_pat")
-				next.ServeHTTP(w, r)
+				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), cloudNodeIdentityKey{}, identity)))
 				return
 			}
 

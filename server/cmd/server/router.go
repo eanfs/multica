@@ -401,6 +401,10 @@ func seatCapacityExecutor(cloudURL string) seatcapacity.Executor {
 // callers that only need the HTTP handler (tests, the simple
 // NewRouter shim) discard the second value.
 func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analyticsClient analytics.Client, rdb redis.UniversalClient, opts RouterOptions) (chi.Router, *handler.Handler) {
+	localFleet, localErr := resolveLocalFleet(os.Getenv("MULTICA_CLOUD_URL"), os.Getenv("MULTICA_LOCAL_FLEET_URL"), os.Getenv("MULTICA_LOCAL_FLEET_SECRET_FILE"))
+	if localErr != nil {
+		panic(localErr)
+	}
 	queries := db.New(pool)
 	emailSvc := service.NewEmailService()
 	daemonHub := opts.DaemonHub
@@ -435,6 +439,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		TrustedProxies:           parseTrustedProxies(os.Getenv("MULTICA_TRUSTED_PROXIES")),
 		CloudURL:                 strings.TrimSpace(os.Getenv("MULTICA_CLOUD_URL")),
 		CloudTimeout:             35 * time.Second,
+		LocalFleetURL:            localFleet.URL,
+		LocalFleetSecret:         localFleet.Secret,
 		AttachmentDownloadMode:   os.Getenv("ATTACHMENT_DOWNLOAD_MODE"),
 		AttachmentDownloadURLTTL: envDuration("ATTACHMENT_DOWNLOAD_URL_TTL", 30*time.Minute),
 		AttachmentFrameAncestors: origins,
@@ -1385,16 +1391,13 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	h.DaemonTokenCache = daemonTokenCache
 	h.MembershipCache = auth.NewMembershipCache(rdb)
 
-	// Cloud PAT verifier: validates mcn_ tokens against Multica Cloud
-	// Fleet. Returns nil when no Cloud URL is configured — the Auth /
+	// Cloud PAT verifier: validates mcn_ tokens against the selected SaaS
+	// or local Fleet. Returns nil when neither URL is configured — the Auth /
 	// DaemonAuth middlewares treat nil as "mcn_ not supported" and
 	// reject with 401, instead of falling through to mul_/JWT paths.
-	// Reuses MULTICA_CLOUD_URL (the same URL the cloud-runtime proxy uses) so a
-	// deployment has one authoritative multica-cloud connection.
-	cloudPATVerifier := auth.NewCloudPATVerifier(auth.CloudPATVerifierConfig{
-		FleetBaseURL: signupConfig.CloudURL,
-		Redis:        rdb,
-	})
+	// Local Fleet gets its private service key and no positive Redis cache.
+	// SaaS keeps the same Cloud URL and configured Redis behavior.
+	cloudPATVerifier := fleetPATVerifier(signupConfig.CloudURL, localFleet, rdb)
 
 	// Empty-claim cache: lets the daemon poll path skip a Postgres
 	// scan when a recent check confirmed the runtime had no queued
@@ -2450,8 +2453,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				})
 			})
 
-			// Cloud Runtime fleet proxy. The remote service URL is configured
-			// on SaaS API nodes only; self-hosted deployments return 503.
+			// Node-only Fleet proxy, selected by mutually exclusive SaaS/local URLs.
+			// Unconfigured self-hosted deployments retain the feature-disabled response.
 			r.Route("/api/cloud-runtime", func(r chi.Router) {
 				r.Get("/", h.GetCloudRuntimeService)
 				r.Get("/healthz", h.GetCloudRuntimeHealth)

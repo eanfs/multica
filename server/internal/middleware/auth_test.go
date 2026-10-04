@@ -2,6 +2,9 @@ package middleware
 
 import (
 	"context"
+	"encoding/json"
+	"github.com/multica-ai/multica/server/internal/testutil"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -486,5 +489,61 @@ func TestAuth_MCN_FleetUnreachableReturns503(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestCloudPATTrustedIdentityContext(t *testing.T) {
+	pool, f := testutil.NewFleetFixture(t)
+	expected := auth.CloudPATIdentity{OwnerID: f.UserID, InstanceRecordID: "22222222-2222-4222-8222-222222222222", InstanceID: "test-container"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Fleet-Service-Key") != "test-only-service-key" {
+			w.WriteHeader(401)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"valid": true, "owner_id": expected.OwnerID, "instance_record_id": expected.InstanceRecordID, "instance_id": expected.InstanceID})
+	}))
+	defer srv.Close()
+	verifier := auth.NewCloudPATVerifier(auth.CloudPATVerifierConfig{FleetBaseURL: srv.URL, ServiceSecret: []byte("test-only-service-key")})
+	q := db.New(pool)
+	for _, mw := range []func(http.Handler) http.Handler{Auth(q, nil, verifier, nil), DaemonAuth(q, nil, nil, verifier)} {
+		next := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			identity, ok := CloudNodeIdentity(r.Context())
+			if !ok || identity != expected || r.Header.Get("X-User-ID") != f.UserID || r.Header.Get("X-Actor-Source") != "cloud_pat" {
+				w.WriteHeader(403)
+				return
+			}
+			w.WriteHeader(204)
+		}))
+		req := httptest.NewRequest("POST", "/api/daemon/register", nil)
+		req.Header.Set("Authorization", "Bearer mcn_fake")
+		req.Header.Set("X-User-ID", "forged")
+		req.Header.Set("X-Fleet-Node-ID", "forged")
+		w := httptest.NewRecorder()
+		next.ServeHTTP(w, req)
+		if w.Code != 204 {
+			t.Fatalf("verified context status=%d %s", w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestCloudPATIdentityCannotBeForgedByJWTHeaders(t *testing.T) {
+	for _, mw := range []func(http.Handler) http.Handler{Auth(nil, nil, nil, nil), DaemonAuth(nil, nil, nil, nil)} {
+		next := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, ok := CloudNodeIdentity(r.Context()); ok {
+				w.WriteHeader(403)
+				return
+			}
+			w.WriteHeader(204)
+		}))
+		req := httptest.NewRequest("POST", "/api/daemon/register", nil)
+		req.Header.Set("Authorization", "Bearer "+generateToken(validClaims(), auth.JWTSecret()))
+		req.Header.Set("X-Fleet-Node-ID", "forged")
+		req.Header.Set("X-Actor-Source", "cloud_pat")
+		req.Header.Set("X-User-ID", "forged")
+		w := httptest.NewRecorder()
+		next.ServeHTTP(w, req)
+		if w.Code != 204 {
+			t.Fatalf("headers forged identity: %d %s", w.Code, w.Body.String())
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/multica-ai/multica/server/internal/cloudruntime"
@@ -21,6 +22,7 @@ type cloudRuntimeProxyOptions struct {
 	withUserID bool
 	withQuery  bool
 	withBody   bool
+	billing    bool
 }
 
 func (h *Handler) GetCloudRuntimeService(w http.ResponseWriter, r *http.Request) {
@@ -101,11 +103,27 @@ func (h *Handler) ExecCloudRuntimeNode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) proxyCloudRuntime(w http.ResponseWriter, r *http.Request, method, path string, opts cloudRuntimeProxyOptions) {
-	if h.CloudRuntime == nil || !h.CloudRuntime.Enabled() {
+	client := h.CloudRuntime
+	if opts.billing {
+		client = h.CloudBilling
+	}
+	if client == nil || !client.Enabled() {
 		writeFeatureDisabled(w, "cloud_runtime_not_configured", "cloud runtime is not configured")
 		return
 	}
 
+	var headers http.Header
+	mutation := !opts.billing && ((path == "/api/v1/nodes" && (method == http.MethodPost || method == http.MethodDelete)) || path == "/api/v1/nodes/start" || path == "/api/v1/nodes/stop" || path == "/api/v1/nodes/reboot")
+	if mutation {
+		keys := r.Header.Values("Idempotency-Key")
+		if h.cfg.LocalFleetURL != "" && (len(keys) != 1 || strings.TrimSpace(keys[0]) == "" || len(keys[0]) > 128) {
+			writeError(w, 400, "one Idempotency-Key of at most 128 bytes is required")
+			return
+		}
+		if len(keys) > 0 {
+			headers = http.Header{"Idempotency-Key": append([]string(nil), keys...)}
+		}
+	}
 	var userID string
 	if opts.withUserID {
 		var ok bool
@@ -124,18 +142,36 @@ func (h *Handler) proxyCloudRuntime(w http.ResponseWriter, r *http.Request, meth
 		}
 	}
 
+	if h.cfg.LocalFleetURL != "" && method == http.MethodPost && path == "/api/v1/nodes" && !opts.billing {
+		// Installed clients send instance_type; Fleet only accepts the approved spec key.
+		var in struct {
+			Name         string `json:"name"`
+			InstanceType string `json:"instance_type"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&in); err != nil || strings.TrimSpace(in.InstanceType) == "" {
+			writeError(w, 400, "local create accepts only name and instance_type")
+			return
+		}
+		body, _ = json.Marshal(struct {
+			Name string `json:"name"`
+			Spec string `json:"spec"`
+		}{in.Name, in.InstanceType})
+	}
 	var query url.Values
 	if opts.withQuery {
 		query = r.URL.Query()
 	}
 
-	resp, err := h.CloudRuntime.Do(r.Context(), cloudruntime.Request{
+	resp, err := client.Do(r.Context(), cloudruntime.Request{
 		Method:    method,
 		Path:      path,
 		Query:     query,
 		Body:      body,
 		UserID:    userID,
 		RequestID: cloudRuntimeRequestID(r),
+		Headers:   headers,
 	})
 	if err != nil {
 		writeCloudRuntimeError(w, r, err)

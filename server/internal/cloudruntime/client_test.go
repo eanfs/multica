@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 )
 
@@ -69,6 +70,22 @@ func TestClientDoForwardsFleetRequest(t *testing.T) {
 	}
 }
 
+// Caller headers must never become trusted service credentials, even on SaaS.
+func TestClientRejectsCallerServiceIdentity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Fleet-Service-Key") != "" || r.Header.Get("X-User-ID") != "trusted-owner" {
+			w.WriteHeader(403)
+			return
+		}
+		w.WriteHeader(204)
+	}))
+	defer srv.Close()
+	resp, err := NewClient(Config{BaseURL: srv.URL}).Do(context.Background(), Request{Method: "POST", Path: "/api/v1/nodes", UserID: "trusted-owner", Headers: http.Header{"x-fleet-service-key": {"forged"}, "x-user-id": {"forged"}}})
+	if err != nil || resp.StatusCode != 204 {
+		t.Fatalf("untrusted service credential forwarded: resp=%v err=%v", resp, err)
+	}
+}
+
 func TestClientDoDisabled(t *testing.T) {
 	client := NewClient(Config{})
 	_, err := client.Do(context.Background(), Request{Method: http.MethodGet, Path: "/healthz"})
@@ -82,5 +99,51 @@ func TestClientDoInvalidBaseURL(t *testing.T) {
 	_, err := client.Do(context.Background(), Request{Method: http.MethodGet, Path: "/healthz"})
 	if !errors.Is(err, ErrInvalidBaseURL) {
 		t.Fatalf("err = %v, want ErrInvalidBaseURL", err)
+	}
+}
+
+// Redirects must not disclose the private service key to another HTTP origin.
+func TestClientLocalServiceKeyRejectsRedirect(t *testing.T) {
+	var leaked atomic.Bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked.Store(r.Header.Get("X-Fleet-Service-Key") != "")
+		w.WriteHeader(204)
+	}))
+	defer target.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, target.URL, 302) }))
+	defer srv.Close()
+	client := NewClient(Config{BaseURL: srv.URL, ServiceSecret: []byte("test-only-service-key")})
+	_, _ = client.Do(context.Background(), Request{Method: "GET", Path: "/api/v1/"})
+	if leaked.Load() {
+		t.Fatal("private service key followed redirect")
+	}
+}
+
+func TestClientLocalTrustedHeadersAllActions(t *testing.T) {
+	secret := []byte("test-only-service-key")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Fleet-Service-Key") != "test-only-service-key" || r.Header.Get("X-User-ID") != "trusted-owner" || r.Header.Get("Idempotency-Key") != "same-key" || r.Header.Get("Stripe-Signature") != "untouched-signature" {
+			w.WriteHeader(403)
+			return
+		}
+		w.WriteHeader(204)
+	}))
+	defer srv.Close()
+	client := NewClient(Config{BaseURL: srv.URL, ServiceSecret: secret})
+	secret[0] = 'X'
+	for _, action := range []string{"create", "start", "stop", "reboot", "delete"} {
+		path := "/api/v1/nodes/" + action
+		method := "POST"
+		if action == "create" {
+			path = "/api/v1/nodes"
+		}
+		if action == "delete" {
+			path = "/api/v1/nodes"
+			method = "DELETE"
+		}
+		resp, err := client.Do(context.Background(), Request{Method: method, Path: path, UserID: "trusted-owner", Headers: http.Header{"x-fleet-service-key": {"forged"}, "X-User-ID": {"forged"}, "Idempotency-Key": {"same-key"}, "Stripe-Signature": {"untouched-signature"}}})
+		if err != nil || resp.StatusCode != 204 {
+			t.Fatalf("%s trusted headers failed: %v %v", action, resp, err)
+		}
 	}
 }

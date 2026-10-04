@@ -23,6 +23,12 @@ import (
 // Reusing this table-driven helper keeps the per-endpoint tests small
 // — the interesting per-endpoint logic lives in `withQuery` /
 // `withBody` / dynamic-path-param branches.
+func useCloudBillingProxy(t *testing.T, proxy cloudRuntimeProxy) {
+	previous := testHandler.CloudBilling
+	testHandler.CloudBilling = proxy
+	t.Cleanup(func() { testHandler.CloudBilling = previous })
+}
+
 type billingProxyCase struct {
 	name   string
 	method string
@@ -118,7 +124,7 @@ func TestCloudBillingProxiesForwardCorrectly(t *testing.T) {
 					Body:       []byte(`{"ok":true}`),
 				},
 			}
-			useCloudRuntimeProxy(t, proxy)
+			useCloudBillingProxy(t, proxy)
 
 			req := newRequest(tc.method, tc.path, tc.body)
 			w := httptest.NewRecorder()
@@ -165,7 +171,7 @@ func TestGetCloudBillingCheckoutSession_AppendsSessionIDToPath(t *testing.T) {
 			Body:       []byte(`{"order_id":"o","status":"credited"}`),
 		},
 	}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 
 	req := newRequest(http.MethodGet, "/api/cloud-billing/checkout-sessions/cs_test_abc", nil)
 	req = withURLParam(req, "sessionId", "cs_test_abc")
@@ -191,7 +197,7 @@ func TestGetCloudBillingCheckoutSession_AppendsSessionIDToPath(t *testing.T) {
 // here would re-target the upstream request.
 func TestGetCloudBillingCheckoutSession_RejectsPathTraversal(t *testing.T) {
 	proxy := &fakeCloudRuntimeProxy{enabled: true}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 
 	for _, sessionID := range []string{
 		"cs_test/../admin",
@@ -218,7 +224,7 @@ func TestGetCloudBillingCheckoutSession_RejectsPathTraversal(t *testing.T) {
 // param, but we guard anyway).
 func TestGetCloudBillingCheckoutSession_MissingPathParamReturns400(t *testing.T) {
 	proxy := &fakeCloudRuntimeProxy{enabled: true}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 
 	req := newRequest(http.MethodGet, "/api/cloud-billing/checkout-sessions/", nil)
 	// No URL param injected.
@@ -237,7 +243,7 @@ func TestGetCloudBillingCheckoutSession_MissingPathParamReturns400(t *testing.T)
 // deployments (no cloud URL configured) get a non-retryable 403 rather than
 // a cryptic upstream error.
 func TestCloudBillingDisabledReturnsForbidden(t *testing.T) {
-	useCloudRuntimeProxy(t, &fakeCloudRuntimeProxy{enabled: false})
+	useCloudBillingProxy(t, &fakeCloudRuntimeProxy{enabled: false})
 
 	req := newRequest(http.MethodGet, "/api/cloud-billing/balance", nil)
 	w := httptest.NewRecorder()
@@ -263,7 +269,7 @@ func TestCloudWorkspaceSubscriptionsDisabledByDefault(t *testing.T) {
 	for path, invoke := range reads {
 		t.Run(path, func(t *testing.T) {
 			proxy := &fakeCloudRuntimeProxy{enabled: true}
-			useCloudRuntimeProxy(t, proxy)
+			useCloudBillingProxy(t, proxy)
 
 			req := withCloudSubscriptionWorkspace(newRequest(http.MethodGet, path, nil), "member")
 			w := httptest.NewRecorder()
@@ -338,7 +344,7 @@ func TestCloudWorkspaceSubscriptionReadAndWritesUseScopedPaths(t *testing.T) {
 					Body:       []byte(`{"ok":true}`),
 				},
 			}
-			useCloudRuntimeProxy(t, proxy)
+			useCloudBillingProxy(t, proxy)
 
 			req := withCloudSubscriptionWorkspace(newRequest(tc.method, tc.path, nil), tc.role)
 			if strings.Contains(tc.path, "portal-sessions") {
@@ -375,7 +381,7 @@ func TestCreateCloudWorkspaceSubscriptionCheckoutInjectsAuthoritativeWorkspaceAn
 			Body:       []byte(`{"url":"https://checkout.stripe.test/session"}`),
 		},
 	}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 
 	req := newRequest(http.MethodPost, "/api/cloud-subscriptions/checkout-sessions", map[string]any{
 		"workspace_id":    "00000000-0000-0000-0000-000000000001",
@@ -412,7 +418,7 @@ func TestCreateCloudWorkspaceSubscriptionCheckoutInjectsAuthoritativeWorkspaceAn
 func TestCreateCloudWorkspaceSubscriptionCheckoutFailsWhenPayerCannotBeResolved(t *testing.T) {
 	withFeatureFlag(t, testHandler, featureflags.BillingWorkspaceSubscriptions, true)
 	proxy := &fakeCloudRuntimeProxy{enabled: true}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 
 	req := newRequest(http.MethodPost, "/api/cloud-subscriptions/checkout-sessions", map[string]any{
 		"interval":        "month",
@@ -434,7 +440,7 @@ func TestCreateCloudWorkspaceSubscriptionCheckoutFailsWhenPayerCannotBeResolved(
 func TestCreateCloudWorkspaceSubscriptionCheckoutRejectsInvalidPayerID(t *testing.T) {
 	withFeatureFlag(t, testHandler, featureflags.BillingWorkspaceSubscriptions, true)
 	proxy := &fakeCloudRuntimeProxy{enabled: true}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 
 	req := newRequest(http.MethodPost, "/api/cloud-subscriptions/checkout-sessions", map[string]any{
 		"interval":        "month",
@@ -456,7 +462,7 @@ func TestCreateCloudWorkspaceSubscriptionCheckoutRejectsInvalidPayerID(t *testin
 func TestCreateCloudWorkspaceSubscriptionCheckoutRejectsEmptyPayerEmail(t *testing.T) {
 	withFeatureFlag(t, testHandler, featureflags.BillingWorkspaceSubscriptions, true)
 	proxy := &fakeCloudRuntimeProxy{enabled: true}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 	emptyEmailUserID := dbfx.User(t, "Empty Checkout Email", "   ")
 	dbfx.Member(t, testWorkspaceID, emptyEmailUserID, "owner")
 
@@ -486,7 +492,7 @@ func TestCreateCloudWorkspaceSubscriptionCheckoutAcceptsHeaderIdempotencyKey(t *
 			Body:       []byte(`{"url":"https://checkout.stripe.test/session"}`),
 		},
 	}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 
 	req := withCloudSubscriptionWorkspace(
 		newRequest(http.MethodPost, "/api/cloud-subscriptions/checkout-sessions", map[string]any{"interval": "month"}),
@@ -511,7 +517,7 @@ func TestCreateCloudWorkspaceSubscriptionCheckoutAcceptsHeaderIdempotencyKey(t *
 func TestCloudWorkspaceSeatPurchaseForwardsOnlyAdditiveConfirmation(t *testing.T) {
 	withFeatureFlag(t, testHandler, featureflags.BillingWorkspaceSubscriptions, true)
 	proxy := &fakeCloudRuntimeProxy{enabled: true, resp: &cloudruntime.Response{StatusCode: http.StatusAccepted, Body: []byte(`{"status":"submitted"}`)}}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 	req := withCloudSubscriptionWorkspace(newRequest(http.MethodPost, "/api/cloud-subscriptions/seats/purchases", map[string]any{
 		"workspace_id":              "00000000-0000-0000-0000-000000000001",
 		"target_seats":              999,
@@ -549,7 +555,7 @@ func TestCloudWorkspaceSeatPurchaseForwardsOnlyAdditiveConfirmation(t *testing.T
 func TestCloudWorkspaceSeatPurchasePreviewUsesAuthoritativePath(t *testing.T) {
 	withFeatureFlag(t, testHandler, featureflags.BillingWorkspaceSubscriptions, true)
 	proxy := &fakeCloudRuntimeProxy{enabled: true, resp: &cloudruntime.Response{StatusCode: http.StatusOK, Body: []byte(`{"resulting_seats":7}`)}}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 	req := withCloudSubscriptionWorkspace(newRequest(http.MethodPost, "/api/cloud-subscriptions/seats/purchase-preview", map[string]any{
 		"additional_seats": 10_001, "workspace_id": "00000000-0000-0000-0000-000000000002", "target_seats": 999,
 	}), "owner")
@@ -580,7 +586,7 @@ func TestCloudWorkspaceSeatPurchaseRejectsInvalidRequests(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			proxy := &fakeCloudRuntimeProxy{enabled: true}
-			useCloudRuntimeProxy(t, proxy)
+			useCloudBillingProxy(t, proxy)
 			req := withCloudSubscriptionWorkspace(newRequest(http.MethodPost, "/api/cloud-subscriptions/seats/purchases", tc.body), tc.role)
 			if tc.header != "" {
 				req.Header.Set(idempotencyKeyHeader, tc.header)
@@ -600,7 +606,7 @@ func TestCloudWorkspaceSeatPurchaseRejectsInvalidRequests(t *testing.T) {
 func TestCloudWorkspaceSubscriptionWritesRequireManagerRole(t *testing.T) {
 	withFeatureFlag(t, testHandler, featureflags.BillingWorkspaceSubscriptions, true)
 	proxy := &fakeCloudRuntimeProxy{enabled: true}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 
 	req := withCloudSubscriptionWorkspace(
 		newRequest(http.MethodPost, "/api/cloud-subscriptions/portal-sessions", nil),
@@ -623,7 +629,7 @@ func TestCloudWorkspaceSubscriptionsRejectMachineActorsAtHandler(t *testing.T) {
 	for _, actorSource := range []string{"task_token", "cloud_pat"} {
 		t.Run(actorSource, func(t *testing.T) {
 			proxy := &fakeCloudRuntimeProxy{enabled: true}
-			useCloudRuntimeProxy(t, proxy)
+			useCloudBillingProxy(t, proxy)
 
 			req := withCloudSubscriptionWorkspace(
 				newRequest(http.MethodPost, "/api/cloud-subscriptions/portal-sessions", nil),
@@ -687,7 +693,7 @@ func TestCloudWorkspaceSubscriptionMutationsValidateLocally(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			proxy := &fakeCloudRuntimeProxy{enabled: true}
-			useCloudRuntimeProxy(t, proxy)
+			useCloudBillingProxy(t, proxy)
 
 			req := withCloudSubscriptionWorkspace(newRequest(http.MethodPost, tc.path, tc.body), "owner")
 			if tc.header != "" {
@@ -733,7 +739,7 @@ func TestStripeWebhookForwardsRawBodyAndSignature(t *testing.T) {
 			Body:       []byte(`{"received":true}`),
 		},
 	}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/stripe", strings.NewReader(rawBody))
 	req.Header.Set("Stripe-Signature", sig)
@@ -784,7 +790,7 @@ func TestStripeWebhookForwardsRawBodyAndSignature(t *testing.T) {
 // outcome it would have if the request had reached cloud.
 func TestStripeWebhookMissingSignatureRejectedLocally(t *testing.T) {
 	proxy := &fakeCloudRuntimeProxy{enabled: true}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/stripe",
 		strings.NewReader(`{"id":"evt"}`))
@@ -813,7 +819,7 @@ func TestStripeWebhookForwardsEmptyBody(t *testing.T) {
 			Body:       []byte(`{"error":"empty body"}`),
 		},
 	}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/stripe", http.NoBody)
 	req.Header.Set("Stripe-Signature", "t=1,v1=deadbeef")
@@ -835,7 +841,7 @@ func TestStripeWebhookForwardsEmptyBody(t *testing.T) {
 // upstream round-trip on a doomed verification.
 func TestStripeWebhookRejectsLargeBody(t *testing.T) {
 	proxy := &fakeCloudRuntimeProxy{enabled: true}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 
 	body := bytes.NewReader(bytes.Repeat([]byte("a"), maxStripeWebhookBodySize+1))
 	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/stripe", body)
@@ -855,7 +861,7 @@ func TestStripeWebhookRejectsLargeBody(t *testing.T) {
 // cloud-runtime disabled test but for the webhook path. Self-hosted
 // deployments without a cloud URL must return a non-retryable 403, not crash.
 func TestStripeWebhookDisabledReturnsForbidden(t *testing.T) {
-	useCloudRuntimeProxy(t, &fakeCloudRuntimeProxy{enabled: false})
+	useCloudBillingProxy(t, &fakeCloudRuntimeProxy{enabled: false})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/stripe",
 		strings.NewReader(`{"id":"evt"}`))
@@ -876,7 +882,7 @@ func TestStripeWebhookDisabledReturnsForbidden(t *testing.T) {
 // cloud-side budget.
 func TestStripeWebhookRateLimited(t *testing.T) {
 	proxy := &fakeCloudRuntimeProxy{enabled: true}
-	useCloudRuntimeProxy(t, proxy)
+	useCloudBillingProxy(t, proxy)
 
 	prevLimiter := testHandler.WebhookIPRateLimiter
 	testHandler.WebhookIPRateLimiter = denyingWebhookIPRateLimiter{}

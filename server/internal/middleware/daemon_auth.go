@@ -192,7 +192,8 @@ func DaemonAuth(queries *db.Queries, patCache *auth.PATCache, daemonCache *auth.
 				// or shared between the two middlewares would behave
 				// differently depending on which one routed it.
 				r.Header.Set("X-Actor-Source", "cloud_pat")
-				ctx := context.WithValue(r.Context(), ctxKeyDaemonAuthPath, DaemonAuthPathCloudPAT)
+				ctx := context.WithValue(r.Context(), cloudNodeIdentityKey{}, identity)
+				ctx = context.WithValue(ctx, ctxKeyDaemonAuthPath, DaemonAuthPathCloudPAT)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}

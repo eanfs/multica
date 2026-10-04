@@ -120,6 +120,8 @@ type Config struct {
 	// of attempting to dial a hard-coded private service.
 	CloudURL                 string
 	CloudTimeout             time.Duration
+	LocalFleetURL            string
+	LocalFleetSecret         []byte
 	AttachmentDownloadMode   string
 	AttachmentDownloadURLTTL time.Duration
 	// AttachmentFrameAncestors are trusted browser origins allowed to embed
@@ -326,6 +328,7 @@ type Handler struct {
 	InvitationRateLimiters       InvitationRateLimiters
 	WebhookDeliveryWorker        *WebhookDeliveryWorker
 	CloudRuntime                 cloudRuntimeProxy
+	CloudBilling                 cloudRuntimeProxy
 	// Test-only HTTP override; nil uses the default client in production.
 	googleOAuthHTTPClient *http.Client
 	// Test-only override for the SSRF-safe provider artifact import client;
@@ -603,8 +606,12 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 			BaseURL: cfg.CloudURL,
 			Timeout: cfg.CloudTimeout,
 		}),
-		LLM: llmClient,
-		cfg: cfg,
+		CloudBilling: cloudruntime.NewClient(cloudruntime.Config{BaseURL: cfg.CloudURL, Timeout: cfg.CloudTimeout}),
+		LLM:          llmClient,
+		cfg:          cfg,
+	}
+	if cfg.LocalFleetURL != "" {
+		h.CloudRuntime = cloudruntime.NewClient(cloudruntime.Config{BaseURL: cfg.LocalFleetURL, ServiceSecret: cfg.LocalFleetSecret, Timeout: cfg.CloudTimeout})
 	}
 	h.WebhookDeliveryWorker = NewWebhookDeliveryWorker(h)
 	// The default passthrough scheduler reports sweeper-race recoveries so the

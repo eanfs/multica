@@ -401,6 +401,51 @@ func (q *Queries) GetFleetNodeForRuntime(ctx context.Context, arg GetFleetNodeFo
 	return i, err
 }
 
+const getFleetNodeIdentity = `-- name: GetFleetNodeIdentity :one
+SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config FROM fleet_nodes WHERE id = $1 AND owner_id = $2
+`
+
+type GetFleetNodeIdentityParams struct {
+	NodeID  pgtype.UUID `json:"node_id"`
+	OwnerID pgtype.UUID `json:"owner_id"`
+}
+
+// The globally unique node ID locates its trusted namespace, never caller metadata.
+func (q *Queries) GetFleetNodeIdentity(ctx context.Context, arg GetFleetNodeIdentityParams) (FleetNode, error) {
+	row := q.db.QueryRow(ctx, getFleetNodeIdentity, arg.NodeID, arg.OwnerID)
+	var i FleetNode
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ContainerID,
+		&i.DaemonID,
+		&i.Name,
+		&i.Spec,
+		&i.Image,
+		&i.ProfileRef,
+		&i.StartEpoch,
+		&i.DataVolume,
+		&i.SecretsVolume,
+		&i.Desired,
+		&i.Status,
+		&i.Generation,
+		&i.Ready,
+		&i.HealthAt,
+		&i.ActiveRuns,
+		&i.PendingReports,
+		&i.FailedReports,
+		&i.Maintenance,
+		&i.Revoked,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+		&i.SpecConfig,
+	)
+	return i, err
+}
+
 const getFleetOperation = `-- name: GetFleetOperation :one
 SELECT id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message FROM fleet_node_operations WHERE namespace = $1 AND owner_id = $2 AND id = $3
 `

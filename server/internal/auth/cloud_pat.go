@@ -166,9 +166,10 @@ type OwnerLookupFunc func(ctx context.Context, ownerID string) (bool, error)
 // MULTICA_CLOUD_URL configured simply rejects mcn_ tokens at
 // the prefix branch instead of nil-derefing.
 type CloudPATVerifier struct {
-	baseURL string
-	http    *http.Client
-	rdb     redis.UniversalClient // may be nil — disables caching
+	baseURL       string
+	serviceSecret []byte
+	http          *http.Client
+	rdb           redis.UniversalClient // may be nil — disables caching
 }
 
 // CloudPATVerifierConfig assembles the dependencies for
@@ -179,7 +180,8 @@ type CloudPATVerifierConfig struct {
 	// FleetBaseURL is the Cloud Fleet base URL (e.g.
 	// https://fleet.multica.cloud). Trailing slashes are trimmed.
 	// Empty disables the verifier — NewCloudPATVerifier returns nil.
-	FleetBaseURL string
+	FleetBaseURL  string
+	ServiceSecret []byte
 
 	// HTTPClient is the client used for verify calls. Optional —
 	// when nil, a client with cloudPATDefaultTimeout is created.
@@ -205,10 +207,16 @@ func NewCloudPATVerifier(cfg CloudPATVerifierConfig) *CloudPATVerifier {
 	if client == nil {
 		client = &http.Client{Timeout: cloudPATDefaultTimeout}
 	}
+	if len(cfg.ServiceSecret) > 0 {
+		copyClient := *client
+		copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &copyClient
+	}
 	return &CloudPATVerifier{
-		baseURL: base,
-		http:    client,
-		rdb:     cfg.Redis,
+		baseURL:       base,
+		http:          client,
+		rdb:           cfg.Redis,
+		serviceSecret: append([]byte(nil), cfg.ServiceSecret...),
 	}
 }
 
@@ -334,6 +342,9 @@ func (v *CloudPATVerifier) fetch(ctx context.Context, token string) (CloudPATIde
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	if len(v.serviceSecret) > 0 {
+		req.Header.Set("X-Fleet-Service-Key", string(v.serviceSecret))
+	}
 
 	resp, err := v.http.Do(req)
 	if err != nil {

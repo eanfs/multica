@@ -107,6 +107,9 @@ func (h *Handler) requireDaemonRuntimeAccess(w http.ResponseWriter, r *http.Requ
 	if !h.requireDaemonWorkspaceAccess(w, r, uuidToString(rt.WorkspaceID)) {
 		return db.AgentRuntime{}, false
 	}
+	if !h.requireLocalFleetRuntime(w, r, rt) {
+		return db.AgentRuntime{}, false
+	}
 	return rt, true
 }
 
@@ -366,6 +369,9 @@ func (h *Handler) upsertRuntimeWithProfile(
 	}
 
 	row, err = qtx.UpsertAgentRuntimeWithProfile(ctx, build(profile))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return row, profile, errLocalFleetIdentityProtected
+	}
 	if err != nil {
 		return row, profile, fmt.Errorf("upsert profile runtime: %w", err)
 	}
@@ -450,6 +456,14 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		ownerID = member.UserID
 	}
 
+	localNode, localOK := h.localFleetRegistration(w, r, req.DaemonID)
+	if !localOK {
+		return
+	}
+	if localNode != nil {
+		ownerID = localNode.OwnerID
+		req.LegacyDaemonIDs = nil
+	}
 	ws, err := h.Queries.GetWorkspace(r.Context(), wsUUID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
@@ -490,6 +504,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 			"capabilities": requestClientCapabilities(r),
 		})
 
+		metadata = localFleetMetadata(metadata, localNode)
 		var registered db.AgentRuntime
 		var inserted bool
 		isCustom := strings.TrimSpace(runtime.ProfileID) != ""
@@ -521,6 +536,10 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 					}
 				},
 			)
+			if errors.Is(err, errLocalFleetIdentityProtected) {
+				writeError(w, 403, "managed runtime identity is protected")
+				return
+			}
 			if errors.Is(err, pgx.ErrNoRows) {
 				writeError(w, http.StatusBadRequest, "unknown runtime profile: "+runtime.ProfileID)
 				return
@@ -575,6 +594,10 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				Metadata:    metadata,
 				OwnerID:     ownerID,
 			})
+			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, errLocalFleetIdentityProtected) {
+				writeError(w, 403, "managed runtime identity is protected")
+				return
+			}
 			if err != nil {
 				obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.RuntimeFailed(
 					uuidToString(ownerID),
@@ -698,6 +721,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 					"runtime_profile_failure_reason":     reason,
 					"command_name":                       resolvedCommandName,
 				})
+				metadata = localFleetMetadata(metadata, localNode)
 				return db.UpsertAgentRuntimeWithProfileParams{
 					WorkspaceID: wsUUID,
 					DaemonID:    strToText(req.DaemonID),
@@ -712,6 +736,10 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				}
 			},
 		)
+		if errors.Is(err, errLocalFleetIdentityProtected) {
+			writeError(w, 403, "managed runtime identity is protected")
+			return
+		}
 		if err != nil {
 			slog.Warn("failed to record runtime profile registration failure",
 				"workspace_id", req.WorkspaceID, "daemon_id", req.DaemonID,
@@ -1151,6 +1179,10 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 	workspaceCheckMs = time.Since(wsCheckStart).Milliseconds()
 	if !wsOK {
 		outcome = "workspace_denied"
+		return
+	}
+	if !h.requireLocalFleetRuntime(w, r, rt) {
+		outcome = "node_identity_denied"
 		return
 	}
 	authMs = time.Since(start).Milliseconds()

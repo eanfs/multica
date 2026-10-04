@@ -151,6 +151,10 @@ VALUES (@namespace, @owner_id, @name, @spec, @image, @profile_ref, @spec_config)
 INSERT INTO fleet_node_operations (namespace, owner_id, node_id, action, idempotency_key, request_hash)
 VALUES (@namespace, @owner_id, @node_id, 'create', @idempotency_key, @request_hash) RETURNING *;
 
+-- name: GetFleetNodeIdentity :one
+-- The globally unique node ID locates its trusted namespace, never caller metadata.
+SELECT * FROM fleet_nodes WHERE id = @node_id AND owner_id = @owner_id;
+
 -- name: GetFleetNodeByID :one
 SELECT * FROM fleet_nodes WHERE namespace = @namespace AND id = @node_id;
 

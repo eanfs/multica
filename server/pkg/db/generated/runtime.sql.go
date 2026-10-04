@@ -1590,6 +1590,19 @@ DO UPDATE SET
     owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
     last_seen_at = now(),
     updated_at = now()
+WHERE (
+    COALESCE(agent_runtime.metadata->>'managed_by', '') <> 'local_fleet'
+    OR (
+        EXCLUDED.metadata->>'managed_by' = 'local_fleet'
+        AND EXCLUDED.metadata->>'fleet_node_id' = agent_runtime.metadata->>'fleet_node_id'
+        AND EXCLUDED.owner_id = agent_runtime.owner_id
+    )
+)
+AND (
+    COALESCE(EXCLUDED.metadata->>'managed_by', '') <> 'local_fleet'
+    OR agent_runtime.owner_id IS NULL
+    OR EXCLUDED.owner_id = agent_runtime.owner_id
+)
 RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, (xmax = 0) AS inserted
 `
 
@@ -1633,6 +1646,8 @@ type UpsertAgentRuntimeRow struct {
 // index from migration 121 (WHERE profile_id IS NULL); the predicate must be
 // spelled out so Postgres selects that partial index, not the custom-runtime
 // one on (workspace_id, daemon_id, profile_id).
+// Local Fleet ownership and node identity cannot be downgraded by an ordinary
+// reconnect, including after local mode is disabled. Both values are server-derived.
 func (q *Queries) UpsertAgentRuntime(ctx context.Context, arg UpsertAgentRuntimeParams) (UpsertAgentRuntimeRow, error) {
 	row := q.db.QueryRow(ctx, upsertAgentRuntime,
 		arg.WorkspaceID,
@@ -1694,6 +1709,19 @@ DO UPDATE SET
     owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
     last_seen_at = now(),
     updated_at = now()
+WHERE (
+    COALESCE(agent_runtime.metadata->>'managed_by', '') <> 'local_fleet'
+    OR (
+        EXCLUDED.metadata->>'managed_by' = 'local_fleet'
+        AND EXCLUDED.metadata->>'fleet_node_id' = agent_runtime.metadata->>'fleet_node_id'
+        AND EXCLUDED.owner_id = agent_runtime.owner_id
+    )
+)
+AND (
+    COALESCE(EXCLUDED.metadata->>'managed_by', '') <> 'local_fleet'
+    OR agent_runtime.owner_id IS NULL
+    OR EXCLUDED.owner_id = agent_runtime.owner_id
+)
 RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, (xmax = 0) AS inserted
 `
 
@@ -1738,6 +1766,8 @@ type UpsertAgentRuntimeWithProfileRow struct {
 // profiles of the same protocol family. provider carries the base runtime
 // identity so ResolveBackend applies its descriptor; profile_id preserves
 // custom-profile provenance. (xmax = 0) AS inserted mirrors UpsertAgentRuntime.
+// Local Fleet ownership and node identity cannot be downgraded by an ordinary
+// reconnect, including after local mode is disabled. Both values are server-derived.
 func (q *Queries) UpsertAgentRuntimeWithProfile(ctx context.Context, arg UpsertAgentRuntimeWithProfileParams) (UpsertAgentRuntimeWithProfileRow, error) {
 	row := q.db.QueryRow(ctx, upsertAgentRuntimeWithProfile,
 		arg.WorkspaceID,
