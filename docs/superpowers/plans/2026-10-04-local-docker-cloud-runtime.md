@@ -298,6 +298,8 @@ Store.MintNodeToken(ctx context.Context,nodeID pgtype.UUID) (token string,genera
 
 ### Task 4: Fleet HTTP 契约和假 Provider 服务
 
+**Start 所有权澄清：** Task4 的 start 与 stop/reboot/delete 一样仅接受 SQL-bound `OperationRequestDTO`（action=start、owner/ns/node/op/generation 匹配、approved=true），返回异步接受，绝不调用 Provider.Apply/创建 start 意图。instance_id-only legacystart=>409。API Task7 负责 start-intent，Task10 物理启动/恢复；本任务假Provider断言 start 通知不产生副作用。
+
 **执行接口补充（Task4 专属，不追溯 Task3）：** Modify model/types.go，仅在 Provider 加 `CheckAvailability(context.Context) error` 第六方法；测试 fake 同时实现，Task8 只读 Engine Ping 实现，不建资源/拉镜像/读模型账户。Create store/schema.go/schema_test.go 和对应 fleet.sql/sqlc probe（如需）：`Store.CheckSchema(ctx context.Context) error` 在2s预算内检查 PG17+、四表/必需列（含576资源快照和credential generation）与查询依赖可用，不执行DDL。readyz 分开调用 Schema 与 Provider availability，nil/failure=>503，只返回不敏感状态；healthz liveness保持200。不得用空 Node 的 Inspect/Ensure 代替 availability。
 
 **认证补充：** 所有业务路由要求非空 service secret 的 constant-time 验证。节点路由和诊断额外校验可信 X-User-ID；`/api/v1/pat/verify` 仅要求 service key（auth caller 尚未知道 owner），忽略 caller owner header并仅从 SQL凭证返回 owner，body严格 `{token}`。healthz/readyz 可匿名，但仅状态、不暴露 DB/路径/错误详情。PAT valid响应兼容既有 owner_id/instance_id/instance_record_id，instance_record_id 为Node UUID、instance_id可在初始化时为空；禁用/撤销不得从未验证 owner header 推断身份。Task5 在既有 verifier 对 local mode 注入 service key，不改变 SaaS。
@@ -434,6 +436,8 @@ SQL/row 数据必须在 shared lock 后重读；capacity 计数在 capacity lock
 **登记与批量锁补充（本任务同时实现）：** `CheckRegister(ctx context.Context,q *db.Queries,namespace string,nodeID pgtype.UUID) error`，在handler注册/upsert的同一事务shared-lock后重读node；initializing允许注册，revoked/terminating/terminated拒绝，不能利用新工作区Runtime绕过屏障。多node批量先按UUID排序shared锁，再同序capacity锁，最后agent/task行锁。CheckEnqueue在delete准备态必须看到desired=terminating；AbortMaintenance按Operation.PriorDesired恢复，stop保留正常排队。WS每次claim重新查同库，不凭旧认证放行；Fleet HTTP不可达但有效健康/DB状态仍允许已有WS路径。
 
 ### Task 7: 两段式维护授权、忙碌拒绝与删除准入
+
+**Start producer（本任务已有 API lifecycle 所有权）：** 新增 `Store.CreateStartIntent(ctx context.Context,ownerID,nodeID pgtype.UUID,key string)(model.Operation,error)` 于 store/maintenance.go；API local start 经 `Maintainer.Request(action=Start)` 路由该 producer。节点 exclusive-lock 后校验 owner/ns、幂等key（同payload/action重放，冲突409）、非revoked/terminating/terminated且无 preparing/prepared/applying/其他未完成操作；按同节点 generation CAS 原子产生 queued/approved=true/start op，将 desired=running、ready=false，保留卷、profile/resource快照。Start 不做破坏性 maintenance prepare/diagnose/取消队列，不凭未知健康解除既有屏障；stopped/failed/missing 可请求安全恢复，运行中状态或既有 intent 冲突不再创建。操作写入与 generation advancement 同短事务，无IO。API 给 Fleet Task4 发送固定 OperationRequestDTO；Task10 才物理启动。canonical test 在本任务 maintenance_test.go：并发same-key replay、preparing/terminating冲突、owned跨ns隔离、卷/快照保持与无破坏性授权IO。
 
 **审查补充（本任务所有权与 canonical tests）：** 新增 Modify: `server/internal/handler/runtime.go`、`server/internal/handler/runtime_test.go`（含 DeleteAgentRuntime/UnbindAgentsAndDeleteRuntime）、`server/cmd/server/router.go`、`server/internal/cloudruntime/client.go`、`server/internal/cloudruntime/client_test.go`、`server/internal/handler/handler.go`。`Maintainer.Diagnose func(context.Context,model.Node,model.OperationRef)(model.Observation,error)`；`Maintainer.Review(ctx context.Context,ownerID pgtype.UUID,ref model.OperationRef)(model.Operation,error)`。prepare commit→Diagnose(ref) tx 外→第二短 tx approve；unknown 先判，保留 barrier/ErrUnknownHealth，不当明确 busy abort；只有 known nonempty 409/abort prior desired，保留数据。stopped/missing delete 只接纳匹配 DataVolume/layout/current observation 的 offline report-zero，不以 SQL idle 替代报告。
 
