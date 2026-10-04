@@ -314,7 +314,7 @@ Store.MintNodeToken(ctx context.Context,nodeID pgtype.UUID) (token string,genera
 
 **Interfaces:** `fleet.NewService(repo *store.Store, cfg model.Config, provider model.Provider) *Service`；`Service.Handler(secret []byte) http.Handler`；Provider 是上方契约。Service 不直接执行维护，stop/reboot/delete 只接受已批准 operation，未批准返回 Conflict。公开 DTO 的 `id,owner_id,instance_id,region,instance_type,image_id,subnet_id,name,status,tags,metadata,created_at,updated_at` 保留，额外 `provider,operation_id,ready,error_code` 为可选。
 
-- [ ] **Step 1:** 写无服务密钥 401、伪造 X-User-ID、越权节点、spec/image/path 拒绝和 exec 未支持：
+- [x] **Step 1:** 写无服务密钥 401、伪造 X-User-ID、越权节点、spec/image/path 拒绝和 exec 未支持：
 
 ```go
 func TestServiceRequiresSecret(t *testing.T) {
@@ -328,8 +328,8 @@ func TestServiceRequiresSecret(t *testing.T) {
 ```
 
 测试 secret 字符串只用于内存 httptest，不作为生产默认。create 必须有 idempotency header，list 精确 owner/namespace 过滤。
-- [ ] **Step 2:** `go test ./internal/fleet -run 'TestService|TestHTTP' -count=1`；预期路由/认证未实现 FAIL。
-- [ ] **Step 3:** Chi 固定路由；secret 用 constant-time 比较，body 上限 1 MiB，未知字段拒绝。注册 设计第5节的 routes；healthz 存活、readyz 需 DB/schema/Provider 检查。统一 map errors 到状态码；公开响应构造独立 DTO，绝不序列化 Bootstrap。fake Provider 六方法（新增只读 availability）实现于本任务的测试文件并记录动作，不能调用用户 Docker。
+- [x] **Step 2:** `go test ./internal/fleet -run 'TestService|TestHTTP' -count=1`；预期路由/认证未实现 FAIL。
+- [x] **Step 3:** Chi 固定路由；secret 用 constant-time 比较，body 上限 1 MiB，未知字段拒绝。注册 设计第5节的 routes；healthz 存活、readyz 需 DB/schema/Provider 检查。统一 map errors 到状态码；公开响应构造独立 DTO，绝不序列化 Bootstrap。fake Provider 六方法（新增只读 availability）实现于本任务的测试文件并记录动作，不能调用用户 Docker。
 
 ```go
 if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Fleet-Service-Key")), secret) != 1 {
@@ -338,8 +338,8 @@ if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Fleet-Service-Key")), secre
 }
 ```
 
-- [ ] **Step 4:** 完整 httptest 行为 PASS，明确 terminated/stopped/token revoked、分页、异常 JSON 与重复操作返回码；response 字段可被现有 core schema 解析。
-- [ ] **Step 5:** 提交 `feat(fleet): expose authenticated local node APIs`。
+- [x] **Step 4:** 完整 httptest 行为 PASS，明确 terminated/stopped/token revoked、分页、异常 JSON 与重复操作返回码；response 字段可被现有 core schema 解析。
+- [x] **Step 5:** 提交 `feat(fleet): expose authenticated local node APIs`。
 
 ### Task 5: API 本地组装、SaaS 隔离和可信节点身份
 
