@@ -73,6 +73,109 @@ func (q *Queries) CountFleetQueuedRuns(ctx context.Context, arg CountFleetQueued
 	return count, err
 }
 
+const fleetAdmissionLocksHeld = `-- name: FleetAdmissionLocksHeld :one
+WITH keys AS (
+ SELECT hashtextextended($1::text || ':' || $2::uuid::text,0) AS key,'ShareLock'::text AS mode
+ UNION ALL SELECT hashtextextended('capacity:' || $1::text || ':' || $2::uuid::text,0),'ExclusiveLock'
+)
+SELECT bool_and(EXISTS (
+ SELECT 1 FROM pg_catalog.pg_lock_status() l WHERE to_jsonb(l)->>'locktype'='advisory'
+ AND (to_jsonb(l)->>'pid')::integer=pg_backend_pid()
+ AND (to_jsonb(l)->>'granted')::boolean AND (to_jsonb(l)->>'objsubid')::integer=1
+ AND (to_jsonb(l)->>'classid')::bigint=((keys.key >> 32) & 4294967295)
+ AND (to_jsonb(l)->>'objid')::bigint=(keys.key & 4294967295)
+ AND (to_jsonb(l)->>'mode'=keys.mode OR (keys.mode='ShareLock' AND to_jsonb(l)->>'mode'='ExclusiveLock'))
+)) FROM keys
+`
+
+type FleetAdmissionLocksHeldParams struct {
+	Namespace string      `json:"namespace"`
+	NodeID    pgtype.UUID `json:"node_id"`
+}
+
+// Caller-owned enqueue must prove its early locks on THIS backend/transaction;
+// it may not acquire a newly discovered node after chat/workspace rows.
+func (q *Queries) FleetAdmissionLocksHeld(ctx context.Context, arg FleetAdmissionLocksHeldParams) (bool, error) {
+	row := q.db.QueryRow(ctx, fleetAdmissionLocksHeld, arg.Namespace, arg.NodeID)
+	var bool_and bool
+	err := row.Scan(&bool_and)
+	return bool_and, err
+}
+
+const fleetLockClaimAgents = `-- name: FleetLockClaimAgents :many
+SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, disabled_runtime_skills, service_tier, conversation_starters FROM agent WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE
+`
+
+func (q *Queries) FleetLockClaimAgents(ctx context.Context, agentIds []pgtype.UUID) ([]Agent, error) {
+	rows, err := q.db.Query(ctx, fleetLockClaimAgents, agentIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Agent{}
+	for rows.Next() {
+		var i Agent
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Name,
+			&i.AvatarUrl,
+			&i.RuntimeMode,
+			&i.RuntimeConfig,
+			&i.Visibility,
+			&i.Status,
+			&i.MaxConcurrentTasks,
+			&i.OwnerID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Description,
+			&i.RuntimeID,
+			&i.Instructions,
+			&i.ArchivedAt,
+			&i.ArchivedBy,
+			&i.CustomEnv,
+			&i.CustomArgs,
+			&i.McpConfig,
+			&i.Model,
+			&i.ThinkingLevel,
+			&i.ComposioToolkitAllowlist,
+			&i.PermissionMode,
+			&i.Kind,
+			&i.SystemKey,
+			&i.DisabledRuntimeSkills,
+			&i.ServiceTier,
+			&i.ConversationStarters,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const fleetLockTaskWorkspaces = `-- name: FleetLockTaskWorkspaces :exec
+SELECT 1 FROM workspace w WHERE w.id IN (
+ SELECT a.workspace_id FROM agent a WHERE a.id = $1
+ UNION SELECT i.workspace_id FROM issue i WHERE i.id = $2
+ UNION SELECT r.workspace_id FROM agent_runtime r WHERE r.id = $3
+) ORDER BY w.id FOR KEY SHARE
+`
+
+type FleetLockTaskWorkspacesParams struct {
+	AgentID   pgtype.UUID `json:"agent_id"`
+	IssueID   pgtype.UUID `json:"issue_id"`
+	RuntimeID pgtype.UUID `json:"runtime_id"`
+}
+
+// Early managed admission mirrors migration 284 before runtime and agent locks.
+func (q *Queries) FleetLockTaskWorkspaces(ctx context.Context, arg FleetLockTaskWorkspacesParams) error {
+	_, err := q.db.Exec(ctx, fleetLockTaskWorkspaces, arg.AgentID, arg.IssueID, arg.RuntimeID)
+	return err
+}
+
 const fleetNodeCapacityLock = `-- name: FleetNodeCapacityLock :exec
 SELECT pg_advisory_xact_lock(hashtextextended('capacity:' || $1::text || ':' || $2::uuid::text, 0))
 `
@@ -140,6 +243,40 @@ func (q *Queries) FleetOwnerExists(ctx context.Context, ownerID pgtype.UUID) (bo
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const fleetReclaimBindings = `-- name: FleetReclaimBindings :many
+SELECT DISTINCT a.id AS agent_id, a.runtime_id AS bound_runtime_id,
+ atq.runtime_id AS task_runtime_id
+FROM agent_task_queue atq JOIN agent a ON a.id=atq.agent_id
+WHERE atq.runtime_id=ANY($1::uuid[]) AND atq.status='dispatched'
+`
+
+type FleetReclaimBindingsRow struct {
+	AgentID        pgtype.UUID `json:"agent_id"`
+	BoundRuntimeID pgtype.UUID `json:"bound_runtime_id"`
+	TaskRuntimeID  pgtype.UUID `json:"task_runtime_id"`
+}
+
+// Nonlocking candidates precede node locks; agent bindings are rechecked after locks.
+func (q *Queries) FleetReclaimBindings(ctx context.Context, runtimeIds []pgtype.UUID) ([]FleetReclaimBindingsRow, error) {
+	rows, err := q.db.Query(ctx, fleetReclaimBindings, runtimeIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FleetReclaimBindingsRow{}
+	for rows.Next() {
+		var i FleetReclaimBindingsRow
+		if err := rows.Scan(&i.AgentID, &i.BoundRuntimeID, &i.TaskRuntimeID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const fleetSchemaProbe = `-- name: FleetSchemaProbe :exec

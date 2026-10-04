@@ -75,6 +75,7 @@ func (s *slackDMControlStarter) StartSlackDMChat(ctx context.Context, inst engin
 			Initiator: userID,
 			Body:      body, CommandText: body, DedupMessageID: envelopeID, ClaimToken: claim,
 			PersistMessage: body != "", HistoryBoundaryPending: true,
+			BeforeOwnerLocks: prepared.BeforeOwnerLocks,
 			BeforeCommit: func(ctx context.Context, tx pgx.Tx, session db.ChatSession) error {
 				if body == "" {
 					return nil
@@ -160,6 +161,7 @@ func (s *slackDMControlStarter) ClearSlackDMContext(ctx context.Context, inst en
 				SessionID: sessionID, Sender: userID, InstallationID: inst.ID,
 				Body: body, CommandText: clearSlashCommand + " " + body,
 				DedupMessageID: envelopeID, ClaimToken: claim, ForceFresh: true,
+				BeforeOwnerLocks: prepared.BeforeOwnerLocks,
 				BeforeCommit: func(ctx context.Context, tx pgx.Tx, session db.ChatSession, contextRevision int64, _ pgtype.UUID, _ int64) error {
 					var enqueueErr error
 					task, enqueueErr = s.tasks.EnqueuePreparedChannelChatTaskInTx(

@@ -429,12 +429,14 @@ func (r *Router) processClaimed(ctx context.Context, set ResolverSet, msg channe
 
 		if startChat {
 			startedTask = db.AgentTaskQueue{}
+			var beforeOwnerLocks func(context.Context, pgx.Tx) error
 			var beforeCommit func(context.Context, pgx.Tx, db.ChatSession) error
 			if persistStartedMessage && !msg.SkipAgentRun {
 				prepared, prepareErr := r.tasks.PrepareChatTaskEnqueue(ctx, inst.AgentID, identity.UserID)
 				if prepareErr != nil {
 					return Result{}, finalizeRelease, fmt.Errorf("prepare started chat task: %w", prepareErr)
 				}
+				beforeOwnerLocks = prepared.BeforeOwnerLocks
 				beforeCommit = func(ctx context.Context, tx pgx.Tx, session db.ChatSession) error {
 					var enqueueErr error
 					startedTask, enqueueErr = r.tasks.EnqueuePreparedChannelChatTaskInTx(
@@ -446,7 +448,7 @@ func (r *Router) processClaimed(ctx context.Context, set ResolverSet, msg channe
 			started, err = set.Session.StartSession(ctx, StartSessionParams{
 				Installation: inst, Creator: sessionCreator, Sender: identity.UserID, Message: msg,
 				ClaimToken: claimToken, MediaPendingSeconds: mediaPendingSeconds,
-				PersistMessage: persistStartedMessage, BeforeCommit: beforeCommit,
+				PersistMessage: persistStartedMessage, BeforeOwnerLocks: beforeOwnerLocks, BeforeCommit: beforeCommit,
 			})
 			sessionID, appendRes = started.SessionID, started.Append
 		} else {

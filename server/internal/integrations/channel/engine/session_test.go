@@ -478,6 +478,34 @@ func TestStartSessionMediaBeforeTextUsesUserTextForTitle(t *testing.T) {
 	}
 }
 
+func TestFleetChannelAdmissionBeforeAllOwnerLocks(t *testing.T) {
+	for _, path := range []string{"start", "append"} {
+		t.Run(path, func(t *testing.T) {
+			f := newFake()
+			tx := &recordingTx{}
+			s := newChatSessionWith(f, recordingTxStarter{tx: tx}, channel.Type("slack"), SessionTitles{})
+			want := errors.New("terminal node admission")
+			called := false
+			admission := func(_ context.Context, got pgx.Tx) error {
+				called = true
+				if got != tx || f.lockedWorkspace != 0 || len(f.messages) != 0 || f.touched != 0 || f.createdSessions != 0 {
+					t.Fatal("admission was not first in owner transaction")
+				}
+				return want
+			}
+			var err error
+			if path == "start" {
+				_, err = s.StartSession(context.Background(), StartSessionInput{EnsureSessionInput: EnsureSessionInput{WorkspaceID: uid(2), AgentID: uid(3), InstallationID: uid(1), Sender: uid(7), BindingKey: "chatA", ChatType: channel.ChatTypeP2P}, Initiator: uid(7), Body: "test", PersistMessage: true, BeforeOwnerLocks: admission})
+			} else {
+				_, err = s.AppendUserMessage(context.Background(), AppendInput{SessionID: uid(2), Body: "test", BeforeOwnerLocks: admission})
+			}
+			if !called || !errors.Is(err, want) || tx.commits != 0 || f.lockedWorkspace != 0 || len(f.messages) != 0 {
+				t.Fatalf("admission failed to prevent writes: called=%v err=%v commits=%d locks=%d messages=%d", called, err, tx.commits, f.lockedWorkspace, len(f.messages))
+			}
+		})
+	}
+}
+
 func TestStartSessionRunsBeforeCommitInOwningTransaction(t *testing.T) {
 	f := newFake()
 	tx := &recordingTx{}

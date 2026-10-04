@@ -73,6 +73,40 @@ FROM fleet_nodes n CROSS JOIN fleet_node_operations o
  CROSS JOIN "user" u CROSS JOIN agent_runtime r CROSS JOIN agent_task_queue t
 WHERE false;
 
+-- name: FleetReclaimBindings :many
+-- Nonlocking candidates precede node locks; agent bindings are rechecked after locks.
+SELECT DISTINCT a.id AS agent_id, a.runtime_id AS bound_runtime_id,
+ atq.runtime_id AS task_runtime_id
+FROM agent_task_queue atq JOIN agent a ON a.id=atq.agent_id
+WHERE atq.runtime_id=ANY(@runtime_ids::uuid[]) AND atq.status='dispatched';
+
+-- name: FleetLockClaimAgents :many
+SELECT * FROM agent WHERE id=ANY(@agent_ids::uuid[]) ORDER BY id FOR UPDATE;
+
+-- name: FleetLockTaskWorkspaces :exec
+-- Early managed admission mirrors migration 284 before runtime and agent locks.
+SELECT 1 FROM workspace w WHERE w.id IN (
+ SELECT a.workspace_id FROM agent a WHERE a.id = @agent_id
+ UNION SELECT i.workspace_id FROM issue i WHERE i.id = @issue_id
+ UNION SELECT r.workspace_id FROM agent_runtime r WHERE r.id = @runtime_id
+) ORDER BY w.id FOR KEY SHARE;
+
+-- name: FleetAdmissionLocksHeld :one
+-- Caller-owned enqueue must prove its early locks on THIS backend/transaction;
+-- it may not acquire a newly discovered node after chat/workspace rows.
+WITH keys AS (
+ SELECT hashtextextended(sqlc.arg(namespace)::text || ':' || sqlc.arg(node_id)::uuid::text,0) AS key,'ShareLock'::text AS mode
+ UNION ALL SELECT hashtextextended('capacity:' || sqlc.arg(namespace)::text || ':' || sqlc.arg(node_id)::uuid::text,0),'ExclusiveLock'
+)
+SELECT bool_and(EXISTS (
+ SELECT 1 FROM pg_catalog.pg_lock_status() l WHERE to_jsonb(l)->>'locktype'='advisory'
+ AND (to_jsonb(l)->>'pid')::integer=pg_backend_pid()
+ AND (to_jsonb(l)->>'granted')::boolean AND (to_jsonb(l)->>'objsubid')::integer=1
+ AND (to_jsonb(l)->>'classid')::bigint=((keys.key >> 32) & 4294967295)
+ AND (to_jsonb(l)->>'objid')::bigint=(keys.key & 4294967295)
+ AND (to_jsonb(l)->>'mode'=keys.mode OR (keys.mode='ShareLock' AND to_jsonb(l)->>'mode'='ExclusiveLock'))
+)) FROM keys;
+
 -- name: FleetNodeSharedLock :exec
 SELECT pg_advisory_xact_lock_shared(hashtextextended(sqlc.arg(namespace)::text || ':' || sqlc.arg(node_id)::uuid::text, 0));
 

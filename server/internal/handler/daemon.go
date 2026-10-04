@@ -23,6 +23,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/daemonws"
+	"github.com/multica-ai/multica/server/internal/fleetguard"
 	"github.com/multica-ai/multica/server/internal/integrations/slack"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
@@ -583,7 +584,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				ProfileID:      prow.ProfileID,
 			}
 		} else {
-			row, err := h.Queries.UpsertAgentRuntime(r.Context(), db.UpsertAgentRuntimeParams{
+			row, err := h.upsertFleetRuntime(r, localNode, db.UpsertAgentRuntimeParams{
 				WorkspaceID: wsUUID,
 				DaemonID:    strToText(req.DaemonID),
 				Name:        name,
@@ -772,6 +773,42 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// upsertFleetRuntime holds shared node admission from credential recheck through
+// the INITIAL insert as well as reconnect upserts. Ordinary registration is unchanged.
+func (h *Handler) upsertFleetRuntime(r *http.Request, node *db.FleetNode, params db.UpsertAgentRuntimeParams) (db.UpsertAgentRuntimeRow, error) {
+	if node == nil {
+		return h.Queries.UpsertAgentRuntime(r.Context(), params)
+	}
+	if h.TxStarter == nil {
+		return db.UpsertAgentRuntimeRow{}, errLocalFleetIdentityProtected
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return db.UpsertAgentRuntimeRow{}, err
+	}
+	defer tx.Rollback(ctx)
+	q := h.Queries.WithTx(tx)
+	if err := fleetguard.CheckRegister(ctx, q, node.Namespace, node.ID); err != nil {
+		return db.UpsertAgentRuntimeRow{}, errLocalFleetIdentityProtected
+	}
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	current, err := q.VerifyFleetCredential(ctx, db.VerifyFleetCredentialParams{Namespace: node.Namespace, TokenHash: auth.HashToken(token)})
+	identity, ok := middleware.CloudNodeIdentity(ctx)
+	if err != nil || !ok || current.ID != node.ID || current.OwnerID != node.OwnerID || current.Namespace != node.Namespace || current.DaemonID != node.DaemonID || current.ContainerID != identity.InstanceID || params.OwnerID != current.OwnerID || params.DaemonID.String != uuidToString(current.DaemonID) {
+		return db.UpsertAgentRuntimeRow{}, errLocalFleetIdentityProtected
+	}
+	row, err := q.UpsertAgentRuntime(ctx, params)
+	if err != nil {
+		return row, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return db.UpsertAgentRuntimeRow{}, err
+	}
+	return row, nil
+}
+
 // mergeLegacyRuntimes folds every runtime row keyed on a prior hostname-derived
 // daemon_id into the newly registered UUID-keyed row. For each legacy id the
 // lookup is case-insensitive and returns *all* matching rows — case-only drift
@@ -859,12 +896,27 @@ var errRuntimeMergeFenced = errors.New("runtime merge refused by the task-write 
 // teardown cannot start deleting the target until this merge finishes, and any
 // failure rolls the whole merge back to its starting state.
 func (h *Handler) mergeLegacyRuntime(ctx context.Context, newRuntimeID, oldRuntimeID pgtype.UUID, legacyID, provider string) error {
+	for attempt := 0; attempt < 5; attempt++ {
+		err := h.mergeLegacyRuntimeTx(ctx, newRuntimeID, oldRuntimeID, legacyID, provider)
+		if !errors.Is(err, fleetguard.ErrBindingChanged) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	return fleetguard.ErrBindingChanged
+}
+func (h *Handler) mergeLegacyRuntimeTx(ctx context.Context, newRuntimeID, oldRuntimeID pgtype.UUID, legacyID, provider string) error {
 	tx, err := h.TxStarter.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin merge tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 	qtx := h.Queries.WithTx(tx)
+	if err := fleetguard.CheckRuntimeMerge(ctx, qtx, "", oldRuntimeID, newRuntimeID); err != nil {
+		return err
+	}
 
 	// Fence, in the same order every task write uses: workspace row first, then the
 	// owner rows. Without the FOR UPDATE on the runtimes, a concurrent enqueue

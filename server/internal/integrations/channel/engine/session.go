@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/multica-ai/multica/server/internal/channelmedia"
+	"github.com/multica-ai/multica/server/internal/fleetguard"
 	"github.com/multica-ai/multica/server/internal/integrations/channel"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
@@ -403,7 +404,9 @@ type AppendInput struct {
 	// BeforeCommit adds work that must be atomic with this message and its
 	// context-generation change. Native slash commands use it to snapshot and
 	// enqueue the task before the message becomes visible.
-	BeforeCommit func(context.Context, pgx.Tx, db.ChatSession, int64, pgtype.UUID, int64) error
+	// BeforeOwnerLocks runs immediately after Begin, before workspace/chat/binding locks.
+	BeforeOwnerLocks func(context.Context, pgx.Tx) error
+	BeforeCommit     func(context.Context, pgx.Tx, db.ChatSession, int64, pgtype.UUID, int64) error
 }
 
 // StartSessionInput is the shared, transactional implementation of /new.
@@ -431,19 +434,38 @@ type StartSessionInput struct {
 	// BeforeCommit can add work that must be atomic with the route rotation and
 	// first message. The newly created session is visible through tx, but none of
 	// these writes are externally observable until StartSession commits.
-	BeforeCommit func(context.Context, pgx.Tx, db.ChatSession) error
+	// BeforeOwnerLocks runs immediately after Begin, before workspace/chat/binding locks.
+	BeforeOwnerLocks func(context.Context, pgx.Tx) error
+	BeforeCommit     func(context.Context, pgx.Tx, db.ChatSession) error
 }
 
 // StartSession atomically retires the current route generation, creates an
 // explicitly visible Chat, installs the next generation, and optionally writes
 // the command body as its first ordinary user message.
 func (s *ChatSession) StartSession(ctx context.Context, in StartSessionInput) (StartSessionResult, error) {
+	for attempt := 0; attempt < 5; attempt++ {
+		result, err := s.startSession(ctx, in)
+		if !errors.Is(err, fleetguard.ErrBindingChanged) {
+			return result, err
+		}
+		if ctx.Err() != nil {
+			return StartSessionResult{}, ctx.Err()
+		}
+	}
+	return StartSessionResult{}, fleetguard.ErrBindingChanged
+}
+func (s *ChatSession) startSession(ctx context.Context, in StartSessionInput) (StartSessionResult, error) {
 	tx, err := s.tx.Begin(ctx)
 	if err != nil {
 		return StartSessionResult{}, fmt.Errorf("begin start chat tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 	qtx := s.q.WithTx(tx)
+	if in.BeforeOwnerLocks != nil {
+		if err := in.BeforeOwnerLocks(ctx, tx); err != nil {
+			return StartSessionResult{}, err
+		}
+	}
 	if _, err := qtx.LockWorkspaceForChatSessionCreate(ctx, in.WorkspaceID); err != nil {
 		return StartSessionResult{}, fmt.Errorf("lock workspace for start chat: %w", err)
 	}
@@ -643,12 +665,29 @@ const channelCommandMessageKind = "channel_command"
 // the dedup token mid-flight, in which case the whole transaction rolls back
 // (no chat_message lands).
 func (s *ChatSession) AppendUserMessage(ctx context.Context, in AppendInput) (AppendResult, error) {
+	for attempt := 0; attempt < 5; attempt++ {
+		result, err := s.appendUserMessage(ctx, in)
+		if !errors.Is(err, fleetguard.ErrBindingChanged) {
+			return result, err
+		}
+		if ctx.Err() != nil {
+			return AppendResult{}, ctx.Err()
+		}
+	}
+	return AppendResult{}, fleetguard.ErrBindingChanged
+}
+func (s *ChatSession) appendUserMessage(ctx context.Context, in AppendInput) (AppendResult, error) {
 	tx, err := s.tx.Begin(ctx)
 	if err != nil {
 		return AppendResult{}, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 	qtx := s.q.WithTx(tx)
+	if in.BeforeOwnerLocks != nil {
+		if err := in.BeforeOwnerLocks(ctx, tx); err != nil {
+			return AppendResult{}, err
+		}
+	}
 	commandSource := in.CommandText
 	if commandSource == "" {
 		commandSource = in.Body

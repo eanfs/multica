@@ -2,10 +2,18 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/testutil"
+	"github.com/multica-ai/multica/server/internal/util"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1523,4 +1531,183 @@ func newDeliveryTaskID(t *testing.T, pool *pgxpool.Pool) pgtype.UUID {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM channel_task_delivery WHERE task_id = $1`, taskID)
 	})
 	return taskID
+}
+
+type fleetSessionStarter struct {
+	pool    *pgxpool.Pool
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (s *fleetSessionStarter) Begin(ctx context.Context) (pgx.Tx, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &fleetSessionTx{Tx: tx, s: s}, nil
+}
+
+type fleetSessionTx struct {
+	pgx.Tx
+	s *fleetSessionStarter
+}
+
+func (t *fleetSessionTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	if strings.Contains(sql, "name: FleetNodeSharedLock") {
+		t.s.once.Do(func() { close(t.s.entered) })
+	}
+	return t.Tx.Exec(ctx, sql, args...)
+}
+
+func TestFleetChannelOwningTransactionAdmission(t *testing.T) {
+	for _, path := range []string{"start", "append"} {
+		for _, state := range []string{"terminal-race", "allowed", "missing-early"} {
+			t.Run(path+"/"+state, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				pool, f := testutil.NewFleetFixture(t)
+				ns := "task6-channel-" + uuid.NewString()
+				node := f.FleetNode(t, ns)
+				rt := f.Runtime(t, "channel", testutil.Cols{"runtime_mode": "local", "metadata": json.RawMessage(fmt.Sprintf(`{"managed_by":"local_fleet","fleet_node_id":"%s"}`, node))})
+				ag := f.Agent(t, "channel", rt, testutil.Cols{"runtime_mode": "local"})
+				inst := f.Insert(t, "channel_installation", testutil.Cols{"workspace_id": f.WorkspaceID, "agent_id": ag, "channel_type": "lark", "config": json.RawMessage("{}"), "status": "active", "installer_user_id": f.UserID})
+				t.Cleanup(func() {
+					for _, sql := range []string{
+						"DELETE FROM channel_task_delivery WHERE task_id IN(SELECT id FROM agent_task_queue WHERE agent_id=$1)",
+						"DELETE FROM agent_task_queue WHERE agent_id=$1",
+						"DELETE FROM channel_chat_context_generation WHERE chat_session_id IN(SELECT id FROM chat_session WHERE agent_id=$1)",
+						"DELETE FROM channel_chat_session_binding WHERE chat_session_id IN(SELECT id FROM chat_session WHERE agent_id=$1)",
+						"DELETE FROM chat_message WHERE chat_session_id IN(SELECT id FROM chat_session WHERE agent_id=$1)",
+						"DELETE FROM chat_session WHERE agent_id=$1",
+					} {
+						if _, err := pool.Exec(context.Background(), sql, ag); err != nil {
+							t.Errorf("owned channel cleanup: %v", err)
+						}
+					}
+				})
+				q := db.New(pool)
+				svc := service.NewTaskService(q, pool, nil, events.New())
+				owner := util.MustParseUUID(f.UserID)
+				prepared, err := svc.PrepareChatTaskEnqueue(ctx, util.MustParseUUID(ag), owner)
+				if err != nil {
+					t.Fatal(err)
+				}
+				starter := &fleetSessionStarter{pool: pool, entered: make(chan struct{})}
+				sessions := NewChatSession(q, starter, channel.Type("lark"), SessionTitles{})
+				var existing db.ChatSession
+				ensure := EnsureSessionInput{WorkspaceID: util.MustParseUUID(f.WorkspaceID), AgentID: util.MustParseUUID(ag), InstallationID: util.MustParseUUID(inst), Sender: owner, BindingKey: "fixture-route", ChatType: channel.ChatTypeP2P}
+				if path == "append" {
+					seed := NewChatSession(q, pool, channel.Type("lark"), SessionTitles{})
+					id, err := seed.EnsureSession(ctx, ensure)
+					if err != nil {
+						t.Fatal(err)
+					}
+					existing, err = q.GetChatSession(ctx, id)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				count := func() int {
+					var rows int
+					if err := pool.QueryRow(ctx, `SELECT
+ (SELECT count(*) FROM agent_task_queue WHERE agent_id=$1)+
+ (SELECT count(*) FROM chat_session WHERE agent_id=$1)+
+ (SELECT count(*) FROM chat_message WHERE chat_session_id IN(SELECT id FROM chat_session WHERE agent_id=$1))+
+ (SELECT count(*) FROM channel_chat_session_binding WHERE installation_id=$2)`, ag, inst).Scan(&rows); err != nil {
+						t.Fatal(err)
+					}
+					return rows
+				}
+				before := count()
+				var blocker pgx.Tx
+				if state == "terminal-race" {
+					blocker, err = pool.Begin(ctx)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer blocker.Rollback(context.Background())
+					if err := db.New(blocker).FleetNodeExclusiveLock(ctx, db.FleetNodeExclusiveLockParams{Namespace: ns, NodeID: util.MustParseUUID(node)}); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := blocker.Exec(ctx, "UPDATE fleet_nodes SET desired='terminating',maintenance=true WHERE id=$1 AND namespace=$2", node, ns); err != nil {
+						t.Fatal(err)
+					}
+				}
+				early := prepared.BeforeOwnerLocks
+				if state == "missing-early" {
+					early = nil
+				}
+				enqueue := func(ctx context.Context, tx pgx.Tx, session db.ChatSession, revision int64) error {
+					_, err := svc.EnqueuePreparedChannelChatTaskInTx(ctx, tx, session, owner, false, revision, prepared)
+					return err
+				}
+				done := make(chan error, 1)
+				go func() {
+					if path == "start" {
+						_, err := sessions.StartSession(ctx, StartSessionInput{EnsureSessionInput: ensure, Body: "test-only task", PersistMessage: true, BeforeOwnerLocks: early, BeforeCommit: func(ctx context.Context, tx pgx.Tx, session db.ChatSession) error {
+							return enqueue(ctx, tx, session, 1)
+						}})
+						done <- err
+					} else {
+						_, err := sessions.AppendUserMessage(ctx, AppendInput{SessionID: existing.ID, Sender: owner, InstallationID: util.MustParseUUID(inst), Body: "test-only task", BeforeOwnerLocks: early, BeforeCommit: func(ctx context.Context, tx pgx.Tx, session db.ChatSession, revision int64, bindingID pgtype.UUID, routeRevision int64) error {
+							return enqueue(ctx, tx, session, revision)
+						}})
+						done <- err
+					}
+				}()
+				if state == "terminal-race" {
+					select {
+					case <-starter.entered:
+					case <-ctx.Done():
+						t.Fatal(ctx.Err())
+					}
+					probe, err := pool.Begin(ctx)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := probe.Exec(ctx, "SELECT id FROM workspace WHERE id=$1 FOR UPDATE NOWAIT", f.WorkspaceID); err != nil {
+						t.Fatalf("workspace lock preceded node admission: %v", err)
+					}
+					if _, err := probe.Exec(ctx, "SELECT id FROM agent_runtime WHERE id=$1 FOR UPDATE NOWAIT", rt); err != nil {
+						t.Fatalf("runtime lock preceded node admission: %v", err)
+					}
+					_ = probe.Rollback(ctx)
+					if err := blocker.Commit(ctx); err != nil {
+						t.Fatal(err)
+					}
+				}
+				select {
+				case err := <-done:
+					if state == "allowed" {
+						if err != nil {
+							t.Fatal(err)
+						}
+					} else if err == nil {
+						t.Fatal("terminal or missing early admission committed")
+					}
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+				if state == "missing-early" {
+					select {
+					case <-starter.entered:
+						t.Fatal("late callback acquired a new node behind owner rows")
+					default:
+					}
+				}
+				after := count()
+				if state == "allowed" {
+					delta := 2
+					if path == "start" {
+						delta = 4
+					}
+					if after != before+delta {
+						t.Fatalf("atomic chat+task rows=%d before=%d delta=%d", after, before, delta)
+					}
+				} else if after != before {
+					t.Fatalf("refused owning transaction persisted rows: before=%d after=%d", before, after)
+				}
+			})
+		}
+	}
 }

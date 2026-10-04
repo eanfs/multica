@@ -23,6 +23,8 @@ import (
 	"github.com/multica-ai/multica/server/internal/entitlement"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/featureflags"
+	"github.com/multica-ai/multica/server/internal/fleet/model"
+	"github.com/multica-ai/multica/server/internal/fleetguard"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/realtime"
@@ -1320,36 +1322,44 @@ func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue
 		HeadSha: headShaText(s.ResolveIssueReviewSHA(ctx, issue.ID)),
 	}
 	var task db.AgentTaskQueue
-	if fireAt.Valid {
-		task, err = s.Queries.CreateDeferredChannelIssueTask(ctx, db.CreateDeferredChannelIssueTaskParams{
-			ID:                   dbid.NewV7(),
-			AgentID:              createParams.AgentID,
-			RuntimeID:            createParams.RuntimeID,
-			IssueID:              createParams.IssueID,
-			Priority:             createParams.Priority,
-			TriggerCommentID:     createParams.TriggerCommentID,
-			CoalescedCommentIds:  createParams.CoalescedCommentIds,
-			TriggerSummary:       createParams.TriggerSummary,
-			ForceFreshSession:    createParams.ForceFreshSession,
-			IsLeaderTask:         createParams.IsLeaderTask,
-			HandoffNote:          createParams.HandoffNote,
-			SquadID:              createParams.SquadID,
-			HeadSha:              createParams.HeadSha,
-			OriginatorUserID:     createParams.OriginatorUserID,
-			AccountableUserID:    createParams.AccountableUserID,
-			RuntimeMcpOverlay:    createParams.RuntimeMcpOverlay,
-			RuntimeConnectedApps: createParams.RuntimeConnectedApps,
-			OriginatorSource:     createParams.OriginatorSource,
-			DelegatedFromTaskID:  createParams.DelegatedFromTaskID,
-			RuleVersionID:        createParams.RuleVersionID,
-			RerunOfTaskID:        createParams.RerunOfTaskID,
-			TriggerEvidenceKind:  createParams.TriggerEvidenceKind,
-			TriggerEvidenceRefID: createParams.TriggerEvidenceRefID,
-			FireAt:               fireAt,
-		})
-	} else {
-		task, err = s.Queries.CreateAgentTask(ctx, createParams)
-	}
+	err = s.runFleetTx(ctx, func(qtx *db.Queries) error {
+		locked, e := s.admitEnqueueAgent(ctx, qtx, createParams.AgentID, issue.ID)
+		if e != nil {
+			return e
+		}
+		createParams.RuntimeID = locked.RuntimeID
+		if fireAt.Valid {
+			task, err = qtx.CreateDeferredChannelIssueTask(ctx, db.CreateDeferredChannelIssueTaskParams{
+				ID:                   dbid.NewV7(),
+				AgentID:              createParams.AgentID,
+				RuntimeID:            createParams.RuntimeID,
+				IssueID:              createParams.IssueID,
+				Priority:             createParams.Priority,
+				TriggerCommentID:     createParams.TriggerCommentID,
+				CoalescedCommentIds:  createParams.CoalescedCommentIds,
+				TriggerSummary:       createParams.TriggerSummary,
+				ForceFreshSession:    createParams.ForceFreshSession,
+				IsLeaderTask:         createParams.IsLeaderTask,
+				HandoffNote:          createParams.HandoffNote,
+				SquadID:              createParams.SquadID,
+				HeadSha:              createParams.HeadSha,
+				OriginatorUserID:     createParams.OriginatorUserID,
+				AccountableUserID:    createParams.AccountableUserID,
+				RuntimeMcpOverlay:    createParams.RuntimeMcpOverlay,
+				RuntimeConnectedApps: createParams.RuntimeConnectedApps,
+				OriginatorSource:     createParams.OriginatorSource,
+				DelegatedFromTaskID:  createParams.DelegatedFromTaskID,
+				RuleVersionID:        createParams.RuleVersionID,
+				RerunOfTaskID:        createParams.RerunOfTaskID,
+				TriggerEvidenceKind:  createParams.TriggerEvidenceKind,
+				TriggerEvidenceRefID: createParams.TriggerEvidenceRefID,
+				FireAt:               fireAt,
+			})
+		} else {
+			task, err = qtx.CreateAgentTask(ctx, createParams)
+		}
+		return err
+	})
 	if err != nil {
 		// A concurrent enqueue for the same (issue, agent) won the race and the
 		// unique index rejected this insert. That is benign — a sibling run
@@ -1465,32 +1475,40 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, iss
 	originatorUserID := attr.UserID
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
 	attrSource, attrDelegatedFrom, attrEvidenceKind, attrEvidenceRef := attributionCreateParams(attr)
-	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
-		ID:                   dbid.NewV7(),
-		AgentID:              agentID,
-		RuntimeID:            agent.RuntimeID,
-		IssueID:              issue.ID,
-		Priority:             priorityToInt(issue.Priority),
-		TriggerCommentID:     triggerCommentID,
-		CoalescedCommentIds:  coalescedCommentIDs,
-		TriggerSummary:       s.buildCommentTriggerSummary(ctx, issue.WorkspaceID, triggerCommentID),
-		IsLeaderTask:         pgtype.Bool{Bool: isLeader, Valid: isLeader},
-		ForceFreshSession:    pgtype.Bool{Bool: forceFreshSession, Valid: forceFreshSession},
-		HandoffNote:          pgtype.Text{String: handoffNote, Valid: handoffNote != ""},
-		SquadID:              squadID,
-		OriginatorUserID:     originatorUserID,
-		AccountableUserID:    attr.AccountableUserID,
-		RuleVersionID:        attr.RuleVersionID,
-		RerunOfTaskID:        rerunOfTaskID,
-		RuntimeMcpOverlay:    runtimeMCPOverlay.Overlay,
-		RuntimeConnectedApps: runtimeMCPOverlay.ConnectedApps,
-		OriginatorSource:     attrSource,
-		DelegatedFromTaskID:  attrDelegatedFrom,
-		TriggerEvidenceKind:  attrEvidenceKind,
-		TriggerEvidenceRefID: attrEvidenceRef,
-		// Stamp the reviewed head so dedup can distinguish this run's target
-		// from a later request against a new HEAD (TEN-356).
-		HeadSha: headShaText(s.ResolveIssueReviewSHA(ctx, issue.ID)),
+	var task db.AgentTaskQueue
+	err = s.runFleetTx(ctx, func(qtx *db.Queries) error {
+		locked, e := s.admitEnqueueAgent(ctx, qtx, agentID, issue.ID)
+		if e != nil {
+			return e
+		}
+		task, err = qtx.CreateAgentTask(ctx, db.CreateAgentTaskParams{
+			ID:                   dbid.NewV7(),
+			AgentID:              agentID,
+			RuntimeID:            locked.RuntimeID,
+			IssueID:              issue.ID,
+			Priority:             priorityToInt(issue.Priority),
+			TriggerCommentID:     triggerCommentID,
+			CoalescedCommentIds:  coalescedCommentIDs,
+			TriggerSummary:       s.buildCommentTriggerSummary(ctx, issue.WorkspaceID, triggerCommentID),
+			IsLeaderTask:         pgtype.Bool{Bool: isLeader, Valid: isLeader},
+			ForceFreshSession:    pgtype.Bool{Bool: forceFreshSession, Valid: forceFreshSession},
+			HandoffNote:          pgtype.Text{String: handoffNote, Valid: handoffNote != ""},
+			SquadID:              squadID,
+			OriginatorUserID:     originatorUserID,
+			AccountableUserID:    attr.AccountableUserID,
+			RuleVersionID:        attr.RuleVersionID,
+			RerunOfTaskID:        rerunOfTaskID,
+			RuntimeMcpOverlay:    runtimeMCPOverlay.Overlay,
+			RuntimeConnectedApps: runtimeMCPOverlay.ConnectedApps,
+			OriginatorSource:     attrSource,
+			DelegatedFromTaskID:  attrDelegatedFrom,
+			TriggerEvidenceKind:  attrEvidenceKind,
+			TriggerEvidenceRefID: attrEvidenceRef,
+			// Stamp the reviewed head so dedup can distinguish this run's target
+			// from a later request against a new HEAD (TEN-356).
+			HeadSha: headShaText(s.ResolveIssueReviewSHA(ctx, issue.ID)),
+		})
+		return err
 	})
 	if err != nil {
 		// A concurrent enqueue for the same (issue, agent) won the race and the
@@ -1663,44 +1681,55 @@ func (s *TaskService) enqueueQuickCreateTask(ctx context.Context, workspaceID, r
 	}
 	var task db.AgentTaskQueue
 	if capture == nil {
-		task, err = s.Queries.CreateQuickCreateTask(ctx, createParams)
+		err = s.runFleetTx(ctx, func(qtx *db.Queries) error {
+			locked, e := s.admitEnqueueAgent(ctx, qtx, agentID)
+			if e != nil {
+				return e
+			}
+			createParams.RuntimeID = locked.RuntimeID
+			task, e = qtx.CreateQuickCreateTask(ctx, createParams)
+			return e
+		})
 	} else {
-		tx, beginErr := s.TxStarter.Begin(ctx)
-		if beginErr != nil {
-			return db.AgentTaskQueue{}, fmt.Errorf("begin quick-create source context tx: %w", beginErr)
+		if s.TxStarter == nil {
+			return db.AgentTaskQueue{}, model.ErrUnavailable
 		}
-		defer tx.Rollback(ctx)
-		qtx := s.Queries.WithTx(tx)
-		if _, err = qtx.LockIssueForDescriptionUpdate(ctx, db.LockIssueForDescriptionUpdateParams{
-			ID: capture.SourceIssueID, WorkspaceID: workspaceID,
-		}); err == nil {
-			var locked []pgtype.UUID
-			locked, err = qtx.LockCommentAncestorPath(ctx, db.LockCommentAncestorPathParams{
-				CommentID: capture.AnchorCommentID, WorkspaceID: workspaceID, IssueID: capture.SourceIssueID,
-			})
-			if err == nil && len(locked) == 0 {
-				err = ErrAnchorCommentDeleted
+		err = s.runFleetTx(ctx, func(qtx *db.Queries) error {
+			task = db.AgentTaskQueue{}
+			locked, e := s.admitEnqueueAgent(ctx, qtx, agentID, capture.SourceIssueID)
+			if e != nil {
+				return e
 			}
-		}
-		if errors.Is(err, pgx.ErrNoRows) {
-			err = ErrSourceIssueDeleted
-		}
-		if err == nil {
-			var current SourceContextBuild
-			current, err = BuildSourceContext(ctx, qtx, workspaceID, capture.AnchorCommentID)
-			if err == nil && current.Digest != capture.Digest {
-				err = ErrSourceContextChanged
+			createParams.RuntimeID = locked.RuntimeID
+			if _, err = qtx.LockIssueForDescriptionUpdate(ctx, db.LockIssueForDescriptionUpdateParams{
+				ID: capture.SourceIssueID, WorkspaceID: workspaceID,
+			}); err == nil {
+				var locked []pgtype.UUID
+				locked, err = qtx.LockCommentAncestorPath(ctx, db.LockCommentAncestorPathParams{
+					CommentID: capture.AnchorCommentID, WorkspaceID: workspaceID, IssueID: capture.SourceIssueID,
+				})
+				if err == nil && len(locked) == 0 {
+					err = ErrAnchorCommentDeleted
+				}
 			}
-		}
-		if err == nil {
-			task, err = qtx.CreateQuickCreateTask(ctx, createParams)
-		}
-		if err == nil {
-			_, err = PersistSourceContext(ctx, qtx, *capture, pgtype.UUID{}, task.ID)
-		}
-		if err == nil {
-			err = tx.Commit(ctx)
-		}
+			if errors.Is(err, pgx.ErrNoRows) {
+				err = ErrSourceIssueDeleted
+			}
+			if err == nil {
+				var current SourceContextBuild
+				current, err = BuildSourceContext(ctx, qtx, workspaceID, capture.AnchorCommentID)
+				if err == nil && current.Digest != capture.Digest {
+					err = ErrSourceContextChanged
+				}
+			}
+			if err == nil {
+				task, err = qtx.CreateQuickCreateTask(ctx, createParams)
+			}
+			if err == nil {
+				_, err = PersistSourceContext(ctx, qtx, *capture, pgtype.UUID{}, task.ID)
+			}
+			return err
+		})
 	}
 	if err != nil {
 		return db.AgentTaskQueue{}, fmt.Errorf("create quick-create task with source context: %w", err)
@@ -1760,35 +1789,60 @@ func (s *TaskService) RetrySourceContextQuickCreate(ctx context.Context, workspa
 	}
 	overlay := s.buildRuntimeMCPOverlay(ctx, requesterID, agent)
 
-	tx, err := s.TxStarter.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin source context manual retry: %w", err)
+	if s.TxStarter == nil {
+		return nil, model.ErrUnavailable
 	}
-	defer tx.Rollback(ctx)
-	qtx := s.Queries.WithTx(tx)
-	locked, err := qtx.GetPendingIssueSourceContextByOriginTask(ctx, db.GetPendingIssueSourceContextByOriginTaskParams{
-		WorkspaceID: workspaceID, OriginTaskID: sourceTaskID,
+	var child db.AgentTaskQueue
+	err = s.runFleetTx(ctx, func(qtx *db.Queries) error {
+		candidateParent, e := qtx.GetAgentTask(ctx, sourceTaskID)
+		if e != nil {
+			return e
+		}
+		admitted, e := s.admitEnqueueAgent(ctx, qtx, candidateParent.AgentID)
+		if e != nil {
+			return e
+		}
+		if admitted.RuntimeID != candidateParent.RuntimeID {
+			currentNS, e := fleetguard.ResolveNamespace(ctx, qtx, admitted.RuntimeID)
+			if e != nil {
+				return e
+			}
+			parentNS, e := fleetguard.ResolveNamespace(ctx, qtx, candidateParent.RuntimeID)
+			if e != nil {
+				return e
+			}
+			if currentNS != "" || parentNS != "" {
+				return ErrSourceContextRetryUnavailable
+			}
+		}
+		locked, err := qtx.GetPendingIssueSourceContextByOriginTask(ctx, db.GetPendingIssueSourceContextByOriginTaskParams{
+			WorkspaceID: workspaceID, OriginTaskID: sourceTaskID,
+		})
+		if err != nil || locked.ID != contextID {
+			return ErrSourceContextRetryUnavailable
+		}
+		child, err = qtx.CreateManualQuickCreateRetryTask(ctx, db.CreateManualQuickCreateRetryTaskParams{
+			ActorUserID:          requesterID,
+			RuntimeMcpOverlay:    overlay.Overlay,
+			RuntimeConnectedApps: overlay.ConnectedApps,
+			NewTaskID:            dbid.NewV7(),
+			SourceTaskID:         sourceTaskID,
+		})
+		if err != nil {
+			return fmt.Errorf("create source context manual retry: %w", err)
+		}
+		if child.AgentID != candidateParent.AgentID || child.RuntimeID != candidateParent.RuntimeID {
+			return fleetguard.ErrBindingChanged
+		}
+		if _, err := qtx.TransferPendingIssueSourceContextTask(ctx, db.TransferPendingIssueSourceContextTaskParams{
+			NewTaskID: child.ID, WorkspaceID: workspaceID, ID: contextID, OldTaskID: sourceTaskID,
+		}); err != nil {
+			return fmt.Errorf("transfer source context manual retry: %w", err)
+		}
+		return nil
 	})
-	if err != nil || locked.ID != contextID {
-		return nil, ErrSourceContextRetryUnavailable
-	}
-	child, err := qtx.CreateManualQuickCreateRetryTask(ctx, db.CreateManualQuickCreateRetryTaskParams{
-		ActorUserID:          requesterID,
-		RuntimeMcpOverlay:    overlay.Overlay,
-		RuntimeConnectedApps: overlay.ConnectedApps,
-		NewTaskID:            dbid.NewV7(),
-		SourceTaskID:         sourceTaskID,
-	})
 	if err != nil {
-		return nil, fmt.Errorf("create source context manual retry: %w", err)
-	}
-	if _, err := qtx.TransferPendingIssueSourceContextTask(ctx, db.TransferPendingIssueSourceContextTaskParams{
-		NewTaskID: child.ID, WorkspaceID: workspaceID, ID: contextID, OldTaskID: sourceTaskID,
-	}); err != nil {
-		return nil, fmt.Errorf("transfer source context manual retry: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit source context manual retry: %w", err)
+		return nil, err
 	}
 	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, child)
 	s.NotifyTaskEnqueued(ctx, child)
@@ -1844,6 +1898,8 @@ var ErrChatSessionArchived = errors.New("chat task: session archived")
 // PreparedChatTaskEnqueue is an opaque, side-effect-free input snapshot built
 // before a caller opens a task-enqueue transaction.
 type PreparedChatTaskEnqueue struct {
+	// BeforeOwnerLocks admits the runtime in the caller transaction before any owner locks.
+	BeforeOwnerLocks func(context.Context, pgx.Tx) error
 	accountableUser  pgtype.UUID
 	attrSource       pgtype.Text
 	attrEvidenceKind pgtype.Text
@@ -1903,8 +1959,9 @@ func (s *TaskService) PrepareChatTaskEnqueue(
 	}
 	attrSource, _, attrEvidenceKind, _ := attributionCreateParams(attr)
 	return PreparedChatTaskEnqueue{
-		accountableUser: attr.AccountableUserID,
-		attrSource:      attrSource, attrEvidenceKind: attrEvidenceKind,
+		BeforeOwnerLocks: func(ctx context.Context, tx pgx.Tx) error { return s.AdmitPreparedChatEnqueueInTx(ctx, tx, agentID) },
+		accountableUser:  attr.AccountableUserID,
+		attrSource:       attrSource, attrEvidenceKind: attrEvidenceKind,
 		runtimeOverlay: s.buildRuntimeMCPOverlay(ctx, initiatorUserID, agent),
 	}, nil
 }
@@ -1961,21 +2018,14 @@ func (s *TaskService) enqueueChatTask(
 	if s.TxStarter == nil {
 		return db.AgentTaskQueue{}, errors.New("chat task enqueue: transaction starter is required")
 	}
-	tx, err := s.TxStarter.Begin(ctx)
-	if err != nil {
-		return db.AgentTaskQueue{}, fmt.Errorf("begin chat task enqueue: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	task, err := s.enqueueChatTaskTx(
-		ctx, s.Queries.WithTx(tx), chatSession, initiatorUserID,
-		forceFreshSession, contextRevision, requireDelivery,
-		expectedBindingID, expectedRouteRevision, prepared,
-	)
+	var task db.AgentTaskQueue
+	err = s.runFleetTx(ctx, func(qtx *db.Queries) error {
+		var e error
+		task, e = s.enqueueChatTaskTx(ctx, qtx, chatSession, initiatorUserID, forceFreshSession, contextRevision, requireDelivery, expectedBindingID, expectedRouteRevision, prepared, false)
+		return e
+	})
 	if err != nil {
 		return db.AgentTaskQueue{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return db.AgentTaskQueue{}, fmt.Errorf("commit chat task enqueue: %w", err)
 	}
 	s.FinalizeChatTaskEnqueue(ctx, task)
 	return task, nil
@@ -1998,7 +2048,7 @@ func (s *TaskService) EnqueuePreparedChannelChatTaskInTx(
 	}
 	return s.enqueueChatTaskTx(
 		ctx, s.Queries.WithTx(tx), chatSession, initiatorUserID,
-		forceFreshSession, contextRevision, true, pgtype.UUID{}, 0, prepared,
+		forceFreshSession, contextRevision, true, pgtype.UUID{}, 0, prepared, true,
 	)
 }
 
@@ -2013,7 +2063,21 @@ func (s *TaskService) enqueueChatTaskTx(
 	expectedBindingID pgtype.UUID,
 	expectedRouteRevision int64,
 	prepared PreparedChatTaskEnqueue,
+	callerOwned bool,
 ) (db.AgentTaskQueue, error) {
+	var admitted db.Agent
+	var e error
+	if callerOwned {
+		admitted, e = qtx.GetAgent(ctx, chatSession.AgentID)
+		if e == nil {
+			e = fleetguard.CheckCallerEnqueue(ctx, qtx, admitted.RuntimeID, time.Now())
+		}
+	} else {
+		admitted, e = s.admitEnqueueAgent(ctx, qtx, chatSession.AgentID)
+	}
+	if e != nil {
+		return db.AgentTaskQueue{}, e
+	}
 	currentSession, err := qtx.LockChatSessionForEnqueue(ctx, chatSession.ID)
 	if err != nil {
 		return db.AgentTaskQueue{}, fmt.Errorf("lock chat session: %w", err)
@@ -2025,6 +2089,9 @@ func (s *TaskService) enqueueChatTaskTx(
 	agent, err := qtx.GetAgentForClaimUpdate(ctx, chatSession.AgentID)
 	if err != nil {
 		return db.AgentTaskQueue{}, fmt.Errorf("reload chat agent: %w", err)
+	}
+	if agent.RuntimeID != admitted.RuntimeID {
+		return db.AgentTaskQueue{}, fleetguard.ErrBindingChanged
 	}
 	if agent.ArchivedAt.Valid {
 		return db.AgentTaskQueue{}, ErrChatTaskAgentArchived
@@ -2350,7 +2417,11 @@ func (s *TaskService) SendDirectChatMessage(
 	attrSource, _, attrEvidenceKind, attrEvidenceRef := attributionCreateParams(attr)
 
 	var out DirectChatSendResult
-	if err := s.runInTx(ctx, func(qtx *db.Queries) error {
+	if err := s.runFleetTx(ctx, func(qtx *db.Queries) error {
+		admitted, e := s.admitEnqueueAgent(ctx, qtx, session.AgentID)
+		if e != nil {
+			return e
+		}
 		// Serialise this send against a concurrent runtime rebind of the same
 		// session (MUL-5163). The lock must be taken first and the agent re-read
 		// under it: the runtime_id the caller loaded can already be stale by the
@@ -2372,6 +2443,9 @@ func (s *TaskService) SendDirectChatMessage(
 		carrier, err := qtx.GetAgentForClaimUpdate(ctx, session.AgentID)
 		if err != nil {
 			return fmt.Errorf("reload chat agent: %w", err)
+		}
+		if carrier.RuntimeID != admitted.RuntimeID {
+			return fleetguard.ErrBindingChanged
 		}
 		if carrier.ArchivedAt.Valid {
 			return ErrChatTaskAgentArchived
@@ -3511,13 +3585,35 @@ func (s *TaskService) claimTask(ctx context.Context, agentID, runtimeID pgtype.U
 		s.maybeLogClaimSlow(agentID, outcome, start, getAgentMs, countRunningMs, claimAgentMs, reanchorMs, updateStatusMs, dispatchMs)
 	}()
 
-	err := s.runInTx(ctx, func(qtx *db.Queries) error {
+	err := s.runFleetTx(ctx, func(qtx *db.Queries) error {
+		claimed = nil
+		candidate, err := qtx.GetAgent(ctx, agentID)
+		if err != nil {
+			return err
+		}
+		candidateRuntime := runtimeID
+		if !candidateRuntime.Valid {
+			candidateRuntime = candidate.RuntimeID
+		}
+		if !candidateRuntime.Valid {
+			return nil
+		}
+		if err := s.checkFleetAdmission(ctx, qtx, candidateRuntime, true); err != nil {
+			if errors.Is(err, model.ErrBusy) {
+				outcome = "fleet_blocked"
+				return nil
+			}
+			return err
+		}
 		t0 := time.Now()
 		agent, err := qtx.GetAgentForClaimUpdate(ctx, agentID)
 		getAgentMs = time.Since(t0).Milliseconds()
 		if err != nil {
 			outcome = "error_get_agent"
 			return fmt.Errorf("agent not found: %w", err)
+		}
+		if agent.RuntimeID != candidate.RuntimeID {
+			return fleetguard.ErrBindingChanged
 		}
 		claimRuntimeID := runtimeID
 		if !claimRuntimeID.Valid {
@@ -3670,11 +3766,28 @@ func (s *TaskService) ClaimTaskForRuntime(ctx context.Context, runtimeID pgtype.
 	checkStarted := time.Now()
 	if due := s.ReclaimCheck.DueRuntimeIDs(ctx, []string{runtimeKey}, checkStarted); len(due) > 0 {
 		reclaimCheckAfter := time.Now().Add(claimResponseRecoveryWindow + ReclaimCheckHintSafetyMargin)
-		stale, err := s.Queries.ReclaimStaleDispatchedTaskForRuntime(ctx, db.ReclaimStaleDispatchedTaskForRuntimeParams{
-			RuntimeID:         runtimeID,
-			ClaimRecoverySecs: claimResponseRecoveryWindow.Seconds(),
-			PrepareLeaseSecs:  prepareLeaseDuration.Seconds(),
-			RuntimeStaleSecs:  RuntimeClaimFreshnessSeconds,
+		var stale db.AgentTaskQueue
+		err := s.runFleetReclaimTx(ctx, []pgtype.UUID{runtimeID}, func(qtx *db.Queries, managed bool) error {
+			var protected []pgtype.UUID
+			if managed {
+				eligible, barriers, e := fleetguard.ReclaimCandidates(ctx, qtx, []pgtype.UUID{runtimeID}, time.Now())
+				if e != nil {
+					return e
+				}
+				if len(eligible) == 0 {
+					return pgx.ErrNoRows
+				}
+				protected = barriers
+			}
+			var err error
+			stale, err = qtx.ReclaimStaleDispatchedTaskForRuntime(ctx, db.ReclaimStaleDispatchedTaskForRuntimeParams{
+				RuntimeID:              runtimeID,
+				FleetBarrierRuntimeIds: protected,
+				ClaimRecoverySecs:      claimResponseRecoveryWindow.Seconds(),
+				PrepareLeaseSecs:       prepareLeaseDuration.Seconds(),
+				RuntimeStaleSecs:       RuntimeClaimFreshnessSeconds,
+			})
+			return err
 		})
 		if err == nil {
 			s.ReclaimCheck.MarkChecked(
@@ -3988,12 +4101,30 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 	var reclaimCheckAfter time.Time
 	if len(dueKeys) > 0 {
 		reclaimCheckAfter = time.Now().Add(claimResponseRecoveryWindow + ReclaimCheckHintSafetyMargin)
-		reclaimed, err = s.Queries.ReclaimStaleDispatchedTasksForRuntimes(ctx, db.ReclaimStaleDispatchedTasksForRuntimesParams{
-			RuntimeIds:        uniqueIDs,
-			ClaimRecoverySecs: claimResponseRecoveryWindow.Seconds(),
-			PrepareLeaseSecs:  prepareLeaseDuration.Seconds(),
-			RuntimeStaleSecs:  RuntimeClaimFreshnessSeconds,
-			MaxTasks:          int32(maxTasks),
+		err = s.runFleetReclaimTx(ctx, uniqueIDs, func(qtx *db.Queries, managed bool) error {
+			reclaimed = nil
+			eligible := uniqueIDs
+			var protected []pgtype.UUID
+			if managed {
+				var filterErr error
+				eligible, protected, filterErr = fleetguard.ReclaimCandidates(ctx, qtx, uniqueIDs, time.Now())
+				if filterErr != nil {
+					return filterErr
+				}
+				if len(eligible) == 0 {
+					return nil
+				}
+			}
+			var e error
+			reclaimed, e = qtx.ReclaimStaleDispatchedTasksForRuntimes(ctx, db.ReclaimStaleDispatchedTasksForRuntimesParams{
+				RuntimeIds:             eligible,
+				FleetBarrierRuntimeIds: protected,
+				ClaimRecoverySecs:      claimResponseRecoveryWindow.Seconds(),
+				PrepareLeaseSecs:       prepareLeaseDuration.Seconds(),
+				RuntimeStaleSecs:       RuntimeClaimFreshnessSeconds,
+				MaxTasks:               int32(maxTasks),
+			})
+			return e
 		})
 		if err != nil {
 			return nil, fmt.Errorf("reclaim stale dispatched tasks: %w", err)
@@ -4900,7 +5031,21 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 
 	var task db.AgentTaskQueue
 	var retried *db.AgentTaskQueue
-	if err := s.runInTx(ctx, func(qtx *db.Queries) error {
+	if err := s.runFleetTx(ctx, func(qtx *db.Queries) error {
+		retried = nil
+		retryAllowed := wantRetry
+		var retryCandidate db.AgentTaskQueue
+		if retryAllowed {
+			var err error
+			retryCandidate, err = qtx.GetAgentTask(ctx, taskID)
+			if err != nil {
+				return err
+			}
+			retryAllowed, err = s.admitRetryEnqueue(ctx, qtx, retryCandidate)
+			if err != nil {
+				return err
+			}
+		}
 		if err := lockChatSessionForTaskWrite(ctx, qtx, taskID); err != nil {
 			return err
 		}
@@ -4923,6 +5068,9 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 			return err
 		}
 		task = t
+		if retryAllowed && (t.AgentID != retryCandidate.AgentID || t.RuntimeID != retryCandidate.RuntimeID || t.IssueID != retryCandidate.IssueID) {
+			return fleetguard.ErrBindingChanged
+		}
 
 		// Atomic with the status flip, same as the completion path. A failed
 		// coordinator that already received the recovery comment has consumed
@@ -5006,7 +5154,7 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 		// ON CONFLICT DO NOTHING, which yields the slot instead of raising and so
 		// can never abort this transaction — which also carries the parent's
 		// failed status.
-		createRetry := wantRetry
+		createRetry := retryAllowed && retryEligible(failureReason, t)
 		if createRetry {
 			successor, herr := hasRunnableSuccessor(ctx, qtx, t)
 			if herr != nil {
@@ -5514,64 +5662,87 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 	if s.TxStarter == nil {
 		return nil, errors.New("task auto-retry: transaction starter is required")
 	}
-	tx, err := s.TxStarter.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("task auto-retry: begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	qtx := s.Queries.WithTx(tx)
-	if err := guardIssueNotInTriage(ctx, qtx, parent.IssueID, OriginDerived); err != nil {
-		if errors.Is(err, ErrIssueInTriage) {
-			slog.Info("task auto-retry skipped: issue is in triage",
-				"parent_task_id", util.UUIDToString(parent.ID),
-				"issue_id", util.UUIDToString(parent.IssueID))
-			return nil, nil
+	var child db.AgentTaskQueue
+	created := false
+	err := s.runFleetTx(ctx, func(qtx *db.Queries) error {
+		created = false
+		candidate, err := qtx.GetAgentTask(ctx, parent.ID)
+		if err != nil {
+			return err
 		}
-		return nil, err
-	}
-	child, err := qtx.CreateRetryTask(ctx, db.CreateRetryTaskParams{
-		NewTaskID:            dbid.NewV7(),
-		ID:                   parent.ID,
-		FireAt:               retryFireAt,
-		MaxAttempts:          pgtype.Int4{Int32: retryAttemptCeiling(reason, parent.MaxAttempts), Valid: true},
-		RuntimeMcpOverlay:    runtimeMCPOverlay.Overlay,
-		RuntimeConnectedApps: runtimeMCPOverlay.ConnectedApps,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Workspace torn down, or the pending slot was taken between the check
-		// above and this insert. Same contract as FailTask's path: no retry, no
-		// error.
-		slog.Info("task auto-retry not created: no row written",
-			"parent_task_id", util.UUIDToString(parent.ID),
-			"reason", reason,
-		)
-		return nil, nil
-	}
-	if err != nil {
-		slog.Warn("task auto-retry failed",
-			"parent_task_id", util.UUIDToString(parent.ID),
-			"reason", reason,
-			"error", err,
-		)
-		return nil, err
-	}
-	if err := transferPendingSourceContextToRetry(ctx, qtx, parent, child); err != nil {
+		allowed, err := s.admitRetryEnqueue(ctx, qtx, candidate)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return nil
+		}
+		parent = candidate
+		if err := guardIssueNotInTriage(ctx, qtx, parent.IssueID, OriginDerived); err != nil {
+			if errors.Is(err, ErrIssueInTriage) {
+				slog.Info("task auto-retry skipped: issue is in triage",
+					"parent_task_id", util.UUIDToString(parent.ID),
+					"issue_id", util.UUIDToString(parent.IssueID))
+				return nil
+			}
+			return err
+		}
+		child, err = qtx.CreateRetryTask(ctx, db.CreateRetryTaskParams{
+			NewTaskID:            dbid.NewV7(),
+			ID:                   parent.ID,
+			FireAt:               retryFireAt,
+			MaxAttempts:          pgtype.Int4{Int32: retryAttemptCeiling(reason, parent.MaxAttempts), Valid: true},
+			RuntimeMcpOverlay:    runtimeMCPOverlay.Overlay,
+			RuntimeConnectedApps: runtimeMCPOverlay.ConnectedApps,
+		})
 		if errors.Is(err, pgx.ErrNoRows) {
-			slog.Info("task auto-retry skipped: source context already transferred or attached",
+			// Workspace torn down, or the pending slot was taken between the check
+			// above and this insert. Same contract as FailTask's path: no retry, no
+			// error.
+			slog.Info("task auto-retry not created: no row written",
 				"parent_task_id", util.UUIDToString(parent.ID),
-				"source_context_retry_id", util.UUIDToString(child.ID),
+				"reason", reason,
 			)
-			return nil, nil
+			return nil
 		}
+		if err != nil {
+			slog.Warn("task auto-retry failed",
+				"parent_task_id", util.UUIDToString(parent.ID),
+				"reason", reason,
+				"error", err,
+			)
+			return err
+		}
+		if child.AgentID != candidate.AgentID || child.RuntimeID != candidate.RuntimeID || child.IssueID != candidate.IssueID {
+			return fleetguard.ErrBindingChanged
+		}
+		if err := transferPendingSourceContextToRetry(ctx, qtx, parent, child); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				slog.Info("task auto-retry skipped: source context already transferred or attached",
+					"parent_task_id", util.UUIDToString(parent.ID),
+					"source_context_retry_id", util.UUIDToString(child.ID),
+				)
+				deleted, deleteErr := qtx.DeleteUnstartedQuickCreateRetryTask(ctx, child.ID)
+				if deleteErr != nil || deleted != 1 {
+					return fmt.Errorf("discard unattached source context retry: changed=%d: %w", deleted, deleteErr)
+				}
+				return nil
+			}
+			return err
+		}
+		if err := qtx.CopyChannelTaskDelivery(ctx, db.CopyChannelTaskDeliveryParams{
+			ChildTaskID: child.ID, ParentTaskID: parent.ID,
+		}); err != nil {
+			return fmt.Errorf("copy auto-retry channel delivery: %w", err)
+		}
+		created = true
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
-	if err := qtx.CopyChannelTaskDelivery(ctx, db.CopyChannelTaskDeliveryParams{
-		ChildTaskID: child.ID, ParentTaskID: parent.ID,
-	}); err != nil {
-		return nil, fmt.Errorf("copy auto-retry channel delivery: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("task auto-retry: commit: %w", err)
+	if !created {
+		return nil, nil
 	}
 	slog.Info("task auto-retry enqueued",
 		"parent_task_id", util.UUIDToString(parent.ID),
@@ -6674,7 +6845,7 @@ func (s *TaskService) dispatchDelegatedFailureRecovery(ctx context.Context, targ
 			ruleVersionID = target.source.RuleVersionID
 		}
 		overlay := s.buildRuntimeMCPOverlay(ctx, originator, target.agent)
-		task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
+		params := db.CreateAgentTaskParams{
 			ID:                   dbid.NewV7(),
 			AgentID:              target.agent.ID,
 			RuntimeID:            target.agent.RuntimeID,
@@ -6694,6 +6865,16 @@ func (s *TaskService) dispatchDelegatedFailureRecovery(ctx context.Context, targ
 			TriggerEvidenceKind:  pgtype.Text{String: string(attribution.EvidenceDelegatedFailure), Valid: true},
 			TriggerEvidenceRefID: target.failed.ID,
 			HeadSha:              headShaText(s.ResolveIssueReviewSHA(ctx, target.issue.ID)),
+		}
+		var task db.AgentTaskQueue
+		err = s.runFleetTx(ctx, func(qtx *db.Queries) error {
+			admitted, e := s.admitEnqueueAgent(ctx, qtx, target.agent.ID, target.issue.ID)
+			if e != nil {
+				return e
+			}
+			params.RuntimeID = admitted.RuntimeID
+			task, e = qtx.CreateAgentTask(ctx, params)
+			return e
 		})
 		if err == nil {
 			slog.Info("delegated failure recovery task enqueued",
@@ -6805,6 +6986,137 @@ func (s *TaskService) dispatchDelegatedFailureRecoveryComment(ctx context.Contex
 	}
 	target.comment = comment
 	return s.dispatchDelegatedFailureRecovery(ctx, target, completedTaskID)
+}
+
+// admitEnqueueAgent discovers the binding before locks and fences the binding
+// before any caller-owned chat, issue or task lock is taken.
+func (s *TaskService) admitEnqueueAgent(ctx context.Context, q *db.Queries, id pgtype.UUID, issueIDs ...pgtype.UUID) (db.Agent, error) {
+	candidate, err := q.GetAgent(ctx, id)
+	if err != nil {
+		return db.Agent{}, err
+	}
+	if !candidate.RuntimeID.Valid {
+		return candidate, nil
+	}
+	namespace, err := fleetguard.ResolveNamespace(ctx, q, candidate.RuntimeID)
+	if err != nil {
+		return db.Agent{}, err
+	}
+	if namespace == "" {
+		return candidate, nil
+	}
+	if s.TxStarter == nil {
+		return db.Agent{}, model.ErrUnavailable
+	}
+	var issueID pgtype.UUID
+	if len(issueIDs) > 0 {
+		issueID = issueIDs[0]
+	}
+	if err := fleetguard.CheckEnqueueForOwners(ctx, q, namespace, db.FleetLockTaskWorkspacesParams{AgentID: id, IssueID: issueID, RuntimeID: candidate.RuntimeID}, time.Now()); err != nil {
+		return db.Agent{}, err
+	}
+	locked, err := q.GetAgentForClaimUpdate(ctx, id)
+	if err != nil {
+		return db.Agent{}, err
+	}
+	if locked.RuntimeID != candidate.RuntimeID {
+		return db.Agent{}, fleetguard.ErrBindingChanged
+	}
+	if locked.ArchivedAt.Valid {
+		return db.Agent{}, ErrChatTaskAgentArchived
+	}
+	return locked, nil
+}
+
+// Retry SQL copies the parent's persisted runtime, not the agent's new binding.
+// Refuse a managed binding mismatch; logical enqueue refusal never discards an
+// accepted parent terminal/report transition.
+func (s *TaskService) admitRetryEnqueue(ctx context.Context, q *db.Queries, parent db.AgentTaskQueue) (bool, error) {
+	admitted, err := s.admitEnqueueAgent(ctx, q, parent.AgentID, parent.IssueID)
+	if err != nil {
+		if errors.Is(err, model.ErrBusy) || errors.Is(err, model.ErrForbidden) || errors.Is(err, model.ErrUnavailable) || errors.Is(err, ErrChatTaskAgentArchived) {
+			return false, nil
+		}
+		return false, err
+	}
+	if admitted.RuntimeID != parent.RuntimeID {
+		currentNS, err := fleetguard.ResolveNamespace(ctx, q, admitted.RuntimeID)
+		if err != nil {
+			return false, err
+		}
+		parentNS, err := fleetguard.ResolveNamespace(ctx, q, parent.RuntimeID)
+		if err != nil {
+			return false, err
+		}
+		if currentNS != "" || parentNS != "" {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// AdmitPreparedChatEnqueueInTx is the early caller-owned transaction seam.
+// It MUST run before workspace/chat/binding locks; it is not an HTTP permission.
+func (s *TaskService) AdmitPreparedChatEnqueueInTx(ctx context.Context, tx pgx.Tx, agentID pgtype.UUID) error {
+	_, err := s.admitEnqueueAgent(ctx, s.Queries.WithTx(tx), agentID)
+	return err
+}
+
+// checkFleetAdmission must run before any owner-row lock in the insertion transaction.
+func (s *TaskService) checkFleetAdmission(ctx context.Context, q *db.Queries, runtimeID pgtype.UUID, claim bool) error {
+	if !runtimeID.Valid {
+		return nil
+	}
+	namespace, err := fleetguard.ResolveNamespace(ctx, q, runtimeID)
+	if err != nil {
+		return err
+	}
+	if namespace == "" {
+		return nil
+	}
+	if s.TxStarter == nil {
+		return model.ErrUnavailable
+	}
+	if claim {
+		return fleetguard.CheckClaim(ctx, q, namespace, runtimeID, time.Now())
+	}
+	return fleetguard.CheckEnqueue(ctx, q, namespace, runtimeID, time.Now())
+}
+
+// Ordinary reclaim keeps its original autocommit/partial-success transaction
+// shape. SQL itself excludes newly-managed metadata unless the owning guarded
+// transaction supplies the actual locked managed IDs, so discovery is not a
+// cached claim permission.
+func (s *TaskService) runFleetReclaimTx(ctx context.Context, ids []pgtype.UUID, fn func(*db.Queries, bool) error) error {
+	runtimes, err := s.Queries.GetAgentRuntimes(ctx, ids)
+	if err != nil {
+		return err
+	}
+	managed := false
+	for _, rt := range runtimes {
+		managed = managed || fleetguard.Managed(rt)
+	}
+	if !managed {
+		return fn(s.Queries, false)
+	}
+	if s.TxStarter == nil {
+		return model.ErrUnavailable
+	}
+	return s.runFleetTx(ctx, func(qtx *db.Queries) error { return fn(qtx, true) })
+}
+
+// runFleetTx retries only rolled-back binding discovery, with a bounded budget.
+func (s *TaskService) runFleetTx(ctx context.Context, fn func(*db.Queries) error) error {
+	for attempt := 0; attempt < 5; attempt++ {
+		err := s.runInTx(ctx, fn)
+		if !errors.Is(err, fleetguard.ErrBindingChanged) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	return fleetguard.ErrBindingChanged
 }
 
 // runInTx executes fn inside a single DB transaction. If TxStarter is nil

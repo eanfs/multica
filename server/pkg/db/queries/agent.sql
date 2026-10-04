@@ -906,6 +906,10 @@ WHERE id = (
             AND r.status = 'online'
             AND COALESCE(r.last_seen_at, r.updated_at) >=
                 now() - make_interval(secs => @runtime_stale_secs::double precision)
+            -- Only managed runtime IDs protected by this owning transaction may
+            -- refresh leases. The ordinary autocommit path passes an empty set.
+            AND (atq.runtime_id=ANY(@fleet_barrier_runtime_ids::uuid[]) OR
+                (COALESCE(r.metadata->>'managed_by','')<>'local_fleet' AND NOT(r.metadata ? 'fleet_node_id')))
       )
     ORDER BY atq.priority DESC, atq.dispatched_at ASC
     LIMIT 1
@@ -953,6 +957,10 @@ WHERE id IN (
             AND r.status = 'online'
             AND COALESCE(r.last_seen_at, r.updated_at) >=
                 now() - make_interval(secs => @runtime_stale_secs::double precision)
+            -- Only managed runtime IDs protected by this owning transaction may
+            -- refresh leases. The ordinary autocommit path passes an empty set.
+            AND (atq.runtime_id=ANY(@fleet_barrier_runtime_ids::uuid[]) OR
+                (COALESCE(r.metadata->>'managed_by','')<>'local_fleet' AND NOT(r.metadata ? 'fleet_node_id')))
       )
     ORDER BY atq.priority DESC, atq.dispatched_at ASC
     LIMIT @max_tasks::int

@@ -17,10 +17,14 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/daemonws"
+	"github.com/multica-ai/multica/server/internal/fleet"
+	"github.com/multica-ai/multica/server/internal/fleet/model"
+	"github.com/multica-ai/multica/server/internal/fleet/store"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/testutil"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 	"github.com/multica-ai/multica/server/pkg/remotemcp"
@@ -4903,5 +4907,50 @@ func TestDaemonRegister_ProfileUsesStoredRuntimeIdentity(t *testing.T) {
 	dbfx.QueryRow(t, `SELECT provider FROM agent_runtime WHERE profile_id = $1`, profileID).Scan(&provider)
 	if provider != "omp" {
 		t.Fatalf("provider = %q, want stored omp identity", provider)
+	}
+}
+
+// Registration must check deletion admission in the SAME upsert transaction.
+func TestFleetRegisterInitializationAndTerminalAdmission(t *testing.T) {
+	for _, state := range []string{"initializing", "terminating"} {
+		t.Run(state, func(t *testing.T) {
+			pool, f := testutil.NewFleetFixture(t)
+			ns := "task6-register-" + uuid.NewString()
+			id := f.FleetNode(t, ns, testutil.Cols{"desired": state, "status": state, "ready": false})
+			repo := store.New(pool, ns)
+			cleanupTask5Fleet(t, pool, ns, f.UserID, f.WorkspaceID)
+			token, _, err := repo.MintNodeToken(context.Background(), parseUUID(id))
+			if err != nil {
+				t.Fatal(err)
+			}
+			node, err := db.New(pool).GetFleetNodeIdentity(context.Background(), db.GetFleetNodeIdentityParams{NodeID: parseUUID(id), OwnerID: parseUUID(f.UserID)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			secret := []byte("task6-test-only-012345678901234567890123456789")
+			srv := httptest.NewServer(fleet.NewService(repo, model.Config{Namespace: ns}, nil).Handler(secret))
+			defer srv.Close()
+			verifier := auth.NewCloudPATVerifier(auth.CloudPATVerifierConfig{FleetBaseURL: srv.URL, ServiceSecret: secret})
+			h := *testHandler
+			h.Queries = db.New(pool)
+			h.TxStarter = pool
+			h.cfg.LocalFleetURL = srv.URL
+			body := fmt.Sprintf(`{"workspace_id":"%s","daemon_id":"%s","runtimes":[{"type":"claude","name":"fixture"}]}`, f.WorkspaceID, util.UUIDToString(node.DaemonID))
+			req := httptest.NewRequest("POST", "/api/daemon/register", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+token)
+			w := httptest.NewRecorder()
+			middleware.DaemonAuth(h.Queries, nil, nil, verifier)(http.HandlerFunc(h.DaemonRegister)).ServeHTTP(w, req)
+			var count int
+			if err := pool.QueryRow(context.Background(), "SELECT count(*) FROM agent_runtime WHERE workspace_id=$1 AND owner_id=$2", f.WorkspaceID, f.UserID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if state == "initializing" {
+				if w.Code != 200 || count != 1 {
+					t.Fatalf("initializing register=%d rows=%d body=%s", w.Code, count, w.Body.String())
+				}
+			} else if w.Code == 200 || count != 0 {
+				t.Fatalf("terminating register escaped: %d rows=%d", w.Code, count)
+			}
+		})
 	}
 }

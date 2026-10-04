@@ -178,7 +178,7 @@ func (r *feishuSessionBinder) StartSession(ctx context.Context, p engine.StartSe
 		SenderChannelID: p.Message.Source.SenderID,
 		ClaimToken:      p.ClaimToken, MediaPendingSeconds: p.MediaPendingSeconds,
 		PersistMessage: p.PersistMessage, HistoryBoundaryPending: p.HistoryBoundaryPending,
-		BeforeCommit: p.BeforeCommit,
+		BeforeOwnerLocks: p.BeforeOwnerLocks, BeforeCommit: p.BeforeCommit,
 	})
 	return engine.StartSessionResult{SessionID: result.SessionID, BindingID: result.BindingID, RouteRevision: result.RouteRevision, Append: result.Append}, err
 }

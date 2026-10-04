@@ -7776,6 +7776,10 @@ WHERE id = (
             AND r.status = 'online'
             AND COALESCE(r.last_seen_at, r.updated_at) >=
                 now() - make_interval(secs => $4::double precision)
+            -- Only managed runtime IDs protected by this owning transaction may
+            -- refresh leases. The ordinary autocommit path passes an empty set.
+            AND (atq.runtime_id=ANY($5::uuid[]) OR
+                (COALESCE(r.metadata->>'managed_by','')<>'local_fleet' AND NOT(r.metadata ? 'fleet_node_id')))
       )
     ORDER BY atq.priority DESC, atq.dispatched_at ASC
     LIMIT 1
@@ -7785,10 +7789,11 @@ RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, c
 `
 
 type ReclaimStaleDispatchedTaskForRuntimeParams struct {
-	RuntimeID         pgtype.UUID `json:"runtime_id"`
-	PrepareLeaseSecs  float64     `json:"prepare_lease_secs"`
-	ClaimRecoverySecs float64     `json:"claim_recovery_secs"`
-	RuntimeStaleSecs  float64     `json:"runtime_stale_secs"`
+	RuntimeID              pgtype.UUID   `json:"runtime_id"`
+	PrepareLeaseSecs       float64       `json:"prepare_lease_secs"`
+	ClaimRecoverySecs      float64       `json:"claim_recovery_secs"`
+	RuntimeStaleSecs       float64       `json:"runtime_stale_secs"`
+	FleetBarrierRuntimeIds []pgtype.UUID `json:"fleet_barrier_runtime_ids"`
 }
 
 // Re-delivers a task whose previous claim likely succeeded server-side but
@@ -7802,6 +7807,7 @@ func (q *Queries) ReclaimStaleDispatchedTaskForRuntime(ctx context.Context, arg 
 		arg.PrepareLeaseSecs,
 		arg.ClaimRecoverySecs,
 		arg.RuntimeStaleSecs,
+		arg.FleetBarrierRuntimeIds,
 	)
 	var i AgentTaskQueue
 	err := row.Scan(
@@ -7901,20 +7907,25 @@ WHERE id IN (
             AND r.status = 'online'
             AND COALESCE(r.last_seen_at, r.updated_at) >=
                 now() - make_interval(secs => $4::double precision)
+            -- Only managed runtime IDs protected by this owning transaction may
+            -- refresh leases. The ordinary autocommit path passes an empty set.
+            AND (atq.runtime_id=ANY($5::uuid[]) OR
+                (COALESCE(r.metadata->>'managed_by','')<>'local_fleet' AND NOT(r.metadata ? 'fleet_node_id')))
       )
     ORDER BY atq.priority DESC, atq.dispatched_at ASC
-    LIMIT $5::int
+    LIMIT $6::int
     FOR UPDATE SKIP LOCKED
 )
 RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot
 `
 
 type ReclaimStaleDispatchedTasksForRuntimesParams struct {
-	PrepareLeaseSecs  float64       `json:"prepare_lease_secs"`
-	RuntimeIds        []pgtype.UUID `json:"runtime_ids"`
-	ClaimRecoverySecs float64       `json:"claim_recovery_secs"`
-	RuntimeStaleSecs  float64       `json:"runtime_stale_secs"`
-	MaxTasks          int32         `json:"max_tasks"`
+	PrepareLeaseSecs       float64       `json:"prepare_lease_secs"`
+	RuntimeIds             []pgtype.UUID `json:"runtime_ids"`
+	ClaimRecoverySecs      float64       `json:"claim_recovery_secs"`
+	RuntimeStaleSecs       float64       `json:"runtime_stale_secs"`
+	FleetBarrierRuntimeIds []pgtype.UUID `json:"fleet_barrier_runtime_ids"`
+	MaxTasks               int32         `json:"max_tasks"`
 }
 
 // Batch variant of ReclaimStaleDispatchedTaskForRuntime (MUL-4257): re-delivers
@@ -7930,6 +7941,7 @@ func (q *Queries) ReclaimStaleDispatchedTasksForRuntimes(ctx context.Context, ar
 		arg.RuntimeIds,
 		arg.ClaimRecoverySecs,
 		arg.RuntimeStaleSecs,
+		arg.FleetBarrierRuntimeIds,
 		arg.MaxTasks,
 	)
 	if err != nil {

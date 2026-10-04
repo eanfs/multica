@@ -492,7 +492,7 @@ FOR KEY SHARE;
 --
 -- Returns the ids it actually locked: a caller that asked for two and got fewer
 -- knows a runtime disappeared before it got there and must abandon the merge.
-SELECT id FROM agent_runtime
+SELECT * FROM agent_runtime
 WHERE id = ANY(@runtime_ids::uuid[])
 ORDER BY id
 FOR UPDATE;
