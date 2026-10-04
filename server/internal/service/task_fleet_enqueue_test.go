@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/jackc/pgx/v5"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,12 +18,22 @@ import (
 
 func TestFleetEnqueueFinalInsertPaths(t *testing.T) {
 	for _, path := range []string{"issue", "mention", "quick-create", "chat", "autopilot"} {
-		for _, state := range []string{"terminating", "terminated", "stopped"} {
+		for _, state := range []string{"terminating", "terminated", "stopped", "preparing-delete", "preparing-stop"} {
 			t.Run(path+"/"+state, func(t *testing.T) {
 				ctx := context.Background()
 				pool, f := testutil.NewFleetFixture(t)
 				ns := ownedFleetNamespace(t, pool, f, "task6-enqueue-")
-				node := f.FleetNode(t, ns, testutil.Cols{"desired": state, "status": state})
+				desired := state
+				if strings.HasPrefix(state, "preparing-") {
+					desired = "running"
+				}
+				node := f.FleetNode(t, ns, testutil.Cols{"desired": desired, "status": desired})
+				if strings.HasPrefix(state, "preparing-") {
+					if _, e := pool.Exec(context.Background(), "UPDATE fleet_nodes SET maintenance=true WHERE id=$1 AND namespace=$2", node, ns); e != nil {
+						t.Fatal(e)
+					}
+					f.Insert(t, "fleet_node_operations", testutil.Cols{"namespace": ns, "owner_id": f.UserID, "node_id": node, "action": strings.TrimPrefix(state, "preparing-"), "phase": "preparing", "generation": 1, "idempotency_key": "fixture", "request_hash": "fixture", "prior_desired": "running"})
+				}
 				rt := f.Runtime(t, "enqueue", testutil.Cols{"runtime_mode": "local", "metadata": json.RawMessage(fmt.Sprintf(`{"managed_by":"local_fleet","fleet_node_id":"%s"}`, node))})
 				ag := f.Agent(t, "enqueue", rt, testutil.Cols{"runtime_mode": "local"})
 				f.Cleanup(t, "DELETE FROM agent_task_queue WHERE agent_id=$1", ag)
@@ -73,7 +84,7 @@ func TestFleetEnqueueFinalInsertPaths(t *testing.T) {
 				if e := pool.QueryRow(ctx, "SELECT count(*) FROM agent_task_queue WHERE agent_id=$1", ag).Scan(&count); e != nil {
 					t.Fatal(e)
 				}
-				if state == "stopped" {
+				if state == "stopped" || state == "preparing-stop" {
 					if err != nil || count != 1 {
 						t.Fatalf("stop must allow queue: err=%v count=%d", err, count)
 					}
@@ -87,12 +98,22 @@ func TestFleetEnqueueFinalInsertPaths(t *testing.T) {
 
 func TestFleetRecoveryEnqueueFinalInsertAndRetainedParentTransition(t *testing.T) {
 	for _, path := range []string{"optional-fail-retry", "maybe-retry", "delegated-recovery"} {
-		for _, state := range []string{"terminating", "terminated", "stopped", "ordinary"} {
+		for _, state := range []string{"terminating", "terminated", "stopped", "ordinary", "preparing-delete", "preparing-stop"} {
 			t.Run(path+"/"+state, func(t *testing.T) {
 				ctx := context.Background()
 				pool, f := testutil.NewFleetFixture(t)
 				ns := ownedFleetNamespace(t, pool, f, "task6-recovery-")
-				node := f.FleetNode(t, ns, testutil.Cols{"desired": state, "status": state})
+				desired := state
+				if strings.HasPrefix(state, "preparing-") {
+					desired = "running"
+				}
+				node := f.FleetNode(t, ns, testutil.Cols{"desired": desired, "status": desired})
+				if strings.HasPrefix(state, "preparing-") {
+					if _, e := pool.Exec(context.Background(), "UPDATE fleet_nodes SET maintenance=true WHERE id=$1 AND namespace=$2", node, ns); e != nil {
+						t.Fatal(e)
+					}
+					f.Insert(t, "fleet_node_operations", testutil.Cols{"namespace": ns, "owner_id": f.UserID, "node_id": node, "action": strings.TrimPrefix(state, "preparing-"), "phase": "preparing", "generation": 1, "idempotency_key": "fixture", "request_hash": "fixture", "prior_desired": "running"})
+				}
 				metadata := json.RawMessage(fmt.Sprintf(`{"managed_by":"local_fleet","fleet_node_id":"%s"}`, node))
 				if state == "ordinary" {
 					metadata = json.RawMessage("{}")
@@ -163,7 +184,7 @@ func TestFleetRecoveryEnqueueFinalInsertAndRetainedParentTransition(t *testing.T
 				if e := pool.QueryRow(ctx, "SELECT count(*) FROM agent_task_queue WHERE agent_id=$1 AND status IN ('queued','deferred')", ag).Scan(&queued); e != nil {
 					t.Fatal(e)
 				}
-				blocked := state == "terminating" || state == "terminated"
+				blocked := state == "terminating" || state == "terminated" || state == "preparing-delete"
 				if blocked {
 					if queued != 0 || child != nil {
 						t.Fatalf("%s bypassed %s: queued=%d child=%v err=%v", path, state, queued, child, err)
@@ -197,9 +218,10 @@ func TestFleetOptionalRetryMaintenanceRaceRetainsTerminalReport(t *testing.T) {
 	if err := db.New(blocker).FleetNodeExclusiveLock(ctx, db.FleetNodeExclusiveLockParams{Namespace: ns, NodeID: util.MustParseUUID(node)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := blocker.Exec(ctx, "UPDATE fleet_nodes SET maintenance=true,desired='terminating' WHERE id=$1 AND namespace=$2", node, ns); err != nil {
+	if _, err := blocker.Exec(ctx, "UPDATE fleet_nodes SET maintenance=true WHERE id=$1 AND namespace=$2", node, ns); err != nil {
 		t.Fatal(err)
 	}
+	f.Insert(t, "fleet_node_operations", testutil.Cols{"namespace": ns, "owner_id": f.UserID, "node_id": node, "action": "delete", "phase": "preparing", "generation": 1, "idempotency_key": "fixture", "request_hash": "fixture", "prior_desired": "running"})
 	starter := &fleetClaimTxStarter{pool: pool, entered: make(chan struct{})}
 	svc := NewTaskService(db.New(pool), starter, nil, events.New())
 	type result struct {

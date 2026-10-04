@@ -1534,15 +1534,22 @@ func newDeliveryTaskID(t *testing.T, pool *pgxpool.Pool) pgtype.UUID {
 }
 
 type fleetSessionStarter struct {
-	pool    *pgxpool.Pool
-	entered chan struct{}
-	once    sync.Once
+	pool                *pgxpool.Pool
+	entered             chan struct{}
+	once                sync.Once
+	unlimitedStatements bool
 }
 
 func (s *fleetSessionStarter) Begin(ctx context.Context) (pgx.Tx, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if s.unlimitedStatements {
+		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout=0; SET LOCAL lock_timeout=0"); err != nil {
+			_ = tx.Rollback(context.Background())
+			return nil, err
+		}
 	}
 	return &fleetSessionTx{Tx: tx, s: s}, nil
 }
@@ -1561,13 +1568,17 @@ func (t *fleetSessionTx) Exec(ctx context.Context, sql string, args ...any) (pgc
 
 func TestFleetChannelOwningTransactionAdmission(t *testing.T) {
 	for _, path := range []string{"start", "append"} {
-		for _, state := range []string{"terminal-race", "allowed", "missing-early"} {
+		for _, state := range []string{"terminal-race", "allowed", "missing-early", "owner-timeout", "preparing-delete"} {
 			t.Run(path+"/"+state, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				pool, f := testutil.NewFleetFixture(t)
 				ns := "task6-channel-" + uuid.NewString()
 				node := f.FleetNode(t, ns)
+				t.Logf("Task6FixScope namespace=%s owner=%s workspace=%s", ns, f.UserID, f.WorkspaceID)
+				if state == "preparing-delete" {
+					f.Insert(t, "fleet_node_operations", testutil.Cols{"namespace": ns, "owner_id": f.UserID, "node_id": node, "action": "delete", "phase": "preparing", "generation": 1, "idempotency_key": "fixture", "request_hash": "fixture", "prior_desired": "running"})
+				}
 				rt := f.Runtime(t, "channel", testutil.Cols{"runtime_mode": "local", "metadata": json.RawMessage(fmt.Sprintf(`{"managed_by":"local_fleet","fleet_node_id":"%s"}`, node))})
 				ag := f.Agent(t, "channel", rt, testutil.Cols{"runtime_mode": "local"})
 				inst := f.Insert(t, "channel_installation", testutil.Cols{"workspace_id": f.WorkspaceID, "agent_id": ag, "channel_type": "lark", "config": json.RawMessage("{}"), "status": "active", "installer_user_id": f.UserID})
@@ -1592,11 +1603,11 @@ func TestFleetChannelOwningTransactionAdmission(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				starter := &fleetSessionStarter{pool: pool, entered: make(chan struct{})}
+				starter := &fleetSessionStarter{pool: pool, entered: make(chan struct{}), unlimitedStatements: state == "owner-timeout"}
 				sessions := NewChatSession(q, starter, channel.Type("lark"), SessionTitles{})
 				var existing db.ChatSession
 				ensure := EnsureSessionInput{WorkspaceID: util.MustParseUUID(f.WorkspaceID), AgentID: util.MustParseUUID(ag), InstallationID: util.MustParseUUID(inst), Sender: owner, BindingKey: "fixture-route", ChatType: channel.ChatTypeP2P}
-				if path == "append" {
+				if path == "append" || state == "owner-timeout" {
 					seed := NewChatSession(q, pool, channel.Type("lark"), SessionTitles{})
 					id, err := seed.EnsureSession(ctx, ensure)
 					if err != nil {
@@ -1633,7 +1644,31 @@ func TestFleetChannelOwningTransactionAdmission(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				if state == "owner-timeout" {
+					blocker, err = pool.Begin(ctx)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer blocker.Rollback(context.Background())
+					if _, err = blocker.Exec(ctx, "SELECT id FROM chat_session WHERE id=$1 FOR UPDATE", existing.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				admitted := make(chan struct{})
 				early := prepared.BeforeOwnerLocks
+				if state == "owner-timeout" {
+					early = func(c context.Context, tx pgx.Tx) error {
+						deadline, ok := c.Deadline()
+						if !ok || time.Until(deadline) > 2*time.Second {
+							return fmt.Errorf("native callback missing managed attempt deadline")
+						}
+						e := prepared.BeforeOwnerLocks(c, tx)
+						if e == nil {
+							close(admitted)
+						}
+						return e
+					}
+				}
 				if state == "missing-early" {
 					early = nil
 				}
@@ -1642,6 +1677,7 @@ func TestFleetChannelOwningTransactionAdmission(t *testing.T) {
 					return err
 				}
 				done := make(chan error, 1)
+				started := time.Now()
 				go func() {
 					if path == "start" {
 						_, err := sessions.StartSession(ctx, StartSessionInput{EnsureSessionInput: ensure, Body: "test-only task", PersistMessage: true, BeforeOwnerLocks: early, BeforeCommit: func(ctx context.Context, tx pgx.Tx, session db.ChatSession) error {
@@ -1675,6 +1711,50 @@ func TestFleetChannelOwningTransactionAdmission(t *testing.T) {
 					if err := blocker.Commit(ctx); err != nil {
 						t.Fatal(err)
 					}
+				}
+				if state == "owner-timeout" {
+					select {
+					case <-admitted:
+					case e := <-done:
+						t.Fatalf("admission failed before chat owner wait: %v", e)
+					case <-ctx.Done():
+						t.Fatal(ctx.Err())
+					}
+					timer := time.NewTimer(2500 * time.Millisecond)
+					select {
+					case e := <-done:
+						if e == nil {
+							t.Error("chat owner timeout committed")
+						}
+					case <-timer.C:
+						t.Error("native owner wait exceeded managed attempt budget")
+						_ = blocker.Rollback(context.Background())
+						select {
+						case <-done:
+						case <-ctx.Done():
+							t.Fatal(ctx.Err())
+						}
+					}
+					timer.Stop()
+					_ = blocker.Rollback(context.Background())
+					proof, e := pool.Begin(ctx)
+					if e != nil {
+						t.Fatal(e)
+					}
+					// Socket cancellation may finish server-side rollback asynchronously.
+					// Acquire both real domains within the same total 2.5s test tolerance.
+					proofCtx, stopProof := context.WithDeadline(ctx, started.Add(2500*time.Millisecond))
+					for _, key := range []string{ns + ":" + node, ns + ":" + node + ":capacity"} {
+						if _, e = proof.Exec(proofCtx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", key); e != nil {
+							t.Errorf("native rollback did not release admission domain within budget: %v", e)
+						}
+					}
+					stopProof()
+					_ = proof.Rollback(context.Background())
+					if after := count(); after != before {
+						t.Fatalf("native timeout persisted partial rows: before=%d after=%d", before, after)
+					}
+					return
 				}
 				select {
 				case err := <-done:

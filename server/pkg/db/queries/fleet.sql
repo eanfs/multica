@@ -73,6 +73,28 @@ FROM fleet_nodes n CROSS JOIN fleet_node_operations o
  CROSS JOIN "user" u CROSS JOIN agent_runtime r CROSS JOIN agent_task_queue t
 WHERE false;
 
+-- name: FleetPendingDelete :one
+-- The current control generation is independent of credential generations.
+SELECT EXISTS (SELECT 1 FROM fleet_node_operations o
+ WHERE o.namespace = @namespace AND o.owner_id = @owner_id AND o.node_id = @node_id
+ AND o.generation = @generation AND o.action='delete'
+ AND o.phase IN ('queued','preparing','prepared','applying')) AS pending;
+
+-- name: FleetLockCopiedTaskWorkspaces :exec
+SELECT w.id FROM workspace w WHERE w.id IN (
+ SELECT r.workspace_id FROM agent_runtime r WHERE r.id = ANY(@runtime_ids::uuid[])
+ UNION SELECT a.workspace_id FROM agent a WHERE a.id = @agent_id
+ UNION SELECT i.workspace_id FROM issue i WHERE i.id = @issue_id
+) ORDER BY w.id FOR KEY SHARE;
+
+-- name: FleetFenceTaskOwners :one
+-- Preserve the historical workspace -> agent -> issue -> runtime order.
+SELECT lock_task_owner_rows(@agent_id, @issue_id, @runtime_id)::boolean AS valid;
+
+-- name: FleetLockRuntimeBinding :one
+-- KEY SHARE alone does not conflict with trusted metadata upgrades.
+SELECT * FROM agent_runtime WHERE id = @runtime_id FOR SHARE;
+
 -- name: FleetReclaimBindings :many
 -- Nonlocking candidates precede node locks; agent bindings are rechecked after locks.
 SELECT DISTINCT a.id AS agent_id, a.runtime_id AS bound_runtime_id,

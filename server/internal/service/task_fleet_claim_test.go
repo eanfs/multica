@@ -149,15 +149,24 @@ func TestFleetClaimBarrierAllServicePaths(t *testing.T) {
 
 // These hooks expose query-entry barriers, not cached admission permissions.
 type fleetClaimTxStarter struct {
-	pool    *pgxpool.Pool
-	entered chan struct{}
-	once    sync.Once
+	pool                *pgxpool.Pool
+	entered             chan struct{}
+	once                sync.Once
+	rowHook             func(context.Context, string, pgx.Row) pgx.Row
+	beforeRow           func(context.Context, string)
+	unlimitedStatements bool
 }
 
 func (s *fleetClaimTxStarter) Begin(ctx context.Context) (pgx.Tx, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if s.unlimitedStatements {
+		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout=0; SET LOCAL lock_timeout=0"); err != nil {
+			_ = tx.Rollback(context.Background())
+			return nil, err
+		}
 	}
 	return &fleetClaimTx{Tx: tx, starter: s}, nil
 }
@@ -172,6 +181,30 @@ func (t *fleetClaimTx) Exec(ctx context.Context, sql string, args ...any) (pgcon
 		t.starter.once.Do(func() { close(t.starter.entered) })
 	}
 	return t.Tx.Exec(ctx, sql, args...)
+}
+
+func (t *fleetClaimTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if t.starter.beforeRow != nil {
+		t.starter.beforeRow(ctx, sql)
+	}
+	row := t.Tx.QueryRow(ctx, sql, args...)
+	if t.starter.rowHook != nil {
+		return t.starter.rowHook(ctx, sql, row)
+	}
+	return row
+}
+
+type fleetPausedRow struct {
+	pgx.Row
+	after func()
+}
+
+func (r fleetPausedRow) Scan(dest ...any) error {
+	err := r.Row.Scan(dest...)
+	if err == nil {
+		r.after()
+	}
+	return err
 }
 
 func TestFleetClaimMaintenanceRace(t *testing.T) {
@@ -403,6 +436,168 @@ func TestFleetOppositeBatchReclaimsUseSortedNodeLocks(t *testing.T) {
 	}
 	if len(seen) != 2 {
 		t.Fatalf("redelivered=%d want two own preparation slots", len(seen))
+	}
+}
+
+// Admission must not retain node/capacity locks while an owner row waits forever.
+func TestFleetManagedAttemptBoundsPostAdmissionOwnerLock(t *testing.T) {
+	pool, f := testutil.NewFleetFixture(t)
+	ns := ownedFleetNamespace(t, pool, f, "task6-fix-budget-")
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	node := f.FleetNode(t, ns, testutil.Cols{"status": "running"})
+	rt := f.Runtime(t, "budget", testutil.Cols{"runtime_mode": "local", "metadata": json.RawMessage(fmt.Sprintf(`{"managed_by":"local_fleet","fleet_node_id":"%s"}`, node))})
+	ag := f.Agent(t, "budget", rt, testutil.Cols{"runtime_mode": "local"})
+	task := f.Task(t, ag, testutil.Cols{"runtime_id": rt})
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback(context.Background())
+	if _, err = blocker.Exec(ctx, "SELECT id FROM agent WHERE id=$1 FOR UPDATE", ag); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	var once sync.Once
+	starter := &fleetClaimTxStarter{pool: pool, unlimitedStatements: true, entered: make(chan struct{}), beforeRow: func(c context.Context, sql string) {
+		if strings.Contains(sql, "name: GetAgentForClaimUpdate") {
+			once.Do(func() { close(entered) })
+		}
+	}}
+	svc := NewTaskService(db.New(pool), starter, nil, events.New())
+	done := make(chan error, 1)
+	started := time.Now()
+	go func() { _, e := svc.ClaimTask(ctx, util.MustParseUUID(ag)); done <- e }()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	timer := time.NewTimer(2500 * time.Millisecond)
+	defer timer.Stop()
+	timedOut := false
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("blocked owner claim returned success")
+		}
+	case <-timer.C:
+		timedOut = true
+		t.Error("managed attempt exceeded two-second budget after admission")
+	}
+	// On both RED and GREEN release blockers and collect the goroutine before cleanup.
+	_ = blocker.Rollback(context.Background())
+	if timedOut {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	if !timedOut && time.Since(started) > 2500*time.Millisecond {
+		t.Error("late attempt rollback")
+	}
+	proof, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proof.Rollback(context.Background())
+	proofCtx, stopProof := context.WithDeadline(ctx, started.Add(2500*time.Millisecond))
+	defer stopProof()
+	for _, key := range []string{ns + ":" + node, ns + ":" + node + ":capacity"} {
+		if _, err = proof.Exec(proofCtx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", key); err != nil {
+			t.Fatalf("managed rollback retained admission domain within budget: %v", err)
+		}
+	}
+	row, err := db.New(pool).GetAgentTask(ctx, util.MustParseUUID(task))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !timedOut && row.Status != "queued" {
+		t.Fatalf("timeout mutated task: %s", row.Status)
+	}
+}
+
+func TestFleetOrdinaryDiscoveryTrustedUpgradeRetriesBeforeNodeLocks(t *testing.T) {
+	for _, path := range []string{"claim", "enqueue"} {
+		t.Run(path, func(t *testing.T) {
+			pool, f := testutil.NewFleetFixture(t)
+			ns := ownedFleetNamespace(t, pool, f, "task6-fix-upgrade-")
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			node := f.FleetNode(t, ns, testutil.Cols{"status": "running", "maintenance": true})
+			if path == "enqueue" {
+				if _, e := pool.Exec(ctx, "UPDATE fleet_nodes SET desired='terminating' WHERE id=$1 AND namespace=$2", node, ns); e != nil {
+					t.Fatal(e)
+				}
+			}
+			daemon := uuid.NewString()
+			rt := f.Runtime(t, "upgrade", testutil.Cols{"runtime_mode": "local", "daemon_id": daemon, "provider": "claude"})
+			ag := f.Agent(t, "upgrade", rt, testutil.Cols{"runtime_mode": "local"})
+			task := f.Task(t, ag, testutil.Cols{"runtime_id": rt})
+			f.Cleanup(t, "DELETE FROM agent_task_queue WHERE agent_id=$1", ag)
+			paused, resume := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			starter := &fleetClaimTxStarter{pool: pool, unlimitedStatements: true, entered: make(chan struct{}), rowHook: func(c context.Context, sql string, row pgx.Row) pgx.Row {
+				if strings.Contains(sql, "name: GetAgentRuntime :one") {
+					return fleetPausedRow{Row: row, after: func() {
+						once.Do(func() {
+							close(paused)
+							select {
+							case <-resume:
+							case <-c.Done():
+							}
+						})
+					}}
+				}
+				return row
+			}}
+			svc := NewTaskService(db.New(pool), starter, nil, events.New())
+			done := make(chan error, 1)
+			go func() {
+				if path == "claim" {
+					row, e := svc.ClaimTask(ctx, util.MustParseUUID(ag))
+					if row != nil {
+						e = fmt.Errorf("upgraded maintenance runtime claimed queued task")
+					}
+					done <- e
+				} else {
+					_, e := svc.EnqueueQuickCreateTask(ctx, util.MustParseUUID(f.WorkspaceID), util.MustParseUUID(f.UserID), util.MustParseUUID(ag), pgtype.UUID{}, "fixture", "high", "", pgtype.UUID{}, pgtype.UUID{}, nil)
+					done <- e
+				}
+			}()
+			select {
+			case <-paused:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			// Actual trusted same-owner SQL upsert, not arbitrary metadata UPDATE.
+			upgraded, err := db.New(pool).UpsertAgentRuntime(ctx, db.UpsertAgentRuntimeParams{WorkspaceID: util.MustParseUUID(f.WorkspaceID), DaemonID: pgtype.Text{String: daemon, Valid: true}, Name: "upgrade", RuntimeMode: "local", Provider: "claude", Status: "online", OwnerID: util.MustParseUUID(f.UserID), Metadata: json.RawMessage(fmt.Sprintf(`{"managed_by":"local_fleet","fleet_node_id":"%s"}`, node))})
+			if err != nil {
+				close(resume)
+				t.Fatal(err)
+			}
+			if upgraded.ID != util.MustParseUUID(rt) {
+				close(resume)
+				t.Fatal("trusted upsert did not upgrade same runtime")
+			}
+			close(resume)
+			select {
+			case e := <-done:
+				if path == "claim" && e != nil {
+					t.Fatal(e)
+				}
+				if path == "enqueue" && e == nil {
+					t.Fatal("managed delete/maintenance upgrade inserted task without rediscovery")
+				}
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			row, err := db.New(pool).GetAgentTask(ctx, util.MustParseUUID(task))
+			if err != nil || row.Status != "queued" {
+				t.Fatalf("upgraded claim changed queue: %s %v", row.Status, err)
+			}
+		})
 	}
 }
 

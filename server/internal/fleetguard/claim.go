@@ -28,6 +28,78 @@ func Managed(rt db.AgentRuntime) bool {
 	return hasNode || marker == "local_fleet"
 }
 
+type attemptKey struct{}
+
+// AttemptContext budgets discovery and the complete managed owning transaction.
+// Ordinary transactions retain the caller's original deadline and shape.
+func AttemptContext(ctx context.Context, q *db.Queries, agentID pgtype.UUID, ids ...pgtype.UUID) (context.Context, context.CancelFunc, error) {
+	bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
+	if agentID.Valid {
+		a, err := q.GetAgent(bounded, agentID)
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		if a.RuntimeID.Valid {
+			ids = append(ids, a.RuntimeID)
+		}
+	}
+	var valid []pgtype.UUID
+	for _, id := range ids {
+		if id.Valid {
+			valid = append(valid, id)
+		}
+	}
+	if len(valid) > 0 {
+		rows, err := q.GetAgentRuntimes(bounded, valid)
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		for _, rt := range rows {
+			if Managed(rt) {
+				return context.WithValue(bounded, attemptKey{}, true), cancel, nil
+			}
+		}
+	}
+	cancel()
+	return context.WithValue(ctx, attemptKey{}, false), func() {}, nil
+}
+
+func RollbackContext(ctx context.Context) context.Context {
+	if BudgetedAttempt(ctx) {
+		return context.WithoutCancel(ctx)
+	}
+	return ctx
+}
+
+func OrdinaryAttemptContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, attemptKey{}, false)
+}
+
+func NeedsManagedRediscovery(ctx context.Context) bool {
+	v, ok := ctx.Value(attemptKey{}).(bool)
+	return ok && !v
+}
+
+func BudgetedAttempt(ctx context.Context) bool { v, _ := ctx.Value(attemptKey{}).(bool); return v }
+
+// FenceOrdinaryRuntime freezes management metadata after the caller's ordinary
+// owner locks. An upgrade rolls back; never acquire the first node lock late.
+func FenceOrdinaryRuntime(ctx context.Context, q *db.Queries, id pgtype.UUID) error {
+	if !id.Valid {
+		return nil
+	}
+	rt, err := q.FleetLockRuntimeBinding(ctx, id)
+	if err != nil {
+		return err
+	}
+	if Managed(rt) {
+		return ErrBindingChanged
+	}
+	return nil
+}
+
 func ResolveNamespace(ctx context.Context, q *db.Queries, runtimeID pgtype.UUID) (string, error) {
 	rt, err := q.GetAgentRuntime(ctx, runtimeID)
 	if err != nil {
@@ -88,6 +160,9 @@ func lockBindings(ctx context.Context, q *db.Queries, namespace string, ids []pg
 	ordered := make([]db.FleetNode, 0, len(byNode))
 	for _, n := range byNode {
 		ordered = append(ordered, n)
+	}
+	if len(ordered) > 0 && NeedsManagedRediscovery(ctx) {
+		return nil, nil, ErrBindingChanged
 	}
 	sort.Slice(ordered, func(i, j int) bool { return util.UUIDToString(ordered[i].ID) < util.UUIDToString(ordered[j].ID) })
 	for _, n := range ordered {
@@ -293,9 +368,39 @@ func CheckEnqueueForOwners(ctx context.Context, q *db.Queries, namespace string,
 		return err
 	}
 	for _, n := range nodes {
+		pending, err := q.FleetPendingDelete(ctx, db.FleetPendingDeleteParams{Namespace: n.Namespace, OwnerID: n.OwnerID, NodeID: n.ID, Generation: n.Generation})
+		if err != nil {
+			return err
+		}
+		if pending {
+			return model.ErrBusy
+		}
 		if !model.CanEnqueue(model.Node{Desired: n.Desired, Revoked: n.Revoked}) || n.Status == "terminated" || n.Status == "terminating" {
 			return model.ErrBusy
 		}
+	}
+	return nil
+}
+
+// CheckCallerClaim fences ordinary upgrades after the claim's agent lock.
+func CheckCallerClaim(ctx context.Context, q *db.Queries, id pgtype.UUID) error {
+	rt, err := q.FleetLockRuntimeBinding(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !Managed(rt) {
+		return nil
+	}
+	n, err := runtimeNode(ctx, q, "", rt)
+	if err != nil {
+		return err
+	}
+	held, err := q.FleetAdmissionLocksHeld(ctx, db.FleetAdmissionLocksHeldParams{Namespace: n.Namespace, NodeID: n.ID})
+	if err != nil {
+		return err
+	}
+	if !held {
+		return ErrBindingChanged
 	}
 	return nil
 }
@@ -306,7 +411,7 @@ func CheckCallerEnqueue(ctx context.Context, q *db.Queries, runtimeID pgtype.UUI
 	if !runtimeID.Valid {
 		return nil
 	}
-	rt, err := q.GetAgentRuntime(ctx, runtimeID)
+	rt, err := q.FleetLockRuntimeBinding(ctx, runtimeID)
 	if err != nil {
 		return err
 	}
@@ -337,7 +442,11 @@ func CheckRegister(ctx context.Context, q *db.Queries, namespace string, nodeID 
 	if err != nil {
 		return model.ErrForbidden
 	}
-	if !model.CanEnqueue(model.Node{Desired: n.Desired, Revoked: n.Revoked}) || n.Status == "terminated" || n.Status == "terminating" {
+	pending, err := q.FleetPendingDelete(ctx, db.FleetPendingDeleteParams{Namespace: n.Namespace, OwnerID: n.OwnerID, NodeID: n.ID, Generation: n.Generation})
+	if err != nil {
+		return err
+	}
+	if pending || !model.CanEnqueue(model.Node{Desired: n.Desired, Revoked: n.Revoked}) || n.Status == "terminated" || n.Status == "terminating" {
 		return model.ErrBusy
 	}
 	return nil

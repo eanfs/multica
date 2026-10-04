@@ -102,6 +102,24 @@ func (q *Queries) FleetAdmissionLocksHeld(ctx context.Context, arg FleetAdmissio
 	return bool_and, err
 }
 
+const fleetFenceTaskOwners = `-- name: FleetFenceTaskOwners :one
+SELECT lock_task_owner_rows($1, $2, $3)::boolean AS valid
+`
+
+type FleetFenceTaskOwnersParams struct {
+	AgentID   pgtype.UUID `json:"agent_id"`
+	IssueID   pgtype.UUID `json:"issue_id"`
+	RuntimeID pgtype.UUID `json:"runtime_id"`
+}
+
+// Preserve the historical workspace -> agent -> issue -> runtime order.
+func (q *Queries) FleetFenceTaskOwners(ctx context.Context, arg FleetFenceTaskOwnersParams) (bool, error) {
+	row := q.db.QueryRow(ctx, fleetFenceTaskOwners, arg.AgentID, arg.IssueID, arg.RuntimeID)
+	var valid bool
+	err := row.Scan(&valid)
+	return valid, err
+}
+
 const fleetLockClaimAgents = `-- name: FleetLockClaimAgents :many
 SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, disabled_runtime_skills, service_tier, conversation_starters FROM agent WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE
 `
@@ -154,6 +172,55 @@ func (q *Queries) FleetLockClaimAgents(ctx context.Context, agentIds []pgtype.UU
 		return nil, err
 	}
 	return items, nil
+}
+
+const fleetLockCopiedTaskWorkspaces = `-- name: FleetLockCopiedTaskWorkspaces :exec
+SELECT w.id FROM workspace w WHERE w.id IN (
+ SELECT r.workspace_id FROM agent_runtime r WHERE r.id = ANY($1::uuid[])
+ UNION SELECT a.workspace_id FROM agent a WHERE a.id = $2
+ UNION SELECT i.workspace_id FROM issue i WHERE i.id = $3
+) ORDER BY w.id FOR KEY SHARE
+`
+
+type FleetLockCopiedTaskWorkspacesParams struct {
+	RuntimeIds []pgtype.UUID `json:"runtime_ids"`
+	AgentID    pgtype.UUID   `json:"agent_id"`
+	IssueID    pgtype.UUID   `json:"issue_id"`
+}
+
+func (q *Queries) FleetLockCopiedTaskWorkspaces(ctx context.Context, arg FleetLockCopiedTaskWorkspacesParams) error {
+	_, err := q.db.Exec(ctx, fleetLockCopiedTaskWorkspaces, arg.RuntimeIds, arg.AgentID, arg.IssueID)
+	return err
+}
+
+const fleetLockRuntimeBinding = `-- name: FleetLockRuntimeBinding :one
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name FROM agent_runtime WHERE id = $1 FOR SHARE
+`
+
+// KEY SHARE alone does not conflict with trusted metadata upgrades.
+func (q *Queries) FleetLockRuntimeBinding(ctx context.Context, runtimeID pgtype.UUID) (AgentRuntime, error) {
+	row := q.db.QueryRow(ctx, fleetLockRuntimeBinding, runtimeID)
+	var i AgentRuntime
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.DaemonID,
+		&i.Name,
+		&i.RuntimeMode,
+		&i.Provider,
+		&i.Status,
+		&i.DeviceInfo,
+		&i.Metadata,
+		&i.LastSeenAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.OwnerID,
+		&i.LegacyDaemonID,
+		&i.Visibility,
+		&i.ProfileID,
+		&i.CustomName,
+	)
+	return i, err
 }
 
 const fleetLockTaskWorkspaces = `-- name: FleetLockTaskWorkspaces :exec
@@ -243,6 +310,33 @@ func (q *Queries) FleetOwnerExists(ctx context.Context, ownerID pgtype.UUID) (bo
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const fleetPendingDelete = `-- name: FleetPendingDelete :one
+SELECT EXISTS (SELECT 1 FROM fleet_node_operations o
+ WHERE o.namespace = $1 AND o.owner_id = $2 AND o.node_id = $3
+ AND o.generation = $4 AND o.action='delete'
+ AND o.phase IN ('queued','preparing','prepared','applying')) AS pending
+`
+
+type FleetPendingDeleteParams struct {
+	Namespace  string      `json:"namespace"`
+	OwnerID    pgtype.UUID `json:"owner_id"`
+	NodeID     pgtype.UUID `json:"node_id"`
+	Generation int64       `json:"generation"`
+}
+
+// The current control generation is independent of credential generations.
+func (q *Queries) FleetPendingDelete(ctx context.Context, arg FleetPendingDeleteParams) (bool, error) {
+	row := q.db.QueryRow(ctx, fleetPendingDelete,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.NodeID,
+		arg.Generation,
+	)
+	var pending bool
+	err := row.Scan(&pending)
+	return pending, err
 }
 
 const fleetReclaimBindings = `-- name: FleetReclaimBindings :many

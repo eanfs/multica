@@ -1032,7 +1032,7 @@ func (s *AutopilotService) dispatchRunOnly(ctx context.Context, ap db.Autopilot,
 	}
 	apSource, _, apEvidenceKind, apEvidenceRef := attributionCreateParams(autopilotAttr)
 	var task db.AgentTaskQueue
-	err = s.TaskSvc.runFleetTx(ctx, func(qtx *db.Queries) error {
+	err = s.TaskSvc.runFleetTx(ctx, agent.ID, func(ctx context.Context, qtx *db.Queries) error {
 		locked, e := s.TaskSvc.admitEnqueueAgent(ctx, qtx, agent.ID)
 		if e != nil {
 			return e

@@ -170,6 +170,7 @@ func TestFleetLegacyMergeMaintenanceRace(t *testing.T) {
 func TestFleetRegisterRechecksCredentialInInitialUpsertTransaction(t *testing.T) {
 	pool, f := testutil.NewFleetFixture(t)
 	ns := "task6-register-race-" + uuid.NewString()
+	t.Logf("Task6FixScope namespace=%s owner=%s workspace=%s", ns, f.UserID, f.WorkspaceID)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	id := f.FleetNode(t, ns)
@@ -242,5 +243,97 @@ func TestFleetRegisterRechecksCredentialInInitialUpsertTransaction(t *testing.T)
 	}
 	if count != 0 {
 		t.Fatalf("revoked token inserted %d initial runtimes", count)
+	}
+}
+
+func TestFleetRegisterProfilesRecheckCredentialInInitialTransaction(t *testing.T) {
+	for _, path := range []string{"custom", "failed"} {
+		t.Run(path, func(t *testing.T) {
+			pool, f := testutil.NewFleetFixture(t)
+			ns := "task6-register-race-" + uuid.NewString()
+			t.Logf("Task6FixScope namespace=%s owner=%s workspace=%s", ns, f.UserID, f.WorkspaceID)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			id := f.FleetNode(t, ns)
+			repo := store.New(pool, ns)
+			cleanupTask5Fleet(t, pool, ns, f.UserID, f.WorkspaceID)
+			token, _, err := repo.MintNodeToken(ctx, util.MustParseUUID(id))
+			if err != nil {
+				t.Fatal(err)
+			}
+			node, err := db.New(pool).GetFleetNodeIdentity(ctx, db.GetFleetNodeIdentityParams{NodeID: util.MustParseUUID(id), OwnerID: util.MustParseUUID(f.UserID)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			secret := []byte("task6-test-only-012345678901234567890123456789")
+			srv := httptest.NewServer(fleet.NewService(repo, model.Config{Namespace: ns}, nil).Handler(secret))
+			defer srv.Close()
+			verifier := auth.NewCloudPATVerifier(auth.CloudPATVerifierConfig{FleetBaseURL: srv.URL, ServiceSecret: secret})
+			blocker, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer blocker.Rollback(context.Background())
+			if err := db.New(blocker).FleetNodeExclusiveLock(ctx, db.FleetNodeExclusiveLockParams{Namespace: ns, NodeID: node.ID}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := blocker.Exec(ctx, "UPDATE fleet_node_credentials SET revoked_at=now() WHERE namespace=$1 AND node_id=$2", ns, id); err != nil {
+				t.Fatal(err)
+			}
+			starter := &fleetDaemonStarter{pool: pool, entered: make(chan struct{})}
+			h := *testHandler
+			h.Queries = db.New(pool)
+			h.TxStarter = starter
+			h.cfg.LocalFleetURL = srv.URL
+			profile := f.Insert(t, "runtime_profile", testutil.Cols{"workspace_id": f.WorkspaceID, "display_name": "fake profile", "protocol_family": "claude", "command_name": "/test-only-missing/claude", "created_by": f.UserID})
+			body := fmt.Sprintf(`{"workspace_id":"%s","daemon_id":"%s","runtimes":[{"type":"claude","name":"fixture","profile_id":"%s"}]}`, f.WorkspaceID, util.UUIDToString(node.DaemonID), profile)
+			if path == "failed" {
+				body = fmt.Sprintf(`{"workspace_id":"%s","daemon_id":"%s","failed_profiles":[{"profile_id":"%s","reason":"fixture missing"}]}`, f.WorkspaceID, util.UUIDToString(node.DaemonID), profile)
+			}
+			req := httptest.NewRequest("POST", "/api/daemon/register", strings.NewReader(body)).WithContext(ctx)
+			req.Header.Set("Authorization", "Bearer "+token)
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				w := httptest.NewRecorder()
+				middleware.DaemonAuth(h.Queries, nil, nil, verifier)(http.HandlerFunc(h.DaemonRegister)).ServeHTTP(w, req)
+				done <- w
+			}()
+			select {
+			case <-starter.entered:
+			case w := <-done:
+				t.Fatalf("profile registration bypassed node gate: status=%d", w.Code)
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			probe, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := probe.Exec(ctx, "SELECT id FROM workspace WHERE id=$1 FOR UPDATE NOWAIT", f.WorkspaceID); err != nil {
+				t.Fatalf("initial registration workspace preceded node: %v", err)
+			}
+			if _, err := probe.Exec(ctx, "SELECT id FROM runtime_profile WHERE id=$1 FOR UPDATE NOWAIT", profile); err != nil {
+				t.Fatalf("profile row preceded node admission: %v", err)
+			}
+			_ = probe.Rollback(ctx)
+			if err := blocker.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case w := <-done:
+				if w.Code != 403 {
+					t.Fatalf("revoked registration=%d body=%s", w.Code, w.Body.String())
+				}
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			var count int
+			if err := pool.QueryRow(ctx, "SELECT count(*) FROM agent_runtime WHERE workspace_id=$1 AND owner_id=$2", f.WorkspaceID, f.UserID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatalf("revoked token inserted %d initial runtimes", count)
+			}
+		})
 	}
 }

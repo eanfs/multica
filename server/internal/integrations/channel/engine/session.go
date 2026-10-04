@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -43,6 +44,7 @@ type TxStarter interface {
 // service needs. *db.Queries satisfies it through the dbSessionQueries adapter
 // (whose WithTx returns the interface type); tests supply an in-memory fake.
 type SessionQueries interface {
+	AttemptContext(context.Context, pgtype.UUID, pgtype.UUID) (context.Context, context.CancelFunc, error)
 	WithTx(tx pgx.Tx) SessionQueries
 	GetChannelChatSessionBinding(ctx context.Context, arg db.GetChannelChatSessionBindingParams) (db.ChannelChatSessionBinding, error)
 	LockWorkspaceForChatSessionCreate(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error)
@@ -83,6 +85,29 @@ type SessionQueries interface {
 // to give WithTx an interface return type so the transactional path stays
 // behind SessionQueries.
 type dbSessionQueries struct{ q *db.Queries }
+
+func (a dbSessionQueries) AttemptContext(ctx context.Context, agentID, sessionID pgtype.UUID) (context.Context, context.CancelFunc, error) {
+	bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
+	if sessionID.Valid {
+		session, err := a.q.GetChatSession(bounded, sessionID)
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		agentID = session.AgentID
+	}
+	attempt, stop, err := fleetguard.AttemptContext(bounded, a.q, agentID)
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	if fleetguard.BudgetedAttempt(attempt) {
+		return attempt, func() { stop(); cancel() }, nil
+	}
+	stop()
+	cancel()
+	return fleetguard.OrdinaryAttemptContext(ctx), func() {}, nil
+}
 
 func (a dbSessionQueries) WithTx(tx pgx.Tx) SessionQueries {
 	return dbSessionQueries{q: a.q.WithTx(tx)}
@@ -444,7 +469,12 @@ type StartSessionInput struct {
 // the command body as its first ordinary user message.
 func (s *ChatSession) StartSession(ctx context.Context, in StartSessionInput) (StartSessionResult, error) {
 	for attempt := 0; attempt < 5; attempt++ {
-		result, err := s.startSession(ctx, in)
+		attemptCtx, cancel, err := s.q.AttemptContext(ctx, in.AgentID, pgtype.UUID{})
+		if err != nil {
+			return StartSessionResult{}, err
+		}
+		result, err := s.startSession(attemptCtx, in)
+		cancel()
 		if !errors.Is(err, fleetguard.ErrBindingChanged) {
 			return result, err
 		}
@@ -459,7 +489,7 @@ func (s *ChatSession) startSession(ctx context.Context, in StartSessionInput) (S
 	if err != nil {
 		return StartSessionResult{}, fmt.Errorf("begin start chat tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(fleetguard.RollbackContext(ctx))
 	qtx := s.q.WithTx(tx)
 	if in.BeforeOwnerLocks != nil {
 		if err := in.BeforeOwnerLocks(ctx, tx); err != nil {
@@ -666,7 +696,12 @@ const channelCommandMessageKind = "channel_command"
 // (no chat_message lands).
 func (s *ChatSession) AppendUserMessage(ctx context.Context, in AppendInput) (AppendResult, error) {
 	for attempt := 0; attempt < 5; attempt++ {
-		result, err := s.appendUserMessage(ctx, in)
+		attemptCtx, cancel, err := s.q.AttemptContext(ctx, pgtype.UUID{}, in.SessionID)
+		if err != nil {
+			return AppendResult{}, err
+		}
+		result, err := s.appendUserMessage(attemptCtx, in)
+		cancel()
 		if !errors.Is(err, fleetguard.ErrBindingChanged) {
 			return result, err
 		}
@@ -681,7 +716,7 @@ func (s *ChatSession) appendUserMessage(ctx context.Context, in AppendInput) (Ap
 	if err != nil {
 		return AppendResult{}, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(fleetguard.RollbackContext(ctx))
 	qtx := s.q.WithTx(tx)
 	if in.BeforeOwnerLocks != nil {
 		if err := in.BeforeOwnerLocks(ctx, tx); err != nil {

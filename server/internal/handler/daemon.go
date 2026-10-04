@@ -344,19 +344,34 @@ var errRuntimeProfileDisabled = errors.New("runtime profile is disabled")
 // enumerates runtime rows. This closes the stale-read window where deletion
 // could miss an instance inserted by a concurrently registering daemon.
 func (h *Handler) upsertRuntimeWithProfile(
-	ctx context.Context,
+	r *http.Request, node *db.FleetNode,
 	workspaceID, profileID pgtype.UUID,
 	build func(db.RuntimeProfile) db.UpsertAgentRuntimeWithProfileParams,
 ) (db.UpsertAgentRuntimeWithProfileRow, db.RuntimeProfile, error) {
 	var row db.UpsertAgentRuntimeWithProfileRow
 	var profile db.RuntimeProfile
+	ctx := r.Context()
+	if node != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+	}
 
 	tx, err := h.TxStarter.Begin(ctx)
 	if err != nil {
 		return row, profile, fmt.Errorf("begin profile runtime registration: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	rollbackCtx := ctx
+	if node != nil {
+		rollbackCtx = context.WithoutCancel(ctx)
+	}
+	defer tx.Rollback(rollbackCtx)
 	qtx := h.Queries.WithTx(tx)
+	if node != nil {
+		if err := h.checkFleetRegisterCredential(ctx, r, qtx, node); err != nil {
+			return row, profile, err
+		}
+	}
 
 	profile, err = qtx.LockRuntimeProfileForRegistration(ctx, db.LockRuntimeProfileForRegistrationParams{
 		ID:          profileID,
@@ -369,7 +384,11 @@ func (h *Handler) upsertRuntimeWithProfile(
 		return row, profile, errRuntimeProfileDisabled
 	}
 
-	row, err = qtx.UpsertAgentRuntimeWithProfile(ctx, build(profile))
+	params := build(profile)
+	if node != nil && (params.OwnerID != node.OwnerID || params.DaemonID.String != uuidToString(node.DaemonID)) {
+		return row, profile, errLocalFleetIdentityProtected
+	}
+	row, err = qtx.UpsertAgentRuntimeWithProfile(ctx, params)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return row, profile, errLocalFleetIdentityProtected
 	}
@@ -519,7 +538,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 			// the profile's stored runtime identity over the daemon-sent type so
 			// the provider used for task routing cannot drift from the profile.
 			prow, profile, err := h.upsertRuntimeWithProfile(
-				r.Context(),
+				r, localNode,
 				wsUUID,
 				profileUUID,
 				func(profile db.RuntimeProfile) db.UpsertAgentRuntimeWithProfileParams {
@@ -695,7 +714,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		commandName := strings.TrimSpace(failed.CommandName)
 		prow, _, err := h.upsertRuntimeWithProfile(
-			r.Context(),
+			r, localNode,
 			wsUUID,
 			profileUUID,
 			func(profile db.RuntimeProfile) db.UpsertAgentRuntimeWithProfileParams {
@@ -788,15 +807,12 @@ func (h *Handler) upsertFleetRuntime(r *http.Request, node *db.FleetNode, params
 	if err != nil {
 		return db.UpsertAgentRuntimeRow{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(context.WithoutCancel(ctx))
 	q := h.Queries.WithTx(tx)
-	if err := fleetguard.CheckRegister(ctx, q, node.Namespace, node.ID); err != nil {
-		return db.UpsertAgentRuntimeRow{}, errLocalFleetIdentityProtected
+	if err := h.checkFleetRegisterCredential(ctx, r, q, node); err != nil {
+		return db.UpsertAgentRuntimeRow{}, err
 	}
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	current, err := q.VerifyFleetCredential(ctx, db.VerifyFleetCredentialParams{Namespace: node.Namespace, TokenHash: auth.HashToken(token)})
-	identity, ok := middleware.CloudNodeIdentity(ctx)
-	if err != nil || !ok || current.ID != node.ID || current.OwnerID != node.OwnerID || current.Namespace != node.Namespace || current.DaemonID != node.DaemonID || current.ContainerID != identity.InstanceID || params.OwnerID != current.OwnerID || params.DaemonID.String != uuidToString(current.DaemonID) {
+	if params.OwnerID != node.OwnerID || params.DaemonID.String != uuidToString(node.DaemonID) {
 		return db.UpsertAgentRuntimeRow{}, errLocalFleetIdentityProtected
 	}
 	row, err := q.UpsertAgentRuntime(ctx, params)
@@ -807,6 +823,20 @@ func (h *Handler) upsertFleetRuntime(r *http.Request, node *db.FleetNode, params
 		return db.UpsertAgentRuntimeRow{}, err
 	}
 	return row, nil
+}
+
+// Shared registration admission precedes every profile/owner lock and initial write.
+func (h *Handler) checkFleetRegisterCredential(ctx context.Context, r *http.Request, q *db.Queries, node *db.FleetNode) error {
+	if err := fleetguard.CheckRegister(ctx, q, node.Namespace, node.ID); err != nil {
+		return errLocalFleetIdentityProtected
+	}
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	current, err := q.VerifyFleetCredential(ctx, db.VerifyFleetCredentialParams{Namespace: node.Namespace, TokenHash: auth.HashToken(token)})
+	identity, ok := middleware.CloudNodeIdentity(ctx)
+	if err != nil || !ok || current.ID != node.ID || current.OwnerID != node.OwnerID || current.Namespace != node.Namespace || current.DaemonID != node.DaemonID || current.ContainerID != identity.InstanceID {
+		return errLocalFleetIdentityProtected
+	}
+	return nil
 }
 
 // mergeLegacyRuntimes folds every runtime row keyed on a prior hostname-derived
@@ -897,7 +927,12 @@ var errRuntimeMergeFenced = errors.New("runtime merge refused by the task-write 
 // failure rolls the whole merge back to its starting state.
 func (h *Handler) mergeLegacyRuntime(ctx context.Context, newRuntimeID, oldRuntimeID pgtype.UUID, legacyID, provider string) error {
 	for attempt := 0; attempt < 5; attempt++ {
-		err := h.mergeLegacyRuntimeTx(ctx, newRuntimeID, oldRuntimeID, legacyID, provider)
+		attemptCtx, cancel, err := fleetguard.AttemptContext(ctx, h.Queries, pgtype.UUID{}, newRuntimeID, oldRuntimeID)
+		if err != nil {
+			return err
+		}
+		err = h.mergeLegacyRuntimeTx(attemptCtx, newRuntimeID, oldRuntimeID, legacyID, provider)
+		cancel()
 		if !errors.Is(err, fleetguard.ErrBindingChanged) {
 			return err
 		}
@@ -912,7 +947,7 @@ func (h *Handler) mergeLegacyRuntimeTx(ctx context.Context, newRuntimeID, oldRun
 	if err != nil {
 		return fmt.Errorf("begin merge tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(fleetguard.RollbackContext(ctx))
 	qtx := h.Queries.WithTx(tx)
 	if err := fleetguard.CheckRuntimeMerge(ctx, qtx, "", oldRuntimeID, newRuntimeID); err != nil {
 		return err

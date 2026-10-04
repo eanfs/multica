@@ -133,6 +133,10 @@ func newFake() *fakeSessionQueries {
 
 func bindKey(inst pgtype.UUID, chat string) string { return fmt.Sprintf("%x|%s", inst.Bytes, chat) }
 
+func (f *fakeSessionQueries) AttemptContext(ctx context.Context, agentID, sessionID pgtype.UUID) (context.Context, context.CancelFunc, error) {
+	return ctx, func() {}, nil
+}
+
 func (f *fakeSessionQueries) WithTx(tx pgx.Tx) SessionQueries { return f }
 
 func (f *fakeSessionQueries) GetChannelChatSessionBinding(_ context.Context, arg db.GetChannelChatSessionBindingParams) (db.ChannelChatSessionBinding, error) {

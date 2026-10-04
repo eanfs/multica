@@ -93,6 +93,44 @@ func TestClaimBarrierPendingReportsAndOwnPreparationSlot(t *testing.T) {
 	}
 }
 
+func TestFleetPendingDeleteAdmissionUsesCurrentScopedOperation(t *testing.T) {
+	for _, tc := range []struct {
+		name, phase, action string
+		generation          int64
+		wrongNamespace      bool
+		blocked             bool
+	}{
+		{"queued", "queued", "delete", 1, false, true}, {"preparing", "preparing", "delete", 1, false, true}, {"prepared", "prepared", "delete", 1, false, true}, {"applying", "applying", "delete", 1, false, true},
+		{"completed", "completed", "delete", 1, false, false}, {"failed", "failed", "delete", 1, false, false}, {"aborted", "aborted", "delete", 1, false, false},
+		{"old-generation", "preparing", "delete", 2, false, false}, {"other-namespace", "preparing", "delete", 1, true, false}, {"stop-retains-queue", "preparing", "stop", 1, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, f := testutil.NewFleetFixture(t)
+			ns := "task6-fix-op-" + uuid.NewString()
+			t.Logf("Task6FixScope namespace=%s owner=%s workspace=%s", ns, f.UserID, f.WorkspaceID)
+			node := f.FleetNode(t, ns, testutil.Cols{"maintenance": true, "status": "running", "desired": "running"})
+			operationNS := ns
+			if tc.wrongNamespace {
+				operationNS += "-other"
+			}
+			f.Insert(t, "fleet_node_operations", testutil.Cols{"namespace": operationNS, "owner_id": f.UserID, "node_id": node, "action": tc.action, "phase": tc.phase, "generation": tc.generation, "idempotency_key": "fixture", "request_hash": "fixture", "prior_desired": "running"})
+			rt := f.Runtime(t, "op", testutil.Cols{"metadata": json.RawMessage(fmt.Sprintf(`{"managed_by":"local_fleet","fleet_node_id":"%s"}`, node))})
+			tx, e := pool.Begin(context.Background())
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer tx.Rollback(context.Background())
+			e = CheckEnqueue(context.Background(), db.New(tx), ns, util.MustParseUUID(rt), time.Now())
+			if tc.blocked && !errors.Is(e, model.ErrBusy) {
+				t.Fatalf("current pending delete admitted: %v", e)
+			}
+			if !tc.blocked && e != nil {
+				t.Fatalf("unrelated or terminal operation blocked enqueue: %v", e)
+			}
+		})
+	}
+}
+
 func TestCallerEnqueueRequiresActualOwningTransactionLocks(t *testing.T) {
 	pool, f := testutil.NewFleetFixture(t)
 	ctx := context.Background()

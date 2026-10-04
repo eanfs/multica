@@ -1,11 +1,13 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1322,7 +1324,7 @@ func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue
 		HeadSha: headShaText(s.ResolveIssueReviewSHA(ctx, issue.ID)),
 	}
 	var task db.AgentTaskQueue
-	err = s.runFleetTx(ctx, func(qtx *db.Queries) error {
+	err = s.runFleetTx(ctx, createParams.AgentID, func(ctx context.Context, qtx *db.Queries) error {
 		locked, e := s.admitEnqueueAgent(ctx, qtx, createParams.AgentID, issue.ID)
 		if e != nil {
 			return e
@@ -1476,7 +1478,7 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, iss
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
 	attrSource, attrDelegatedFrom, attrEvidenceKind, attrEvidenceRef := attributionCreateParams(attr)
 	var task db.AgentTaskQueue
-	err = s.runFleetTx(ctx, func(qtx *db.Queries) error {
+	err = s.runFleetTx(ctx, agentID, func(ctx context.Context, qtx *db.Queries) error {
 		locked, e := s.admitEnqueueAgent(ctx, qtx, agentID, issue.ID)
 		if e != nil {
 			return e
@@ -1681,7 +1683,7 @@ func (s *TaskService) enqueueQuickCreateTask(ctx context.Context, workspaceID, r
 	}
 	var task db.AgentTaskQueue
 	if capture == nil {
-		err = s.runFleetTx(ctx, func(qtx *db.Queries) error {
+		err = s.runFleetTx(ctx, agentID, func(ctx context.Context, qtx *db.Queries) error {
 			locked, e := s.admitEnqueueAgent(ctx, qtx, agentID)
 			if e != nil {
 				return e
@@ -1694,7 +1696,7 @@ func (s *TaskService) enqueueQuickCreateTask(ctx context.Context, workspaceID, r
 		if s.TxStarter == nil {
 			return db.AgentTaskQueue{}, model.ErrUnavailable
 		}
-		err = s.runFleetTx(ctx, func(qtx *db.Queries) error {
+		err = s.runFleetTx(ctx, agentID, func(ctx context.Context, qtx *db.Queries) error {
 			task = db.AgentTaskQueue{}
 			locked, e := s.admitEnqueueAgent(ctx, qtx, agentID, capture.SourceIssueID)
 			if e != nil {
@@ -1793,9 +1795,12 @@ func (s *TaskService) RetrySourceContextQuickCreate(ctx context.Context, workspa
 		return nil, model.ErrUnavailable
 	}
 	var child db.AgentTaskQueue
-	err = s.runFleetTx(ctx, func(qtx *db.Queries) error {
+	err = s.runFleetTx(ctx, parent.AgentID, func(ctx context.Context, qtx *db.Queries) error {
 		candidateParent, e := qtx.GetAgentTask(ctx, sourceTaskID)
 		if e != nil {
+			return e
+		}
+		if e = s.fenceCopiedOrdinaryRuntime(ctx, qtx, candidateParent); e != nil {
 			return e
 		}
 		admitted, e := s.admitEnqueueAgent(ctx, qtx, candidateParent.AgentID)
@@ -2019,7 +2024,7 @@ func (s *TaskService) enqueueChatTask(
 		return db.AgentTaskQueue{}, errors.New("chat task enqueue: transaction starter is required")
 	}
 	var task db.AgentTaskQueue
-	err = s.runFleetTx(ctx, func(qtx *db.Queries) error {
+	err = s.runFleetTx(ctx, chatSession.AgentID, func(ctx context.Context, qtx *db.Queries) error {
 		var e error
 		task, e = s.enqueueChatTaskTx(ctx, qtx, chatSession, initiatorUserID, forceFreshSession, contextRevision, requireDelivery, expectedBindingID, expectedRouteRevision, prepared, false)
 		return e
@@ -2417,7 +2422,7 @@ func (s *TaskService) SendDirectChatMessage(
 	attrSource, _, attrEvidenceKind, attrEvidenceRef := attributionCreateParams(attr)
 
 	var out DirectChatSendResult
-	if err := s.runFleetTx(ctx, func(qtx *db.Queries) error {
+	if err := s.runFleetTx(ctx, session.AgentID, func(ctx context.Context, qtx *db.Queries) error {
 		admitted, e := s.admitEnqueueAgent(ctx, qtx, session.AgentID)
 		if e != nil {
 			return e
@@ -3585,7 +3590,7 @@ func (s *TaskService) claimTask(ctx context.Context, agentID, runtimeID pgtype.U
 		s.maybeLogClaimSlow(agentID, outcome, start, getAgentMs, countRunningMs, claimAgentMs, reanchorMs, updateStatusMs, dispatchMs)
 	}()
 
-	err := s.runFleetTx(ctx, func(qtx *db.Queries) error {
+	err := s.runFleetTx(ctx, agentID, func(ctx context.Context, qtx *db.Queries) error {
 		claimed = nil
 		candidate, err := qtx.GetAgent(ctx, agentID)
 		if err != nil {
@@ -3614,6 +3619,9 @@ func (s *TaskService) claimTask(ctx context.Context, agentID, runtimeID pgtype.U
 		}
 		if agent.RuntimeID != candidate.RuntimeID {
 			return fleetguard.ErrBindingChanged
+		}
+		if err := fleetguard.CheckCallerClaim(ctx, qtx, candidateRuntime); err != nil {
+			return err
 		}
 		claimRuntimeID := runtimeID
 		if !claimRuntimeID.Valid {
@@ -3767,7 +3775,7 @@ func (s *TaskService) ClaimTaskForRuntime(ctx context.Context, runtimeID pgtype.
 	if due := s.ReclaimCheck.DueRuntimeIDs(ctx, []string{runtimeKey}, checkStarted); len(due) > 0 {
 		reclaimCheckAfter := time.Now().Add(claimResponseRecoveryWindow + ReclaimCheckHintSafetyMargin)
 		var stale db.AgentTaskQueue
-		err := s.runFleetReclaimTx(ctx, []pgtype.UUID{runtimeID}, func(qtx *db.Queries, managed bool) error {
+		err := s.runFleetReclaimTx(ctx, []pgtype.UUID{runtimeID}, func(ctx context.Context, qtx *db.Queries, managed bool) error {
 			var protected []pgtype.UUID
 			if managed {
 				eligible, barriers, e := fleetguard.ReclaimCandidates(ctx, qtx, []pgtype.UUID{runtimeID}, time.Now())
@@ -4101,7 +4109,7 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 	var reclaimCheckAfter time.Time
 	if len(dueKeys) > 0 {
 		reclaimCheckAfter = time.Now().Add(claimResponseRecoveryWindow + ReclaimCheckHintSafetyMargin)
-		err = s.runFleetReclaimTx(ctx, uniqueIDs, func(qtx *db.Queries, managed bool) error {
+		err = s.runFleetReclaimTx(ctx, uniqueIDs, func(ctx context.Context, qtx *db.Queries, managed bool) error {
 			reclaimed = nil
 			eligible := uniqueIDs
 			var protected []pgtype.UUID
@@ -4997,6 +5005,7 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 	// common agent_error path skips this work entirely.
 	var (
 		wantRetry        bool
+		retryAgentID     pgtype.UUID
 		retryOverlay     runtimeMCPOverlayData
 		retryFireAt      pgtype.Timestamptz
 		retryMaxAttempts pgtype.Int4
@@ -5007,6 +5016,7 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 				"task_id", util.UUIDToString(taskID), "error", perr)
 		} else if retryEligible(failureReason, parent) {
 			wantRetry = true
+			retryAgentID = parent.AgentID
 			// Persist the reason-aware effective budget into the child so the
 			// retry chain self-describes (e.g. provider_network → max_attempts=3),
 			// rather than leaking a contradictory attempt=N/max_attempts=2 row.
@@ -5031,7 +5041,7 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 
 	var task db.AgentTaskQueue
 	var retried *db.AgentTaskQueue
-	if err := s.runFleetTx(ctx, func(qtx *db.Queries) error {
+	if err := s.runFleetTx(ctx, retryAgentID, func(ctx context.Context, qtx *db.Queries) error {
 		retried = nil
 		retryAllowed := wantRetry
 		var retryCandidate db.AgentTaskQueue
@@ -5664,7 +5674,7 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 	}
 	var child db.AgentTaskQueue
 	created := false
-	err := s.runFleetTx(ctx, func(qtx *db.Queries) error {
+	err := s.runFleetTx(ctx, parent.AgentID, func(ctx context.Context, qtx *db.Queries) error {
 		created = false
 		candidate, err := qtx.GetAgentTask(ctx, parent.ID)
 		if err != nil {
@@ -6867,7 +6877,7 @@ func (s *TaskService) dispatchDelegatedFailureRecovery(ctx context.Context, targ
 			HeadSha:              headShaText(s.ResolveIssueReviewSHA(ctx, target.issue.ID)),
 		}
 		var task db.AgentTaskQueue
-		err = s.runFleetTx(ctx, func(qtx *db.Queries) error {
+		err = s.runFleetTx(ctx, target.agent.ID, func(ctx context.Context, qtx *db.Queries) error {
 			admitted, e := s.admitEnqueueAgent(ctx, qtx, target.agent.ID, target.issue.ID)
 			if e != nil {
 				return e
@@ -7003,7 +7013,24 @@ func (s *TaskService) admitEnqueueAgent(ctx context.Context, q *db.Queries, id p
 		return db.Agent{}, err
 	}
 	if namespace == "" {
+		var issueID pgtype.UUID
+		if len(issueIDs) > 0 {
+			issueID = issueIDs[0]
+		}
+		valid, e := q.FleetFenceTaskOwners(ctx, db.FleetFenceTaskOwnersParams{AgentID: id, IssueID: issueID, RuntimeID: candidate.RuntimeID})
+		if e != nil {
+			return db.Agent{}, e
+		}
+		if !valid {
+			return db.Agent{}, fleetguard.ErrBindingChanged
+		}
+		if e = fleetguard.FenceOrdinaryRuntime(ctx, q, candidate.RuntimeID); e != nil {
+			return db.Agent{}, e
+		}
 		return candidate, nil
+	}
+	if fleetguard.NeedsManagedRediscovery(ctx) {
+		return db.Agent{}, fleetguard.ErrBindingChanged
 	}
 	if s.TxStarter == nil {
 		return db.Agent{}, model.ErrUnavailable
@@ -7031,7 +7058,51 @@ func (s *TaskService) admitEnqueueAgent(ctx context.Context, q *db.Queries, id p
 // Retry SQL copies the parent's persisted runtime, not the agent's new binding.
 // Refuse a managed binding mismatch; logical enqueue refusal never discards an
 // accepted parent terminal/report transition.
+// A historical ordinary runtime may also be upgraded by trusted registration.
+// Freeze both ordinary bindings only after their complete sorted owner fence.
+func (s *TaskService) fenceCopiedOrdinaryRuntime(ctx context.Context, q *db.Queries, parent db.AgentTaskQueue) error {
+	agent, err := q.GetAgent(ctx, parent.AgentID)
+	if err != nil {
+		return err
+	}
+	if agent.RuntimeID == parent.RuntimeID || !agent.RuntimeID.Valid || !parent.RuntimeID.Valid {
+		return nil
+	}
+	for _, id := range []pgtype.UUID{agent.RuntimeID, parent.RuntimeID} {
+		ns, e := fleetguard.ResolveNamespace(ctx, q, id)
+		if e != nil {
+			return e
+		}
+		if ns != "" {
+			return nil
+		}
+	}
+	ids := []pgtype.UUID{agent.RuntimeID, parent.RuntimeID}
+	if err = q.FleetLockCopiedTaskWorkspaces(ctx, db.FleetLockCopiedTaskWorkspacesParams{RuntimeIds: ids, AgentID: parent.AgentID, IssueID: parent.IssueID}); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		valid, e := q.FleetFenceTaskOwners(ctx, db.FleetFenceTaskOwnersParams{AgentID: parent.AgentID, IssueID: parent.IssueID, RuntimeID: id})
+		if e != nil {
+			return e
+		}
+		if !valid {
+			return fleetguard.ErrBindingChanged
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return bytes.Compare(ids[i].Bytes[:], ids[j].Bytes[:]) < 0 })
+	for _, id := range ids {
+		if err = fleetguard.FenceOrdinaryRuntime(ctx, q, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *TaskService) admitRetryEnqueue(ctx context.Context, q *db.Queries, parent db.AgentTaskQueue) (bool, error) {
+	if err := s.fenceCopiedOrdinaryRuntime(ctx, q, parent); err != nil {
+		return false, err
+	}
 	admitted, err := s.admitEnqueueAgent(ctx, q, parent.AgentID, parent.IssueID)
 	if err != nil {
 		if errors.Is(err, model.ErrBusy) || errors.Is(err, model.ErrForbidden) || errors.Is(err, model.ErrUnavailable) || errors.Is(err, ErrChatTaskAgentArchived) {
@@ -7074,6 +7145,9 @@ func (s *TaskService) checkFleetAdmission(ctx context.Context, q *db.Queries, ru
 	if namespace == "" {
 		return nil
 	}
+	if fleetguard.NeedsManagedRediscovery(ctx) {
+		return fleetguard.ErrBindingChanged
+	}
 	if s.TxStarter == nil {
 		return model.ErrUnavailable
 	}
@@ -7087,28 +7161,37 @@ func (s *TaskService) checkFleetAdmission(ctx context.Context, q *db.Queries, ru
 // shape. SQL itself excludes newly-managed metadata unless the owning guarded
 // transaction supplies the actual locked managed IDs, so discovery is not a
 // cached claim permission.
-func (s *TaskService) runFleetReclaimTx(ctx context.Context, ids []pgtype.UUID, fn func(*db.Queries, bool) error) error {
-	runtimes, err := s.Queries.GetAgentRuntimes(ctx, ids)
+func (s *TaskService) runFleetReclaimTx(ctx context.Context, ids []pgtype.UUID, fn func(context.Context, *db.Queries, bool) error) error {
+	attemptCtx, cancel, err := fleetguard.AttemptContext(ctx, s.Queries, pgtype.UUID{}, ids...)
 	if err != nil {
 		return err
 	}
-	managed := false
-	for _, rt := range runtimes {
-		managed = managed || fleetguard.Managed(rt)
-	}
-	if !managed {
-		return fn(s.Queries, false)
+	defer cancel()
+	if !fleetguard.BudgetedAttempt(attemptCtx) {
+		return fn(ctx, s.Queries, false)
 	}
 	if s.TxStarter == nil {
 		return model.ErrUnavailable
 	}
-	return s.runFleetTx(ctx, func(qtx *db.Queries) error { return fn(qtx, true) })
+	return s.runFleetRuntimeTx(attemptCtx, pgtype.UUID{}, ids, func(ctx context.Context, qtx *db.Queries) error { return fn(ctx, qtx, true) })
 }
 
-// runFleetTx retries only rolled-back binding discovery, with a bounded budget.
-func (s *TaskService) runFleetTx(ctx context.Context, fn func(*db.Queries) error) error {
+// runFleetTx rediscovers after each rolled-back binding change.
+func (s *TaskService) runFleetTx(ctx context.Context, agentID pgtype.UUID, fn func(context.Context, *db.Queries) error) error {
+	return s.runFleetRuntimeTx(ctx, agentID, nil, fn)
+}
+func (s *TaskService) runFleetRuntimeTx(ctx context.Context, agentID pgtype.UUID, ids []pgtype.UUID, fn func(context.Context, *db.Queries) error) error {
 	for attempt := 0; attempt < 5; attempt++ {
-		err := s.runInTx(ctx, fn)
+		attemptCtx, cancel, err := fleetguard.AttemptContext(ctx, s.Queries, agentID, ids...)
+		if err != nil {
+			return err
+		}
+		if fleetguard.BudgetedAttempt(attemptCtx) && s.TxStarter == nil {
+			cancel()
+			return model.ErrUnavailable
+		}
+		err = s.runInTx(attemptCtx, func(q *db.Queries) error { return fn(attemptCtx, q) })
+		cancel()
 		if !errors.Is(err, fleetguard.ErrBindingChanged) {
 			return err
 		}
@@ -7130,7 +7213,7 @@ func (s *TaskService) runInTx(ctx context.Context, fn func(*db.Queries) error) e
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(fleetguard.RollbackContext(ctx))
 	if err := fn(s.Queries.WithTx(tx)); err != nil {
 		return err
 	}
