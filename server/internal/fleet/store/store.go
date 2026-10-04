@@ -3,6 +3,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -15,9 +16,10 @@ import (
 const databaseTimeout = 2 * time.Second
 
 type Store struct {
-	pool      *pgxpool.Pool
-	namespace string
-	maxNodes  int
+	pool         *pgxpool.Pool
+	namespace    string
+	maxNodes     int
+	provisioning model.Config
 }
 type Option func(*Store)
 
@@ -29,6 +31,33 @@ func WithMaxNodes(limit int) Option {
 		}
 	}
 }
+
+// WithProvisioningConfig takes a defensive snapshot of administrator-owned provisioning inputs.
+// MaxNodes is deliberately configured through WithMaxNodes, not this option.
+func WithProvisioningConfig(cfg model.Config) Option {
+	copyCfg := model.Config{Namespace: cfg.Namespace, Image: cfg.Image, Specs: make(map[string]model.Spec, len(cfg.Specs))}
+	for name, spec := range cfg.Specs {
+		copyCfg.Specs[name] = spec
+	}
+	return func(s *Store) { s.provisioning = copyCfg }
+}
+
+func validResources(spec model.Spec) bool {
+	return spec.CPUs > 0 && spec.MemoryBytes > 0 && spec.Pids > 0 && spec.MaxRuns > 0
+}
+func (s *Store) validProvisioning() bool {
+	cfg := s.provisioning
+	if cfg.Namespace != s.namespace || strings.TrimSpace(cfg.Namespace) == "" || strings.TrimSpace(cfg.Image) == "" || len(cfg.Specs) == 0 {
+		return false
+	}
+	for name, spec := range cfg.Specs {
+		if strings.TrimSpace(name) == "" || !validResources(spec) {
+			return false
+		}
+	}
+	return true
+}
+
 func New(pool *pgxpool.Pool, namespace string, opts ...Option) *Store {
 	s := &Store{pool: pool, namespace: namespace, maxNodes: 2}
 	for _, opt := range opts {
@@ -74,7 +103,11 @@ func (s *Store) ListNodes(ctx context.Context, ownerID pgtype.UUID, limit, offse
 	}
 	nodes := make([]model.Node, 0, len(rows))
 	for _, row := range rows {
-		nodes = append(nodes, nodeFromRow(row))
+		node, err := nodeFromRow(row)
+		if err != nil {
+			return nil, err
+		}
+		nodes = append(nodes, node)
 	}
 	return nodes, nil
 }
@@ -86,7 +119,7 @@ func (s *Store) GetNode(ctx context.Context, ownerID, nodeID pgtype.UUID) (model
 	if err != nil {
 		return model.Node{}, err
 	}
-	return nodeFromRow(row), nil
+	return nodeFromRow(row)
 }
 
 func (s *Store) GetOperation(ctx context.Context, ownerID, operationID pgtype.UUID) (model.Operation, error) {
@@ -96,6 +129,10 @@ func (s *Store) GetOperation(ctx context.Context, ownerID, operationID pgtype.UU
 	if err != nil {
 		return model.Operation{}, err
 	}
+	return operationFromRow(row), nil
+}
+
+func operationFromRow(row db.FleetNodeOperation) model.Operation {
 	return model.Operation{
 		ID:             row.ID,
 		NodeID:         row.NodeID,
@@ -110,15 +147,20 @@ func (s *Store) GetOperation(ctx context.Context, ownerID, operationID pgtype.UU
 		Attempts:       int(row.Attempts),
 		CreatedAt:      row.CreatedAt.Time,
 		UpdatedAt:      row.UpdatedAt.Time,
-	}, nil
+	}
 }
 
-func nodeFromRow(row db.FleetNode) model.Node {
+func nodeFromRow(row db.FleetNode) (model.Node, error) {
+	var resources model.Spec
+	if _, err := model.DecodeStrictObject(row.SpecConfig, &resources); err != nil || !validResources(resources) {
+		return model.Node{}, model.ErrUnavailable
+	}
 	var health time.Time
 	if row.HealthAt.Valid {
 		health = row.HealthAt.Time
 	}
 	return model.Node{
+		Resources:      resources,
 		ID:             row.ID,
 		OwnerID:        row.OwnerID,
 		Namespace:      row.Namespace,
@@ -145,5 +187,5 @@ func nodeFromRow(row db.FleetNode) model.Node {
 		FailedReports:  int(row.FailedReports),
 		Maintenance:    row.Maintenance,
 		Revoked:        row.Revoked,
-	}
+	}, nil
 }

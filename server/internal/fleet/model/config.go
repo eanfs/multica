@@ -34,7 +34,7 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, err
 	}
 	cfg := Config{MaxNodes: 2}
-	fields, err := decodeObject(raw, &cfg)
+	fields, err := DecodeStrictObject(raw, &cfg)
 	if err != nil {
 		return Config{}, err
 	}
@@ -43,7 +43,7 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("%w: required config identity, image, API URL, specs and positive node limit", ErrInvalidRequest)
 	}
 	var specs map[string]json.RawMessage
-	if _, err := decodeObject(fields["specs"], &specs); err != nil {
+	if _, err := DecodeStrictObject(fields["specs"], &specs); err != nil {
 		return Config{}, ErrInvalidRequest
 	}
 	for name, rawSpec := range specs {
@@ -51,7 +51,7 @@ func LoadConfig(path string) (Config, error) {
 			return Config{}, fmt.Errorf("%w: spec name required", ErrInvalidRequest)
 		}
 		spec := Spec{CPUs: 2, MemoryBytes: 4 * 1024 * 1024 * 1024, Pids: 256, MaxRuns: 1}
-		if _, err := decodeObject(rawSpec, &spec); err != nil {
+		if _, err := DecodeStrictObject(rawSpec, &spec); err != nil {
 			return Config{}, err
 		}
 		if spec.CPUs <= 0 || spec.MemoryBytes <= 0 || spec.Pids <= 0 || spec.MaxRuns <= 0 {
@@ -62,9 +62,9 @@ func LoadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
-// decodeObject rejects unknown/duplicate fields, explicit nulls and extra JSON documents.
+// DecodeStrictObject rejects unknown/duplicate fields, explicit nulls and extra JSON documents.
 // Parser diagnostics are not returned, so untrusted field names/values cannot leak into logs.
-func decodeObject(raw []byte, dst any) (map[string]json.RawMessage, error) {
+func DecodeStrictObject(raw []byte, dst any) (map[string]json.RawMessage, error) {
 	reader := json.NewDecoder(bytes.NewReader(raw))
 	if token, err := reader.Token(); err != nil || token != json.Delim('{') {
 		return nil, ErrInvalidRequest

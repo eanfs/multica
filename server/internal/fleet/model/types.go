@@ -30,6 +30,7 @@ var (
 )
 
 type Node struct {
+	Resources                                                       Spec
 	CreatedAt, UpdatedAt                                            time.Time
 	ID, OwnerID                                                     pgtype.UUID
 	Namespace, ContainerID, DaemonID, Name, Spec, Image, ProfileRef string

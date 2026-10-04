@@ -856,17 +856,19 @@ type FleetNode struct {
 	Revoked        bool               `json:"revoked"`
 	ErrorCode      string             `json:"error_code"`
 	ErrorMessage   string             `json:"error_message"`
+	SpecConfig     []byte             `json:"spec_config"`
 }
 
 type FleetNodeCredential struct {
-	ID        pgtype.UUID        `json:"id"`
-	Namespace string             `json:"namespace"`
-	OwnerID   pgtype.UUID        `json:"owner_id"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
-	NodeID    pgtype.UUID        `json:"node_id"`
-	TokenHash string             `json:"token_hash"`
-	RevokedAt pgtype.Timestamptz `json:"revoked_at"`
+	ID         pgtype.UUID        `json:"id"`
+	Namespace  string             `json:"namespace"`
+	OwnerID    pgtype.UUID        `json:"owner_id"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
+	NodeID     pgtype.UUID        `json:"node_id"`
+	TokenHash  string             `json:"token_hash"`
+	RevokedAt  pgtype.Timestamptz `json:"revoked_at"`
+	Generation int64              `json:"generation"`
 }
 
 type FleetNodeOperation struct {

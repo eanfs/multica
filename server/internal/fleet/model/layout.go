@@ -35,7 +35,7 @@ func ValidateLayoutManifest(raw []byte, want LayoutIdentity) error {
 		return ErrInvalidRequest
 	}
 	var manifest LayoutManifestData
-	if _, err := decodeObject(raw, &manifest); err != nil {
+	if _, err := DecodeStrictObject(raw, &manifest); err != nil {
 		return err
 	}
 	if manifest.Version != LayoutVersion || manifest.Namespace != want.Namespace || manifest.FleetID != want.FleetID ||

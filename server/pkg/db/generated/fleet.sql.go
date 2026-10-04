@@ -34,6 +34,23 @@ func (q *Queries) CountFleetActiveRuns(ctx context.Context, arg CountFleetActive
 	return count, err
 }
 
+const countFleetProvisionedNodes = `-- name: CountFleetProvisionedNodes :one
+SELECT count(*) FROM fleet_nodes WHERE namespace = $1 AND owner_id = $2
+ AND NOT (desired = 'terminated' AND status = 'terminated')
+`
+
+type CountFleetProvisionedNodesParams struct {
+	Namespace string      `json:"namespace"`
+	OwnerID   pgtype.UUID `json:"owner_id"`
+}
+
+func (q *Queries) CountFleetProvisionedNodes(ctx context.Context, arg CountFleetProvisionedNodesParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countFleetProvisionedNodes, arg.Namespace, arg.OwnerID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countFleetQueuedRuns = `-- name: CountFleetQueuedRuns :one
 SELECT count(*) FROM agent_task_queue t
 JOIN agent_runtime r ON r.id = t.runtime_id
@@ -98,8 +115,69 @@ func (q *Queries) FleetNodeSharedLock(ctx context.Context, arg FleetNodeSharedLo
 	return err
 }
 
+const fleetOwnerExclusiveLock = `-- name: FleetOwnerExclusiveLock :exec
+SELECT pg_advisory_xact_lock(hashtextextended('fleet-owner:' || $1::text || ':' || $2::uuid::text, 0))
+`
+
+type FleetOwnerExclusiveLockParams struct {
+	Namespace string      `json:"namespace"`
+	OwnerID   pgtype.UUID `json:"owner_id"`
+}
+
+// Creation and profile projection share this protocol; batch owners sort by UUID.
+// Acquire owner before any node/capacity/runtime locks if combining protocols.
+func (q *Queries) FleetOwnerExclusiveLock(ctx context.Context, arg FleetOwnerExclusiveLockParams) error {
+	_, err := q.db.Exec(ctx, fleetOwnerExclusiveLock, arg.Namespace, arg.OwnerID)
+	return err
+}
+
+const fleetOwnerExists = `-- name: FleetOwnerExists :one
+SELECT EXISTS (SELECT 1 FROM "user" WHERE id = $1)
+`
+
+func (q *Queries) FleetOwnerExists(ctx context.Context, ownerID pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, fleetOwnerExists, ownerID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const getFleetIntentByKey = `-- name: GetFleetIntentByKey :one
+SELECT id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message FROM fleet_node_operations WHERE namespace = $1 AND owner_id = $2 AND idempotency_key = $3
+`
+
+type GetFleetIntentByKeyParams struct {
+	Namespace      string      `json:"namespace"`
+	OwnerID        pgtype.UUID `json:"owner_id"`
+	IdempotencyKey string      `json:"idempotency_key"`
+}
+
+func (q *Queries) GetFleetIntentByKey(ctx context.Context, arg GetFleetIntentByKeyParams) (FleetNodeOperation, error) {
+	row := q.db.QueryRow(ctx, getFleetIntentByKey, arg.Namespace, arg.OwnerID, arg.IdempotencyKey)
+	var i FleetNodeOperation
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.NodeID,
+		&i.Action,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.Phase,
+		&i.PriorDesired,
+		&i.Generation,
+		&i.Approved,
+		&i.Attempts,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+	)
+	return i, err
+}
+
 const getFleetNode = `-- name: GetFleetNode :one
-SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message FROM fleet_nodes WHERE namespace = $1 AND owner_id = $2 AND id = $3
+SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config FROM fleet_nodes WHERE namespace = $1 AND owner_id = $2 AND id = $3
 `
 
 type GetFleetNodeParams struct {
@@ -138,12 +216,57 @@ func (q *Queries) GetFleetNode(ctx context.Context, arg GetFleetNodeParams) (Fle
 		&i.Revoked,
 		&i.ErrorCode,
 		&i.ErrorMessage,
+		&i.SpecConfig,
+	)
+	return i, err
+}
+
+const getFleetNodeByID = `-- name: GetFleetNodeByID :one
+SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config FROM fleet_nodes WHERE namespace = $1 AND id = $2
+`
+
+type GetFleetNodeByIDParams struct {
+	Namespace string      `json:"namespace"`
+	NodeID    pgtype.UUID `json:"node_id"`
+}
+
+func (q *Queries) GetFleetNodeByID(ctx context.Context, arg GetFleetNodeByIDParams) (FleetNode, error) {
+	row := q.db.QueryRow(ctx, getFleetNodeByID, arg.Namespace, arg.NodeID)
+	var i FleetNode
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ContainerID,
+		&i.DaemonID,
+		&i.Name,
+		&i.Spec,
+		&i.Image,
+		&i.ProfileRef,
+		&i.StartEpoch,
+		&i.DataVolume,
+		&i.SecretsVolume,
+		&i.Desired,
+		&i.Status,
+		&i.Generation,
+		&i.Ready,
+		&i.HealthAt,
+		&i.ActiveRuns,
+		&i.PendingReports,
+		&i.FailedReports,
+		&i.Maintenance,
+		&i.Revoked,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+		&i.SpecConfig,
 	)
 	return i, err
 }
 
 const getFleetNodeForRuntime = `-- name: GetFleetNodeForRuntime :one
-SELECT n.id, n.namespace, n.owner_id, n.created_at, n.updated_at, n.container_id, n.daemon_id, n.name, n.spec, n.image, n.profile_ref, n.start_epoch, n.data_volume, n.secrets_volume, n.desired, n.status, n.generation, n.ready, n.health_at, n.active_runs, n.pending_reports, n.failed_reports, n.maintenance, n.revoked, n.error_code, n.error_message FROM fleet_nodes n JOIN agent_runtime r ON r.metadata->>'fleet_node_id' = n.id::text
+SELECT n.id, n.namespace, n.owner_id, n.created_at, n.updated_at, n.container_id, n.daemon_id, n.name, n.spec, n.image, n.profile_ref, n.start_epoch, n.data_volume, n.secrets_volume, n.desired, n.status, n.generation, n.ready, n.health_at, n.active_runs, n.pending_reports, n.failed_reports, n.maintenance, n.revoked, n.error_code, n.error_message, n.spec_config FROM fleet_nodes n JOIN agent_runtime r ON r.metadata->>'fleet_node_id' = n.id::text
 WHERE n.namespace = $1 AND n.owner_id = $2 AND r.owner_id = n.owner_id
  AND r.id = $3 AND r.metadata->>'managed_by' = 'local_fleet'
 `
@@ -184,6 +307,7 @@ func (q *Queries) GetFleetNodeForRuntime(ctx context.Context, arg GetFleetNodeFo
 		&i.Revoked,
 		&i.ErrorCode,
 		&i.ErrorMessage,
+		&i.SpecConfig,
 	)
 	return i, err
 }
@@ -222,8 +346,157 @@ func (q *Queries) GetFleetOperation(ctx context.Context, arg GetFleetOperationPa
 	return i, err
 }
 
+const getFleetProfile = `-- name: GetFleetProfile :one
+SELECT id, namespace, owner_id, created_at, updated_at, profile_ref, config_version FROM fleet_credential_profiles WHERE namespace = $1 AND owner_id = $2
+`
+
+type GetFleetProfileParams struct {
+	Namespace string      `json:"namespace"`
+	OwnerID   pgtype.UUID `json:"owner_id"`
+}
+
+func (q *Queries) GetFleetProfile(ctx context.Context, arg GetFleetProfileParams) (FleetCredentialProfile, error) {
+	row := q.db.QueryRow(ctx, getFleetProfile, arg.Namespace, arg.OwnerID)
+	var i FleetCredentialProfile
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ProfileRef,
+		&i.ConfigVersion,
+	)
+	return i, err
+}
+
+const insertFleetCreateOperation = `-- name: InsertFleetCreateOperation :one
+INSERT INTO fleet_node_operations (namespace, owner_id, node_id, action, idempotency_key, request_hash)
+VALUES ($1, $2, $3, 'create', $4, $5) RETURNING id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message
+`
+
+type InsertFleetCreateOperationParams struct {
+	Namespace      string      `json:"namespace"`
+	OwnerID        pgtype.UUID `json:"owner_id"`
+	NodeID         pgtype.UUID `json:"node_id"`
+	IdempotencyKey string      `json:"idempotency_key"`
+	RequestHash    string      `json:"request_hash"`
+}
+
+func (q *Queries) InsertFleetCreateOperation(ctx context.Context, arg InsertFleetCreateOperationParams) (FleetNodeOperation, error) {
+	row := q.db.QueryRow(ctx, insertFleetCreateOperation,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.NodeID,
+		arg.IdempotencyKey,
+		arg.RequestHash,
+	)
+	var i FleetNodeOperation
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.NodeID,
+		&i.Action,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.Phase,
+		&i.PriorDesired,
+		&i.Generation,
+		&i.Approved,
+		&i.Attempts,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+	)
+	return i, err
+}
+
+const insertFleetCredential = `-- name: InsertFleetCredential :exec
+INSERT INTO fleet_node_credentials (namespace, node_id, owner_id, token_hash, generation)
+VALUES ($1, $2, $3, $4, $5)
+`
+
+type InsertFleetCredentialParams struct {
+	Namespace  string      `json:"namespace"`
+	NodeID     pgtype.UUID `json:"node_id"`
+	OwnerID    pgtype.UUID `json:"owner_id"`
+	TokenHash  string      `json:"token_hash"`
+	Generation int64       `json:"generation"`
+}
+
+func (q *Queries) InsertFleetCredential(ctx context.Context, arg InsertFleetCredentialParams) error {
+	_, err := q.db.Exec(ctx, insertFleetCredential,
+		arg.Namespace,
+		arg.NodeID,
+		arg.OwnerID,
+		arg.TokenHash,
+		arg.Generation,
+	)
+	return err
+}
+
+const insertFleetNode = `-- name: InsertFleetNode :one
+INSERT INTO fleet_nodes (namespace, owner_id, name, spec, image, profile_ref, spec_config)
+VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config
+`
+
+type InsertFleetNodeParams struct {
+	Namespace  string      `json:"namespace"`
+	OwnerID    pgtype.UUID `json:"owner_id"`
+	Name       string      `json:"name"`
+	Spec       string      `json:"spec"`
+	Image      string      `json:"image"`
+	ProfileRef string      `json:"profile_ref"`
+	SpecConfig []byte      `json:"spec_config"`
+}
+
+func (q *Queries) InsertFleetNode(ctx context.Context, arg InsertFleetNodeParams) (FleetNode, error) {
+	row := q.db.QueryRow(ctx, insertFleetNode,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.Name,
+		arg.Spec,
+		arg.Image,
+		arg.ProfileRef,
+		arg.SpecConfig,
+	)
+	var i FleetNode
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ContainerID,
+		&i.DaemonID,
+		&i.Name,
+		&i.Spec,
+		&i.Image,
+		&i.ProfileRef,
+		&i.StartEpoch,
+		&i.DataVolume,
+		&i.SecretsVolume,
+		&i.Desired,
+		&i.Status,
+		&i.Generation,
+		&i.Ready,
+		&i.HealthAt,
+		&i.ActiveRuns,
+		&i.PendingReports,
+		&i.FailedReports,
+		&i.Maintenance,
+		&i.Revoked,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+		&i.SpecConfig,
+	)
+	return i, err
+}
+
 const listFleetNodesByOwner = `-- name: ListFleetNodesByOwner :many
-SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message FROM fleet_nodes WHERE namespace = $1 AND owner_id = $2
+SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config FROM fleet_nodes WHERE namespace = $1 AND owner_id = $2
 ORDER BY created_at, id LIMIT $4 OFFSET $3
 `
 
@@ -275,6 +548,7 @@ func (q *Queries) ListFleetNodesByOwner(ctx context.Context, arg ListFleetNodesB
 			&i.Revoked,
 			&i.ErrorCode,
 			&i.ErrorMessage,
+			&i.SpecConfig,
 		); err != nil {
 			return nil, err
 		}
@@ -284,4 +558,112 @@ func (q *Queries) ListFleetNodesByOwner(ctx context.Context, arg ListFleetNodesB
 		return nil, err
 	}
 	return items, nil
+}
+
+const maxFleetCredentialGeneration = `-- name: MaxFleetCredentialGeneration :one
+SELECT COALESCE(max(generation), 0)::bigint FROM fleet_node_credentials
+WHERE namespace = $1 AND node_id = $2 AND owner_id = $3
+`
+
+type MaxFleetCredentialGenerationParams struct {
+	Namespace string      `json:"namespace"`
+	NodeID    pgtype.UUID `json:"node_id"`
+	OwnerID   pgtype.UUID `json:"owner_id"`
+}
+
+func (q *Queries) MaxFleetCredentialGeneration(ctx context.Context, arg MaxFleetCredentialGenerationParams) (int64, error) {
+	row := q.db.QueryRow(ctx, maxFleetCredentialGeneration, arg.Namespace, arg.NodeID, arg.OwnerID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const revokeFleetCredentials = `-- name: RevokeFleetCredentials :exec
+UPDATE fleet_node_credentials SET revoked_at = now(), updated_at = now()
+WHERE namespace = $1 AND node_id = $2 AND owner_id = $3 AND revoked_at IS NULL
+`
+
+type RevokeFleetCredentialsParams struct {
+	Namespace string      `json:"namespace"`
+	NodeID    pgtype.UUID `json:"node_id"`
+	OwnerID   pgtype.UUID `json:"owner_id"`
+}
+
+func (q *Queries) RevokeFleetCredentials(ctx context.Context, arg RevokeFleetCredentialsParams) error {
+	_, err := q.db.Exec(ctx, revokeFleetCredentials, arg.Namespace, arg.NodeID, arg.OwnerID)
+	return err
+}
+
+const upsertFleetProfile = `-- name: UpsertFleetProfile :exec
+INSERT INTO fleet_credential_profiles (namespace, owner_id, profile_ref, config_version)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (namespace, owner_id) DO UPDATE SET profile_ref = EXCLUDED.profile_ref,
+ config_version = EXCLUDED.config_version, updated_at = now()
+`
+
+type UpsertFleetProfileParams struct {
+	Namespace     string      `json:"namespace"`
+	OwnerID       pgtype.UUID `json:"owner_id"`
+	ProfileRef    string      `json:"profile_ref"`
+	ConfigVersion int64       `json:"config_version"`
+}
+
+func (q *Queries) UpsertFleetProfile(ctx context.Context, arg UpsertFleetProfileParams) error {
+	_, err := q.db.Exec(ctx, upsertFleetProfile,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.ProfileRef,
+		arg.ConfigVersion,
+	)
+	return err
+}
+
+const verifyFleetCredential = `-- name: VerifyFleetCredential :one
+SELECT n.id, n.namespace, n.owner_id, n.created_at, n.updated_at, n.container_id, n.daemon_id, n.name, n.spec, n.image, n.profile_ref, n.start_epoch, n.data_volume, n.secrets_volume, n.desired, n.status, n.generation, n.ready, n.health_at, n.active_runs, n.pending_reports, n.failed_reports, n.maintenance, n.revoked, n.error_code, n.error_message, n.spec_config FROM fleet_node_credentials c
+JOIN fleet_nodes n ON n.id = c.node_id AND n.owner_id = c.owner_id AND n.namespace = c.namespace
+JOIN "user" u ON u.id = n.owner_id
+WHERE c.namespace = $1 AND c.token_hash = $2 AND c.revoked_at IS NULL
+ AND NOT n.revoked AND n.desired <> 'terminated' AND n.status <> 'terminated'
+ AND c.generation = (SELECT max(h.generation) FROM fleet_node_credentials h
+   WHERE h.namespace = n.namespace AND h.node_id = n.id AND h.owner_id = n.owner_id)
+`
+
+type VerifyFleetCredentialParams struct {
+	Namespace string `json:"namespace"`
+	TokenHash string `json:"token_hash"`
+}
+
+func (q *Queries) VerifyFleetCredential(ctx context.Context, arg VerifyFleetCredentialParams) (FleetNode, error) {
+	row := q.db.QueryRow(ctx, verifyFleetCredential, arg.Namespace, arg.TokenHash)
+	var i FleetNode
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ContainerID,
+		&i.DaemonID,
+		&i.Name,
+		&i.Spec,
+		&i.Image,
+		&i.ProfileRef,
+		&i.StartEpoch,
+		&i.DataVolume,
+		&i.SecretsVolume,
+		&i.Desired,
+		&i.Status,
+		&i.Generation,
+		&i.Ready,
+		&i.HealthAt,
+		&i.ActiveRuns,
+		&i.PendingReports,
+		&i.FailedReports,
+		&i.Maintenance,
+		&i.Revoked,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+		&i.SpecConfig,
+	)
+	return i, err
 }
