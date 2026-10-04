@@ -95,6 +95,7 @@ type Node struct {
     Generation int64
     Ready bool
     HealthAt time.Time
+    CreatedAt, UpdatedAt time.Time
     ActiveRuns, PendingReports, FailedReports int
     Maintenance bool
     Revoked bool
@@ -106,6 +107,7 @@ type Operation struct {
     Generation int64
     Approved bool
     Attempts int
+    CreatedAt, UpdatedAt time.Time
 }
 type CreateRequest struct { Name, Spec, IdempotencyKey string }
 type Bootstrap struct {
@@ -150,7 +152,7 @@ type Provider interface {
 
 **Interfaces:** Produces 上述 types 和 helpers；`Config` 包含 `Namespace, FleetID, Image, APIURL string`、`Specs map[string]Spec`、`MaxNodes int`；`Spec{CPUs int, MemoryBytes int64, Pids int64, MaxRuns int}`；`LoadConfig(path string) (Config,error)` 从明确文件读且拒绝未知危险字段。私密 profile 与 public config 用不同结构，不将 Bootstrap json.Marshal 到日志。
 
-- [ ] **Step 1:** 写状态矩阵，至少以下回归：
+- [x] **Step 1:** 写状态矩阵，至少以下回归：
 
 ```go
 func TestCanClaimBlocksMaintenance(t *testing.T) {
@@ -163,8 +165,8 @@ func TestCanClaimBlocksMaintenance(t *testing.T) {
 ```
 
 另加 revoked、健康31秒、starting、missing readiness分支；pending/failed reports危险操作矩阵归Task7，不重复测试；config 拒绝未知 image/path 字段和零/负资源限制。
-- [ ] **Step 2:** `(cd server && go test ./internal/fleet/model -run TestCanClaim -count=1)`；预期 undefined helper 或断言 FAIL，记录原因。
-- [ ] **Step 3:** 实现 pure 判断，初版：
+- [x] **Step 2:** `(cd server && go test ./internal/fleet/model -run TestCanClaim -count=1)`；预期 undefined helper 或断言 FAIL，记录原因。
+- [x] **Step 3:** 实现 pure 判断，初版：
 
 ```go
 func CanClaim(n Node, now time.Time) bool {
@@ -178,12 +180,12 @@ func CanEnqueue(n Node) bool {
 ```
 
 待回传结果不永久阻止普通领取，已有任务回放沿原协议处理；它们是危险操作的忙碌条件，不误加到 CanClaim 中。ValidateCreate 只允许名称和已声明 spec，默认限制复制 Global Constraints。
-- [ ] **Step 4:** 同一命令跑 `./internal/fleet/model` 全套，预期 PASS；表驱动测试负责枚举，界面不重复这些矩阵。
-- [ ] **Step 5:** 检查 diff，提交 `feat(fleet): define local node configuration and policy`，只 stage 本任务文件。
+- [x] **Step 4:** 同一命令跑 `./internal/fleet/model` 全套，预期 PASS；表驱动测试负责枚举，界面不重复这些矩阵。
+- [x] **Step 5:** 检查 diff，提交 `feat(fleet): define local node configuration and policy`，只 stage 本任务文件。
 
 ### Task 2: 同库迁移、sqlc 与数据库测试 fixture
 
-**审查补充（本任务所有权与 canonical tests）：** 新增 Modify: `server/cmd/migrate/main.go`、`server/cmd/migrate/migrate_mul5999_index_retry_test.go`；Create `server/cmd/migrate/migrate_fleet_index_retry_test.go`。564 表迁移 id/node_id/owner_id/namespace 必需字段 NOT NULL，无内联 PK/UNIQUE/FK。565–575 各 index up/down 独立单语句，up CONCURRENTLY，down DROP INDEX CONCURRENTLY IF EXISTS。每个完整 basename→public.index 登记 concurrentIndexCleanups；仅 down 重建并发索引时登记 concurrentDownIndexCleanups（Fleet down 只有 DROP，不伪造 build）。保留 TestEveryConcurrentUpBuildHasCleanup/现有 down coverage invariant，新增 TestFleetInvalidConcurrentIndexRetry 验证 INVALID 清理重建、drop 中断重跑、up/down/up。DB setup 完成后 `go test ./cmd/migrate -run 'EveryConcurrent|FleetInvalid' -count=1`；down 只在获准测试自有 schema/数据库，不回滚业务库。执行前 glob main，重编号及两方向 map 同步。
+**审查补充（本任务所有权与 canonical tests）：** 新增 Modify: `server/internal/fleet/model/types.go`：Task 1 审查通过后由 Task 2 补充 Node/Operation 的 CreatedAt、UpdatedAt time.Time，并将持久时间从 sqlc row 显式映射；供 Task 4 既有 created_at/updated_at 响应和 Task 10 有界初始化/恢复使用，不能以响应时间伪造创建时间。store_test.go 用固定 fixture 时间验证回传。新增 Modify: `server/cmd/migrate/main.go`、`server/cmd/migrate/migrate_mul5999_index_retry_test.go`；Create `server/cmd/migrate/migrate_fleet_index_retry_test.go`。564 表迁移 id/node_id/owner_id/namespace 必需字段 NOT NULL，无内联 PK/UNIQUE/FK。565–575 各 index up/down 独立单语句，up CONCURRENTLY，down DROP INDEX CONCURRENTLY IF EXISTS。每个完整 basename→public.index 登记 concurrentIndexCleanups；仅 down 重建并发索引时登记 concurrentDownIndexCleanups（Fleet down 只有 DROP，不伪造 build）。保留 TestEveryConcurrentUpBuildHasCleanup/现有 down coverage invariant，新增 TestFleetInvalidConcurrentIndexRetry 验证 INVALID 清理重建、drop 中断重跑、up/down/up。DB setup 完成后 `go test ./cmd/migrate -run 'EveryConcurrent|FleetInvalid' -count=1`；down 只在获准测试自有 schema/数据库，不回滚业务库。执行前 glob main，重编号及两方向 map 同步。
 
 **Dependencies:** Task 1。**Deliverable:** 四张 Fleet 表、锁/查询生成代码与真实 PostgreSQL 回归。
 
