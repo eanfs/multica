@@ -211,17 +211,30 @@ func TestFleetTransactionTotalTimeout(t *testing.T) {
 	pool, f := testutil.NewFleetFixture(t)
 	id := f.FleetNode(t, "total-timeout")
 	s := New(pool, "total-timeout")
-	var lateErr error
-	_ = s.WithTx(context.Background(), func(q *db.Queries) error {
-		for i := 0; i < 2; i++ {
-			<-time.After(1100 * time.Millisecond)
-			lateErr = q.FleetNodeCapacityLock(context.Background(), db.FleetNodeCapacityLockParams{Namespace: "total-timeout", NodeID: uuid(t, id)})
-			if lateErr != nil {
-				return lateErr
-			}
+	var firstErr, lateErr error
+	var firstAttempted, lateAttempted bool
+	txErr := s.WithTx(context.Background(), func(q *db.Queries) error {
+		params := db.FleetNodeCapacityLockParams{Namespace: "total-timeout", NodeID: uuid(t, id)}
+		<-time.After(1100 * time.Millisecond)
+		firstAttempted = true
+		firstErr = q.FleetNodeCapacityLock(context.Background(), params)
+		if firstErr != nil {
+			return firstErr
 		}
-		return nil
+		<-time.After(1100 * time.Millisecond)
+		lateAttempted = true
+		lateErr = q.FleetNodeCapacityLock(context.Background(), params)
+		return lateErr
 	})
+	if !firstAttempted || firstErr != nil {
+		t.Fatalf("pre-budget database work must succeed: attempted=%v query=%v transaction=%v", firstAttempted, firstErr, txErr)
+	}
+	if !lateAttempted {
+		t.Fatal("post-budget database work was not attempted")
+	}
+	if txErr == nil {
+		t.Fatal("transaction accepted work beyond its two-second budget")
+	}
 	if lateErr == nil {
 		t.Fatal("transaction accepted database work after its two-second budget")
 	}
