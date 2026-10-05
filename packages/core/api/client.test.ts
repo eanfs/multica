@@ -1,13 +1,174 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+// @vitest-environment node
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuthStore } from "../auth";
 import { configStore } from "../config";
 import type { StorageAdapter, User } from "../types";
+import { setCurrentWorkspace } from "../platform/workspace-storage";
 import { ApiClient, ApiError, CHAT_DRAFT_RESTORE_CAPABILITY, clientErrorMessage } from "./client";
 import { EMPTY_PLUGIN_PACKAGE_LIST, EMPTY_PLUGIN_PREVIEW, EMPTY_PLUGIN_SURFACE_LAUNCH } from "./schemas";
 
+beforeEach(() => {
+  vi.stubGlobal("fetch", () => { throw new Error("Unstubbed network request in client test"); });
+});
+
 afterEach(() => {
   configStore.getState().setAgentConversationStartersSupported(false);
+  setCurrentWorkspace(null, null);
   vi.unstubAllGlobals();
+});
+
+describe("Task11 cloud runtime wire boundary", () => {
+  const node = {
+    id: "hosted-node-1",
+    owner_id: "user-1",
+    instance_id: "i-hosted-1",
+    region: "us-west-2",
+    instance_type: "g5.xlarge",
+    image_id: "ami-1",
+    subnet_id: "subnet-1",
+    name: "worker",
+    status: "running",
+    tags: {},
+    metadata: {},
+    created_at: "2026-10-04T00:00:00Z",
+    updated_at: "2026-10-04T00:00:00Z",
+  };
+  const response = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
+  it("discovers capabilities at the existing root and maps snake_case", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      calls.push(url);
+      return response({
+        provider: "docker",
+        operations: ["create", "stop"],
+        specs: [{ id: "small", cpus: 2, memory_bytes: 4294967296, pids: 256, max_runs: 1 }],
+        persistent_storage: true,
+        disk_quota_supported: false,
+      });
+    });
+    const caps = await new ApiClient("https://api.example.test").getCloudRuntimeCapabilities();
+    expect(calls).toEqual(["https://api.example.test/api/cloud-runtime/"]);
+    expect(caps).toEqual({
+      provider: "docker",
+      operations: ["create", "stop"],
+      specs: [{ id: "small", cpus: 2, memoryBytes: 4294967296, pids: 256 }],
+      persistentStorage: true,
+      diskQuotaSupported: false,
+    });
+  });
+
+  it.each(["create", "start", "stop", "reboot", "delete"] as const)(
+    "%s preserves intent key through transport and caller retries without trusted headers",
+    async (action) => {
+      const calls: Array<{
+        url: string;
+        headers: Headers;
+        method: string | undefined;
+        body: unknown;
+      }> = [];
+      let attempts = 0;
+      vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+        calls.push({
+          url,
+          headers: new Headers(init.headers),
+          method: init.method,
+          body: JSON.parse(String(init.body)),
+        });
+        attempts++;
+        if (attempts === 1) return response({ error: "CSRF validation failed" }, 403);
+        return action === "delete" ? new Response(null, { status: 204 }) : response(node);
+      });
+      setCurrentWorkspace("work", "ws-1");
+      const client = new ApiClient("https://api.example.test");
+      client.setToken("caller-token");
+      const send = (key: string) =>
+        action === "create"
+          ? client.createCloudRuntimeNode({ spec: "small", name: "worker" }, key)
+          : action === "delete"
+            ? client.deleteCloudRuntimeNode("i-hosted-1", key)
+            : action === "start"
+              ? client.startCloudRuntimeNode("i-hosted-1", key)
+              : action === "stop"
+                ? client.stopCloudRuntimeNode("i-hosted-1", key)
+                : client.rebootCloudRuntimeNode("i-hosted-1", key);
+      await send("intent-a");
+      await send("intent-a");
+      await send("intent-b");
+      expect(calls.map((c) => c.headers.get("Idempotency-Key"))).toEqual([
+        "intent-a",
+        "intent-a",
+        "intent-a",
+        "intent-b",
+      ]);
+      for (const c of calls) {
+        expect(c.url).toBe(
+          "https://api.example.test/api/cloud-runtime/nodes" +
+            (["create", "delete"].includes(action) ? "" : "/" + action),
+        );
+        expect(c.method).toBe(action === "delete" ? "DELETE" : "POST");
+        expect(c.body).toEqual(
+          action === "create" ? { spec: "small", name: "worker" } : { instance_id: "i-hosted-1" },
+        );
+        expect(c.headers.get("Authorization")).toBe("Bearer caller-token");
+        expect(c.headers.get("X-Workspace-Slug")).toBe("work");
+        expect(
+          [...c.headers.keys()].filter((k) => /user-id|owner|service|fleet-secret|api-key/.test(k)),
+        ).toEqual([]);
+      }
+    },
+  );
+
+  it.each(["create", "start", "stop", "reboot"] as const)(
+    "%s rejects degraded and empty-node success",
+    async (action) => {
+      const client = new ApiClient("https://api.example.test");
+      const send = () =>
+        action === "create"
+          ? client.createCloudRuntimeNode({ spec: "small" }, "intent")
+          : action === "start"
+            ? client.startCloudRuntimeNode("i-hosted-1", "intent")
+            : action === "stop"
+              ? client.stopCloudRuntimeNode("i-hosted-1", "intent")
+              : client.rebootCloudRuntimeNode("i-hosted-1", "intent");
+      for (const body of [
+        { id: 123 },
+        { ...node, id: "" },
+        { ...node, id: "   " },
+        { ...node, ready: "yes" },
+      ]) {
+        vi.stubGlobal("fetch", async () => response(body));
+        await expect(send()).rejects.toThrow(/invalid cloud runtime node/i);
+      }
+    },
+  );
+
+  it("accepts queued Docker creation before a container id exists", async () => {
+    vi.stubGlobal("fetch", async () =>
+      response({
+        ...node,
+        id: "fleet-node",
+        instance_id: "",
+        provider: "docker",
+        ready: false,
+        operation_id: "op-1",
+        error_code: "",
+      }),
+    );
+    const result = await new ApiClient("https://api.example.test").createCloudRuntimeNode(
+      { spec: "small" },
+      "intent",
+    );
+    expect(result).toMatchObject({
+      id: "fleet-node",
+      instance_id: "",
+      provider: "docker",
+      ready: false,
+      operationId: "op-1",
+      errorCode: "",
+    });
+  });
 });
 
 describe("ApiClient status reorder", () => {
@@ -1564,7 +1725,7 @@ describe("ApiClient", () => {
     await expect(client.listCloudRuntimeNodes()).resolves.toEqual([]);
     await expect(
       client.createCloudRuntimeNode({ instance_type: "g5.xlarge" }),
-    ).resolves.toMatchObject({ id: "", status: "" });
+    ).rejects.toThrow(/invalid cloud runtime node/i);
   });
 
   it("deleteCloudRuntimeNode sends DELETE with JSON body containing instance id", async () => {

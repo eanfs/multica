@@ -1,6 +1,9 @@
+// @vitest-environment node
 import { describe, expect, it } from "vitest";
 import {
   AppConfigSchema,
+  CloudRuntimeNodeSchema,
+  CloudRuntimeCapabilitiesSchema,
   WecomInstallationSchema,
   ListWecomInstallationsResponseSchema,
   RedeemWecomBindingTokenResponseSchema,
@@ -75,6 +78,81 @@ import {
   EMPTY_ISSUE_STATUS_ENTRY,
 } from "./schemas";
 import { parseWithFallback } from "./schema";
+
+describe("Task11 cloud runtime schemas", () => {
+  const caps = {
+    provider: "docker",
+    operations: ["create", "start", "stop", "reboot", "delete"],
+    specs: [{ id: "small", cpus: 2, memory_bytes: 4294967296, pids: 256 }],
+    persistent_storage: true,
+    disk_quota_supported: false,
+  };
+  it("maps actual capabilities without requiring invented limits", () => {
+    expect(CloudRuntimeCapabilitiesSchema.parse(caps)).toEqual({
+      provider: "docker",
+      operations: ["create", "start", "stop", "reboot", "delete"],
+      specs: [{ id: "small", cpus: 2, memoryBytes: 4294967296, pids: 256 }],
+      persistentStorage: true,
+      diskQuotaSupported: false,
+    });
+  });
+  it("unknown provider disables operations even when delete is advertised", () => {
+    expect(CloudRuntimeCapabilitiesSchema.parse({ ...caps, provider: "future" })).toMatchObject({
+      provider: "unknown",
+      operations: [],
+    });
+  });
+  it.each(["cpus", "memory_bytes", "pids"])(
+    "rejects nonpositive or nonfinite %s specs",
+    (field) => {
+      for (const value of [0, -1, Infinity, NaN, "2"]) {
+        expect(
+          CloudRuntimeCapabilitiesSchema.safeParse({
+            ...caps,
+            specs: [{ ...caps.specs[0], [field]: value }],
+          }).success,
+        ).toBe(false);
+      }
+    },
+  );
+  it("rejects malformed required operations rather than granting permission", () => {
+    expect(
+      CloudRuntimeCapabilitiesSchema.safeParse({ ...caps, operations: "delete" }).success,
+    ).toBe(false);
+  });
+  it("unknown operation is omitted without erasing known operations", () => {
+    expect(
+      CloudRuntimeCapabilitiesSchema.parse({ ...caps, operations: ["create", "exec", "delete"] }),
+    ).toMatchObject({ operations: ["create", "delete"] });
+  });
+  it("preserves hosted string IDs and defaults absent optional diagnostics", () => {
+    const node = {
+      id: "hosted-node",
+      owner_id: "owner",
+      instance_id: "i-hosted",
+      region: "us-west-2",
+      instance_type: "g5.xlarge",
+      image_id: "ami-1",
+      subnet_id: "subnet-1",
+      name: "worker",
+      status: "running",
+      created_at: "date",
+      updated_at: "date",
+    };
+    expect(CloudRuntimeNodeSchema.parse(node)).toMatchObject({
+      ...node,
+      provider: "unknown",
+      ready: false,
+      operationId: "",
+      errorCode: "",
+      tags: {},
+      metadata: {},
+    });
+    expect(CloudRuntimeNodeSchema.safeParse({ ...node, ready: "true" }).success).toBe(false);
+    expect(CloudRuntimeNodeSchema.safeParse({ ...node, operation_id: 7 }).success).toBe(false);
+    expect(CloudRuntimeNodeSchema.safeParse({ ...node, error_code: {} }).success).toBe(false);
+  });
+});
 
 const baseIssue = {
   id: "11111111-1111-1111-1111-111111111111",

@@ -241,12 +241,17 @@ import type {
 import type {
   CloudRuntimeNode,
   CreateCloudRuntimeNodeRequest,
+  CreateDockerNodeRequest,
   ListCloudRuntimeNodesParams,
 } from "../runtimes/cloud-runtime";
 import { type Logger, noopLogger } from "../logger";
 import { createRequestId, createSafeId } from "../utils";
 import { getCurrentSlug } from "../platform/workspace-storage";
-import { parseWithFallback } from "./schema";
+import { parseWithFallback, parseWithFallbackResult } from "./schema";
+import {
+  EMPTY_CLOUD_RUNTIME_CAPABILITIES,
+  type CloudRuntimeCapabilities,
+} from "../runtimes/cloud-runtime-capabilities";
 import {
   RuntimeProfileSchema,
   RuntimeProfileListSchema,
@@ -270,6 +275,7 @@ import {
   CommentsListSchema,
   CommentTriggerPreviewSchema,
   IssueTriggerPreviewSchema,
+  CloudRuntimeCapabilitiesSchema,
   CloudRuntimeNodeListSchema,
   CloudRuntimeNodeSchema,
   AgentBuilderRuntimeSwitchSchema,
@@ -2048,28 +2054,80 @@ export class ApiClient {
     );
   }
 
-  async createCloudRuntimeNode(
-    data: CreateCloudRuntimeNodeRequest,
-  ): Promise<CloudRuntimeNode> {
-    const res = await this.fetchRaw("/api/cloud-runtime/nodes", {
-      method: "POST",
-      body: JSON.stringify(data),
-      extraHeaders: { "Content-Type": "application/json" },
-    });
-    const raw = await res.json() as unknown;
+  async getCloudRuntimeCapabilities(): Promise<CloudRuntimeCapabilities> {
+    const raw = await this.fetch<unknown>("/api/cloud-runtime/");
     return parseWithFallback(
       raw,
-      CloudRuntimeNodeSchema,
-      EMPTY_CLOUD_RUNTIME_NODE,
-      { endpoint: "POST /api/cloud-runtime/nodes" },
+      CloudRuntimeCapabilitiesSchema,
+      EMPTY_CLOUD_RUNTIME_CAPABILITIES,
+      { endpoint: "GET /api/cloud-runtime/" },
     );
   }
 
-  async deleteCloudRuntimeNode(instanceId: string): Promise<void> {
+  private async requestCloudRuntimeNode(
+    path: string,
+    data: CreateCloudRuntimeNodeRequest | CreateDockerNodeRequest | { instance_id: string },
+    idempotencyKey?: string,
+  ): Promise<CloudRuntimeNode> {
+    const res = await this.fetchRaw(path, {
+      method: "POST",
+      body: JSON.stringify(data),
+      extraHeaders: {
+        "Content-Type": "application/json",
+        ...(idempotencyKey !== undefined ? { "Idempotency-Key": idempotencyKey } : {}),
+      },
+    });
+    const raw: unknown = await res.json();
+    const parsed = parseWithFallbackResult(raw, CloudRuntimeNodeSchema, EMPTY_CLOUD_RUNTIME_NODE, {
+      endpoint: "POST " + path,
+    });
+    // A queued local node may not have a container yet. Only logical identity
+    // and valid parsing are required; hosted identities stay ordinary strings.
+    if (parsed.degraded || !parsed.value.id.trim()) {
+      throw new Error("Invalid cloud runtime node response");
+    }
+    return parsed.value;
+  }
+
+  async createCloudRuntimeNode(
+    data: CreateCloudRuntimeNodeRequest | CreateDockerNodeRequest,
+    idempotencyKey?: string,
+  ): Promise<CloudRuntimeNode> {
+    return this.requestCloudRuntimeNode("/api/cloud-runtime/nodes", data, idempotencyKey);
+  }
+
+  async startCloudRuntimeNode(instanceId: string, key: string): Promise<CloudRuntimeNode> {
+    return this.requestCloudRuntimeNode(
+      "/api/cloud-runtime/nodes/start",
+      { instance_id: instanceId },
+      key,
+    );
+  }
+
+  async stopCloudRuntimeNode(instanceId: string, key: string): Promise<CloudRuntimeNode> {
+    return this.requestCloudRuntimeNode(
+      "/api/cloud-runtime/nodes/stop",
+      { instance_id: instanceId },
+      key,
+    );
+  }
+
+  async rebootCloudRuntimeNode(instanceId: string, key: string): Promise<CloudRuntimeNode> {
+    return this.requestCloudRuntimeNode(
+      "/api/cloud-runtime/nodes/reboot",
+      { instance_id: instanceId },
+      key,
+    );
+  }
+
+  async deleteCloudRuntimeNode(instanceId: string, key?: string): Promise<void> {
     await this.fetchRaw("/api/cloud-runtime/nodes", {
       method: "DELETE",
       body: JSON.stringify({ instance_id: instanceId }),
-      extraHeaders: { "Content-Type": "application/json" },
+      extraHeaders: {
+        "Content-Type": "application/json",
+        ...(key !== undefined ? { "Idempotency-Key": key } : {}),
+      },
     });
   }
 
