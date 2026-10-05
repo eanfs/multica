@@ -1167,114 +1167,163 @@ func TestResolveAgentsViaLoginShell_StripsAliasShadowing(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell not available on Windows")
 	}
-	sh := "/bin/sh"
-	if _, err := os.Stat(sh); err != nil {
-		t.Skipf("no /bin/sh available: %v", err)
-	}
-
 	binDir := t.TempDir()
 	binPath := filepath.Join(binDir, "fakeclaude")
-	if err := os.WriteFile(binPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write fake binary: %v", err)
+	aliasPath := filepath.Join(binDir, "alias-wrapper")
+	for _, path := range []string{binPath, aliasPath} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
 	}
-
-	// rc adds binDir to PATH AND defines an alias that shadows the bare
-	// name with a non-existent path. The pre-fix script would see the
-	// alias, see that its target isn't absolute, and silently drop the
-	// agent. With unalias/unset -f in place, command -v falls through to
-	// the PATH search and finds binPath.
-	rc := filepath.Join(t.TempDir(), "sh.rc")
-	rcBody := "export PATH=\"" + binDir + ":$PATH\"\n" +
-		"alias fakeclaude=\"/nonexistent/wrapper-from-rc\"\n"
-	if err := os.WriteFile(rc, []byte(rcBody), 0o644); err != nil {
-		t.Fatalf("write rc: %v", err)
-	}
-
-	// Strip PATH so exec.LookPath misses fakeclaude — same precondition as
-	// the happy-path test, so we know the shell did the resolution.
-	t.Setenv("PATH", "/usr/bin:/bin")
-	if _, err := lookPathInPath("fakeclaude"); err == nil {
-		t.Skip("PATH leak — fakeclaude already visible to the daemon without shell help")
-	}
-	// Sanity-check that the simulated environment can actually load aliases.
-	// If the host /bin/sh doesn't honour $ENV in -i mode (rare but possible
-	// on minimal Linux images), skipping is more honest than asserting on a
-	// scenario the test couldn't actually set up.
+	// Parse the real script only after defining the alias, without ENV or login rc.
+	prelude := "exec /bin/sh -c 'alias fakeclaude=\"" + aliasPath + "\"; eval \"$1\"' sh \"$2\"\n"
+	sh := ownedLoginShellWithPrelude(t, prelude, binDir)
 	t.Setenv("SHELL", sh)
-	t.Setenv("ENV", rc)
-	probeCtx, probeCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer probeCancel()
-	probeCmd := exec.CommandContext(probeCtx, sh, "-ilc", "alias fakeclaude 2>/dev/null")
-	probeCmd.Stdin = strings.NewReader("")
-	probe, err := probeCmd.Output()
-	if err != nil || !strings.Contains(string(probe), "fakeclaude") {
-		t.Skipf("test host's /bin/sh did not load alias from $ENV; cannot simulate shadowing (probe=%q err=%v)", string(probe), err)
+	t.Setenv("PATH", t.TempDir())
+	if sh == "/bin/sh" || !filepath.IsAbs(sh) {
+		t.Fatal("fixture must use an owned shell before login discovery")
 	}
-
+	if _, err := lookPathInPath("fakeclaude"); err == nil {
+		t.Fatal("fakeclaude must be absent from the daemon PATH")
+	}
+	probe := func(script string) string {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, sh, "-ilc", script)
+		cmd.WaitDelay = 100 * time.Millisecond
+		raw, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("owned alias control: %v", err)
+		}
+		return string(raw)
+	}
+	if got := probe("for n in fakeclaude; do command -v \"$n\"; done"); !strings.Contains(got, aliasPath) {
+		t.Fatalf("alias precondition not established: %q", got)
+	}
+	// Negative control runs the actual script with just alias removal disabled.
+	script := buildLoginShellResolveScript([]string{"fakeclaude"})
+	withoutUnalias := strings.ReplaceAll(script, "  unalias \"$n\" 2>/dev/null\n", "")
+	if got := probe(withoutUnalias); strings.TrimSpace(got) != "" {
+		t.Fatalf("alias-shadowed script unexpectedly found PATH binary: %q", got)
+	}
 	got := resolveAgentsViaLoginShell([]string{"fakeclaude"})
-	resolved, ok := got["fakeclaude"]
-	if !ok {
-		t.Fatalf("expected fakeclaude in resolved map despite alias shadowing, got %v", got)
-	}
 	wantCanonical, err := filepath.EvalSymlinks(binPath)
 	if err != nil {
-		t.Fatalf("eval symlinks for expected path: %v", err)
+		t.Fatal(err)
 	}
-	if resolved != wantCanonical {
-		t.Errorf("resolved = %q, want canonical %q (got the alias instead of the PATH binary?)", resolved, wantCanonical)
+	if len(got) != 1 || got["fakeclaude"] != wantCanonical {
+		t.Fatalf("alias-unshadowed resolution = %v, want only fakeclaude=%q", got, wantCanonical)
 	}
 }
 
-// TestResolveAgentsViaLoginShell_HardTimeoutOnBackgroundedStdout exercises the
-// failure mode Cmd.WaitDelay guards against: an rc file that backgrounds a
-// long-running process inheriting stdout. Killing the shell on context
-// cancel does not close the inherited pipe, so cmd.Output() would hang on
-// EOF until the survivor exits. The hard deadline must be roughly
-// loginShellResolveTimeout + loginShellResolveWaitDelay, not the survivor's
-// lifetime.
+// The owned shell exits after running the real discovery script. Its supervised
+// child keeps stdout open beyond the asserted cap; cleanup kills and reaps that
+// child before waiting for the resolver, even when the deadline assertion fails.
 func TestResolveAgentsViaLoginShell_HardTimeoutOnBackgroundedStdout(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell not available on Windows")
 	}
-	sh := "/bin/sh"
-	if _, err := os.Stat(sh); err != nil {
-		t.Skipf("no /bin/sh available: %v", err)
+	root := t.TempDir()
+	if strings.ContainsAny(root, "'\n\r") {
+		t.Fatal("unsafe fixture path")
 	}
-
-	// rc backgrounds a sleeper that holds stdout for far longer than any
-	// reasonable WaitDelay. The resolver script never gets to print
-	// anything (we never even reach the for-loop because rc is still
-	// being sourced when the sleeper forks), but that's exactly the
-	// scenario we care about — we don't want to leak time-to-startup.
-	rc := filepath.Join(t.TempDir(), "sh.rc")
-	rcBody := "( sleep 60 ) &\n"
-	if err := os.WriteFile(rc, []byte(rcBody), 0o644); err != nil {
-		t.Fatalf("write rc: %v", err)
+	pidFile, childFile := filepath.Join(root, "supervisor-pid"), filepath.Join(root, "child-pid")
+	ready, cleaned := filepath.Join(root, "ready"), filepath.Join(root, "cleaned")
+	supervisor := filepath.Join(root, "supervisor")
+	body := "#!/bin/sh\nunset ENV BASH_ENV\n" +
+		"/bin/sleep 15 &\nchild=$!\n" +
+		"cleanup() { kill \"$child\" 2>/dev/null; wait \"$child\" 2>/dev/null; : > '" + cleaned + "'; exit 0; }\ntrap cleanup TERM\n" +
+		"printf '%s\\n' \"$child\" > '" + childFile + "'\n" +
+		": > '" + ready + "'\nwait \"$child\"\n: > '" + cleaned + "'\n"
+	if err := os.WriteFile(supervisor, []byte(body), 0700); err != nil {
+		t.Fatal(err)
 	}
+	prelude := "'" + supervisor + "' &\nprintf '%s\\n' \"$!\" > '" + pidFile + "'\n" +
+		"while [ ! -f '" + ready + "' ]; do /bin/sleep 0.01; done\n"
+	sh := ownedLoginShellWithPrelude(t, prelude, root)
 	t.Setenv("SHELL", sh)
-	t.Setenv("ENV", rc)
-	// The shell itself exits at once, so the whole run is the wait delay; a
-	// short one proves the same ceiling without the test paying the real 2s.
+	t.Setenv("PATH", t.TempDir())
+	if sh == "/bin/sh" || !filepath.IsAbs(sh) {
+		t.Fatal("fixture must use an owned shell before login discovery")
+	}
 	origWaitDelay := loginShellResolveWaitDelay
 	loginShellResolveWaitDelay = 100 * time.Millisecond
-	t.Cleanup(func() { loginShellResolveWaitDelay = origWaitDelay })
-
-	// Cap = context timeout + wait delay + generous slack for goroutine
-	// scheduling. A bug that disables WaitDelay would blow past 60s here.
+	defer func() { loginShellResolveWaitDelay = origWaitDelay }()
 	cap := loginShellResolveTimeout + loginShellResolveWaitDelay + 3*time.Second
-	start := time.Now()
-	done := make(chan struct{})
-	go func() {
-		_ = resolveAgentsViaLoginShell([]string{"claude"})
-		close(done)
+	if 15*time.Second <= cap {
+		t.Fatal("survivor lifetime must exceed asserted resolver cap")
+	}
+	done := make(chan map[string]string, 1)
+	// Cleanup is registered before launching any child and waits on the shell's
+	// own wait receipt, not a guessed PID or a global process-name kill.
+	defer func() {
+		raw, err := os.ReadFile(pidFile)
+		if err != nil {
+			t.Errorf("owned supervisor PID missing: %v", err)
+			return
+		}
+		pid := strings.TrimSpace(string(raw))
+		if pid == "" || pid == "0" || pid == "1" || strings.Trim(pid, "0123456789") != "" {
+			t.Errorf("invalid owned supervisor PID: %q", pid)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := exec.CommandContext(ctx, "/bin/kill", "-TERM", pid).Run(); err != nil {
+			t.Errorf("stop owned supervisor %s: %v", pid, err)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if _, err := os.Stat(cleaned); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Error("owned supervisor did not reap stdout child within cleanup bound")
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		child, err := os.ReadFile(childFile)
+		if err != nil || strings.TrimSpace(string(child)) == "" {
+			t.Errorf("owned stdout child PID missing: %v", err)
+		} else if err := exec.CommandContext(ctx, "/bin/kill", "-0", strings.TrimSpace(string(child))).Run(); err == nil {
+			t.Error("stdout child still alive after supervisor wait")
+		}
+		// The supervisor exits immediately after writing its reaping receipt.
+		deadline = time.Now().Add(2 * time.Second)
+		for exec.Command("/bin/kill", "-0", pid).Run() == nil {
+			if time.Now().After(deadline) {
+				t.Error("owned supervisor still alive after cleanup")
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("resolver did not finish after owned child cleanup")
+		}
+		t.Logf("owned supervisor %s killed and stdout child %s reaped", pid, strings.TrimSpace(string(child)))
 	}()
+	start := time.Now()
+	go func() { done <- resolveAgentsViaLoginShell([]string{"missing-fixture-agent"}) }()
 	select {
-	case <-done:
-		if elapsed := time.Since(start); elapsed > cap {
-			t.Errorf("resolver took %v, expected <= %v (WaitDelay leak?)", elapsed, cap)
+	case got := <-done:
+		done <- got // Preserve the completion receipt for deferred cleanup.
+		if len(got) != 0 {
+			t.Errorf("missing owned agent resolved unexpectedly: %v", got)
+		}
+		if elapsed := time.Since(start); elapsed < loginShellResolveWaitDelay || elapsed > cap {
+			t.Errorf("resolver took %v, want WaitDelay <= elapsed <= %v", elapsed, cap)
+		}
+		if _, err := os.Stat(ready); err != nil {
+			t.Errorf("stdout survivor never became ready: %v", err)
+		}
+		if _, err := os.Stat(cleaned); !os.IsNotExist(err) {
+			t.Error("stdout survivor exited before the deadline assertion")
 		}
 	case <-time.After(cap):
-		t.Fatalf("resolver did not return within %v — WaitDelay is not enforcing a hard ceiling", cap)
+		t.Errorf("resolver did not return within %v — WaitDelay is not enforcing a hard ceiling", cap)
 	}
 }
 

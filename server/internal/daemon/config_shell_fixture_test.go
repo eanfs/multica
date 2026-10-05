@@ -11,6 +11,12 @@ import (
 // login profiles. Its PATH contains only fixture binaries and two tool shims.
 func ownedLoginShell(t *testing.T, dirs ...string) string {
 	t.Helper()
+	return ownedLoginShellWithPrelude(t, "", dirs...)
+}
+
+// The prelude contains only test-authored alias or stdout-survivor setup.
+func ownedLoginShellWithPrelude(t *testing.T, prelude string, dirs ...string) string {
+	t.Helper()
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
@@ -43,6 +49,7 @@ func ownedLoginShell(t *testing.T, dirs ...string) string {
 		"printf '%s\\n' \"$@\" > '" + argv + "'\n" +
 		"PATH='" + fixturePath + "'; export PATH\n" +
 		"unset ENV BASH_ENV\n" +
+		prelude +
 		"exec /bin/sh -c \"$2\"\n"
 	if err := os.WriteFile(shell, []byte(body), 0700); err != nil {
 		t.Fatal(err)
