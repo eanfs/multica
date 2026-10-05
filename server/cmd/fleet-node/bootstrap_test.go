@@ -105,8 +105,14 @@ func TestBootstrapRejectsUnsafeIdentityAndPreservesData(t *testing.T) {
 				checkFixture(t, os.Rename(secretPath, target))
 				checkFixture(t, os.Symlink(target, secretPath))
 			case "home-symlink":
-				home = filepath.Join(data, "linked-home")
-				checkFixture(t, os.Symlink(filepath.Join(data, "home"), home))
+				target := filepath.Join(data, "home-target")
+				// Both paths are test-owned; retain profile and sentinel bytes.
+				checkFixture(t, os.Rename(home, target))
+				checkFixture(t, os.Symlink(target, home))
+				info, err := os.Lstat(home)
+				if err != nil || info.Mode()&os.ModeSymlink == 0 {
+					t.Fatal("home-symlink fixture is not a symlink")
+				}
 			case "task-config-override":
 				t.Setenv(cli.TaskConfigRootEnv, t.TempDir())
 			case "invalid-token", "invalid-uuid", "extra-secret", "malformed-secret":
@@ -129,6 +135,9 @@ func TestBootstrapRejectsUnsafeIdentityAndPreservesData(t *testing.T) {
 					raw = []byte("unit-test-only")
 				}
 				checkFixture(t, os.WriteFile(secretPath, raw, 0600))
+			}
+			if kind == "home-symlink" && filepath.Base(home) != "home" {
+				t.Fatal("home-symlink fixture must reach directory validation with basename home")
 			}
 			_, err := BootstrapFiles(home, secrets)
 			if err == nil {

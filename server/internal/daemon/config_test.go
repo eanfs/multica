@@ -331,20 +331,14 @@ func TestBuildLoginShellResolveScript_ShapeAndContent(t *testing.T) {
 // We simulate this by:
 //   - creating a temp dir containing an executable named "fakeclaude"
 //   - removing every other dir from PATH (so exec.LookPath misses)
-//   - pointing SHELL at /bin/sh and using ENV (sourced on -i) to add the dir
+//   - pointing SHELL at an owned fake that accepts -ilc but runs the real
+//     discovery script with a fake-only PATH and a non-login interpreter.
 //
-// Skipped on Windows (no POSIX shell), and skipped if /bin/sh is missing or
-// doesn't honour ENV (which would defeat the simulation — not the function's
-// fault).
+// System and user login profiles are never loaded.
 func TestResolveAgentsViaLoginShell_ResolvesViaInteractiveShell(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell not available on Windows")
 	}
-	sh := "/bin/sh"
-	if _, err := os.Stat(sh); err != nil {
-		t.Skipf("no /bin/sh available: %v", err)
-	}
-
 	binDir := t.TempDir()
 	binPath := filepath.Join(binDir, "fakeclaude")
 	// A trivially executable script. We only need it to exist and be
@@ -353,24 +347,18 @@ func TestResolveAgentsViaLoginShell_ResolvesViaInteractiveShell(t *testing.T) {
 		t.Fatalf("write fake binary: %v", err)
 	}
 
-	// Prove the precondition: with binDir absent from PATH, the daemon
-	// would normally miss this binary.
-	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
 	if _, err := lookPathInPath("fakeclaude"); err == nil {
-		t.Skip("PATH leak — test environment already exposes fakeclaude without shell help")
+		t.Fatal("fixture binary visible before shell discovery")
 	}
-
-	// Wire the interactive shell to add binDir to PATH on startup. POSIX
-	// sh reads $ENV when invoked with -i, so we write a tiny rc file that
-	// prepends binDir.
-	rc := filepath.Join(t.TempDir(), "sh.rc")
-	if err := os.WriteFile(rc, []byte("export PATH=\""+binDir+":$PATH\"\n"), 0o644); err != nil {
-		t.Fatalf("write rc: %v", err)
-	}
+	sh := ownedLoginShell(t, binDir)
 	t.Setenv("SHELL", sh)
-	t.Setenv("ENV", rc)
 
 	got := resolveAgentsViaLoginShell([]string{"fakeclaude", "kiro-cli"})
+	if len(got) != 1 {
+		t.Fatalf("discovery escaped fake-only PATH (kiro-cli must be missing): %v", got)
+	}
 	resolved, ok := got["fakeclaude"]
 	if !ok {
 		t.Fatalf("expected fakeclaude in resolved map, got %v", got)
@@ -541,6 +529,9 @@ func TestLoadConfig_SkipsMulticaHooksShadowingAgentBinaries(t *testing.T) {
 	t.Setenv("SHELL", filepath.Join(t.TempDir(), "fish"))
 	t.Setenv("MULTICA_DAEMON_ID", "11111111-1111-1111-1111-111111111111")
 
+	// This fixture owns PATH/bundle candidates; do not inherit the runner
+	// override that deliberately hides actual desktop installations.
+	t.Setenv("MULTICA_CODEX_PATH", "")
 	cfg, err := LoadConfig(Overrides{
 		ServerURL:      "http://localhost:0",
 		WorkspacesRoot: t.TempDir(),
@@ -572,11 +563,6 @@ func TestLoadConfig_SkipsMulticaHooksFromLoginShellFallback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell not available on Windows")
 	}
-	sh := "/bin/sh"
-	if _, err := os.Stat(sh); err != nil {
-		t.Skipf("no /bin/sh available: %v", err)
-	}
-
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	hooksDir := filepath.Join(home, ".multica", "hooks")
@@ -593,17 +579,13 @@ func TestLoadConfig_SkipsMulticaHooksFromLoginShellFallback(t *testing.T) {
 		t.Fatalf("write real codex: %v", err)
 	}
 
-	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("PATH", t.TempDir())
 	if _, err := exec.LookPath("codex"); err == nil {
-		t.Skip("PATH leak - codex already visible to daemon without shell fallback")
+		t.Fatal("fixture codex visible before shell discovery")
 	}
-	rc := filepath.Join(t.TempDir(), "sh.rc")
-	rcBody := "export PATH=\"" + hooksDir + string(os.PathListSeparator) + realBinDir + ":$PATH\"\n"
-	if err := os.WriteFile(rc, []byte(rcBody), 0o644); err != nil {
-		t.Fatalf("write shell rc: %v", err)
-	}
+	t.Setenv("MULTICA_CODEX_PATH", "")
+	sh := ownedLoginShell(t, hooksDir, realBinDir)
 	t.Setenv("SHELL", sh)
-	t.Setenv("ENV", rc)
 	t.Setenv("MULTICA_DAEMON_ID", "11111111-1111-1111-1111-111111111111")
 	pinNonCodexAgentsToMissingPaths(t)
 	oldBundlePaths := codexDesktopAppBundlePaths
@@ -1374,6 +1356,7 @@ func TestLoadConfig_UsesCodexDesktopAppBundleFallback(t *testing.T) {
 	t.Setenv("MULTICA_CODEX_MODEL", "gpt-5")
 	pinNonCodexAgentsToMissingPaths(t)
 
+	t.Setenv("MULTICA_CODEX_PATH", "") // Only the owned bundle candidates may rescue the default.
 	cfg, err := LoadConfig(Overrides{
 		ServerURL:      "http://localhost:0",
 		WorkspacesRoot: t.TempDir(),
@@ -1418,6 +1401,7 @@ func TestLoadConfig_UsesChatGPTAppBundleCodexPath(t *testing.T) {
 	t.Setenv("SHELL", filepath.Join(t.TempDir(), "fish"))
 	t.Setenv("MULTICA_DAEMON_ID", "11111111-1111-1111-1111-111111111111")
 	pinNonCodexAgentsToMissingPaths(t)
+	t.Setenv("MULTICA_CODEX_PATH", "") // Discovery is restricted to owned bundle candidates.
 
 	cfg, err := LoadConfig(Overrides{
 		ServerURL:      "http://localhost:0",
