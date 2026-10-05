@@ -41,6 +41,8 @@ WORKSPACE_SLUG="${MULTICA_DEV_WORKSPACE_SLUG:-dev}"
 
 ALL_COMPONENTS="api web daemon desktop fleet"
 DEFAULT_COMPONENTS="api web"
+# Only validated managed entry points set this private composition marker.
+MULTICA_MANAGED_API_CONFIG=""
 
 # An agent runs with TMPDIR=/tmp/multica-task-<id>, deleted when the run ends.
 # Anything the Go toolchain builds there goes with it, so a binary started from
@@ -550,14 +552,15 @@ start_api() {
   local launched_at health waited=0 expected_commit
   expected_commit="$(checkout_commit)"
   if health="$(health_json)" && [ -n "$health" ] && component_pid api >/dev/null; then
-    if api_identity_matches "$health" "$expected_commit"; then
+    if api_identity_matches "$health" "$expected_commit" && managed_api_reusable; then
       record_component_listener api "$BACKEND_PORT" >/dev/null \
         || die "The API listener changed while its identity was being verified. Refusing to reuse it."
       ok "api already running on :$BACKEND_PORT (pid $(json_field "$health" pid), commit $expected_commit)"
       return 0
     fi
     if health_belongs_to_api "$health"; then
-      warn "api on :$BACKEND_PORT is ours but not commit $expected_commit; restarting it."
+      warn "api on :$BACKEND_PORT is ours but its composition changed; restarting it."
+      if [ -n "${MULTICA_MANAGED_API_CONFIG:-}" ]; then fleet_action quiesce; fi
       stop_component api
     else
       die "Port $BACKEND_PORT answers /health, but its pid/commit does not match this environment. Refusing to reuse or kill it."
@@ -569,7 +572,13 @@ Run 'make down' here first — a leftover instance answers /health with 200 and 
   fi
 
   launched_at="$(now_epoch)"
-  launch_detached api make -C "$REPO_ROOT" -s api-dev ENV_FILE="$ENV_FILE"
+  if [ -n "${MULTICA_MANAGED_API_CONFIG:-}" ]; then
+    launch_detached api make -C "$REPO_ROOT" -s api-dev ENV_FILE="$ENV_FILE" \
+      MULTICA_LOCAL_FLEET_URL="$MULTICA_LOCAL_FLEET_URL" \
+      MULTICA_LOCAL_FLEET_SECRET_FILE="$MULTICA_LOCAL_FLEET_SECRET_FILE"
+  else
+    launch_detached api make -C "$REPO_ROOT" -s api-dev ENV_FILE="$ENV_FILE"
+  fi
   info "api launching (pid $(cat "$(pid_file api)")), log: $(log_file api)"
 
   while [ "$waited" -lt 300 ]; do
@@ -585,6 +594,7 @@ Run 'make down' here first — a leftover instance answers /health with 200 and 
         stop_component api
         die "The API listener changed while its identity was being recorded."
       fi
+      save_managed_api_receipt
       ok "api healthy at http://localhost:$BACKEND_PORT (pid $(json_field "$health" pid), commit $expected_commit)"
       return 0
     fi
@@ -1067,10 +1077,10 @@ process.exit(sql(['-tAc','SELECT 1'])&&sql(['-v','ON_ERROR_STOP=1','-c','DROP DA
 NODE
 }
 
-fleet_cleanup_done() {
+fleet_cleanup_started() {
   node - "$STATE_DIR/fleet/identity.json" <<'NODE'
 const id=JSON.parse(require('fs').readFileSync(process.argv[2],'utf8'));
-process.exit(id.cleanup_operation_key===id.operation_key?0:1);
+process.exit(id.cleanup_intent_key===id.operation_key||id.cleanup_operation_key===id.operation_key?0:1);
 NODE
 }
 
@@ -1087,11 +1097,27 @@ fleet_action() {
     --api-port "$BACKEND_PORT" --offset "$OFFSET" --input "$MULTICA_FLEET_INPUT" \
     --operator "$MULTICA_FLEET_OPERATOR" || die "fleet-env: denied"
 }
+managed_api_reusable() {
+  [ -n "${MULTICA_MANAGED_API_CONFIG:-}" ] || return 0
+  node - "$STATE_DIR/api-fleet.json" "$MULTICA_MANAGED_API_CONFIG" "$(component_pid api)" "$(port_listener_pid "$BACKEND_PORT")" <<'NODE'
+const fs=require('fs');try{const p=process.argv[2],s=fs.lstatSync(p);if(!s.isFile()||s.isSymbolicLink()||s.uid!==process.getuid()||(s.mode&511)!==384)process.exit(1);const r=JSON.parse(fs.readFileSync(p));process.exit(r.configuration===process.argv[3]&&r.launcher===process.argv[4]&&r.listener===process.argv[5]?0:1);}catch{process.exit(1);}
+NODE
+}
+save_managed_api_receipt() {
+  [ -n "${MULTICA_MANAGED_API_CONFIG:-}" ] || return 0
+  node - "$STATE_DIR/api-fleet.json" "$MULTICA_MANAGED_API_CONFIG" "$(component_pid api)" "$(port_listener_pid "$BACKEND_PORT")" <<'NODE'
+const fs=require('fs'),p=process.argv[2],t=p+'.new-'+process.pid;fs.writeFileSync(t,JSON.stringify({configuration:process.argv[3],launcher:process.argv[4],listener:process.argv[5]}),{mode:0o600,flag:'wx'});fs.renameSync(t,p);
+NODE
+}
 fleet_api_config() {
   local fleet_port
   fleet_port="$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1])).port))' "$STATE_DIR/fleet/identity.json")"
   export MULTICA_LOCAL_FLEET_URL="http://127.0.0.1:$fleet_port"
   export MULTICA_LOCAL_FLEET_SECRET_FILE="$STATE_DIR/fleet/service-key"
+  MULTICA_MANAGED_API_CONFIG="$(node - "$STATE_DIR/fleet/identity.json" "$MULTICA_LOCAL_FLEET_URL" "$MULTICA_LOCAL_FLEET_SECRET_FILE" <<'NODE'
+const fs=require('fs'),crypto=require('crypto'),id=JSON.parse(fs.readFileSync(process.argv[2]));process.stdout.write(crypto.createHash('sha256').update(JSON.stringify([id.repo,id.name,id.namespace,id.fleet_id,id.input_hash,id.prepared_hash,process.argv[3],process.argv[4]])).digest('hex'));
+NODE
+)"
 }
 
 # ------------------------------------------------------------------- verbs ---
@@ -1370,7 +1396,7 @@ cmd_destroy() {
     # Validate saved private inputs/current ownership before an owned API restart.
     fleet_action status
     # A physical phase marker never replaces the trusted SQL destroy check.
-    if ! fleet_cleanup_done; then
+    if ! fleet_cleanup_started; then
       fleet_action quiesce
       fleet_api_config
       start_api

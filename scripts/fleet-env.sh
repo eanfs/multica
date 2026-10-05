@@ -15,7 +15,7 @@ try{
  need(['prepare','up','status','quiesce','down','destroy'].includes(action));
  const allowed=['repo','state','name','database-url','db-name','api-port','offset','input','operator'];need(argv.length%2===0);
  for(let i=0;i<argv.length;i+=2){const k=argv[i].slice(2);need(argv[i].startsWith('--')&&allowed.includes(k)&&args[k]===undefined&&argv[i+1]);args[k]=argv[i+1];}need(allowed.every(k=>args[k]));
- need(args.repo===root&&path.isAbsolute(args.state)&&path.basename(args.state)===args.name&&/^[a-z0-9][a-z0-9-]*$/.test(args.name));directories(args.state);need((fs.statSync(args.state).mode&0o777)===0o700&&fs.statSync(args.state).uid===process.getuid());
+ need(args.repo===root&&path.isAbsolute(args.state)&&path.basename(args.state)===args.name&&/^[a-z0-9][a-z0-9_-]{0,127}$/.test(args.name));directories(args.state);need((fs.statSync(args.state).mode&0o777)===0o700&&fs.statSync(args.state).uid===process.getuid());
  const dsn=args['database-url'],url=new URL(dsn);need(dsn.length<=8192&&['postgres:','postgresql:'].includes(url.protocol)&&url.username&&url.password&&!url.hash&&decodeURIComponent(url.pathname.slice(1))===args['db-name']&&url.searchParams.get('sslmode')==='disable'&&!/[\x00-\x20\x7f-\x9f]/.test(dsn));need(['localhost','127.0.0.1','[::1]'].includes(url.hostname));
  const apiPort=Number(args['api-port']),offset=Number(args.offset);need(Number.isInteger(apiPort)&&apiPort>0&&apiPort<=65535&&Number.isInteger(offset)&&offset>=0&&offset<1000);
  const input=json(args.input),fields=['version','database_name','database_lifecycle','context','engine_id','pg_container_id','pg_network_id','pg_alias','pg_port','pg_host_port','socket_path','uid','gid','socket_gid','node_image','fleet_image','api_url','profiles_file','service_key_file'];
@@ -35,7 +35,8 @@ try{
  const mounts=[];for(const [owner,ref] of Object.entries(profiles.owners)){need(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(owner)&&owner!=='00000000-0000-0000-0000-000000000000'&&typeof ref==='string');if(ref!==''){readPrivate(ref);mounts.push({type:'bind',source:ref,target:ref,read_only:true});}}
  need(path.isAbsolute(args.operator));directories(path.dirname(args.operator));need((fs.statSync(path.dirname(args.operator)).mode&0o777)===0o700);const opStat=fs.lstatSync(args.operator);need(opStat.isFile()&&!opStat.isSymbolicLink()&&opStat.uid===process.getuid()&&(opStat.mode&0o077)===0&&(opStat.mode&0o100)!==0);
  const fleetDir=path.join(args.state,'fleet');if(!fs.existsSync(fleetDir))fs.mkdirSync(fleetDir,{mode:0o700});directories(fleetDir);need((fs.statSync(fleetDir).mode&0o777)===0o700&&fs.statSync(fleetDir).uid===process.getuid());lock=path.join(fleetDir,'lock');fs.mkdirSync(lock,{mode:0o700});locked=true;
- const docker=a=>command('docker',['--context',input.context,...a]),inspect=a=>JSON.parse(docker(a));
+ let dockerDeadline;
+ const docker=a=>{const remaining=dockerDeadline===undefined?30000:dockerDeadline-Date.now();need(remaining>0);return command('docker',['--context',input.context,...a],process.env,remaining);},inspect=a=>JSON.parse(docker(a));
  const engine=inspect(['info','--format','{{json .}}']);need(engine.ID===input.engine_id&&engine.OSType==='linux');
  const pg=inspect(['container','inspect',input.pg_container_id])[0];need(pg.Id===input.pg_container_id&&pg.State.Running&&pg.Config.Labels['com.docker.compose.project']==='multica'&&pg.Config.Labels['com.docker.compose.service']==='postgres');
  const attached=Object.entries(pg.NetworkSettings.Networks).filter(([name,n])=>n.NetworkID===input.pg_network_id&&n.Aliases.includes(input.pg_alias));need(attached.length===1);
@@ -72,34 +73,44 @@ try{
  const configPath=path.join(fleetDir,'config.json'),dbPath=path.join(fleetDir,'database-url'),keyPath=path.join(fleetDir,'service-key'),composePath=path.join(fleetDir,'compose.json');
  const operator=a=>command(args.operator,[a,'--namespace',id.namespace,'--fleet-id',id.fleet_id,'--fleet-url','http://127.0.0.1:'+id.port,'--database-url',dsn,'--config',configPath,'--service-key',keyPath,'--profiles',input.profiles_file,'--operation-key',id.operation_key,'--timeout','5m'],{PATH:process.env.PATH},310000);
  const compose=a=>docker(['compose','--project-name',id.node_network,'--file',path.join(root,'docker-compose.fleet.yml'),'--file',composePath,...a]);
- function network(){const n=inspect(['network','inspect',id.node_network])[0];need(n.Name===id.node_network&&n.Driver==='bridge'&&sameLabels(n.Labels));return n;}
- function controls(requireHealthy=false){
-  const ids=[...new Set([...docker(['ps','-aq','--filter','label=multica.fleet.namespace='+id.namespace,'--filter','label=multica.fleet.role=control']).split('\n'),...docker(['ps','-aq','--filter','label=com.docker.compose.project='+id.node_network]).split('\n')].filter(Boolean))];need(ids.length<=1);
+ const cleanupIntent=()=>id.cleanup_intent_key===id.operation_key;
+ function network(optional=false){const names=docker(['network','ls','--format','{{.Name}}','--filter','name=^'+id.node_network+'$']).split('\n').filter(Boolean);if(names.length===0){need(optional);return null;}need(names.length===1&&names[0]===id.node_network);const n=inspect(['network','inspect',id.node_network])[0];need(n.Name===id.node_network&&n.Driver==='bridge'&&sameLabels(n.Labels)&&n.Id===id.network_id);return n;}
+ function controls(requireHealthy=false,creating=false){
+  const ids=[...new Set([...docker(['ps','-aq','--no-trunc','--filter','label=multica.fleet.namespace='+id.namespace,'--filter','label=multica.fleet.role=control']).split('\n'),...docker(['ps','-aq','--no-trunc','--filter','label=multica.fleet.fleet_id='+id.fleet_id,'--filter','label=multica.fleet.role=control']).split('\n'),...docker(['ps','-aq','--no-trunc','--filter','label=com.docker.compose.project='+id.node_network]).split('\n'),...(id.control_id?docker(['ps','-aq','--no-trunc','--filter','id='+id.control_id]).split('\n'):[]),...docker(['ps','-aq','--no-trunc','--filter','name=^/'+id.node_network+'-control$']).split('\n')].filter(Boolean))];need(ids.length<=1);
   const expected=json(composePath).services.fleet;
   for(const cid of ids){
    const c=inspect(['container','inspect',cid])[0],l=c.Config.Labels,h=c.HostConfig;
-   need(c.Id===cid&&l['multica.fleet.namespace']===id.namespace&&l['multica.fleet.fleet_id']===id.fleet_id&&l['multica.fleet.node']==='namespace'&&l['multica.fleet.role']==='control');
+   need(c.Id===cid&&(creating||cid===id.control_id)&&c.Name==='/'+id.node_network+'-control'&&l['com.docker.compose.project']===id.node_network&&l['com.docker.compose.service']==='fleet'&&l['multica.fleet.namespace']===id.namespace&&l['multica.fleet.fleet_id']===id.fleet_id&&l['multica.fleet.node']==='namespace'&&l['multica.fleet.role']==='control');
    need(c.Config.Image===expected.image&&c.Config.User===expected.user&&JSON.stringify(c.Config.Entrypoint)===JSON.stringify(expected.entrypoint)&&JSON.stringify(c.Config.Cmd)===JSON.stringify(expected.command.map(v=>v.replaceAll('$$','$'))));
    need(h.ReadonlyRootfs&&!h.Privileged&&JSON.stringify(h.GroupAdd)===JSON.stringify(expected.group_add));
    const bindings=h.PortBindings;need(Object.keys(bindings).join()==='8090/tcp'&&bindings['8090/tcp'].length===1&&bindings['8090/tcp'][0].HostIp==='127.0.0.1'&&Number(bindings['8090/tcp'][0].HostPort)===id.port);
    need(JSON.stringify(c.Config.Healthcheck.Test)===JSON.stringify(expected.healthcheck.test));
-   const networks=c.NetworkSettings.Networks;need(Object.keys(networks).length===2&&networks[pgNet.Name].NetworkID===input.pg_network_id&&networks[id.node_network]);
+   const networks=c.NetworkSettings.Networks,created=c.State.Status==='created';need(Object.keys(networks).length===2&&networks[pgNet.Name]&&networks[id.node_network]);need((networks[pgNet.Name].NetworkID===input.pg_network_id||created&&networks[pgNet.Name].NetworkID==='')&&(networks[id.node_network].NetworkID===id.network_id||created&&networks[id.node_network].NetworkID===''));
    need(c.Mounts.length===expected.volumes.length&&expected.volumes.every(v=>c.Mounts.some(m=>m.Source===v.source&&m.Destination===v.target&&m.RW===!v.read_only)));
    const environment=Object.fromEntries((c.Config.Env||[]).map(v=>{const i=v.indexOf('=');return [v.slice(0,i),v.slice(i+1)];}));
    need(Object.entries(expected.environment).every(([k,v])=>environment[k]===v)&&Object.keys(environment).every(k=>k==='PATH'||Object.hasOwn(expected.environment,k)));
    if(requireHealthy)need(c.State.Running&&c.State.Health.Status==='healthy');
   }
-  if(requireHealthy)need(ids.length===1);return ids;
+  if(requireHealthy)need(ids.length===1);if(!creating&&id.control_id&&ids.length===0)need(cleanupIntent());return ids;
  }
- function cleanupAbsent(){
+ function readyControl(){
+   // One ordinary Docker deadline covers start, identity reads and readiness.
+   const cid=id.control_id;need(cid);dockerDeadline=Date.now()+30000;
+   try{
+    need(controls()[0]===cid);const c=inspect(['container','inspect',cid])[0];if(!c.State.Running)docker(['container','start',cid]);
+    while(true){need(controls()[0]===cid);const current=inspect(['container','inspect',cid])[0];need(current.Id===cid&&current.State.Running&&current.State.Health);if(current.State.Health.Status==='healthy')break;need(current.State.Health.Status==='starting');const remaining=dockerDeadline-Date.now();need(remaining>0);Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,Math.min(100,remaining));}
+    controls(true);
+   }finally{dockerDeadline=undefined;}
+  }
+  function cleanupAbsent(){
   // This physical receipt is never SQL authority; every retry rechecks destroy.
   for(const field of ['namespace','fleet_id']){
    const filter='label=multica.fleet.'+field+'='+id[field];
-   for(const query of [['ps','-aq','--filter',filter],['volume','ls','-q','--filter',filter],['network','ls','--format','{{.Name}}','--filter',filter]])need(docker(query)==='');
+   for(const query of [['ps','-aq','--no-trunc','--filter',filter],['volume','ls','-q','--filter',filter],['network','ls','--format','{{.Name}}','--filter',filter]])need(docker(query)==='');
   }
-  need(docker(['network','ls','--format','{{.Name}}','--filter','name=^'+id.node_network+'$'])==='');
+  need(docker(['network','ls','--format','{{.Name}}','--filter','name=^'+id.node_network+'$'])==='');need(docker(['ps','-aq','--no-trunc','--filter','label=com.docker.compose.project='+id.node_network])==='');need(docker(['ps','-aq','--no-trunc','--filter','name=^/'+id.node_network+'-control$'])==='');if(id.control_id)need(docker(['ps','-aq','--no-trunc','--filter','id='+id.control_id])==='');
  }
- function inventoryEmpty(){for(const query of [['ps','-aq','--filter','label=multica.fleet.namespace='+id.namespace],['volume','ls','-q','--filter','label=multica.fleet.namespace='+id.namespace]])need(docker(query)==='');const names=docker(['network','ls','--format','{{.Name}}','--filter','label=multica.fleet.namespace='+id.namespace]).split('\n').filter(Boolean);need(names.length===1&&names[0]===id.node_network);need(Object.keys(network().Containers||{}).length===0);}
+ function inventoryEmpty(){for(const query of [['ps','-aq','--no-trunc','--filter','label=multica.fleet.namespace='+id.namespace],['volume','ls','-q','--filter','label=multica.fleet.namespace='+id.namespace]])need(docker(query)==='');const names=docker(['network','ls','--format','{{.Name}}','--filter','label=multica.fleet.namespace='+id.namespace]).split('\n').filter(Boolean);need(names.length===0||names.length===1&&names[0]===id.node_network);const n=network(true);need(!n||Object.keys(n.Containers||{}).length===0);return n;}
  const preparedFiles=[configPath,dbPath,keyPath,composePath];
  const digestPrivate=p=>crypto.createHash('sha256').update(readPrivate(p)).digest('hex');
  if(id.prepared_hash){for(const p of preparedFiles)need(id.prepared_hash[path.basename(p)]===digestPrivate(p));controls();}
@@ -110,36 +121,43 @@ try{
   writePrivate(configPath,{namespace:id.namespace,fleet_id:id.fleet_id,image:input.node_image,api_url:input.api_url,max_nodes:2,specs:{'local-small':{cpus:2,memory_bytes:4294967296,pids:256,max_runs:1}}});writePrivate(keyPath,key);
   // Parent-approved exception: load DB URI into only the original Fleet process.
   const startup='IFS= read -r DATABASE_URL < /run/multica-fleet/database-url || test -n "$$DATABASE_URL"; test -n "$$DATABASE_URL" || exit 1; export DATABASE_URL; exec /usr/local/bin/fleet';
-  writePrivate(composePath,{services:{fleet:{image:input.fleet_image,user:input.uid+':'+input.gid,group_add:[String(input.socket_gid)],entrypoint:['/bin/sh','-ec'],command:[startup],environment:{FLEET_ADDR:'0.0.0.0:8090',FLEET_CONFIG_FILE:'/run/multica-fleet/config.json',FLEET_SERVICE_KEY_FILE:'/run/multica-fleet/service-key'},ports:['127.0.0.1:'+id.port+':8090'],volumes:[{type:'bind',source:input.socket_path,target:'/var/run/docker.sock'},{type:'bind',source:fleetDir,target:'/run/multica-fleet',read_only:true},...mounts],labels:{...labels,'multica.fleet.role':'control'},extra_hosts:['host.docker.internal:host-gateway'],networks:['shared-pg','fleet-nodes'],healthcheck:{test:['CMD','/usr/local/bin/fleet','readyz'],interval:'5s',timeout:'10s',retries:12},read_only:true,cap_drop:['ALL'],security_opt:['no-new-privileges:true'],restart:'unless-stopped'}},networks:{'shared-pg':{external:true,name:pgNet.Name},'fleet-nodes':{external:true,name:id.node_network}}});need(!readPrivate(composePath).includes(dsn)&&!readPrivate(composePath).includes(key.trim()));
+  writePrivate(composePath,{services:{fleet:{container_name:id.node_network+'-control',image:input.fleet_image,user:input.uid+':'+input.gid,group_add:[String(input.socket_gid)],entrypoint:['/bin/sh','-ec'],command:[startup],environment:{FLEET_ADDR:'0.0.0.0:8090',FLEET_CONFIG_FILE:'/run/multica-fleet/config.json',FLEET_SERVICE_KEY_FILE:'/run/multica-fleet/service-key'},ports:['127.0.0.1:'+id.port+':8090'],volumes:[{type:'bind',source:input.socket_path,target:'/var/run/docker.sock'},{type:'bind',source:fleetDir,target:'/run/multica-fleet',read_only:true},...mounts],labels:{...labels,'multica.fleet.role':'control'},extra_hosts:['host.docker.internal:host-gateway'],networks:['shared-pg','fleet-nodes'],healthcheck:{test:['CMD','/usr/local/bin/fleet','readyz'],interval:'5s',timeout:'10s',retries:12},read_only:true,cap_drop:['ALL'],security_opt:['no-new-privileges:true'],restart:'unless-stopped'}},networks:{'shared-pg':{external:true,name:pgNet.Name},'fleet-nodes':{external:true,name:id.node_network}}});need(!readPrivate(composePath).includes(dsn)&&!readPrivate(composePath).includes(key.trim()));
   // Migration has its existing build/DB environment; only operator children omit HOME/PG.
   command('go',['run','./cmd/migrate','up'],{...process.env,DATABASE_URL:dsn,GOTOOLCHAIN:'local'},310000,path.join(root,'server'));
   operator('prepare');
   id.prepared_hash=Object.fromEntries(preparedFiles.map(p=>[path.basename(p),digestPrivate(p)]));writePrivate(identityPath,id);
  }else{
   readPrivate(configPath);readPrivate(dbPath);readPrivate(keyPath);readPrivate(composePath);controls();
-  if(action==='up'){const names=docker(['network','ls','--format','{{.Name}}','--filter','name=^'+id.node_network+'$']).split('\n').filter(Boolean);if(names.length===0)docker(['network','create','--driver','bridge',...Object.entries(labels).flatMap(([k,v])=>['--label',k+'='+v]),id.node_network]);network();compose(['up','-d','--no-build','--wait','--wait-timeout','30','fleet']);controls(true);operator('resume');
+  if(action==='up'){
+   need(!cleanupIntent());
+   if(!id.network_id){need(docker(['network','ls','--format','{{.Name}}','--filter','name=^'+id.node_network+'$'])==='');id.network_id=docker(['network','create','--driver','bridge',...Object.entries(labels).flatMap(([k,v])=>['--label',k+'='+v]),id.node_network]);network();writePrivate(identityPath,id);}else network();
+   if(!id.control_id){need(controls().length===0);compose(['create','--no-build','fleet']);const created=controls(false,true);need(created.length===1);id.control_id=created[0];writePrivate(identityPath,id);}else need(controls().length===1);
+   controls();compose(['start','--wait','--wait-timeout','30','fleet']);controls(true);operator('resume');
    // Only trusted successful resume permits the next distinct closure key.
    id.operation_key=crypto.randomUUID();writePrivate(identityPath,id);
   }
-  else if(action==='status'){if(id.cleanup_operation_key===id.operation_key)cleanupAbsent();else network();operator('status');}
-  else if(action==='quiesce'){network();operator('quiesce');}
-  else if(action==='down'){network();operator('quiesce');compose(['stop','fleet']);}
+  else if(action==='status'){if(id.cleanup_operation_key===id.operation_key)cleanupAbsent();else network(cleanupIntent()||!id.network_id);operator('status');}
+  else if(action==='quiesce'){network(!id.network_id);operator('quiesce');}
+  else if(action==='down'){network(!id.network_id);operator('quiesce');if(id.control_id){need(controls().length===1);compose(['stop','fleet']);controls();}}
   else if(action==='destroy'&&id.cleanup_operation_key===id.operation_key){
    operator('destroy');cleanupAbsent();
   }else if(action==='destroy'){
-   network();operator('quiesce');
-   // Original SQL stop completion proves admission closed before any restart.
-   // Restart the exact inspected control while admission remains closed.
-   for(const cid of controls()){const c=inspect(['container','inspect',cid])[0];if(!c.State.Running)docker(['container','start',cid]);}
-   if(controls().length)controls(true);
+   network(cleanupIntent()||!id.network_id);
+   if(!cleanupIntent()){
+    operator('quiesce');
+    // Only original SQL Stop completion permits stopped control restart.
+    if(controls().length)readyControl();
+    id.cleanup_intent_key=id.operation_key;writePrivate(identityPath,id);
+   }
+   // Intent chooses a route, never SQL authority. Recheck original Delete always.
+   // Do not restart on intent; incomplete SQL work can deny and retain inputs.
    operator('destroy');
    // Original-ref node/data cleanup belongs to the operator; never adopt orphans.
    const controlIds=controls();
    // Unknown leftovers deny before stopping the control plane or the API.
-   const remaining=docker(['ps','-aq','--filter','label=multica.fleet.namespace='+id.namespace]).split('\n').filter(Boolean);need(JSON.stringify(remaining.sort())===JSON.stringify(controlIds.sort()));
-   need(docker(['volume','ls','-q','--filter','label=multica.fleet.namespace='+id.namespace])==='');
-   if(controlIds.length){compose(['stop','fleet']);compose(['rm','-f','fleet']);}
-   inventoryEmpty();docker(['network','rm',id.node_network]);cleanupAbsent();
+   for(const field of ['namespace','fleet_id']){const filter='label=multica.fleet.'+field+'='+id[field];const remaining=docker(['ps','-aq','--no-trunc','--filter',filter]).split('\n').filter(Boolean);need(JSON.stringify(remaining.sort())===JSON.stringify([...controlIds].sort()));need(docker(['volume','ls','-q','--filter',filter])==='');const names=docker(['network','ls','--format','{{.Name}}','--filter',filter]).split('\n').filter(Boolean);need(names.length===0||names.length===1&&names[0]===id.node_network);}
+   if(controlIds.length){controls();compose(['stop','fleet']);controls();compose(['rm','-f','fleet']);}
+   const remainingNetwork=inventoryEmpty();if(remainingNetwork)docker(['network','rm',id.node_network]);cleanupAbsent();
    id.cleanup_operation_key=id.operation_key;writePrivate(identityPath,id);
   }
  }
