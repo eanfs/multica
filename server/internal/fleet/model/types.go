@@ -47,6 +47,8 @@ type Node struct {
 }
 
 type Operation struct {
+	ActionClaimedAt                                  time.Time
+	ActionStartEpoch                                 string
 	BootstrapClaimedAt, NextAttemptAt                time.Time
 	BootstrapMinted, NonRetryable                    bool
 	ErrorCode                                        string

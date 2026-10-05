@@ -38,6 +38,8 @@ SELECT n.id,
  o.updated_at,
  o.node_id,
  o.action,
+ o.action_claimed_at,
+ o.action_start_epoch,
  o.idempotency_key,
  o.request_hash,
  o.phase,
@@ -278,6 +280,14 @@ WHERE c.namespace = @namespace AND c.token_hash = @token_hash AND c.revoked_at I
 -- name: FleetRecoveryClock :one
 SELECT clock_timestamp()::timestamptz AS sql_now;
 
+-- name: FleetObservable :many
+SELECT n.* FROM fleet_nodes n
+WHERE n.namespace= @namespace AND n.container_id<>'' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running'
+ AND n.id> @after_id::uuid
+ AND NOT EXISTS (SELECT 1 FROM fleet_node_operations o WHERE o.namespace=n.namespace AND o.node_id=n.id
+  AND o.generation=n.generation AND o.phase IN ('queued','preparing','prepared','applying'))
+ORDER BY n.id LIMIT 100;
+
 -- name: ListFleetRecoverable :many
 -- Projections are scheduling candidates, not physical authority.
 SELECT o.* FROM fleet_node_operations o JOIN fleet_nodes n
@@ -288,6 +298,20 @@ WHERE o.namespace= @namespace AND o.phase IN ('queued','preparing','prepared','a
  AND (o.action<>'create' OR n.container_id<>'' OR o.bootstrap_claimed_at IS NULL
   OR (o.bootstrap_claimed_at<=clock_timestamp() AND o.bootstrap_claimed_at+interval '5 minutes'<=clock_timestamp()))
 ORDER BY o.created_at,o.id LIMIT 100;
+
+-- name: FleetClaimLifecycle :one
+UPDATE fleet_node_operations o SET action_claimed_at=clock_timestamp(),action_start_epoch= @start_epoch,phase='applying',updated_at=now()
+WHERE o.namespace= @namespace AND o.owner_id= @owner_id AND o.node_id= @node_id AND o.id= @operation_id
+ AND o.generation= @generation AND o.action= @action AND o.approved= @approved
+ AND o.action IN ('start','stop','reboot') AND o.phase IN ('queued','prepared')
+ AND o.action_claimed_at IS NULL AND NOT o.non_retryable AND o.attempts<5
+ AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=clock_timestamp())
+ AND EXISTS (SELECT 1 FROM fleet_nodes n WHERE n.namespace=o.namespace AND n.owner_id=o.owner_id AND n.id=o.node_id
+  AND n.generation=o.generation AND n.container_id= @container_id AND n.container_id<>'' AND n.start_epoch= @start_epoch
+  AND NOT n.revoked AND ((o.action='start' AND NOT n.maintenance AND n.desired='running')
+   OR (o.action='stop' AND o.approved AND n.maintenance AND n.desired='stopped')
+   OR (o.action='reboot' AND o.approved AND n.maintenance AND n.desired='running')))
+RETURNING o.*;
 
 -- name: FleetClaimBootstrap :one
 UPDATE fleet_node_operations o SET bootstrap_claimed_at=clock_timestamp(),phase='applying',updated_at=now()

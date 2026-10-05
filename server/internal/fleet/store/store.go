@@ -134,6 +134,8 @@ func (s *Store) GetOperation(ctx context.Context, ownerID, operationID pgtype.UU
 
 func operationFromRow(row db.FleetNodeOperation) model.Operation {
 	return model.Operation{
+		ActionClaimedAt:    row.ActionClaimedAt.Time,
+		ActionStartEpoch:   row.ActionStartEpoch,
 		ID:                 row.ID,
 		NodeID:             row.NodeID,
 		OwnerID:            row.OwnerID,

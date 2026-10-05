@@ -216,7 +216,7 @@ WHERE o.namespace= $1 AND o.owner_id= $2 AND o.node_id= $3 AND o.id= $4
  AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=clock_timestamp())
  AND EXISTS (SELECT 1 FROM fleet_nodes n WHERE n.namespace=o.namespace AND n.owner_id=o.owner_id AND n.id=o.node_id
   AND n.generation=o.generation AND n.container_id='' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running')
-RETURNING o.id, o.namespace, o.owner_id, o.created_at, o.updated_at, o.node_id, o.action, o.idempotency_key, o.request_hash, o.phase, o.prior_desired, o.generation, o.approved, o.attempts, o.error_code, o.error_message, o.bootstrap_claimed_at, o.bootstrap_minted, o.non_retryable, o.next_attempt_at
+RETURNING o.id, o.namespace, o.owner_id, o.created_at, o.updated_at, o.node_id, o.action, o.idempotency_key, o.request_hash, o.phase, o.prior_desired, o.generation, o.approved, o.attempts, o.error_code, o.error_message, o.bootstrap_claimed_at, o.bootstrap_minted, o.non_retryable, o.next_attempt_at, o.action_claimed_at, o.action_start_epoch
 `
 
 type FleetClaimBootstrapParams struct {
@@ -257,6 +257,75 @@ func (q *Queries) FleetClaimBootstrap(ctx context.Context, arg FleetClaimBootstr
 		&i.BootstrapMinted,
 		&i.NonRetryable,
 		&i.NextAttemptAt,
+		&i.ActionClaimedAt,
+		&i.ActionStartEpoch,
+	)
+	return i, err
+}
+
+const fleetClaimLifecycle = `-- name: FleetClaimLifecycle :one
+UPDATE fleet_node_operations o SET action_claimed_at=clock_timestamp(),action_start_epoch= $1,phase='applying',updated_at=now()
+WHERE o.namespace= $2 AND o.owner_id= $3 AND o.node_id= $4 AND o.id= $5
+ AND o.generation= $6 AND o.action= $7 AND o.approved= $8
+ AND o.action IN ('start','stop','reboot') AND o.phase IN ('queued','prepared')
+ AND o.action_claimed_at IS NULL AND NOT o.non_retryable AND o.attempts<5
+ AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=clock_timestamp())
+ AND EXISTS (SELECT 1 FROM fleet_nodes n WHERE n.namespace=o.namespace AND n.owner_id=o.owner_id AND n.id=o.node_id
+  AND n.generation=o.generation AND n.container_id= $9 AND n.container_id<>'' AND n.start_epoch= $1
+  AND NOT n.revoked AND ((o.action='start' AND NOT n.maintenance AND n.desired='running')
+   OR (o.action='stop' AND o.approved AND n.maintenance AND n.desired='stopped')
+   OR (o.action='reboot' AND o.approved AND n.maintenance AND n.desired='running')))
+RETURNING o.id, o.namespace, o.owner_id, o.created_at, o.updated_at, o.node_id, o.action, o.idempotency_key, o.request_hash, o.phase, o.prior_desired, o.generation, o.approved, o.attempts, o.error_code, o.error_message, o.bootstrap_claimed_at, o.bootstrap_minted, o.non_retryable, o.next_attempt_at, o.action_claimed_at, o.action_start_epoch
+`
+
+type FleetClaimLifecycleParams struct {
+	StartEpoch  string      `json:"start_epoch"`
+	Namespace   string      `json:"namespace"`
+	OwnerID     pgtype.UUID `json:"owner_id"`
+	NodeID      pgtype.UUID `json:"node_id"`
+	OperationID pgtype.UUID `json:"operation_id"`
+	Generation  int64       `json:"generation"`
+	Action      string      `json:"action"`
+	Approved    bool        `json:"approved"`
+	ContainerID string      `json:"container_id"`
+}
+
+func (q *Queries) FleetClaimLifecycle(ctx context.Context, arg FleetClaimLifecycleParams) (FleetNodeOperation, error) {
+	row := q.db.QueryRow(ctx, fleetClaimLifecycle,
+		arg.StartEpoch,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.NodeID,
+		arg.OperationID,
+		arg.Generation,
+		arg.Action,
+		arg.Approved,
+		arg.ContainerID,
+	)
+	var i FleetNodeOperation
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.NodeID,
+		&i.Action,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.Phase,
+		&i.PriorDesired,
+		&i.Generation,
+		&i.Approved,
+		&i.Attempts,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+		&i.BootstrapClaimedAt,
+		&i.BootstrapMinted,
+		&i.NonRetryable,
+		&i.NextAttemptAt,
+		&i.ActionClaimedAt,
+		&i.ActionStartEpoch,
 	)
 	return i, err
 }
@@ -774,6 +843,69 @@ func (q *Queries) FleetNodeSharedLock(ctx context.Context, arg FleetNodeSharedLo
 	return err
 }
 
+const fleetObservable = `-- name: FleetObservable :many
+SELECT n.id, n.namespace, n.owner_id, n.created_at, n.updated_at, n.container_id, n.daemon_id, n.name, n.spec, n.image, n.profile_ref, n.start_epoch, n.data_volume, n.secrets_volume, n.desired, n.status, n.generation, n.ready, n.health_at, n.active_runs, n.pending_reports, n.failed_reports, n.maintenance, n.revoked, n.error_code, n.error_message, n.spec_config, n.observation FROM fleet_nodes n
+WHERE n.namespace= $1 AND n.container_id<>'' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running'
+ AND n.id> $2::uuid
+ AND NOT EXISTS (SELECT 1 FROM fleet_node_operations o WHERE o.namespace=n.namespace AND o.node_id=n.id
+  AND o.generation=n.generation AND o.phase IN ('queued','preparing','prepared','applying'))
+ORDER BY n.id LIMIT 100
+`
+
+type FleetObservableParams struct {
+	Namespace string      `json:"namespace"`
+	AfterID   pgtype.UUID `json:"after_id"`
+}
+
+func (q *Queries) FleetObservable(ctx context.Context, arg FleetObservableParams) ([]FleetNode, error) {
+	rows, err := q.db.Query(ctx, fleetObservable, arg.Namespace, arg.AfterID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FleetNode{}
+	for rows.Next() {
+		var i FleetNode
+		if err := rows.Scan(
+			&i.ID,
+			&i.Namespace,
+			&i.OwnerID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ContainerID,
+			&i.DaemonID,
+			&i.Name,
+			&i.Spec,
+			&i.Image,
+			&i.ProfileRef,
+			&i.StartEpoch,
+			&i.DataVolume,
+			&i.SecretsVolume,
+			&i.Desired,
+			&i.Status,
+			&i.Generation,
+			&i.Ready,
+			&i.HealthAt,
+			&i.ActiveRuns,
+			&i.PendingReports,
+			&i.FailedReports,
+			&i.Maintenance,
+			&i.Revoked,
+			&i.ErrorCode,
+			&i.ErrorMessage,
+			&i.SpecConfig,
+			&i.Observation,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const fleetOfflineDeletedRuntime = `-- name: FleetOfflineDeletedRuntime :execrows
 UPDATE agent_runtime SET status='offline',metadata=metadata || '{"fleet_tombstone":true}'::jsonb,updated_at=now()
 WHERE id= $1 AND owner_id= $2 AND metadata->>'managed_by'='local_fleet' AND metadata->>'fleet_node_id'= $3::text
@@ -794,7 +926,7 @@ func (q *Queries) FleetOfflineDeletedRuntime(ctx context.Context, arg FleetOffli
 }
 
 const fleetOperationLocator = `-- name: FleetOperationLocator :one
-SELECT id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message, bootstrap_claimed_at, bootstrap_minted, non_retryable, next_attempt_at FROM fleet_node_operations WHERE namespace = $1 AND id = $2
+SELECT id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message, bootstrap_claimed_at, bootstrap_minted, non_retryable, next_attempt_at, action_claimed_at, action_start_epoch FROM fleet_node_operations WHERE namespace = $1 AND id = $2
 `
 
 type FleetOperationLocatorParams struct {
@@ -826,6 +958,8 @@ func (q *Queries) FleetOperationLocator(ctx context.Context, arg FleetOperationL
 		&i.BootstrapMinted,
 		&i.NonRetryable,
 		&i.NextAttemptAt,
+		&i.ActionClaimedAt,
+		&i.ActionStartEpoch,
 	)
 	return i, err
 }
@@ -1087,6 +1221,8 @@ SELECT n.id,
  o.updated_at,
  o.node_id,
  o.action,
+ o.action_claimed_at,
+ o.action_start_epoch,
  o.idempotency_key,
  o.request_hash,
  o.phase,
@@ -1221,7 +1357,7 @@ func (q *Queries) FleetUnfinishedOperations(ctx context.Context, arg FleetUnfini
 }
 
 const getFleetIntentByKey = `-- name: GetFleetIntentByKey :one
-SELECT id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message, bootstrap_claimed_at, bootstrap_minted, non_retryable, next_attempt_at FROM fleet_node_operations WHERE namespace = $1 AND owner_id = $2 AND idempotency_key = $3
+SELECT id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message, bootstrap_claimed_at, bootstrap_minted, non_retryable, next_attempt_at, action_claimed_at, action_start_epoch FROM fleet_node_operations WHERE namespace = $1 AND owner_id = $2 AND idempotency_key = $3
 `
 
 type GetFleetIntentByKeyParams struct {
@@ -1254,6 +1390,8 @@ func (q *Queries) GetFleetIntentByKey(ctx context.Context, arg GetFleetIntentByK
 		&i.BootstrapMinted,
 		&i.NonRetryable,
 		&i.NextAttemptAt,
+		&i.ActionClaimedAt,
+		&i.ActionStartEpoch,
 	)
 	return i, err
 }
@@ -1444,7 +1582,7 @@ func (q *Queries) GetFleetNodeIdentity(ctx context.Context, arg GetFleetNodeIden
 }
 
 const getFleetOperation = `-- name: GetFleetOperation :one
-SELECT id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message, bootstrap_claimed_at, bootstrap_minted, non_retryable, next_attempt_at FROM fleet_node_operations WHERE namespace = $1 AND owner_id = $2 AND id = $3
+SELECT id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message, bootstrap_claimed_at, bootstrap_minted, non_retryable, next_attempt_at, action_claimed_at, action_start_epoch FROM fleet_node_operations WHERE namespace = $1 AND owner_id = $2 AND id = $3
 `
 
 type GetFleetOperationParams struct {
@@ -1477,6 +1615,8 @@ func (q *Queries) GetFleetOperation(ctx context.Context, arg GetFleetOperationPa
 		&i.BootstrapMinted,
 		&i.NonRetryable,
 		&i.NextAttemptAt,
+		&i.ActionClaimedAt,
+		&i.ActionStartEpoch,
 	)
 	return i, err
 }
@@ -1507,7 +1647,7 @@ func (q *Queries) GetFleetProfile(ctx context.Context, arg GetFleetProfileParams
 
 const insertFleetCreateOperation = `-- name: InsertFleetCreateOperation :one
 INSERT INTO fleet_node_operations (namespace, owner_id, node_id, action, idempotency_key, request_hash)
-VALUES ($1, $2, $3, 'create', $4, $5) RETURNING id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message, bootstrap_claimed_at, bootstrap_minted, non_retryable, next_attempt_at
+VALUES ($1, $2, $3, 'create', $4, $5) RETURNING id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message, bootstrap_claimed_at, bootstrap_minted, non_retryable, next_attempt_at, action_claimed_at, action_start_epoch
 `
 
 type InsertFleetCreateOperationParams struct {
@@ -1548,6 +1688,8 @@ func (q *Queries) InsertFleetCreateOperation(ctx context.Context, arg InsertFlee
 		&i.BootstrapMinted,
 		&i.NonRetryable,
 		&i.NextAttemptAt,
+		&i.ActionClaimedAt,
+		&i.ActionStartEpoch,
 	)
 	return i, err
 }
@@ -1578,7 +1720,7 @@ func (q *Queries) InsertFleetCredential(ctx context.Context, arg InsertFleetCred
 
 const insertFleetLifecycleOperation = `-- name: InsertFleetLifecycleOperation :one
 INSERT INTO fleet_node_operations(namespace,owner_id,node_id,action,idempotency_key,request_hash,phase,prior_desired,generation,approved)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message, bootstrap_claimed_at, bootstrap_minted, non_retryable, next_attempt_at
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id, namespace, owner_id, created_at, updated_at, node_id, action, idempotency_key, request_hash, phase, prior_desired, generation, approved, attempts, error_code, error_message, bootstrap_claimed_at, bootstrap_minted, non_retryable, next_attempt_at, action_claimed_at, action_start_epoch
 `
 
 type InsertFleetLifecycleOperationParams struct {
@@ -1629,6 +1771,8 @@ func (q *Queries) InsertFleetLifecycleOperation(ctx context.Context, arg InsertF
 		&i.BootstrapMinted,
 		&i.NonRetryable,
 		&i.NextAttemptAt,
+		&i.ActionClaimedAt,
+		&i.ActionStartEpoch,
 	)
 	return i, err
 }
@@ -1759,7 +1903,7 @@ func (q *Queries) ListFleetNodesByOwner(ctx context.Context, arg ListFleetNodesB
 }
 
 const listFleetRecoverable = `-- name: ListFleetRecoverable :many
-SELECT o.id, o.namespace, o.owner_id, o.created_at, o.updated_at, o.node_id, o.action, o.idempotency_key, o.request_hash, o.phase, o.prior_desired, o.generation, o.approved, o.attempts, o.error_code, o.error_message, o.bootstrap_claimed_at, o.bootstrap_minted, o.non_retryable, o.next_attempt_at FROM fleet_node_operations o JOIN fleet_nodes n
+SELECT o.id, o.namespace, o.owner_id, o.created_at, o.updated_at, o.node_id, o.action, o.idempotency_key, o.request_hash, o.phase, o.prior_desired, o.generation, o.approved, o.attempts, o.error_code, o.error_message, o.bootstrap_claimed_at, o.bootstrap_minted, o.non_retryable, o.next_attempt_at, o.action_claimed_at, o.action_start_epoch FROM fleet_node_operations o JOIN fleet_nodes n
  ON n.namespace=o.namespace AND n.owner_id=o.owner_id AND n.id=o.node_id AND n.generation=o.generation
 WHERE o.namespace= $1 AND o.phase IN ('queued','preparing','prepared','applying')
  AND NOT o.non_retryable AND o.attempts<5
@@ -1800,6 +1944,8 @@ func (q *Queries) ListFleetRecoverable(ctx context.Context, namespace string) ([
 			&i.BootstrapMinted,
 			&i.NonRetryable,
 			&i.NextAttemptAt,
+			&i.ActionClaimedAt,
+			&i.ActionStartEpoch,
 		); err != nil {
 			return nil, err
 		}

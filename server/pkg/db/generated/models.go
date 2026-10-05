@@ -893,6 +893,8 @@ type FleetNodeOperation struct {
 	BootstrapMinted    bool               `json:"bootstrap_minted"`
 	NonRetryable       bool               `json:"non_retryable"`
 	NextAttemptAt      pgtype.Timestamptz `json:"next_attempt_at"`
+	ActionClaimedAt    pgtype.Timestamptz `json:"action_claimed_at"`
+	ActionStartEpoch   string             `json:"action_start_epoch"`
 }
 
 type GithubInstallation struct {

@@ -194,7 +194,29 @@ func currentRecovery(s RecoverySnapshot) error {
 	return nil
 }
 func sameRecoverySnapshot(a, b RecoverySnapshot) bool {
-	return sameRecoveryNode(a.Node, b.Node) && a.Operation.ID == b.Operation.ID && a.Operation.NodeID == b.Operation.NodeID && a.Operation.OwnerID == b.Operation.OwnerID && a.Operation.Action == b.Operation.Action && a.Operation.Generation == b.Operation.Generation && a.Operation.Phase == b.Operation.Phase && a.Operation.Approved == b.Operation.Approved && a.Operation.Attempts == b.Operation.Attempts && a.Operation.NonRetryable == b.Operation.NonRetryable && a.Operation.BootstrapClaimedAt.Equal(b.Operation.BootstrapClaimedAt)
+	return sameRecoveryNode(a.Node, b.Node) && a.Operation.ID == b.Operation.ID && a.Operation.NodeID == b.Operation.NodeID && a.Operation.OwnerID == b.Operation.OwnerID && a.Operation.Action == b.Operation.Action && a.Operation.Generation == b.Operation.Generation && a.Operation.Phase == b.Operation.Phase && a.Operation.Approved == b.Operation.Approved && a.Operation.Attempts == b.Operation.Attempts && a.Operation.NonRetryable == b.Operation.NonRetryable && a.Operation.BootstrapClaimedAt.Equal(b.Operation.BootstrapClaimedAt) && a.Operation.ActionClaimedAt.Equal(b.Operation.ActionClaimedAt) && a.Operation.ActionStartEpoch == b.Operation.ActionStartEpoch
+}
+
+// ListObservable is bounded read-only confirmed-idle discovery, never execution authority.
+func (s *Store) ListObservable(ctx context.Context, after pgtype.UUID) ([]model.Node, error) {
+	ctx, cancel := context.WithTimeout(ctx, databaseTimeout)
+	defer cancel()
+	if !after.Valid {
+		after = pgtype.UUID{Valid: true}
+	}
+	rows, e := db.New(s.pool).FleetObservable(ctx, db.FleetObservableParams{Namespace: s.namespace, AfterID: after})
+	if e != nil {
+		return nil, e
+	}
+	out := make([]model.Node, 0, len(rows))
+	for _, row := range rows {
+		n, e := nodeFromRow(row)
+		if e != nil {
+			return nil, e
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }
 
 func (s *Store) ListRecoverable(ctx context.Context) ([]model.Operation, error) {
@@ -570,48 +592,7 @@ func (s *Store) RecordOperationResult(ctx context.Context, baseline RecoverySnap
 		if !sameRecoverySnapshot(baseline, snap) {
 			return model.ErrConflict
 		}
-		n, op := snap.Node, snap.Operation
-		if op.Action == model.Delete || (maintenanceAction(op.Action) && !op.Approved) || (op.Action == model.Create && n.ContainerID == "") || o.Offline || o.ObservedAt.Before(op.CreatedAt) {
-			return model.ErrConflict
-		}
-		check := n
-		if (op.Action == model.Start || op.Action == model.Reboot) && o.StartEpoch != "" && o.StartEpoch != n.StartEpoch {
-			next, e := time.Parse(time.RFC3339Nano, o.StartEpoch)
-			if e != nil || next.After(o.ObservedAt) || next.Before(op.CreatedAt) {
-				return model.ErrUnknownHealth
-			}
-			if n.StartEpoch != "" {
-				old, e := time.Parse(time.RFC3339Nano, n.StartEpoch)
-				if e != nil || !next.After(old) {
-					return model.ErrUnknownHealth
-				}
-			}
-			check.StartEpoch = ""
-		}
-		check.Maintenance = false
-		if e = validateObservation(check, n.Generation, o, snap.SQLNow); e != nil {
-			return e
-		}
-		if e = persistObservation(ctx, q, n, o); e != nil {
-			return e
-		}
-		complete := o.Status == "running" && o.Ready
-		if op.Action == model.Stop {
-			complete = o.Status == "stopped" || o.Status == "missing"
-		}
-		if !complete {
-			return nil
-		}
-		epoch := n.StartEpoch
-		if o.StartEpoch != "" {
-			epoch = o.StartEpoch
-		}
-		count, e := q.FleetFinishLifecycleNode(ctx, db.FleetFinishLifecycleNodeParams{Namespace: s.namespace, OwnerID: n.OwnerID, NodeID: n.ID, Generation: n.Generation, Desired: n.Desired, Status: o.Status, StartEpoch: epoch, Ready: o.Ready})
-		if e = affectedOne(count, e); e != nil {
-			return e
-		}
-		count, e = q.FleetCompleteOperation(ctx, db.FleetCompleteOperationParams{Namespace: s.namespace, OwnerID: n.OwnerID, NodeID: n.ID, OperationID: op.ID, Generation: op.Generation, Action: string(op.Action), Phase: op.Phase, Approved: op.Approved})
-		return affectedOne(count, e)
+		return s.persistOperationResult(ctx, q, snap, o, false)
 	})
 }
 
