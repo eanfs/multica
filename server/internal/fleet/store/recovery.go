@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -89,6 +90,9 @@ type RecoverySnapshot struct {
 	Node      model.Node
 	Operation model.Operation
 	SQLNow    time.Time
+	// Discovery projection only. Store recomputes from the private receipt under current locks.
+	BootstrapSucceeded bool
+	bootstrapSuccess   *bootstrapSuccess
 }
 
 func (s RecoverySnapshot) Ref() model.OperationRef {
@@ -156,7 +160,28 @@ func (s *Store) recoverySnapshot(ctx context.Context, q *db.Queries, owner pgtyp
 	if !now.Valid || now.InfinityModifier != pgtype.Finite {
 		return out, model.ErrUnavailable
 	}
-	return RecoverySnapshot{Node: n, Operation: op, SQLNow: now.Time}, nil
+	out = RecoverySnapshot{Node: n, Operation: op, SQLNow: now.Time}
+	if op.Action == model.Create {
+		row, e := q.GetFleetNode(ctx, db.GetFleetNodeParams{Namespace: s.namespace, OwnerID: owner, NodeID: n.ID})
+		if e != nil {
+			return out, e
+		}
+		out.bootstrapSuccess, e = decodeBootstrapSuccess(row.Observation)
+		if e != nil {
+			return out, e
+		}
+		if out.bootstrapSuccess != nil {
+			d, _, e := decodeDurableObservation(row.Observation)
+			if e != nil || d.Generation != n.Generation {
+				return out, model.ErrUnavailable
+			}
+		}
+		if out.bootstrapSuccess != nil && !validBootstrapSuccess(out) {
+			return out, model.ErrUnavailable
+		}
+		out.BootstrapSucceeded = validBootstrapSuccess(out)
+	}
+	return out, nil
 }
 func currentRecovery(s RecoverySnapshot) error {
 	n, op := s.Node, s.Operation
@@ -384,7 +409,12 @@ func (s *Store) ConfirmBootstrap(ctx context.Context, c BootstrapClaim, o model.
 		if e != nil {
 			return e
 		}
-		count, e := q.FleetConfirmBootstrap(ctx, db.FleetConfirmBootstrapParams{Namespace: s.namespace, OwnerID: n.OwnerID, NodeID: n.ID, OperationID: op.ID, Generation: op.Generation, ClaimedAt: timestamp(c.claimedAt), ContainerID: o.ContainerID, StartEpoch: o.StartEpoch, Status: o.Status})
+		proof := confirmedBootstrapSuccess(snap, o)
+		raw, e := encodeObservation(n.Generation, o, proof)
+		if e != nil {
+			return e
+		}
+		count, e := q.FleetConfirmBootstrap(ctx, db.FleetConfirmBootstrapParams{Observation: raw, Namespace: s.namespace, OwnerID: n.OwnerID, NodeID: n.ID, OperationID: op.ID, Generation: op.Generation, ClaimedAt: timestamp(c.claimedAt), ContainerID: o.ContainerID, StartEpoch: o.StartEpoch, Status: o.Status})
 		if e = affectedOne(count, e); e != nil {
 			return e
 		}
@@ -426,7 +456,7 @@ func (s *Store) ExpireBootstrap(ctx context.Context, baseline RecoverySnapshot) 
 // confirmedCreateExpired uses the immutable SQL checkpoint, never updated_at or local scheduling time.
 func confirmedCreateExpired(s RecoverySnapshot) bool {
 	n, op := s.Node, s.Operation
-	return n.Generation == op.Generation && currentRecovery(s) == nil && op.Action == model.Create && op.Phase == "applying" && n.ContainerID != "" && op.BootstrapMinted && !op.BootstrapClaimedAt.IsZero() && !op.BootstrapClaimedAt.After(s.SQLNow) && !s.SQLNow.Before(op.BootstrapClaimedAt.Add(bootstrapLease))
+	return s.bootstrapSuccess == nil && n.Generation == op.Generation && currentRecovery(s) == nil && op.Action == model.Create && op.Phase == "applying" && n.ContainerID != "" && op.BootstrapMinted && !op.BootstrapClaimedAt.IsZero() && !op.BootstrapClaimedAt.After(s.SQLNow) && !s.SQLNow.Before(op.BootstrapClaimedAt.Add(bootstrapLease))
 }
 
 // ExpireConfirmedCreate is a current-bound creation-failure disposition. No identity/data cleanup,
@@ -455,18 +485,148 @@ func (s *Store) ExpireConfirmedCreate(ctx context.Context, baseline RecoverySnap
 	})
 }
 
+// bootstrapSuccess is historical proof, not a lease, current health, or public permission.
+// Only live private ConfirmBootstrap writes it, atomically with the in-window confirmation CAS.
+type bootstrapSuccess struct {
+	Ref           model.OperationRef `json:"ref"`
+	OwnerID       pgtype.UUID        `json:"owner_id"`
+	ClaimedAt     time.Time          `json:"claimed_at"`
+	ContainerID   string             `json:"container_id"`
+	DaemonID      string             `json:"daemon_id"`
+	StartEpoch    string             `json:"start_epoch"`
+	DataVolume    string             `json:"data_volume"`
+	SecretsVolume string             `json:"secrets_volume"`
+	Image         string             `json:"image"`
+	ProfileRef    string             `json:"profile_ref"`
+	Resources     model.Spec         `json:"resources"`
+	LayoutVersion string             `json:"layout_version"`
+	Observation   model.Observation  `json:"observation"`
+}
+
+// Online layout is established by the accepted SDK mount/bootstrap/daemon protocol.
+// Its real producer omits data/layout fields; supplied mismatches still fail closed.
+// Report queue Known/counts are separate maintenance gates, not initialization health.
+func bootstrapHealthy(n model.Node, o model.Observation, now time.Time) bool {
+	claude := false
+	for _, a := range o.Agents {
+		claude = claude || strings.EqualFold(a, "claude")
+	}
+	return validateObservation(n, n.Generation, o, now) == nil && o.Ready && !o.Offline && o.Status == "running" && o.ContainerID == n.ContainerID && o.DaemonID == n.DaemonID && o.StartEpoch == n.StartEpoch && claude && o.RuntimeCount > 0 && (o.LayoutVersion == "" || o.LayoutVersion == "1")
+}
+func confirmedBootstrapSuccess(s RecoverySnapshot, o model.Observation) *bootstrapSuccess {
+	if s.Operation.Phase != "applying" || bootstrapState(s.Node, s.Operation, s.SQLNow) != "live" {
+		return nil
+	}
+	n, e := bootstrapObservation(s, o)
+	if e != nil {
+		return nil
+	}
+	n.StartEpoch = o.StartEpoch
+	if !bootstrapHealthy(n, o, s.SQLNow) || !s.SQLNow.Before(s.Operation.BootstrapClaimedAt.Add(bootstrapLease)) {
+		return nil
+	}
+	p := &bootstrapSuccess{Ref: s.Ref(), OwnerID: n.OwnerID, ClaimedAt: s.Operation.BootstrapClaimedAt, ContainerID: o.ContainerID, DaemonID: n.DaemonID, StartEpoch: o.StartEpoch, DataVolume: n.DataVolume, SecretsVolume: n.SecretsVolume, Image: n.Image, ProfileRef: n.ProfileRef, Resources: n.Resources, LayoutVersion: "1", Observation: o}
+	s.Node = n
+	s.bootstrapSuccess = p
+	if !validBootstrapSuccess(s) {
+		return nil
+	}
+	return p
+}
+func validBootstrapSuccess(s RecoverySnapshot) bool {
+	p, n, op := s.bootstrapSuccess, s.Node, s.Operation
+	if p == nil || !validOwner(n.ID) || !validOwner(n.OwnerID) || !validOwner(op.ID) || n.Namespace == "" || op.NodeID != n.ID || op.OwnerID != n.OwnerID || op.Action != model.Create || !op.BootstrapMinted || op.BootstrapClaimedAt.IsZero() || n.Generation != op.Generation || n.Revoked || n.Maintenance || n.Desired != "running" || op.NonRetryable || (op.Phase != "applying" && op.Phase != "completed") {
+		return false
+	}
+	if p.Ref != s.Ref() || p.OwnerID != n.OwnerID || !p.ClaimedAt.Equal(op.BootstrapClaimedAt) || p.ContainerID == "" || p.ContainerID != n.ContainerID || p.DaemonID != n.DaemonID || p.StartEpoch != n.StartEpoch || p.DataVolume != n.DataVolume || p.SecretsVolume != n.SecretsVolume || p.Image != n.Image || p.ProfileRef != n.ProfileRef || p.Resources != n.Resources || p.LayoutVersion != "1" {
+		return false
+	}
+	o := p.Observation
+	if p.ClaimedAt.After(s.SQLNow) || o.ObservedAt.After(s.SQLNow) || o.ObservedAt.Before(p.ClaimedAt) || !o.ObservedAt.Before(p.ClaimedAt.Add(bootstrapLease)) || o.ObservedAt.Before(op.CreatedAt) {
+		return false
+	}
+	epoch, e := time.Parse(time.RFC3339Nano, p.StartEpoch)
+	if e != nil || epoch.Before(p.ClaimedAt) || epoch.After(o.ObservedAt) {
+		return false
+	}
+	// Ignore current lease age only for the historical fact, never for completion.
+	n.HealthAt = time.Time{}
+	return bootstrapHealthy(n, o, o.ObservedAt)
+}
+func decodeDurableObservation(raw []byte) (durableObservation, map[string]json.RawMessage, error) {
+	var d durableObservation
+	var fields map[string]json.RawMessage
+	_, e := model.DecodeStrictObject(raw, &fields)
+	if e != nil || (len(fields) != 2 && len(fields) != 3) || fields["generation"] == nil || fields["observation"] == nil || (len(fields) == 3 && fields["bootstrap_success"] == nil) {
+		return d, fields, model.ErrUnavailable
+	}
+	if e = json.Unmarshal(raw, &d); e != nil {
+		return d, fields, model.ErrUnavailable
+	}
+	return d, fields, nil
+}
+func decodeBootstrapSuccess(raw []byte) (*bootstrapSuccess, error) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("{}")) {
+		return nil, nil
+	}
+	_, fields, e := decodeDurableObservation(raw)
+	if e != nil {
+		return nil, model.ErrUnavailable
+	}
+	if proof, ok := fields["bootstrap_success"]; ok {
+		var p bootstrapSuccess
+		f, e := model.DecodeStrictObject(proof, &p)
+		if e != nil || len(f) != 13 {
+			return nil, model.ErrUnavailable
+		}
+		for key, required := range map[string][]string{
+			"ref":         {"Namespace", "NodeID", "OperationID", "Generation", "Action"},
+			"observation": {"ContainerID", "Status", "DaemonID", "StartEpoch", "Ready", "Agents", "RuntimeCount", "ActiveRuns", "PendingReports", "FailedReports", "ReportStatsKnown", "Offline", "DataVolume", "LayoutVersion", "ObservedAt"},
+		} {
+			var nested map[string]json.RawMessage
+			_, e := model.DecodeStrictObject(f[key], &nested)
+			if e != nil || len(nested) != len(required) {
+				return nil, model.ErrUnavailable
+			}
+			for _, field := range required {
+				if nested[field] == nil {
+					return nil, model.ErrUnavailable
+				}
+			}
+		}
+		var resources model.Spec
+		if fields, e := model.DecodeStrictObject(f["resources"], &resources); e != nil || len(fields) != 4 {
+			return nil, model.ErrUnavailable
+		}
+		return &p, nil
+	}
+	return nil, nil
+}
+func encodeObservation(generation int64, o model.Observation, p *bootstrapSuccess) ([]byte, error) {
+	if o.Agents == nil {
+		o.Agents = []string{}
+	}
+	if p == nil {
+		return json.Marshal(struct {
+			Generation  int64             `json:"generation"`
+			Observation model.Observation `json:"observation"`
+		}{generation, o})
+	}
+	return json.Marshal(durableObservation{Generation: generation, Observation: o, BootstrapSuccess: p})
+}
+
 type durableObservation struct {
-	Generation  int64             `json:"generation"`
-	Observation model.Observation `json:"observation"`
+	Generation       int64             `json:"generation"`
+	Observation      model.Observation `json:"observation"`
+	BootstrapSuccess *bootstrapSuccess `json:"bootstrap_success,omitempty"`
 }
 
 func decodeObservation(raw []byte, n model.Node) (model.Observation, error) {
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("{}")) || len(raw) == 0 {
 		return model.Observation{}, nil
 	}
-	var d durableObservation
-	fields, e := model.DecodeStrictObject(raw, &d)
-	if e != nil || len(fields) != 2 {
+	d, fields, e := decodeDurableObservation(raw)
+	if e != nil || (len(fields) != 2 && len(fields) != 3) {
 		return model.Observation{}, model.ErrUnavailable
 	}
 	var observed map[string]json.RawMessage
@@ -502,7 +662,7 @@ func persistObservation(ctx context.Context, q *db.Queries, n model.Node, o mode
 	if o.Agents == nil {
 		o.Agents = []string{}
 	}
-	raw, e := json.Marshal(durableObservation{Generation: n.Generation, Observation: o})
+	raw, e := encodeObservation(n.Generation, o, nil)
 	if e != nil {
 		return model.ErrUnknownHealth
 	}

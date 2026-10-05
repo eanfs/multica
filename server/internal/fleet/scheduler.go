@@ -9,7 +9,8 @@ import (
 	"github.com/multica-ai/multica/server/internal/fleet/store"
 )
 
-// One slot retains the actual private winner in its closure, never a reconstructed claim.
+// One shared slot retains accepted bootstrap/lifecycle/Delete work. Private winners
+// remain in its closure, never reconstructed from discovery or renewed.
 // Slot and lifecycle fields are protected by the serial scheduler mutex; completion only closes done.
 type initializationSlot struct {
 	ref    model.OperationRef
@@ -54,6 +55,28 @@ func (r *Reconciler) startInitialization(scheduler, service context.Context, s s
 	slot := &initializationSlot{ref: s.Ref(), done: make(chan struct{}), cancel: cancel}
 	r.initialization = slot
 	go func() { defer close(slot.done); defer cancel(); _ = r.initialize(ctx, s, claim) }()
+	return nil
+}
+
+// startRecovery generalizes the existing sole slot; no second claim/mint can be
+// admitted while initialization, lifecycle, or canonical Delete owns it.
+func (r *Reconciler) startRecovery(service context.Context, s store.RecoverySnapshot) error {
+	if r.initialization != nil {
+		return nil
+	}
+	// Bounds the surrounding authority/review/result I/O without depleting the
+	// separately bounded 5s diagnosis, original 5s claim, or 30s Delete action.
+	ctx, cancel := context.WithTimeout(service, 60*time.Second)
+	slot := &initializationSlot{ref: s.Ref(), done: make(chan struct{}), cancel: cancel}
+	r.initialization = slot
+	go func() {
+		defer close(slot.done)
+		defer cancel()
+		fresh, e := r.current(ctx, s)
+		if e == nil {
+			_ = r.reconcile(ctx, fresh)
+		}
+	}()
 	return nil
 }
 

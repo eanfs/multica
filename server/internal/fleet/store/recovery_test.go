@@ -304,7 +304,7 @@ func TestRecoveryStatementBindings(t *testing.T) {
 	if _, e := db.New(c).FleetConfirmBootstrap(context.Background(), db.FleetConfirmBootstrapParams{ContainerID: "cid", StartEpoch: "epoch", Status: "starting", Namespace: "owned", OwnerID: owner, NodeID: node, Generation: 3, OperationID: op, ClaimedAt: stamp}); e != nil {
 		t.Fatal(e)
 	}
-	if !reflect.DeepEqual(c.args, []any{"cid", "epoch", "starting", "owned", owner, node, int64(3), op, stamp}) {
+	if !reflect.DeepEqual(c.args, []any{"cid", "epoch", "starting", []byte(nil), "owned", owner, node, int64(3), op, stamp}) {
 		t.Fatalf("confirmation fence binding=%v", c.args)
 	}
 	if _, e := db.New(c).FleetExpireBootstrapNode(context.Background(), db.FleetExpireBootstrapNodeParams{Namespace: "owned", OwnerID: owner, NodeID: node, Generation: 3, OperationID: op, ClaimedAt: stamp}); e != nil {

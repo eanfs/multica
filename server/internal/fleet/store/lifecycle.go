@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -164,6 +165,12 @@ func lifecycleObservation(s RecoverySnapshot, o model.Observation) error {
 }
 func (s *Store) persistOperationResult(ctx context.Context, q *db.Queries, snap RecoverySnapshot, o model.Observation, winner bool) error {
 	var e error
+	if e = currentRecovery(snap); e != nil {
+		return e
+	}
+	if snap.bootstrapSuccess != nil && !validBootstrapSuccess(snap) {
+		return model.ErrConflict
+	}
 	if snap.Operation.Action == model.Start || snap.Operation.Action == model.Stop || snap.Operation.Action == model.Reboot {
 		if !winner && lifecycleState(snap) != "recovery" {
 			return model.ErrConflict
@@ -174,7 +181,7 @@ func (s *Store) persistOperationResult(ctx context.Context, q *db.Queries, snap 
 	}
 	n, op := snap.Node, snap.Operation
 	// A late healthy observation cannot complete a create beyond its original initialization window.
-	if op.Action == model.Create && !op.BootstrapClaimedAt.IsZero() && (!snap.SQLNow.Before(op.BootstrapClaimedAt.Add(bootstrapLease)) || op.BootstrapClaimedAt.After(snap.SQLNow)) {
+	if op.Action == model.Create && !validBootstrapSuccess(snap) && !op.BootstrapClaimedAt.IsZero() && (!snap.SQLNow.Before(op.BootstrapClaimedAt.Add(bootstrapLease)) || op.BootstrapClaimedAt.After(snap.SQLNow)) {
 		return model.ErrConflict
 	}
 	if op.Action == model.Delete || (maintenanceAction(op.Action) && !op.Approved) || (op.Action == model.Create && n.ContainerID == "") || o.Offline || o.ObservedAt.Before(op.CreatedAt) {
@@ -198,6 +205,9 @@ func (s *Store) persistOperationResult(ctx context.Context, q *db.Queries, snap 
 	if e = validateObservation(check, n.Generation, o, snap.SQLNow); e != nil {
 		return e
 	}
+	if validBootstrapSuccess(snap) && !bootstrapHealthy(n, o, snap.SQLNow) {
+		return model.ErrUnknownHealth
+	}
 	if e = persistObservation(ctx, q, n, o); e != nil {
 		return e
 	}
@@ -212,10 +222,17 @@ func (s *Store) persistOperationResult(ctx context.Context, q *db.Queries, snap 
 	if o.StartEpoch != "" {
 		epoch = o.StartEpoch
 	}
+	var successReceipt []byte
+	if validBootstrapSuccess(snap) {
+		successReceipt, e = json.Marshal(snap.bootstrapSuccess)
+		if e != nil {
+			return model.ErrUnavailable
+		}
+	}
 	count, e := q.FleetFinishLifecycleNode(ctx, db.FleetFinishLifecycleNodeParams{Namespace: s.namespace, OwnerID: n.OwnerID, NodeID: n.ID, Generation: n.Generation, Desired: n.Desired, Status: o.Status, StartEpoch: epoch, Ready: o.Ready})
 	if e = affectedOne(count, e); e != nil {
 		return e
 	}
-	count, e = q.FleetCompleteOperation(ctx, db.FleetCompleteOperationParams{Namespace: s.namespace, OwnerID: n.OwnerID, NodeID: n.ID, OperationID: op.ID, Generation: op.Generation, Action: string(op.Action), Phase: op.Phase, Approved: op.Approved})
+	count, e = q.FleetCompleteOperation(ctx, db.FleetCompleteOperationParams{SuccessReceipt: successReceipt, Namespace: s.namespace, OwnerID: n.OwnerID, NodeID: n.ID, OperationID: op.ID, Generation: op.Generation, Action: string(op.Action), Phase: op.Phase, Approved: op.Approved})
 	return affectedOne(count, e)
 }

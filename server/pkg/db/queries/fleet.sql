@@ -334,7 +334,7 @@ WHERE o.namespace= @namespace AND o.owner_id= @owner_id AND o.node_id= @node_id 
   AND n.generation=o.generation AND n.container_id='' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running');
 
 -- name: FleetConfirmBootstrap :execrows
-UPDATE fleet_nodes n SET container_id= @container_id,start_epoch= @start_epoch,status= @status,ready=false,updated_at=now()
+UPDATE fleet_nodes n SET container_id= @container_id,start_epoch= @start_epoch,status= @status,ready=false,observation= @observation,updated_at=now()
 FROM fleet_node_operations o
 WHERE n.namespace= @namespace AND n.owner_id= @owner_id AND n.id= @node_id AND n.generation= @generation
  AND n.container_id='' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running'
@@ -365,6 +365,7 @@ UPDATE fleet_nodes n SET revoked=true,ready=false,error_code='initialization-tim
 FROM fleet_node_operations o
 WHERE n.namespace= @namespace AND n.owner_id= @owner_id AND n.id= @node_id AND n.generation= @generation
  AND n.container_id= @container_id AND n.container_id<>'' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running'
+ AND NOT (n.observation ? 'bootstrap_success')
  AND o.namespace=n.namespace AND o.owner_id=n.owner_id AND o.node_id=n.id AND o.generation=n.generation
  AND o.id= @operation_id AND o.action='create' AND o.phase='applying' AND o.bootstrap_minted AND NOT o.non_retryable
  AND o.bootstrap_claimed_at= @claimed_at AND o.bootstrap_claimed_at<=clock_timestamp()
@@ -378,7 +379,8 @@ WHERE namespace= @namespace AND owner_id= @owner_id AND node_id= @node_id AND id
  AND bootstrap_claimed_at+interval '5 minutes'<=clock_timestamp();
 
 -- name: FleetRecordObservation :execrows
-UPDATE fleet_nodes SET observation= @observation,
+UPDATE fleet_nodes SET observation= @observation::jsonb ||
+ CASE WHEN observation ? 'bootstrap_success' THEN jsonb_build_object('bootstrap_success',observation->'bootstrap_success') ELSE '{}'::jsonb END,
  status=CASE WHEN desired IN ('terminating','terminated') THEN status ELSE @status END,
  start_epoch=CASE WHEN @start_epoch::text<>'' THEN @start_epoch ELSE start_epoch END,
  ready=(@ready::boolean AND NOT maintenance AND NOT revoked AND desired='running'),
@@ -388,12 +390,18 @@ WHERE namespace= @namespace AND owner_id= @owner_id AND id= @node_id AND generat
  AND (health_at IS NULL OR health_at<= @observed_at);
 
 -- name: FleetCompleteOperation :execrows
-UPDATE fleet_node_operations SET phase='completed',error_code='',error_message='',next_attempt_at=NULL,updated_at=now()
-WHERE namespace= @namespace AND owner_id= @owner_id AND node_id= @node_id AND id= @operation_id
- AND generation= @generation AND action= @action AND approved= @approved AND phase= @phase
- AND phase IN ('queued','prepared','applying') AND NOT non_retryable
- AND (action<>'create' OR bootstrap_claimed_at IS NULL
-  OR (bootstrap_claimed_at<=clock_timestamp() AND bootstrap_claimed_at+interval '5 minutes'>clock_timestamp()));
+UPDATE fleet_node_operations o SET phase='completed',error_code='',error_message='',next_attempt_at=NULL,updated_at=now()
+WHERE o.namespace= @namespace AND o.owner_id= @owner_id AND o.node_id= @node_id AND o.id= @operation_id
+ AND o.generation= @generation AND o.action= @action AND o.approved= @approved AND o.phase= @phase
+ AND o.phase IN ('queued','prepared','applying') AND NOT o.non_retryable
+ AND (o.action<>'create' OR o.bootstrap_claimed_at IS NULL
+  OR (o.bootstrap_claimed_at<=clock_timestamp() AND o.bootstrap_claimed_at+interval '5 minutes'>clock_timestamp())
+   OR EXISTS (SELECT 1 FROM fleet_nodes n WHERE n.namespace=o.namespace
+    AND n.owner_id=o.owner_id AND n.id=o.node_id
+    AND n.generation=o.generation AND NOT n.revoked AND NOT n.maintenance
+    AND n.desired='running' AND n.status='running' AND n.ready
+    AND n.health_at<=clock_timestamp() AND n.health_at>=clock_timestamp()-interval '30 seconds'
+    AND n.observation->'bootstrap_success'=sqlc.narg(success_receipt)::jsonb));
 
 -- name: FleetFinishLifecycleNode :execrows
 UPDATE fleet_nodes SET status= @status,start_epoch= @start_epoch,maintenance=false,ready= @ready,updated_at=now()

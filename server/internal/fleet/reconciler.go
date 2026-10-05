@@ -73,7 +73,7 @@ func NewReconciler(repo *store.Store, p model.Provider, cfg model.Config) *Recon
 }
 func (r *Reconciler) SetReviewer(reviewer OperationReviewer) { r.reviewer = reviewer }
 
-// Tick serializes scheduling, not initialization I/O. Each lane has its own fixed budget.
+// Tick serializes scheduling, not accepted physical I/O. Each lane has its own fixed budget.
 func (r *Reconciler) Tick(parent context.Context) error {
 	if !r.mu.TryLock() {
 		return model.ErrBusy
@@ -140,7 +140,13 @@ func (r *Reconciler) Tick(parent context.Context) error {
 		if snap.Operation.Action == model.Create && snap.Node.ContainerID == "" && snap.Operation.BootstrapClaimedAt.IsZero() {
 			e = r.startInitialization(recovery, parent, snap)
 		} else {
-			e = r.reconcile(recovery, snap)
+			// Only discovery/Inspect recovery uses the freshness reservation. Accepted physical
+			// work shares the sole Worker slot and retains its independent action budgets.
+			if snap.Operation.Action == model.Delete || (snap.Operation.Action != model.Create && snap.Operation.ActionClaimedAt.IsZero()) {
+				e = r.startRecovery(parent, snap)
+			} else {
+				e = r.reconcile(recovery, snap)
+			}
 		}
 		// The attempted row is processed even when its bounded I/O exhausted the pass.
 		r.recoverAfter = op.ID
@@ -260,7 +266,7 @@ func (r *Reconciler) reconcile(ctx context.Context, s store.RecoverySnapshot) er
 		}
 		return model.ErrBusy // Fresh initialization is admitted only by the owned scheduling slot.
 	}
-	if op.Action == model.Create && !op.BootstrapClaimedAt.IsZero() && !op.BootstrapClaimedAt.After(s.SQLNow) && !s.SQLNow.Before(op.BootstrapClaimedAt.Add(5*time.Minute)) {
+	if op.Action == model.Create && !s.BootstrapSucceeded && !op.BootstrapClaimedAt.IsZero() && !op.BootstrapClaimedAt.After(s.SQLNow) && !s.SQLNow.Before(op.BootstrapClaimedAt.Add(5*time.Minute)) {
 		fresh, e := r.current(ctx, s)
 		if e != nil {
 			return nil
@@ -405,7 +411,7 @@ func (r *Reconciler) inspect(ctx context.Context, s store.RecoverySnapshot) erro
 		}
 		return r.repo.RecordOperationError(ctx, current, "instance-lost", true)
 	}
-	if current.Operation.Action == model.Create && !current.Operation.BootstrapClaimedAt.IsZero() && !current.Operation.BootstrapClaimedAt.After(current.SQLNow) && !current.SQLNow.Before(current.Operation.BootstrapClaimedAt.Add(5*time.Minute)) {
+	if current.Operation.Action == model.Create && !current.BootstrapSucceeded && !current.Operation.BootstrapClaimedAt.IsZero() && !current.Operation.BootstrapClaimedAt.After(current.SQLNow) && !current.SQLNow.Before(current.Operation.BootstrapClaimedAt.Add(5*time.Minute)) {
 		return r.repo.ExpireConfirmedCreate(ctx, current)
 	}
 	health := current

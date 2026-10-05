@@ -331,23 +331,30 @@ func (q *Queries) FleetClaimLifecycle(ctx context.Context, arg FleetClaimLifecyc
 }
 
 const fleetCompleteOperation = `-- name: FleetCompleteOperation :execrows
-UPDATE fleet_node_operations SET phase='completed',error_code='',error_message='',next_attempt_at=NULL,updated_at=now()
-WHERE namespace= $1 AND owner_id= $2 AND node_id= $3 AND id= $4
- AND generation= $5 AND action= $6 AND approved= $7 AND phase= $8
- AND phase IN ('queued','prepared','applying') AND NOT non_retryable
- AND (action<>'create' OR bootstrap_claimed_at IS NULL
-  OR (bootstrap_claimed_at<=clock_timestamp() AND bootstrap_claimed_at+interval '5 minutes'>clock_timestamp()))
+UPDATE fleet_node_operations o SET phase='completed',error_code='',error_message='',next_attempt_at=NULL,updated_at=now()
+WHERE o.namespace= $1 AND o.owner_id= $2 AND o.node_id= $3 AND o.id= $4
+ AND o.generation= $5 AND o.action= $6 AND o.approved= $7 AND o.phase= $8
+ AND o.phase IN ('queued','prepared','applying') AND NOT o.non_retryable
+ AND (o.action<>'create' OR o.bootstrap_claimed_at IS NULL
+  OR (o.bootstrap_claimed_at<=clock_timestamp() AND o.bootstrap_claimed_at+interval '5 minutes'>clock_timestamp())
+   OR EXISTS (SELECT 1 FROM fleet_nodes n WHERE n.namespace=o.namespace
+    AND n.owner_id=o.owner_id AND n.id=o.node_id
+    AND n.generation=o.generation AND NOT n.revoked AND NOT n.maintenance
+    AND n.desired='running' AND n.status='running' AND n.ready
+    AND n.health_at<=clock_timestamp() AND n.health_at>=clock_timestamp()-interval '30 seconds'
+    AND n.observation->'bootstrap_success'=$9::jsonb))
 `
 
 type FleetCompleteOperationParams struct {
-	Namespace   string      `json:"namespace"`
-	OwnerID     pgtype.UUID `json:"owner_id"`
-	NodeID      pgtype.UUID `json:"node_id"`
-	OperationID pgtype.UUID `json:"operation_id"`
-	Generation  int64       `json:"generation"`
-	Action      string      `json:"action"`
-	Approved    bool        `json:"approved"`
-	Phase       string      `json:"phase"`
+	Namespace      string      `json:"namespace"`
+	OwnerID        pgtype.UUID `json:"owner_id"`
+	NodeID         pgtype.UUID `json:"node_id"`
+	OperationID    pgtype.UUID `json:"operation_id"`
+	Generation     int64       `json:"generation"`
+	Action         string      `json:"action"`
+	Approved       bool        `json:"approved"`
+	Phase          string      `json:"phase"`
+	SuccessReceipt []byte      `json:"success_receipt"`
 }
 
 func (q *Queries) FleetCompleteOperation(ctx context.Context, arg FleetCompleteOperationParams) (int64, error) {
@@ -360,6 +367,7 @@ func (q *Queries) FleetCompleteOperation(ctx context.Context, arg FleetCompleteO
 		arg.Action,
 		arg.Approved,
 		arg.Phase,
+		arg.SuccessReceipt,
 	)
 	if err != nil {
 		return 0, err
@@ -368,13 +376,13 @@ func (q *Queries) FleetCompleteOperation(ctx context.Context, arg FleetCompleteO
 }
 
 const fleetConfirmBootstrap = `-- name: FleetConfirmBootstrap :execrows
-UPDATE fleet_nodes n SET container_id= $1,start_epoch= $2,status= $3,ready=false,updated_at=now()
+UPDATE fleet_nodes n SET container_id= $1,start_epoch= $2,status= $3,ready=false,observation= $4,updated_at=now()
 FROM fleet_node_operations o
-WHERE n.namespace= $4 AND n.owner_id= $5 AND n.id= $6 AND n.generation= $7
+WHERE n.namespace= $5 AND n.owner_id= $6 AND n.id= $7 AND n.generation= $8
  AND n.container_id='' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running'
  AND o.namespace=n.namespace AND o.owner_id=n.owner_id AND o.node_id=n.id AND o.generation=n.generation
- AND o.id= $8 AND o.action='create' AND o.phase='applying' AND o.bootstrap_minted AND NOT o.non_retryable
- AND o.bootstrap_claimed_at= $9 AND o.bootstrap_claimed_at<=clock_timestamp()
+ AND o.id= $9 AND o.action='create' AND o.phase='applying' AND o.bootstrap_minted AND NOT o.non_retryable
+ AND o.bootstrap_claimed_at= $10 AND o.bootstrap_claimed_at<=clock_timestamp()
  AND o.bootstrap_claimed_at+interval '5 minutes'>clock_timestamp()
 `
 
@@ -382,6 +390,7 @@ type FleetConfirmBootstrapParams struct {
 	ContainerID string             `json:"container_id"`
 	StartEpoch  string             `json:"start_epoch"`
 	Status      string             `json:"status"`
+	Observation []byte             `json:"observation"`
 	Namespace   string             `json:"namespace"`
 	OwnerID     pgtype.UUID        `json:"owner_id"`
 	NodeID      pgtype.UUID        `json:"node_id"`
@@ -395,6 +404,7 @@ func (q *Queries) FleetConfirmBootstrap(ctx context.Context, arg FleetConfirmBoo
 		arg.ContainerID,
 		arg.StartEpoch,
 		arg.Status,
+		arg.Observation,
 		arg.Namespace,
 		arg.OwnerID,
 		arg.NodeID,
@@ -528,6 +538,7 @@ UPDATE fleet_nodes n SET revoked=true,ready=false,error_code='initialization-tim
 FROM fleet_node_operations o
 WHERE n.namespace= $1 AND n.owner_id= $2 AND n.id= $3 AND n.generation= $4
  AND n.container_id= $5 AND n.container_id<>'' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running'
+ AND NOT (n.observation ? 'bootstrap_success')
  AND o.namespace=n.namespace AND o.owner_id=n.owner_id AND o.node_id=n.id AND o.generation=n.generation
  AND o.id= $6 AND o.action='create' AND o.phase='applying' AND o.bootstrap_minted AND NOT o.non_retryable
  AND o.bootstrap_claimed_at= $7 AND o.bootstrap_claimed_at<=clock_timestamp()
@@ -1124,7 +1135,8 @@ func (q *Queries) FleetReclaimBindings(ctx context.Context, runtimeIds []pgtype.
 }
 
 const fleetRecordObservation = `-- name: FleetRecordObservation :execrows
-UPDATE fleet_nodes SET observation= $1,
+UPDATE fleet_nodes SET observation= $1::jsonb ||
+ CASE WHEN observation ? 'bootstrap_success' THEN jsonb_build_object('bootstrap_success',observation->'bootstrap_success') ELSE '{}'::jsonb END,
  status=CASE WHEN desired IN ('terminating','terminated') THEN status ELSE $2 END,
  start_epoch=CASE WHEN $3::text<>'' THEN $3 ELSE start_epoch END,
  ready=($4::boolean AND NOT maintenance AND NOT revoked AND desired='running'),

@@ -77,7 +77,7 @@ func (f *workerRepo) CurrentOperation(_ context.Context, owner pgtype.UUID, ref 
 	return f.snap, nil
 }
 func (f *workerRepo) RecordOperationResult(_ context.Context, s store.RecoverySnapshot, o model.Observation) error {
-	if s.Ref() != f.snap.Ref() {
+	if !sameWorkerBinding(s, f.snap) {
 		return model.ErrConflict
 	}
 	f.events = append(f.events, "result")
@@ -224,7 +224,7 @@ func TestRecoveryReviewUsesSameOperation(t *testing.T) {
 		}
 		return model.Operation{Approved: true}, nil
 	}))
-	if e := r.Tick(context.Background()); e != nil {
+	if e := joinedTick(t, r, context.Background()); e != nil {
 		t.Fatal(e)
 	}
 	if calls != 1 || len(p.actions) != 0 || !reflect.DeepEqual(f.events, []string{"defer"}) || f.currentCalls < 2 {
@@ -237,7 +237,7 @@ func TestRecoveryUnknownOfflinePreservesBarrier(t *testing.T) {
 	p.observation = model.Observation{Status: "stopped", Offline: true, DataVolume: "data", LayoutVersion: "1", ObservedAt: f.snap.SQLNow}
 	f.snap.Node.Observation = p.observation
 	p.err = model.ErrUnknownHealth
-	if e := r.Tick(context.Background()); e != nil {
+	if e := joinedTick(t, r, context.Background()); e != nil {
 		t.Fatal(e)
 	}
 	if !reflect.DeepEqual(p.actions, []string{"delete", "diagnose"}) || !reflect.DeepEqual(f.events, []string{"observation", "defer"}) || !f.snap.Node.Observation.Offline || f.snap.Node.Observation.ReportStatsKnown || f.snap.Operation.ID != op.ID || !f.snap.Operation.Approved || f.snap.Operation.Phase != op.Phase || f.snap.Operation.Attempts != 0 || !f.snap.Node.Maintenance || f.snap.Node.DataVolume != "data" || f.result.Ready {
@@ -247,7 +247,7 @@ func TestRecoveryUnknownOfflinePreservesBarrier(t *testing.T) {
 func TestRecoveryConfirmedCreateInspectOnly(t *testing.T) {
 	f, p, r := workerFixture(model.Create, false)
 	for i := 0; i < 2; i++ {
-		if e := r.Tick(context.Background()); e != nil {
+		if e := joinedTick(t, r, context.Background()); e != nil {
 			t.Fatal(e)
 		}
 	}
@@ -258,7 +258,7 @@ func TestRecoveryConfirmedCreateInspectOnly(t *testing.T) {
 func TestRecoveryConfirmedMissingNeverReplaces(t *testing.T) {
 	f, p, r := workerFixture(model.Create, false)
 	p.observation = model.Observation{Status: "missing", ObservedAt: f.snap.SQLNow}
-	if e := r.Tick(context.Background()); e != nil {
+	if e := joinedTick(t, r, context.Background()); e != nil {
 		t.Fatal(e)
 	}
 	if !reflect.DeepEqual(p.actions, []string{"inspect"}) || !reflect.DeepEqual(f.events, []string{"observation", "instance-lost"}) || !f.snap.Operation.NonRetryable {
@@ -275,7 +275,7 @@ func TestRecoveryBootstrapCrashWindows(t *testing.T) {
 			f.snap.Operation.BootstrapMinted = name != "before-mint"
 			f.discovered = []model.Operation{f.snap.Operation}
 			for i := 0; i < 2; i++ {
-				if e := r.Tick(context.Background()); e != nil {
+				if e := joinedTick(t, r, context.Background()); e != nil {
 					t.Fatal(e)
 				}
 			}
@@ -289,7 +289,7 @@ func TestRecoveryLiveBootstrapInert(t *testing.T) {
 	f, p, r := workerFixture(model.Create, false)
 	f.snap.Node.ContainerID = ""
 	f.snap.Operation.BootstrapClaimedAt = f.snap.SQLNow.Add(-time.Minute)
-	if e := r.Tick(context.Background()); e != nil {
+	if e := joinedTick(t, r, context.Background()); e != nil {
 		t.Fatal(e)
 	}
 	if len(p.actions) != 0 || len(f.events) != 0 {
@@ -303,7 +303,7 @@ func TestRecoveryDeleteCompletionRequiresSuccess(t *testing.T) {
 			if failure {
 				p.err = model.ErrUnavailable
 			}
-			_ = r.Tick(context.Background())
+			_ = joinedTick(t, r, context.Background())
 			finished := false
 			for _, e := range f.events {
 				finished = finished || e == "finish-delete"
@@ -335,7 +335,7 @@ func TestRecoveryReadyRequiresNativeHealth(t *testing.T) {
 			case "future":
 				p.observation.ObservedAt = f.snap.SQLNow.Add(time.Second)
 			}
-			_ = r.Tick(context.Background())
+			_ = joinedTick(t, r, context.Background())
 			if len(p.actions) == 0 || f.result.Ready {
 				t.Fatalf("invalid health became Ready actions=%v result=%+v", p.actions, f.result)
 			}
@@ -345,7 +345,7 @@ func TestRecoveryReadyRequiresNativeHealth(t *testing.T) {
 func TestRecoveryStaleCurrentNeverActs(t *testing.T) {
 	f, p, r := workerFixture(model.Delete, true)
 	f.current = func(int) error { return model.ErrConflict }
-	_ = r.Tick(context.Background())
+	_ = joinedTick(t, r, context.Background())
 	if len(p.actions) != 0 {
 		t.Fatal("stale discovery acted")
 	}
@@ -353,7 +353,7 @@ func TestRecoveryStaleCurrentNeverActs(t *testing.T) {
 func TestRecoveryLateResultPreservesNewGeneration(t *testing.T) {
 	f, p, r := workerFixture(model.Create, false)
 	p.during = func() { f.snap.Node.Generation++; f.snap.Operation.Generation++ }
-	_ = r.Tick(context.Background())
+	_ = joinedTick(t, r, context.Background())
 	if len(f.events) != 0 {
 		t.Fatal("stale physical result persisted")
 	}
@@ -362,7 +362,7 @@ func TestRecoveryActualErrorBudget(t *testing.T) {
 	f, p, r := workerFixture(model.Create, false)
 	p.err = errors.New("private provider path/key must not persist")
 	for i := 0; i < 7; i++ {
-		_ = r.Tick(context.Background())
+		_ = joinedTick(t, r, context.Background())
 	}
 	if f.snap.Operation.Attempts != 5 || !f.snap.Operation.NonRetryable || len(p.actions) != 5 {
 		t.Fatalf("attempts=%d actions=%v", f.snap.Operation.Attempts, p.actions)
@@ -417,14 +417,14 @@ func TestRecoveryLifecycleCompetingReconcilers(t *testing.T) {
 	installLifecycleFake(r, f, false)
 	other := &Reconciler{repo: f, provider: p, cfg: r.cfg, claimLifecycle: r.claimLifecycle}
 	p.during = func() {
-		if e := other.Tick(context.Background()); e != nil {
+		if e := joinedTick(t, other, context.Background()); e != nil {
 			t.Fatal(e)
 		}
 	}
-	if e := r.Tick(context.Background()); e != nil {
+	if e := joinedTick(t, r, context.Background()); e != nil {
 		t.Fatal(e)
 	}
-	if e := other.Tick(context.Background()); e != nil {
+	if e := joinedTick(t, other, context.Background()); e != nil {
 		t.Fatal(e)
 	}
 	if !reflect.DeepEqual(p.actions, []string{"diagnose", "apply"}) {
@@ -444,7 +444,7 @@ func TestRecoveryLifecycleCheckpointNeverRedispatches(t *testing.T) {
 			f.snap.Operation.IdempotencyKey = "original-key"
 			before := f.snap.Operation
 			for i := 0; i < 2; i++ {
-				_ = r.Tick(context.Background())
+				_ = joinedTick(t, r, context.Background())
 			}
 			if !reflect.DeepEqual(p.actions, []string{"inspect", "inspect"}) || f.snap.Operation.ID != before.ID || f.snap.Operation.Generation != before.Generation || f.snap.Operation.IdempotencyKey != before.IdempotencyKey || !f.snap.Operation.ActionClaimedAt.Equal(before.ActionClaimedAt) || !f.snap.Node.Maintenance {
 				t.Fatalf("redispatch/reset: %v", p.actions)
@@ -455,7 +455,7 @@ func TestRecoveryLifecycleCheckpointNeverRedispatches(t *testing.T) {
 func TestRecoveryLifecycleClaimCheckBeforeApply(t *testing.T) {
 	f, p, r := workerFixture(model.Start, false)
 	installLifecycleFake(r, f, true)
-	_ = r.Tick(context.Background())
+	_ = joinedTick(t, r, context.Background())
 	if len(p.actions) != 0 {
 		t.Fatal("lost winner acted")
 	}
@@ -526,6 +526,11 @@ func (c *fakeBootstrap) Confirm(ctx context.Context, o model.Observation) error 
 	c.repo.events = append(c.repo.events, "confirm")
 	c.repo.snap.Node.ContainerID = o.ContainerID
 	c.repo.snap.Node.StartEpoch = o.StartEpoch
+	c.repo.snap.Node.Observation = o
+	c.repo.snap.Node.HealthAt = o.ObservedAt
+	c.repo.snap.Node.Ready = o.Ready
+	// Models only the Store-validated projection; real receipt authority remains private to Store.
+	c.repo.snap.BootstrapSucceeded = o.Ready && o.RuntimeCount > 0 && o.ObservedAt.Before(c.repo.snap.Operation.BootstrapClaimedAt.Add(5*time.Minute))
 	return nil
 }
 func (c *fakeBootstrap) Fail(context.Context, string) error {
@@ -558,6 +563,12 @@ func bootstrapFixture(t *testing.T) (*workerRepo, *workerProvider, *Reconciler, 
 		return c, nil
 	}
 	return f, p, r, c
+}
+func joinedTick(t *testing.T, r *Reconciler, ctx context.Context) error {
+	t.Helper()
+	e := r.Tick(ctx)
+	waitInitialization(t, r)
+	return e
 }
 func waitInitialization(t *testing.T, r *Reconciler) {
 	t.Helper()
@@ -689,7 +700,7 @@ func TestRecoveryNativeRebootEpochDiscovery(t *testing.T) {
 func TestRecoveryDeleteLateSuccessPreservesNewGeneration(t *testing.T) {
 	f, p, r := workerFixture(model.Delete, true)
 	p.during = func() { f.snap.Node.Generation++; f.snap.Operation.Generation++ }
-	_ = r.Tick(context.Background())
+	_ = joinedTick(t, r, context.Background())
 	if !reflect.DeepEqual(p.actions, []string{"delete"}) || len(f.events) != 0 {
 		t.Fatal("late delete tombstoned new generation")
 	}
