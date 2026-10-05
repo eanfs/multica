@@ -12,9 +12,9 @@ import (
 )
 
 const beginFleetNamespaceDestroy = `-- name: BeginFleetNamespaceDestroy :one
-UPDATE fleet_namespace_fences SET finalized=false,generation=generation+1
+UPDATE fleet_namespace_fences SET finalized=false,generation=generation+1,completion_manifest=NULL
 WHERE namespace = $1 AND fleet_id = $2 AND operation_key = $3
-AND generation = $4 AND closed AND finalized RETURNING namespace, fleet_id, closed, generation, operation_key, finalized
+AND generation = $4 AND closed AND finalized RETURNING namespace, fleet_id, closed, generation, operation_key, finalized, completion_manifest
 `
 
 type BeginFleetNamespaceDestroyParams struct {
@@ -39,6 +39,7 @@ func (q *Queries) BeginFleetNamespaceDestroy(ctx context.Context, arg BeginFleet
 		&i.Generation,
 		&i.OperationKey,
 		&i.Finalized,
+		&i.CompletionManifest,
 	)
 	return i, err
 }
@@ -46,7 +47,7 @@ func (q *Queries) BeginFleetNamespaceDestroy(ctx context.Context, arg BeginFleet
 const closeFleetNamespaceFence = `-- name: CloseFleetNamespaceFence :one
 UPDATE fleet_namespace_fences SET closed=true,generation=generation+1,operation_key= $1
 WHERE namespace= $2 AND fleet_id= $3 AND generation= $4 AND NOT closed
-RETURNING namespace, fleet_id, closed, generation, operation_key, finalized
+RETURNING namespace, fleet_id, closed, generation, operation_key, finalized, completion_manifest
 `
 
 type CloseFleetNamespaceFenceParams struct {
@@ -71,6 +72,7 @@ func (q *Queries) CloseFleetNamespaceFence(ctx context.Context, arg CloseFleetNa
 		&i.Generation,
 		&i.OperationKey,
 		&i.Finalized,
+		&i.CompletionManifest,
 	)
 	return i, err
 }
@@ -138,20 +140,22 @@ func (q *Queries) CountFleetQueuedRuns(ctx context.Context, arg CountFleetQueued
 }
 
 const finalizeFleetNamespaceFence = `-- name: FinalizeFleetNamespaceFence :execrows
-UPDATE fleet_namespace_fences SET finalized=true
-WHERE namespace = $1 AND fleet_id = $2 AND operation_key = $3
-AND generation = $4 AND closed AND NOT finalized
+UPDATE fleet_namespace_fences SET finalized=true,completion_manifest= $1::jsonb
+WHERE namespace = $2 AND fleet_id = $3 AND operation_key = $4
+AND generation = $5 AND closed AND NOT finalized
 `
 
 type FinalizeFleetNamespaceFenceParams struct {
-	Namespace    string `json:"namespace"`
-	FleetID      string `json:"fleet_id"`
-	OperationKey string `json:"operation_key"`
-	Generation   int64  `json:"generation"`
+	CompletionManifest []byte `json:"completion_manifest"`
+	Namespace          string `json:"namespace"`
+	FleetID            string `json:"fleet_id"`
+	OperationKey       string `json:"operation_key"`
+	Generation         int64  `json:"generation"`
 }
 
 func (q *Queries) FinalizeFleetNamespaceFence(ctx context.Context, arg FinalizeFleetNamespaceFenceParams) (int64, error) {
 	result, err := q.db.Exec(ctx, finalizeFleetNamespaceFence,
+		arg.CompletionManifest,
 		arg.Namespace,
 		arg.FleetID,
 		arg.OperationKey,
@@ -1450,7 +1454,7 @@ SELECT n.id,
  r.metadata,
  t.runtime_id,
  t.status,
- f.namespace, f.fleet_id, f.closed, f.generation, f.operation_key, f.finalized
+ f.namespace, f.fleet_id, f.closed, f.generation, f.operation_key, f.finalized, f.completion_manifest
 FROM fleet_nodes n CROSS JOIN fleet_node_operations o
  CROSS JOIN fleet_node_credentials c CROSS JOIN fleet_credential_profiles p
  CROSS JOIN "user" u CROSS JOIN agent_runtime r CROSS JOIN agent_task_queue t
@@ -1591,7 +1595,7 @@ func (q *Queries) GetFleetIntentByKey(ctx context.Context, arg GetFleetIntentByK
 }
 
 const getFleetNamespaceFence = `-- name: GetFleetNamespaceFence :one
-SELECT namespace, fleet_id, closed, generation, operation_key, finalized FROM fleet_namespace_fences WHERE namespace = $1
+SELECT namespace, fleet_id, closed, generation, operation_key, finalized, completion_manifest FROM fleet_namespace_fences WHERE namespace = $1
 `
 
 func (q *Queries) GetFleetNamespaceFence(ctx context.Context, namespace string) (FleetNamespaceFence, error) {
@@ -1604,6 +1608,7 @@ func (q *Queries) GetFleetNamespaceFence(ctx context.Context, namespace string) 
 		&i.Generation,
 		&i.OperationKey,
 		&i.Finalized,
+		&i.CompletionManifest,
 	)
 	return i, err
 }
@@ -1991,7 +1996,7 @@ func (q *Queries) InsertFleetLifecycleOperation(ctx context.Context, arg InsertF
 
 const insertFleetNamespaceFence = `-- name: InsertFleetNamespaceFence :one
 INSERT INTO fleet_namespace_fences (namespace,fleet_id,closed,generation,operation_key)
-VALUES ($1,$2,true,1,$3) RETURNING namespace, fleet_id, closed, generation, operation_key, finalized
+VALUES ($1,$2,true,1,$3) RETURNING namespace, fleet_id, closed, generation, operation_key, finalized, completion_manifest
 `
 
 type InsertFleetNamespaceFenceParams struct {
@@ -2010,6 +2015,7 @@ func (q *Queries) InsertFleetNamespaceFence(ctx context.Context, arg InsertFleet
 		&i.Generation,
 		&i.OperationKey,
 		&i.Finalized,
+		&i.CompletionManifest,
 	)
 	return i, err
 }
@@ -2280,7 +2286,7 @@ func (q *Queries) MaxFleetCredentialGeneration(ctx context.Context, arg MaxFleet
 }
 
 const openFleetNamespaceFence = `-- name: OpenFleetNamespaceFence :execrows
-UPDATE fleet_namespace_fences SET closed=false,finalized=false
+UPDATE fleet_namespace_fences SET closed=false,finalized=false,completion_manifest=NULL
 WHERE namespace= $1 AND fleet_id= $2 AND operation_key= $3 AND generation= $4 AND closed
 `
 

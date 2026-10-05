@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -15,15 +16,17 @@ import (
 )
 
 type fakeRepo struct {
-	fence         store.NamespaceFence
-	nodes         []model.Node
-	op            model.Operation
-	openCalls     int
-	completionErr error
-	finalErr      error
-	beginCalls    int
-	receipts      []store.NamespaceCompletion
-	completion    func(store.NamespaceFence, pgtype.UUID, model.OperationRef, string) error
+	fence           store.NamespaceFence
+	nodes           []model.Node
+	op              model.Operation
+	openCalls       int
+	completionErr   error
+	finalErr        error
+	beginCalls      int
+	receipts        []store.NamespaceCompletion
+	manifestAction  model.Action
+	manifestPresent bool
+	completion      func(store.NamespaceFence, pgtype.UUID, model.OperationRef, string) error
 }
 
 func (r *fakeRepo) CloseNamespace(_ context.Context, f, k string) (store.NamespaceFence, error) {
@@ -64,23 +67,39 @@ func (r *fakeRepo) CheckNamespaceCompletion(_ context.Context, f store.Namespace
 	}
 	return r.completionErr
 }
-func (r *fakeRepo) CheckNamespaceCompletions(_ context.Context, f store.NamespaceFence, cs []store.NamespaceCompletion) error {
+func (r *fakeRepo) CheckNamespaceCompletions(_ context.Context, f store.NamespaceFence, action model.Action, cs []store.NamespaceCompletion) error {
 	if r.finalErr != nil {
 		return r.finalErr
 	}
 	if f != r.fence {
 		return model.ErrConflict
 	}
+	if len(cs) != len(r.nodes) {
+		return model.ErrUnknownHealth
+	}
 	for _, c := range cs {
 		for _, n := range r.nodes {
-			if n.ID == c.Node.ID && n.Generation != c.Ref.Generation {
+			if n.ID == c.Node.ID && (n.Generation != c.Ref.Generation || n.Image != c.Node.Image) {
 				return model.ErrConflict
 			}
 		}
 	}
-	r.receipts = append([]store.NamespaceCompletion(nil), cs...)
+	if !f.Finalized {
+		r.receipts = append([]store.NamespaceCompletion(nil), cs...)
+		r.manifestAction = action
+		r.manifestPresent = true
+	}
 	r.fence.Finalized = true
 	return nil
+}
+func (r *fakeRepo) GetNamespaceCompletions(_ context.Context, f store.NamespaceFence, a model.Action) ([]store.NamespaceCompletion, bool, error) {
+	if f != r.fence || !r.manifestPresent {
+		return nil, false, model.ErrUnknownHealth
+	}
+	if a != r.manifestAction {
+		return nil, false, nil
+	}
+	return append([]store.NamespaceCompletion(nil), r.receipts...), true, nil
 }
 func (r *fakeRepo) BeginNamespaceDestroy(_ context.Context, f store.NamespaceFence) (store.NamespaceFence, error) {
 	if f != r.fence || !f.Closed || !f.Finalized {
@@ -99,6 +118,119 @@ func (r *fakeRepo) LookupNamespaceOperation(_ context.Context, n model.Node, a m
 	}
 	return model.Operation{}, false, nil
 }
+func privateConfig(t *testing.T) Config {
+	t.Helper()
+	cfg := testConfig()
+	cfg.FleetURL = "http://127.0.0.1:1"
+	cfg.DatabaseURL = "postgres://fixture:synthetic-password@127.0.0.1:1/fixture?sslmode=disable"
+	cfg.ProfilesFile = privateMap(t)
+	dir := t.TempDir()
+	cfg.ConfigFile = filepath.Join(dir, "config.json")
+	cfg.ServiceKeyFile = filepath.Join(dir, "key")
+	for path, raw := range map[string]string{cfg.ConfigFile: `{"namespace":"fixture","fleet_id":"fleet","image":"fake-image","api_url":"http://127.0.0.1:1","specs":{"small":{}}}`, cfg.ServiceKeyFile: "synthetic-key"} {
+		if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return cfg
+}
+func TestPrivateConfigConsumesCheckedBytes(t *testing.T) {
+	for _, replacement := range []string{"symlink", "fifo"} {
+		t.Run(replacement, func(t *testing.T) {
+			cfg := privateConfig(t)
+			reader := func(path string) ([]byte, error) {
+				raw, err := readPrivate(path)
+				if path == cfg.ConfigFile && err == nil {
+					if e := os.Remove(path); e != nil {
+						t.Fatal(e)
+					}
+					if replacement == "symlink" {
+						foreign := filepath.Join(t.TempDir(), "replacement.json")
+						if e := os.WriteFile(foreign, []byte(`{"namespace":"foreign"}`), 0644); e != nil {
+							t.Fatal(e)
+						}
+						if e := os.Symlink(foreign, path); e != nil {
+							t.Fatal(e)
+						}
+					} else {
+						if e := syscall.Mkfifo(path, 0600); e != nil {
+							t.Fatal(e)
+						}
+					}
+				}
+				return raw, err
+			}
+			done := make(chan error, 1)
+			go func() {
+				public, _, err := validateInputsWithReader("status", cfg, reader)
+				if err == nil && public.Namespace != cfg.Namespace {
+					err = model.ErrConflict
+				}
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("checked bytes replaced by second open: %v", err)
+				}
+			case <-time.After(time.Second):
+				// Release an unsafe second FIFO open so RED leaves no blocked goroutine.
+				f, err := os.OpenFile(cfg.ConfigFile, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+				if err == nil {
+					_, _ = f.Write([]byte("{}"))
+					_ = f.Close()
+				}
+				<-done
+				t.Fatal("unchecked second FIFO open blocked validation")
+			}
+		})
+	}
+}
+
+func TestPrivateDatabasePreservesApprovedOptions(t *testing.T) {
+	raw := "postgres://fixture:synthetic-password@127.0.0.1:1234/fixture?sslmode=disable&application_name=fixture%20operator&connect_timeout=2"
+	cfg, err := localPoolConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ConnConfig.RuntimeParams["application_name"] != "fixture operator" || cfg.ConnConfig.ConnectTimeout != 2*time.Second || cfg.ConnConfig.Port != 1234 {
+		t.Fatal("approved options or explicit port changed")
+	}
+	for _, suffix := range []string{"application_name=", "application_name=a&application_name=b", "application_name=%00", "application_name=%FF", "connect_timeout=0", "connect_timeout=601", "connect_timeout=1.5", "connect_timeout=1&connect_timeout=2", "application_name=%ZZ"} {
+		if _, err := localPoolConfig("postgres://fixture:synthetic-password@127.0.0.1:1/fixture?sslmode=disable&" + suffix); !errors.Is(err, model.ErrInvalidRequest) {
+			t.Fatalf("invalid allowed option accepted: %v", err)
+		}
+	}
+}
+
+func TestPrivateDatabaseRejectsDiscovery(t *testing.T) {
+	cfg := privateConfig(t)
+	for _, query := range []string{"sslmode=disable&sslmode=require", "sslmode=disable&sslmode=disable", "sslmode=disable&ssl=true", "sslmode=disable&database=foreign", "sslmode=disable&password=", "sslmode=disable&host=foreign", "sslmode=disable&dbname=foreign", "sslmode=disable&user=foreign", "sslmode=disable&service=fixture", "sslmode=disable&servicefile=/synthetic", "sslmode=disable&passfile=/synthetic", "sslmode=disable&sslcert=/synthetic", "sslmode=disable&sslkey=/synthetic", "sslmode=disable&sslrootcert=/synthetic", "sslmode=disable&SSLMode=require", "sslmode=disable&options=unsafe", "sslmode=disable&port=2"} {
+		t.Run(query, func(t *testing.T) {
+			bad := cfg
+			bad.DatabaseURL = "postgres://fixture:synthetic-password@127.0.0.1:1/fixture?" + query
+			if err := Validate("status", bad); !errors.Is(err, model.ErrInvalidRequest) {
+				t.Fatalf("unsafe database interpretation accepted: %v", err)
+			}
+		})
+	}
+	for _, key := range []string{"PGSERVICE", "PGSERVICEFILE", "PGPASSFILE", "PGSSLCERT", "PGSSLKEY", "PGSSLROOTCERT", "PGPASSWORD", "PGHOST"} {
+		t.Run(key, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "synthetic-settings")
+			if err := os.WriteFile(path, []byte("[fixture]\npassword=synthetic\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(key, path)
+			if err := Validate("status", cfg); !errors.Is(err, model.ErrInvalidRequest) {
+				t.Fatalf("inherited discovery accepted: %v", err)
+			}
+			if _, err := localPoolConfig(cfg.DatabaseURL); !errors.Is(err, model.ErrInvalidRequest) {
+				t.Fatalf("inherited settings reached pgx parse: %v", err)
+			}
+		})
+	}
+}
+
 func testID(b byte) pgtype.UUID { return pgtype.UUID{Bytes: [16]byte{15: b}, Valid: true} }
 func testConfig() Config {
 	return Config{Namespace: "fixture", FleetID: "fleet", OperationKey: "shutdown", Timeout: time.Second}
@@ -241,6 +373,58 @@ func TestQuiesceRequiresWholeNamespaceCompletionAtReturn(t *testing.T) {
 	}}
 	if err := run(context.Background(), "quiesce", testConfig(), d); !errors.Is(err, model.ErrConflict) || !r.fence.Closed || r.fence.Finalized || !changed {
 		t.Fatalf("earlier stopped node changed during later polling: %v", err)
+	}
+}
+func TestFinalizedReplayDeniesOriginalDriftWithoutRequestsOrCAS(t *testing.T) {
+	for _, mutation := range []string{"missing", "image", "legacy"} {
+		t.Run(mutation, func(t *testing.T) {
+			r := fixtureRepo()
+			b := r.nodes[0]
+			b.ID = testID(4)
+			r.nodes = append(r.nodes, b)
+			calls := 0
+			d := dependencies{repo: r, request: func(_ context.Context, owner, node pgtype.UUID, a model.Action, _ string) (model.Operation, error) {
+				calls++
+				return model.Operation{ID: testID(node.Bytes[15] + 10), OwnerID: owner, NodeID: node, Generation: 2, Action: a, Approved: true, Phase: "completed"}, nil
+			}}
+			if e := run(context.Background(), "quiesce", testConfig(), d); e != nil {
+				t.Fatal(e)
+			}
+			if mutation == "missing" {
+				r.nodes = r.nodes[:1]
+			} else if mutation == "image" {
+				r.nodes[1].Image = "changed"
+			} else {
+				r.manifestPresent = false
+			}
+			before := calls
+			fence := r.fence
+			for _, action := range []string{"quiesce", "destroy"} {
+				if e := run(context.Background(), action, testConfig(), d); e == nil {
+					t.Fatalf("%s accepted original proof drift", action)
+				}
+				if calls != before || r.beginCalls != 0 || r.fence != fence {
+					t.Fatal("denial minted Request/CAS or changed barrier")
+				}
+			}
+		})
+	}
+}
+func TestFinalizedOriginallyEmptyNamespace(t *testing.T) {
+	r := fixtureRepo()
+	r.nodes = nil
+	calls := 0
+	d := dependencies{repo: r, request: func(context.Context, pgtype.UUID, pgtype.UUID, model.Action, string) (model.Operation, error) {
+		calls++
+		return model.Operation{}, model.ErrUnknownHealth
+	}}
+	for _, action := range []string{"quiesce", "quiesce", "destroy", "destroy"} {
+		if e := run(context.Background(), action, testConfig(), d); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if calls != 0 || r.beginCalls != 1 || !r.fence.Finalized || !r.manifestPresent {
+		t.Fatal("original empty proof lost or minted node work")
 	}
 }
 func TestDestroyFromFinalizedStopUsesTrustedCycleCAS(t *testing.T) {

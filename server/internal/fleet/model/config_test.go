@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -16,7 +17,12 @@ func loadTestConfig(t *testing.T, raw string) (Config, error) {
 	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
 		t.Fatal(err)
 	}
-	return LoadConfig(path)
+	loaded, loadErr := LoadConfig(path)
+	decoded, decodeErr := DecodeConfig([]byte(raw))
+	if !reflect.DeepEqual(loaded, decoded) || (loadErr == nil) != (decodeErr == nil) || errors.Is(loadErr, ErrInvalidRequest) != errors.Is(decodeErr, ErrInvalidRequest) {
+		t.Fatal("byte decoder diverged from explicit path parser")
+	}
+	return decoded, decodeErr
 }
 
 func TestLoadConfigDefaults(t *testing.T) {

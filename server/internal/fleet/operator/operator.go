@@ -8,9 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -34,7 +37,8 @@ type repository interface {
 	ListNamespaceNodes(context.Context, pgtype.UUID, int32) ([]model.Node, error)
 	UpsertProfiles(context.Context, map[pgtype.UUID]string, int64) error
 	CheckNamespaceCompletion(context.Context, store.NamespaceFence, model.Node, model.OperationRef, string) error
-	CheckNamespaceCompletions(context.Context, store.NamespaceFence, []store.NamespaceCompletion) error
+	CheckNamespaceCompletions(context.Context, store.NamespaceFence, model.Action, []store.NamespaceCompletion) error
+	GetNamespaceCompletions(context.Context, store.NamespaceFence, model.Action) ([]store.NamespaceCompletion, bool, error)
 }
 type dependencies struct {
 	repo    repository
@@ -108,7 +112,7 @@ func run(ctx context.Context, action string, cfg Config, d dependencies) error {
 			return e
 		}
 		if found {
-			return d.repo.CheckNamespaceCompletions(ctx, f, receipts)
+			return d.repo.CheckNamespaceCompletions(ctx, f, wanted, receipts)
 		}
 		if action != "destroy" {
 			return model.ErrUnknownHealth
@@ -120,7 +124,7 @@ func run(ctx context.Context, action string, cfg Config, d dependencies) error {
 		if !found {
 			return model.ErrUnknownHealth
 		}
-		if e = d.repo.CheckNamespaceCompletions(ctx, f, receipts); e != nil {
+		if e = d.repo.CheckNamespaceCompletions(ctx, f, model.Stop, receipts); e != nil {
 			return e
 		}
 		old := f
@@ -185,44 +189,25 @@ func run(ctx context.Context, action string, cfg Config, d dependencies) error {
 			after = n.ID
 		}
 	}
-	return d.repo.CheckNamespaceCompletions(ctx, f, completed)
+	a := model.Stop
+	if action == "destroy" {
+		a = model.Delete
+	}
+	return d.repo.CheckNamespaceCompletions(ctx, f, a, completed)
 }
 
 // lookupCompletions performs only durable receipt reads on a finalized cycle.
 // All SQL owners must match; a partial set is not completion or destroy authority.
 func lookupCompletions(ctx context.Context, r repository, f store.NamespaceFence, a model.Action) ([]store.NamespaceCompletion, bool, error) {
-	var after pgtype.UUID
-	var receipts []store.NamespaceCompletion
-	for {
-		nodes, e := r.ListNamespaceNodes(ctx, after, 100)
-		if e != nil {
-			return nil, false, e
-		}
-		if len(nodes) == 0 {
-			return receipts, true, nil
-		}
-		for _, n := range nodes {
-			if n.Namespace != f.Namespace || !n.ID.Valid || n.ID.Bytes == [16]byte{} || !n.OwnerID.Valid || n.OwnerID.Bytes == [16]byte{} || after.Valid && bytes.Compare(n.ID.Bytes[:], after.Bytes[:]) <= 0 {
-				return nil, false, model.ErrConflict
-			}
-			key := nodeActionKey(f, n, a)
-			op, found, e := r.LookupNamespaceOperation(ctx, n, a, key)
-			if e != nil {
-				return nil, false, e
-			}
-			if !found {
-				return nil, false, nil
-			}
-			ref := model.OperationRef{Namespace: f.Namespace, NodeID: n.ID, OperationID: op.ID, Generation: op.Generation, Action: a}
-			receipts = append(receipts, store.NamespaceCompletion{Node: n, Ref: ref, Key: key})
-			after = n.ID
-		}
-	}
+	return r.GetNamespaceCompletions(ctx, f, a)
 }
 
 // Validate performs no network, database or provider construction.
 func Validate(action string, cfg Config) error { _, _, err := validateInputs(action, cfg); return err }
 func validateInputs(action string, cfg Config) (model.Config, []byte, error) {
+	return validateInputsWithReader(action, cfg, readPrivate)
+}
+func validateInputsWithReader(action string, cfg Config, read func(string) ([]byte, error)) (model.Config, []byte, error) {
 	fail := func() (model.Config, []byte, error) { return model.Config{}, nil, model.ErrInvalidRequest }
 	switch action {
 	case "prepare", "quiesce", "destroy", "resume", "status":
@@ -236,25 +221,18 @@ func validateInputs(action string, cfg Config) (model.Config, []byte, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return fail()
 	}
-	dbURL, err := url.Parse(cfg.DatabaseURL)
-	if err != nil || (dbURL.Scheme != "postgres" && dbURL.Scheme != "postgresql") || dbURL.Hostname() == "" || len(dbURL.Path) < 2 || dbURL.User == nil || dbURL.User.Username() == "" || dbURL.Fragment != "" {
+	if _, err := localDatabaseURI(cfg.DatabaseURL); err != nil {
 		return fail()
 	}
-	if password, ok := dbURL.User.Password(); !ok || password == "" {
+	raw, err := read(cfg.ConfigFile)
+	if err != nil {
 		return fail()
 	}
-	// The local operator never discovers HOME pgpass/cert or PG* credential inputs.
-	if dbURL.Query().Get("sslmode") != "disable" {
-		return fail()
-	}
-	if _, err = readPrivate(cfg.ConfigFile); err != nil {
-		return fail()
-	}
-	public, err := model.LoadConfig(cfg.ConfigFile)
+	public, err := model.DecodeConfig(raw)
 	if err != nil || public.Namespace != cfg.Namespace || public.FleetID != cfg.FleetID {
 		return fail()
 	}
-	secret, err := readPrivate(cfg.ServiceKeyFile)
+	secret, err := read(cfg.ServiceKeyFile)
 	if err != nil {
 		return fail()
 	}
@@ -266,10 +244,104 @@ func validateInputs(action string, cfg Config) (model.Config, []byte, error) {
 		if _, _, err = LoadProfiles(cfg.ProfilesFile); err != nil {
 			return model.Config{}, nil, err
 		}
-	} else if _, err = readPrivate(cfg.ProfilesFile); err != nil {
+	} else if _, err = read(cfg.ProfilesFile); err != nil {
 		return fail()
 	}
 	return public, secret, nil
+}
+
+// localDatabaseURI bounds the interpretation before pgx can discover files.
+func localDatabaseURI(raw string) (string, error) {
+	for _, entry := range os.Environ() {
+		key, value, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "PG") && value != "" {
+			return "", model.ErrInvalidRequest
+		}
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") || u.Hostname() == "" || strings.ContainsAny(u.Hostname(), ",/\\") || u.User == nil || u.User.Username() == "" || len(u.Path) < 2 || u.Fragment != "" || u.Opaque != "" {
+		return "", model.ErrInvalidRequest
+	}
+	if pw, ok := u.User.Password(); !ok || pw == "" || strings.TrimSpace(pw) != pw || strings.IndexFunc(pw, unicode.IsControl) >= 0 {
+		return "", model.ErrInvalidRequest
+	}
+	for _, value := range []string{u.Hostname(), u.User.Username(), strings.TrimPrefix(u.Path, "/")} {
+		if value == "" || strings.TrimSpace(value) != value || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+			return "", model.ErrInvalidRequest
+		}
+	}
+	if port := u.Port(); port != "" {
+		n, e := strconv.Atoi(port)
+		if e != nil || n < 1 || n > 65535 {
+			return "", model.ErrInvalidRequest
+		}
+	}
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return "", model.ErrInvalidRequest
+	}
+	for key, values := range q {
+		if len(values) != 1 {
+			return "", model.ErrInvalidRequest
+		}
+		switch key {
+		case "sslmode":
+			if values[0] != "disable" {
+				return "", model.ErrInvalidRequest
+			}
+		case "application_name":
+			if values[0] == "" || len(values[0]) > 128 || !utf8.ValidString(values[0]) || strings.IndexFunc(values[0], unicode.IsControl) >= 0 {
+				return "", model.ErrInvalidRequest
+			}
+		case "connect_timeout":
+			n, e := strconv.Atoi(values[0])
+			if e != nil || n < 1 || n > 600 {
+				return "", model.ErrInvalidRequest
+			}
+		default:
+			return "", model.ErrInvalidRequest
+		}
+	}
+	if q.Get("sslmode") != "disable" {
+		return "", model.ErrInvalidRequest
+	}
+	// pgx/libpq URI decoding treats plus literally, unlike net/url query decoding.
+	u.RawQuery = strings.ReplaceAll(q.Encode(), "+", "%20")
+	return u.String(), nil
+}
+func localPoolConfig(raw string) (*pgxpool.Config, error) {
+	canonical, err := localDatabaseURI(raw)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := pgxpool.ParseConfig(canonical)
+	if err != nil {
+		return nil, model.ErrInvalidRequest
+	}
+	u, _ := url.Parse(canonical)
+	pw, _ := u.User.Password()
+	if cfg.ConnConfig.Host != u.Hostname() || cfg.ConnConfig.Database != strings.TrimPrefix(u.Path, "/") || cfg.ConnConfig.User != u.User.Username() || cfg.ConnConfig.Password != pw || cfg.ConnConfig.TLSConfig != nil || len(cfg.ConnConfig.Fallbacks) != 0 {
+		return nil, model.ErrInvalidRequest
+	}
+	expectedPort := uint16(5432)
+	if u.Port() != "" {
+		n, _ := strconv.Atoi(u.Port())
+		expectedPort = uint16(n)
+	}
+	if cfg.ConnConfig.Port != expectedPort {
+		return nil, model.ErrInvalidRequest
+	}
+	q := u.Query()
+	if name := q.Get("application_name"); name != "" && cfg.ConnConfig.RuntimeParams["application_name"] != name {
+		return nil, model.ErrInvalidRequest
+	}
+	if timeout := q.Get("connect_timeout"); timeout != "" {
+		n, _ := strconv.Atoi(timeout)
+		if cfg.ConnConfig.ConnectTimeout != time.Duration(n)*time.Second {
+			return nil, model.ErrInvalidRequest
+		}
+	}
+	return cfg, nil
 }
 func validInput(v string) bool {
 	return v != "" && len(v) <= 128 && strings.TrimSpace(v) == v && strings.IndexFunc(v, unicode.IsControl) < 0
@@ -281,7 +353,7 @@ func Run(ctx context.Context, action string, cfg Config) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
-	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	poolCfg, err := localPoolConfig(cfg.DatabaseURL)
 	if err != nil {
 		return model.ErrInvalidRequest
 	}

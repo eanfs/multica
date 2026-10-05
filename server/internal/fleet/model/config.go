@@ -33,6 +33,11 @@ func LoadConfig(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	return DecodeConfig(raw)
+}
+
+// DecodeConfig parses checked bytes with the same strict schema and resource defaults.
+func DecodeConfig(raw []byte) (Config, error) {
 	cfg := Config{MaxNodes: 2}
 	fields, err := DecodeStrictObject(raw, &cfg)
 	if err != nil {

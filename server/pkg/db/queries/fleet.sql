@@ -75,7 +75,7 @@ SELECT n.id,
  r.metadata,
  t.runtime_id,
  t.status,
- f.namespace, f.fleet_id, f.closed, f.generation, f.operation_key, f.finalized
+ f.namespace, f.fleet_id, f.closed, f.generation, f.operation_key, f.finalized, f.completion_manifest
 FROM fleet_nodes n CROSS JOIN fleet_node_operations o
  CROSS JOIN fleet_node_credentials c CROSS JOIN fleet_credential_profiles p
  CROSS JOIN "user" u CROSS JOIN agent_runtime r CROSS JOIN agent_task_queue t
@@ -158,16 +158,16 @@ WHERE namespace= @namespace AND fleet_id= @fleet_id AND generation= @generation 
 RETURNING *;
 
 -- name: OpenFleetNamespaceFence :execrows
-UPDATE fleet_namespace_fences SET closed=false,finalized=false
+UPDATE fleet_namespace_fences SET closed=false,finalized=false,completion_manifest=NULL
 WHERE namespace= @namespace AND fleet_id= @fleet_id AND operation_key= @operation_key AND generation= @generation AND closed;
 
 -- name: FinalizeFleetNamespaceFence :execrows
-UPDATE fleet_namespace_fences SET finalized=true
+UPDATE fleet_namespace_fences SET finalized=true,completion_manifest= @completion_manifest::jsonb
 WHERE namespace = @namespace AND fleet_id = @fleet_id AND operation_key = @operation_key
 AND generation = @generation AND closed AND NOT finalized;
 
 -- name: BeginFleetNamespaceDestroy :one
-UPDATE fleet_namespace_fences SET finalized=false,generation=generation+1
+UPDATE fleet_namespace_fences SET finalized=false,generation=generation+1,completion_manifest=NULL
 WHERE namespace = @namespace AND fleet_id = @fleet_id AND operation_key = @operation_key
 AND generation = @generation AND closed AND finalized RETURNING *;
 

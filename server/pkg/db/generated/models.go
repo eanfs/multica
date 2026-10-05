@@ -830,12 +830,13 @@ type FleetCredentialProfile struct {
 }
 
 type FleetNamespaceFence struct {
-	Namespace    string `json:"namespace"`
-	FleetID      string `json:"fleet_id"`
-	Closed       bool   `json:"closed"`
-	Generation   int64  `json:"generation"`
-	OperationKey string `json:"operation_key"`
-	Finalized    bool   `json:"finalized"`
+	Namespace          string `json:"namespace"`
+	FleetID            string `json:"fleet_id"`
+	Closed             bool   `json:"closed"`
+	Generation         int64  `json:"generation"`
+	OperationKey       string `json:"operation_key"`
+	Finalized          bool   `json:"finalized"`
+	CompletionManifest []byte `json:"completion_manifest"`
 }
 
 type FleetNode struct {

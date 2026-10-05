@@ -1,8 +1,11 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -41,6 +44,7 @@ func (r admissionRow) Scan(dest ...any) error {
 	*dest[3].(*int64) = 1
 	*dest[4].(*string) = "shutdown"
 	*dest[5].(*bool) = false
+	*dest[6].(*[]byte) = nil
 	return nil
 }
 
@@ -74,7 +78,7 @@ func TestNamespaceSQLSchemaShape(t *testing.T) {
 	var validIndex, notNull bool
 	err := pool.QueryRow(ctx, `SELECT current_database(),current_setting('server_version_num')::int,
  (SELECT indisunique AND indisvalid AND indisready FROM pg_index WHERE indexrelid='fleet_namespace_fences_namespace_uidx'::regclass),
- (SELECT count(*)=6 AND bool_and(attnotnull) FROM pg_attribute WHERE attrelid='fleet_namespace_fences'::regclass AND attnum>0 AND NOT attisdropped)`).Scan(&database, &version, &validIndex, &notNull)
+ (SELECT count(*) FILTER (WHERE attnotnull)=6 AND count(*)=7 AND count(*) FILTER (WHERE attname='completion_manifest' AND NOT attnotnull)=1 FROM pg_attribute WHERE attrelid='fleet_namespace_fences'::regclass AND attnum>0 AND NOT attisdropped)`).Scan(&database, &version, &validIndex, &notNull)
 	if err != nil || version < 170000 || !validIndex || !notNull {
 		t.Fatalf("namespace physical schema proof database=%s PG=%d unique/valid/ready=%v NOTNULL=%v error=%v", database, version, validIndex, notNull, err)
 	}
@@ -217,6 +221,136 @@ func TestNamespaceSQLProducerCommitAndCloseBudget(t *testing.T) {
 	}
 }
 
+func TestNamespaceManifestExcludesDiagnostics(t *testing.T) {
+	s := &Store{namespace: "fixture"}
+	n := model.Node{Namespace: "fixture", ID: pgtype.UUID{Bytes: [16]byte{15: 1}, Valid: true}, OwnerID: pgtype.UUID{Bytes: [16]byte{15: 2}, Valid: true}, Generation: 1, ErrorMessage: "synthetic-model-secret", Observation: model.Observation{Agents: []string{"synthetic-observation"}}}
+	c := NamespaceCompletion{Node: n, Ref: model.OperationRef{Namespace: "fixture", NodeID: n.ID, OperationID: pgtype.UUID{Bytes: [16]byte{15: 3}, Valid: true}, Generation: 1, Action: model.Stop}, Key: "original"}
+	raw, e := encodeCompletionManifest(NamespaceFence{Namespace: s.namespace, FleetID: "fleet", OperationKey: "key", Generation: 1}, model.Stop, []NamespaceCompletion{c})
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, forbidden := range []string{"synthetic-model-secret", "synthetic-observation", "Observation", "ErrorMessage", "ErrorCode", "HealthAt", "UpdatedAt", "ActiveRuns"} {
+		if bytes.Contains(raw, []byte(forbidden)) {
+			t.Fatalf("manifest included non-proof field %s", forbidden)
+		}
+	}
+}
+
+func TestNamespaceSQLManifestEmptyAndLegacy(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprint(legacy), func(t *testing.T) {
+			s, f, ns := namespaceFixture(t)
+			ctx := context.Background()
+			fence, e := s.CloseNamespace(ctx, "fixture-fleet", "shutdown")
+			if e != nil {
+				t.Fatal(e)
+			}
+			if legacy {
+				f.Exec(t, "UPDATE fleet_namespace_fences SET finalized=true WHERE namespace=$1", ns)
+			} else if e = s.CheckNamespaceCompletions(ctx, fence, model.Stop, nil); e != nil {
+				t.Fatal(e)
+			}
+			fence, e = s.GetNamespaceFence(ctx)
+			if e != nil {
+				t.Fatal(e)
+			}
+			cs, found, e := s.GetNamespaceCompletions(ctx, fence, model.Stop)
+			if legacy {
+				if e == nil || found {
+					t.Fatal("legacy missing proof adopted empty namespace")
+				}
+				if e = s.CheckNamespaceCompletions(ctx, fence, model.Stop, nil); e == nil {
+					t.Fatal("legacy proof backfilled")
+				}
+				if _, e = s.BeginNamespaceDestroy(ctx, fence); e == nil {
+					t.Fatal("legacy proof authorized destroy")
+				}
+				var absent bool
+				if e = s.pool.QueryRow(ctx, "SELECT completion_manifest IS NULL FROM fleet_namespace_fences WHERE namespace=$1", ns).Scan(&absent); e != nil || !absent {
+					t.Fatal("missing proof was backfilled")
+				}
+			} else {
+				if e != nil || !found || cs == nil || len(cs) != 0 {
+					t.Fatalf("original empty proof unavailable: %v", e)
+				}
+				if e = s.CheckNamespaceCompletions(ctx, fence, model.Stop, cs); e != nil {
+					t.Fatal(e)
+				}
+				if _, e = s.BeginNamespaceDestroy(ctx, fence); e != nil {
+					t.Fatal(e)
+				}
+			}
+		})
+	}
+}
+
+func TestNamespaceSQLFinalizedManifestRejectsDrift(t *testing.T) {
+	for _, change := range []string{"remove", "image"} {
+		t.Run(change, func(t *testing.T) {
+			s, f, ns := namespaceFixture(t)
+			ctx := context.Background()
+			owner := ownerUUID(t, f.UserID)
+			now := time.Now().UTC()
+			raw, err := encodeObservation(1, model.Observation{Status: "stopped", ContainerID: "owned", ObservedAt: now}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var proof []NamespaceCompletion
+			for _, suffix := range []string{"a", "b"} {
+				id := ownerUUID(t, f.FleetNode(t, ns, testutil.Cols{"status": "stopped", "desired": "stopped", "ready": false, "container_id": "owned", "observation": raw, "health_at": now}))
+				key := "shutdown-" + suffix
+				op := ownerUUID(t, f.Insert(t, "fleet_node_operations", testutil.Cols{"namespace": ns, "owner_id": f.UserID, "node_id": id, "action": "stop", "phase": "completed", "approved": true, "generation": int64(1), "idempotency_key": key, "request_hash": lifecycleFingerprint(id, model.Stop), "action_claimed_at": now.Add(-time.Second)}))
+				node, e := s.GetNode(ctx, owner, id)
+				if e != nil {
+					t.Fatal(e)
+				}
+				proof = append(proof, NamespaceCompletion{Node: node, Ref: model.OperationRef{Namespace: ns, NodeID: id, OperationID: op, Generation: 1, Action: model.Stop}, Key: key})
+			}
+			sort.Slice(proof, func(i, j int) bool { return bytes.Compare(proof[i].Node.ID.Bytes[:], proof[j].Node.ID.Bytes[:]) < 0 })
+			fence, e := s.CloseNamespace(ctx, "fixture-fleet", "shutdown")
+			if e != nil {
+				t.Fatal(e)
+			}
+			if e = s.CheckNamespaceCompletions(ctx, fence, model.Stop, proof); e != nil {
+				t.Fatal(e)
+			}
+			fence, e = s.GetNamespaceFence(ctx)
+			if e != nil {
+				t.Fatal(e)
+			}
+			b := proof[1].Node
+			if change == "remove" {
+				f.Exec(t, "DELETE FROM fleet_nodes WHERE namespace=$1 AND id=$2", ns, b.ID)
+			} else {
+				f.Exec(t, "UPDATE fleet_nodes SET image='substituted' WHERE namespace=$1 AND id=$2", ns, b.ID)
+			}
+			current, e := s.ListNamespaceNodes(ctx, pgtype.UUID{}, 100)
+			if e != nil {
+				t.Fatal(e)
+			}
+			var reduced []NamespaceCompletion
+			for _, n := range current {
+				for _, c := range proof {
+					if c.Node.ID == n.ID {
+						c.Node = n
+						reduced = append(reduced, c)
+					}
+				}
+			}
+			if e = s.CheckNamespaceCompletions(ctx, fence, model.Stop, reduced); e == nil {
+				t.Error("current subset/baseline replaced original finalized proof")
+			}
+			if _, e = s.BeginNamespaceDestroy(ctx, fence); e == nil {
+				t.Error("trusted destroy CAS crossed original proof drift")
+			}
+			after, e := s.GetNamespaceFence(ctx)
+			if e != nil || after != fence {
+				t.Fatalf("drift changed barrier: %v", e)
+			}
+		})
+	}
+}
+
 func TestNamespaceSQLCompletionRequiresOriginalReceipt(t *testing.T) {
 	for _, kind := range []string{"safe", "safe-delete", "unapproved", "missing-observation", "wrong-key", "wrong-generation", "opened", "altered-snapshot", "unexpected-node"} {
 		t.Run(kind, func(t *testing.T) {
@@ -279,7 +413,7 @@ func TestNamespaceSQLCompletionRequiresOriginalReceipt(t *testing.T) {
 			} else if e == nil {
 				t.Fatalf("%s forged completion proof authorized cleanup", kind)
 			}
-			whole := s.CheckNamespaceCompletions(ctx, fence, []NamespaceCompletion{{Node: expected, Ref: ref, Key: key}})
+			whole := s.CheckNamespaceCompletions(ctx, fence, action, []NamespaceCompletion{{Node: expected, Ref: ref, Key: key}})
 			if kind == "safe" || kind == "safe-delete" {
 				if whole != nil {
 					t.Fatal(whole)

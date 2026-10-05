@@ -3,9 +3,12 @@ package store
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
@@ -23,12 +26,12 @@ type NamespaceCompletion struct {
 // CheckNamespaceCompletions is the whole-namespace linearization point. Its
 // exclusive prefix prevents new maintenance intents during this SHORT SQL-only
 // proof; all sorted node locks precede all capacity locks. Failure preserves data.
-func (s *Store) CheckNamespaceCompletions(ctx context.Context, fence NamespaceFence, expected []NamespaceCompletion) error {
-	if !fence.Closed || fence.Generation < 1 || fence.Namespace != s.namespace {
+func (s *Store) CheckNamespaceCompletions(ctx context.Context, fence NamespaceFence, action model.Action, expected []NamespaceCompletion) error {
+	if !fence.Closed || fence.Generation < 1 || fence.Namespace != s.namespace || (action != model.Stop && action != model.Delete) {
 		return model.ErrConflict
 	}
 	for i, c := range expected {
-		if !s.validCompletion(c) || (i > 0 && bytes.Compare(expected[i-1].Node.ID.Bytes[:], c.Node.ID.Bytes[:]) >= 0) {
+		if !s.validCompletion(c) || c.Ref.Action != action || (i > 0 && bytes.Compare(expected[i-1].Node.ID.Bytes[:], c.Node.ID.Bytes[:]) >= 0) {
 			return model.ErrConflict
 		}
 	}
@@ -45,44 +48,25 @@ func (s *Store) CheckNamespaceCompletions(ctx context.Context, fence NamespaceFe
 		if current != fence {
 			return model.ErrConflict
 		}
-		after := pgtype.UUID{Valid: true}
-		seen := 0
-		for {
-			rows, err := q.ListFleetNamespaceNodes(ctx, db.ListFleetNamespaceNodesParams{Namespace: s.namespace, AfterID: after, PageLimit: 100})
-			if err != nil {
-				return err
+		if fence.Finalized {
+			original, originalAction, e := s.readCompletionManifest(ctx, q, fence)
+			if e != nil {
+				return e
 			}
-			if len(rows) == 0 {
-				break
+			if originalAction != action {
+				return model.ErrConflict
 			}
-			for _, n := range rows {
-				if seen >= len(expected) || n.ID != expected[seen].Node.ID || n.OwnerID != expected[seen].Node.OwnerID {
-					return model.ErrUnknownHealth
-				}
-				after = n.ID
-				seen++
-			}
+			expected = original
 		}
-		if seen != len(expected) {
-			return model.ErrUnknownHealth
-		}
-		for _, c := range expected {
-			if err := q.FleetNodeSharedLock(ctx, db.FleetNodeSharedLockParams{Namespace: s.namespace, NodeID: c.Node.ID}); err != nil {
-				return err
-			}
-		}
-		for _, c := range expected {
-			if err := q.FleetNodeCapacityLock(ctx, db.FleetNodeCapacityLockParams{Namespace: s.namespace, NodeID: c.Node.ID}); err != nil {
-				return err
-			}
-		}
-		for _, c := range expected {
-			if err := s.checkNamespaceCompletion(ctx, q, c); err != nil {
-				return err
-			}
+		if err := s.checkNamespaceProof(ctx, q, expected); err != nil {
+			return err
 		}
 		if !fence.Finalized {
-			changed, e := q.FinalizeFleetNamespaceFence(ctx, db.FinalizeFleetNamespaceFenceParams{Namespace: s.namespace, FleetID: fence.FleetID, OperationKey: fence.OperationKey, Generation: fence.Generation})
+			raw, e := encodeCompletionManifest(fence, action, expected)
+			if e != nil {
+				return e
+			}
+			changed, e := q.FinalizeFleetNamespaceFence(ctx, db.FinalizeFleetNamespaceFenceParams{CompletionManifest: raw, Namespace: s.namespace, FleetID: fence.FleetID, OperationKey: fence.OperationKey, Generation: fence.Generation})
 			if e != nil {
 				return e
 			}
@@ -92,6 +76,134 @@ func (s *Store) CheckNamespaceCompletions(ctx context.Context, fence NamespaceFe
 		}
 		return nil
 	})
+}
+
+func (s *Store) checkNamespaceProof(ctx context.Context, q *db.Queries, expected []NamespaceCompletion) error {
+	after := pgtype.UUID{Valid: true}
+	seen := 0
+	for {
+		rows, err := q.ListFleetNamespaceNodes(ctx, db.ListFleetNamespaceNodesParams{Namespace: s.namespace, AfterID: after, PageLimit: 100})
+		if err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, n := range rows {
+			if seen >= len(expected) || n.ID != expected[seen].Node.ID || n.OwnerID != expected[seen].Node.OwnerID {
+				return model.ErrUnknownHealth
+			}
+			after = n.ID
+			seen++
+		}
+	}
+	if seen != len(expected) {
+		return model.ErrUnknownHealth
+	}
+	for _, c := range expected {
+		if err := q.FleetNodeSharedLock(ctx, db.FleetNodeSharedLockParams{Namespace: s.namespace, NodeID: c.Node.ID}); err != nil {
+			return err
+		}
+	}
+	for _, c := range expected {
+		if err := q.FleetNodeCapacityLock(ctx, db.FleetNodeCapacityLockParams{Namespace: s.namespace, NodeID: c.Node.ID}); err != nil {
+			return err
+		}
+	}
+	for _, c := range expected {
+		if err := s.checkNamespaceCompletion(ctx, q, c); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// The persisted schema is a whitelist: never serialize a model.Node or its observations/errors.
+type completionBaseline struct {
+	ID, OwnerID                                                             pgtype.UUID
+	Namespace, ContainerID, DaemonID, StartEpoch, DataVolume, SecretsVolume string
+	Image, ProfileRef, Spec, Name                                           string
+	Resources                                                               model.Spec
+	CreatedAt                                                               time.Time
+	Generation                                                              int64
+}
+type manifestCompletion struct {
+	Baseline completionBaseline
+	Ref      model.OperationRef
+	Key      string
+}
+type completionManifest struct {
+	Version                          int
+	Namespace, FleetID, OperationKey string
+	Generation                       int64
+	Action                           model.Action
+	Completions                      []manifestCompletion
+}
+
+func baseline(n model.Node) completionBaseline {
+	return completionBaseline{ID: n.ID, OwnerID: n.OwnerID, Namespace: n.Namespace, ContainerID: n.ContainerID, DaemonID: n.DaemonID, StartEpoch: n.StartEpoch, DataVolume: n.DataVolume, SecretsVolume: n.SecretsVolume, Image: n.Image, ProfileRef: n.ProfileRef, Spec: n.Spec, Name: n.Name, Resources: n.Resources, CreatedAt: n.CreatedAt, Generation: n.Generation}
+}
+func (b completionBaseline) node() model.Node {
+	return model.Node{ID: b.ID, OwnerID: b.OwnerID, Namespace: b.Namespace, ContainerID: b.ContainerID, DaemonID: b.DaemonID, StartEpoch: b.StartEpoch, DataVolume: b.DataVolume, SecretsVolume: b.SecretsVolume, Image: b.Image, ProfileRef: b.ProfileRef, Spec: b.Spec, Name: b.Name, Resources: b.Resources, CreatedAt: b.CreatedAt, Generation: b.Generation}
+}
+func encodeCompletionManifest(f NamespaceFence, action model.Action, cs []NamespaceCompletion) ([]byte, error) {
+	m := completionManifest{Version: 1, Namespace: f.Namespace, FleetID: f.FleetID, OperationKey: f.OperationKey, Generation: f.Generation, Action: action, Completions: make([]manifestCompletion, 0, len(cs))}
+	for _, c := range cs {
+		m.Completions = append(m.Completions, manifestCompletion{Baseline: baseline(c.Node), Ref: c.Ref, Key: c.Key})
+	}
+	return json.Marshal(m)
+}
+func (s *Store) readCompletionManifest(ctx context.Context, q *db.Queries, f NamespaceFence) ([]NamespaceCompletion, model.Action, error) {
+	row, e := q.GetFleetNamespaceFence(ctx, s.namespace)
+	if e != nil {
+		return nil, "", e
+	}
+	if fenceFromRow(row) != f || !f.Finalized {
+		return nil, "", model.ErrConflict
+	}
+	if len(row.CompletionManifest) == 0 {
+		return nil, "", model.ErrUnknownHealth
+	}
+	var m completionManifest
+	dec := json.NewDecoder(bytes.NewReader(row.CompletionManifest))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&m) != nil || dec.Decode(new(any)) != io.EOF || m.Version != 1 || m.Namespace != f.Namespace || m.FleetID != f.FleetID || m.OperationKey != f.OperationKey || m.Generation != f.Generation || m.Completions == nil || (m.Action != model.Stop && m.Action != model.Delete) {
+		return nil, "", model.ErrUnknownHealth
+	}
+	cs := make([]NamespaceCompletion, 0, len(m.Completions))
+	for i, c := range m.Completions {
+		item := NamespaceCompletion{Node: c.Baseline.node(), Ref: c.Ref, Key: c.Key}
+		if !s.validCompletion(item) || item.Ref.Action != m.Action || (i > 0 && bytes.Compare(cs[i-1].Node.ID.Bytes[:], item.Node.ID.Bytes[:]) >= 0) {
+			return nil, "", model.ErrUnknownHealth
+		}
+		cs = append(cs, item)
+	}
+	return cs, m.Action, nil
+}
+
+// GetNamespaceCompletions reads only the durable original cycle, never current nodes.
+func (s *Store) GetNamespaceCompletions(ctx context.Context, f NamespaceFence, action model.Action) (cs []NamespaceCompletion, found bool, err error) {
+	if f.Namespace != s.namespace || !f.Closed || !f.Finalized || (action != model.Stop && action != model.Delete) {
+		return nil, false, model.ErrConflict
+	}
+	ctx, cancel := context.WithTimeout(ctx, databaseTimeout)
+	defer cancel()
+	err = s.WithTx(ctx, func(q *db.Queries) error {
+		if e := q.FleetNamespaceSharedLock(ctx, s.namespace); e != nil {
+			return e
+		}
+		original, a, e := s.readCompletionManifest(ctx, q, f)
+		if e != nil {
+			return e
+		}
+		if a == action {
+			cs = original
+			found = true
+		}
+		return nil
+	})
+	return
 }
 
 // BeginNamespaceDestroy opens only negative work in a new trusted cycle.
@@ -112,6 +224,13 @@ func (s *Store) BeginNamespaceDestroy(ctx context.Context, expected NamespaceFen
 		}
 		if current != expected {
 			return model.ErrConflict
+		}
+		original, _, e := s.readCompletionManifest(ctx, q, expected)
+		if e != nil {
+			return e
+		}
+		if e = s.checkNamespaceProof(ctx, q, original); e != nil {
+			return e
 		}
 		row, e := q.BeginFleetNamespaceDestroy(ctx, db.BeginFleetNamespaceDestroyParams{Namespace: s.namespace, FleetID: expected.FleetID, OperationKey: expected.OperationKey, Generation: expected.Generation})
 		if e != nil {
