@@ -299,6 +299,14 @@ quiesce 必须先持久关闭 namespace 准入，再 bounded keyset 枚举全部
 
 destroy 要求有效 fence generation/key、再次受控 Delete、原 ref→absence proof→data-last→SQL completion，等待完成；未知资源和 owner/labels 不一致保留 DB/registry。开放 fence 只能由显式 up/resume 的相同环境身份及 generation CAS，不能自动清除失败关闭屏障。profile prepare 不等于开放现有 fence。
 
+### 14.3 全 namespace 完成与持久终结屏障
+
+逐节点完成证明之后，operator 在一个总预算不超过 2 秒的 SQL Tx 中先取得 namespace exclusive lock，再枚举所有当前节点，按稳定顺序取得所有 node locks，再取得 capacity locks。它同时复核原 typed refs、operation keys、不可变节点快照、当前 SQL idle 与实际完成记录；事务中没有 HTTP/Docker I/O。缺失或被其他操作改写的必要节点不能自动当作完成。
+
+该 Tx 必须持久写入 finalized 标志。仅做末尾读取不能阻止“返回成功后、API 停止前”进入的新 Stop/Delete。finalized=true 时，新的正向和负向维护均拒绝；原已完成操作的纯只读重放仍可保留。prepare/status/重试不能解除终结屏障。关闭过程中的原 bootstrap winner 保持既有注册规则，不通过增加 CheckRegister namespace gate 改写原 winner 的权利。
+
+已终结 stop cycle 后的 destroy 需要可信 operator 的相同身份、相同 key、expected-generation CAS：仍保持 closed，清除 finalized，推进 namespace generation，再执行新 cycle 的原 Delete 证明。完成 destroy 时重新终结。显式 resume 是另一项可信 CAS，不是公开节点操作的副作用。579/580 已在受控数据库中应用，新字段使用独立 581 additive migration，不能改写已应用的 579 来模拟升级。
+
 ## 15. 后续步骤
 
 本文描述已授权实施的目标能力，不是已实现功能。保持现有 15 项实施计划，先实现 fake Provider、Store、配置分离和屏障，再接 Docker 镜像与共享界面。SQL 查询变更须重新生成 sqlc。
