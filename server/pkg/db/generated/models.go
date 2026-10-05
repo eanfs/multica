@@ -857,6 +857,7 @@ type FleetNode struct {
 	ErrorCode      string             `json:"error_code"`
 	ErrorMessage   string             `json:"error_message"`
 	SpecConfig     []byte             `json:"spec_config"`
+	Observation    []byte             `json:"observation"`
 }
 
 type FleetNodeCredential struct {
@@ -872,22 +873,26 @@ type FleetNodeCredential struct {
 }
 
 type FleetNodeOperation struct {
-	ID             pgtype.UUID        `json:"id"`
-	Namespace      string             `json:"namespace"`
-	OwnerID        pgtype.UUID        `json:"owner_id"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
-	NodeID         pgtype.UUID        `json:"node_id"`
-	Action         string             `json:"action"`
-	IdempotencyKey string             `json:"idempotency_key"`
-	RequestHash    string             `json:"request_hash"`
-	Phase          string             `json:"phase"`
-	PriorDesired   string             `json:"prior_desired"`
-	Generation     int64              `json:"generation"`
-	Approved       bool               `json:"approved"`
-	Attempts       int32              `json:"attempts"`
-	ErrorCode      string             `json:"error_code"`
-	ErrorMessage   string             `json:"error_message"`
+	ID                 pgtype.UUID        `json:"id"`
+	Namespace          string             `json:"namespace"`
+	OwnerID            pgtype.UUID        `json:"owner_id"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	NodeID             pgtype.UUID        `json:"node_id"`
+	Action             string             `json:"action"`
+	IdempotencyKey     string             `json:"idempotency_key"`
+	RequestHash        string             `json:"request_hash"`
+	Phase              string             `json:"phase"`
+	PriorDesired       string             `json:"prior_desired"`
+	Generation         int64              `json:"generation"`
+	Approved           bool               `json:"approved"`
+	Attempts           int32              `json:"attempts"`
+	ErrorCode          string             `json:"error_code"`
+	ErrorMessage       string             `json:"error_message"`
+	BootstrapClaimedAt pgtype.Timestamptz `json:"bootstrap_claimed_at"`
+	BootstrapMinted    bool               `json:"bootstrap_minted"`
+	NonRetryable       bool               `json:"non_retryable"`
+	NextAttemptAt      pgtype.Timestamptz `json:"next_attempt_at"`
 }
 
 type GithubInstallation struct {

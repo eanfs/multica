@@ -134,19 +134,24 @@ func (s *Store) GetOperation(ctx context.Context, ownerID, operationID pgtype.UU
 
 func operationFromRow(row db.FleetNodeOperation) model.Operation {
 	return model.Operation{
-		ID:             row.ID,
-		NodeID:         row.NodeID,
-		OwnerID:        row.OwnerID,
-		Action:         model.Action(row.Action),
-		Phase:          row.Phase,
-		IdempotencyKey: row.IdempotencyKey,
-		RequestHash:    row.RequestHash,
-		PriorDesired:   row.PriorDesired,
-		Generation:     row.Generation,
-		Approved:       row.Approved,
-		Attempts:       int(row.Attempts),
-		CreatedAt:      row.CreatedAt.Time,
-		UpdatedAt:      row.UpdatedAt.Time,
+		ID:                 row.ID,
+		NodeID:             row.NodeID,
+		OwnerID:            row.OwnerID,
+		Action:             model.Action(row.Action),
+		Phase:              row.Phase,
+		IdempotencyKey:     row.IdempotencyKey,
+		RequestHash:        row.RequestHash,
+		PriorDesired:       row.PriorDesired,
+		Generation:         row.Generation,
+		Approved:           row.Approved,
+		Attempts:           int(row.Attempts),
+		BootstrapClaimedAt: row.BootstrapClaimedAt.Time,
+		BootstrapMinted:    row.BootstrapMinted,
+		NonRetryable:       row.NonRetryable,
+		NextAttemptAt:      row.NextAttemptAt.Time,
+		ErrorCode:          row.ErrorCode,
+		CreatedAt:          row.CreatedAt.Time,
+		UpdatedAt:          row.UpdatedAt.Time,
 	}
 }
 
@@ -159,7 +164,7 @@ func nodeFromRow(row db.FleetNode) (model.Node, error) {
 	if row.HealthAt.Valid {
 		health = row.HealthAt.Time
 	}
-	return model.Node{
+	n := model.Node{
 		Resources:      resources,
 		ID:             row.ID,
 		OwnerID:        row.OwnerID,
@@ -187,5 +192,8 @@ func nodeFromRow(row db.FleetNode) (model.Node, error) {
 		FailedReports:  int(row.FailedReports),
 		Maintenance:    row.Maintenance,
 		Revoked:        row.Revoked,
-	}, nil
+	}
+	var err error
+	n.Observation, err = decodeObservation(row.Observation, n)
+	return n, err
 }

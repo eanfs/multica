@@ -44,7 +44,7 @@ func TestCheckSchemaEmptyFleetAndMissingColumns(t *testing.T) {
 	if e = s.CheckSchema(ctx); e != nil {
 		t.Fatalf("empty fully migrated schema: %v", e)
 	}
-	for _, tc := range []struct{ table, column string }{{"fleet_nodes", "spec_config"}, {"fleet_node_credentials", "generation"}, {"fleet_node_operations", "approved"}, {"fleet_credential_profiles", "config_version"}, {"agent_runtime", "metadata"}, {"agent_task_queue", "status"}} {
+	for _, tc := range []struct{ table, column string }{{"fleet_nodes", "observation"}, {"fleet_node_operations", "bootstrap_claimed_at"}, {"fleet_node_operations", "bootstrap_minted"}, {"fleet_node_operations", "non_retryable"}, {"fleet_node_operations", "next_attempt_at"}, {"fleet_nodes", "spec_config"}, {"fleet_node_credentials", "generation"}, {"fleet_node_operations", "approved"}, {"fleet_credential_profiles", "config_version"}, {"agent_runtime", "metadata"}, {"agent_task_queue", "status"}} {
 		t.Run(tc.table+"_"+tc.column, func(t *testing.T) {
 			table := quoted + "." + pgx.Identifier{tc.table}.Sanitize()
 			col := pgx.Identifier{tc.column}.Sanitize()

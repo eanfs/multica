@@ -30,6 +30,7 @@ SELECT n.id,
  n.error_code,
  n.error_message,
  n.spec_config,
+ n.observation,
  o.id,
  o.namespace,
  o.owner_id,
@@ -44,6 +45,10 @@ SELECT n.id,
  o.generation,
  o.approved,
  o.attempts,
+ o.bootstrap_claimed_at,
+ o.bootstrap_minted,
+ o.non_retryable,
+ o.next_attempt_at,
  o.error_code,
  o.error_message,
  c.id,
@@ -269,3 +274,125 @@ WHERE c.namespace = @namespace AND c.token_hash = @token_hash AND c.revoked_at I
  AND NOT n.revoked AND n.desired <> 'terminated' AND n.status <> 'terminated'
  AND c.generation = (SELECT max(h.generation) FROM fleet_node_credentials h
    WHERE h.namespace = n.namespace AND h.node_id = n.id AND h.owner_id = n.owner_id);
+
+-- name: FleetRecoveryClock :one
+SELECT clock_timestamp()::timestamptz AS sql_now;
+
+-- name: ListFleetRecoverable :many
+-- Projections are scheduling candidates, not physical authority.
+SELECT o.* FROM fleet_node_operations o JOIN fleet_nodes n
+ ON n.namespace=o.namespace AND n.owner_id=o.owner_id AND n.id=o.node_id AND n.generation=o.generation
+WHERE o.namespace= @namespace AND o.phase IN ('queued','preparing','prepared','applying')
+ AND NOT o.non_retryable AND o.attempts<5
+ AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=clock_timestamp())
+ AND (o.action<>'create' OR n.container_id<>'' OR o.bootstrap_claimed_at IS NULL
+  OR (o.bootstrap_claimed_at<=clock_timestamp() AND o.bootstrap_claimed_at+interval '5 minutes'<=clock_timestamp()))
+ORDER BY o.created_at,o.id LIMIT 100;
+
+-- name: FleetClaimBootstrap :one
+UPDATE fleet_node_operations o SET bootstrap_claimed_at=clock_timestamp(),phase='applying',updated_at=now()
+WHERE o.namespace= @namespace AND o.owner_id= @owner_id AND o.node_id= @node_id AND o.id= @operation_id
+ AND o.generation= @generation AND o.action='create' AND o.phase IN ('queued','prepared')
+ AND o.bootstrap_claimed_at IS NULL AND NOT o.bootstrap_minted AND NOT o.non_retryable AND o.attempts<5
+ AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=clock_timestamp())
+ AND EXISTS (SELECT 1 FROM fleet_nodes n WHERE n.namespace=o.namespace AND n.owner_id=o.owner_id AND n.id=o.node_id
+  AND n.generation=o.generation AND n.container_id='' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running')
+RETURNING o.*;
+
+-- name: FleetMarkBootstrapMinted :execrows
+UPDATE fleet_node_operations o SET bootstrap_minted=true,updated_at=now()
+WHERE o.namespace= @namespace AND o.owner_id= @owner_id AND o.node_id= @node_id AND o.id= @operation_id
+ AND o.generation= @generation AND o.action='create' AND o.phase='applying'
+ AND o.bootstrap_claimed_at= @claimed_at AND o.bootstrap_claimed_at<=clock_timestamp()
+ AND o.bootstrap_claimed_at+interval '5 minutes'>clock_timestamp() AND NOT o.bootstrap_minted AND NOT o.non_retryable
+ AND EXISTS (SELECT 1 FROM fleet_nodes n WHERE n.namespace=o.namespace AND n.owner_id=o.owner_id AND n.id=o.node_id
+  AND n.generation=o.generation AND n.container_id='' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running');
+
+-- name: FleetConfirmBootstrap :execrows
+UPDATE fleet_nodes n SET container_id= @container_id,start_epoch= @start_epoch,status= @status,ready=false,updated_at=now()
+FROM fleet_node_operations o
+WHERE n.namespace= @namespace AND n.owner_id= @owner_id AND n.id= @node_id AND n.generation= @generation
+ AND n.container_id='' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running'
+ AND o.namespace=n.namespace AND o.owner_id=n.owner_id AND o.node_id=n.id AND o.generation=n.generation
+ AND o.id= @operation_id AND o.action='create' AND o.phase='applying' AND o.bootstrap_minted AND NOT o.non_retryable
+ AND o.bootstrap_claimed_at= @claimed_at AND o.bootstrap_claimed_at<=clock_timestamp()
+ AND o.bootstrap_claimed_at+interval '5 minutes'>clock_timestamp();
+
+-- name: FleetExpireBootstrapNode :execrows
+UPDATE fleet_nodes n SET revoked=true,ready=false,error_code='bootstrap-unrecoverable',error_message='',updated_at=now()
+FROM fleet_node_operations o
+WHERE n.namespace= @namespace AND n.owner_id= @owner_id AND n.id= @node_id AND n.generation= @generation
+ AND n.container_id='' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running'
+ AND o.namespace=n.namespace AND o.owner_id=n.owner_id AND o.node_id=n.id AND o.generation=n.generation
+ AND o.id= @operation_id AND o.action='create' AND o.phase='applying' AND NOT o.non_retryable
+ AND o.bootstrap_claimed_at= @claimed_at AND o.bootstrap_claimed_at<=clock_timestamp()
+ AND o.bootstrap_claimed_at+interval '5 minutes'<=clock_timestamp();
+
+-- name: FleetExpireBootstrapOperation :execrows
+UPDATE fleet_node_operations SET non_retryable=true,error_code='bootstrap-unrecoverable',error_message='',updated_at=now()
+WHERE namespace= @namespace AND owner_id= @owner_id AND node_id= @node_id AND id= @operation_id
+ AND generation= @generation AND action='create' AND phase='applying' AND NOT non_retryable
+ AND bootstrap_claimed_at= @claimed_at AND bootstrap_claimed_at<=clock_timestamp()
+ AND bootstrap_claimed_at+interval '5 minutes'<=clock_timestamp();
+
+-- name: FleetRecordObservation :execrows
+UPDATE fleet_nodes SET observation= @observation,
+ status=CASE WHEN desired IN ('terminating','terminated') THEN status ELSE @status END,
+ start_epoch=CASE WHEN @start_epoch::text<>'' THEN @start_epoch ELSE start_epoch END,
+ ready=(@ready::boolean AND NOT maintenance AND NOT revoked AND desired='running'),
+ health_at= @observed_at,active_runs= @active_runs,pending_reports= @pending_reports,failed_reports= @failed_reports,updated_at=now()
+WHERE namespace= @namespace AND owner_id= @owner_id AND id= @node_id AND generation= @generation
+ AND @observed_at::timestamptz<=clock_timestamp() AND @observed_at::timestamptz>=clock_timestamp()-interval '30 seconds'
+ AND (health_at IS NULL OR health_at<= @observed_at);
+
+-- name: FleetCompleteOperation :execrows
+UPDATE fleet_node_operations SET phase='completed',error_code='',error_message='',next_attempt_at=NULL,updated_at=now()
+WHERE namespace= @namespace AND owner_id= @owner_id AND node_id= @node_id AND id= @operation_id
+ AND generation= @generation AND action= @action AND approved= @approved AND phase= @phase
+ AND phase IN ('queued','prepared','applying') AND NOT non_retryable;
+
+-- name: FleetFinishLifecycleNode :execrows
+UPDATE fleet_nodes SET status= @status,start_epoch= @start_epoch,maintenance=false,ready= @ready,updated_at=now()
+WHERE namespace= @namespace AND owner_id= @owner_id AND id= @node_id AND generation= @generation AND NOT revoked
+ AND desired= @desired;
+
+-- name: FleetScheduleOperation :execrows
+-- Unknown defers do not spend attempts; actual errors do. No phase/approval/claim mutation.
+UPDATE fleet_node_operations SET attempts=LEAST(5,attempts+ sqlc.arg(attempt_increment)::integer),
+ non_retryable=(@permanent::boolean OR attempts+ sqlc.arg(attempt_increment)::integer>=5),error_code= @error_code,error_message='',
+ next_attempt_at=clock_timestamp()+ sqlc.arg(delay_seconds)::integer*interval '1 second',updated_at=now()
+WHERE namespace= @namespace AND owner_id= @owner_id AND node_id= @node_id AND id= @operation_id
+ AND generation= @generation AND action= @action AND phase= @phase AND approved= @approved AND attempts= @attempts
+ AND phase IN ('queued','preparing','prepared','applying') AND NOT non_retryable;
+
+-- name: FleetDeleteRuntimes :many
+SELECT r.* FROM agent_runtime r WHERE r.owner_id= @owner_id
+ AND r.metadata->>'managed_by'='local_fleet' AND r.metadata->>'fleet_node_id'= @node_text::text ORDER BY r.id;
+
+-- name: FleetOfflineDeletedRuntime :execrows
+UPDATE agent_runtime SET status='offline',metadata=metadata || '{"fleet_tombstone":true}'::jsonb,updated_at=now()
+WHERE id= @runtime_id AND owner_id= @owner_id AND metadata->>'managed_by'='local_fleet' AND metadata->>'fleet_node_id'= @node_text::text;
+
+-- name: FleetTombstoneNode :execrows
+UPDATE fleet_nodes n SET desired='terminated',status='terminated',ready=false,revoked=true,updated_at=now()
+FROM fleet_node_operations o WHERE n.namespace= @namespace AND n.owner_id= @owner_id AND n.id= @node_id AND n.generation= @generation
+ AND n.maintenance AND n.revoked AND n.desired='terminating'
+ AND o.namespace=n.namespace AND o.owner_id=n.owner_id AND o.node_id=n.id AND o.generation=n.generation
+ AND o.id= @operation_id AND o.action='delete' AND o.approved AND o.phase IN ('queued','prepared','applying') AND NOT o.non_retryable;
+
+-- name: FleetFailBootstrapNode :execrows
+UPDATE fleet_nodes n SET revoked=true,ready=false,error_code= @error_code,error_message='',updated_at=now()
+FROM fleet_node_operations o
+WHERE n.namespace= @namespace AND n.owner_id= @owner_id AND n.id= @node_id AND n.generation= @generation
+ AND n.container_id='' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running'
+ AND o.namespace=n.namespace AND o.owner_id=n.owner_id AND o.node_id=n.id AND o.generation=n.generation
+ AND o.id= @operation_id AND o.action='create' AND o.phase='applying' AND NOT o.non_retryable
+ AND o.bootstrap_claimed_at= @claimed_at AND o.bootstrap_claimed_at<=clock_timestamp()
+ AND o.bootstrap_claimed_at+interval '5 minutes'>clock_timestamp();
+
+-- name: FleetFailBootstrapOperation :execrows
+UPDATE fleet_node_operations SET non_retryable=true,error_code= @error_code,error_message='',updated_at=now()
+WHERE namespace= @namespace AND owner_id= @owner_id AND node_id= @node_id AND id= @operation_id
+ AND generation= @generation AND action='create' AND phase='applying' AND NOT non_retryable
+ AND bootstrap_claimed_at= @claimed_at AND bootstrap_claimed_at<=clock_timestamp()
+ AND bootstrap_claimed_at+interval '5 minutes'>clock_timestamp();

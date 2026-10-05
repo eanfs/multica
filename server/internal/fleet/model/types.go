@@ -30,6 +30,8 @@ var (
 )
 
 type Node struct {
+	// Observation is an internal durable diagnostic, never maintenance approval.
+	Observation                                                     Observation
 	Resources                                                       Spec
 	CreatedAt, UpdatedAt                                            time.Time
 	ID, OwnerID                                                     pgtype.UUID
@@ -45,6 +47,9 @@ type Node struct {
 }
 
 type Operation struct {
+	BootstrapClaimedAt, NextAttemptAt                time.Time
+	BootstrapMinted, NonRetryable                    bool
+	ErrorCode                                        string
 	CreatedAt, UpdatedAt                             time.Time
 	ID, NodeID, OwnerID                              pgtype.UUID
 	Action                                           Action
