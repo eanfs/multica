@@ -1,0 +1,56 @@
+# Local Fleet Namespace Operator Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development to implement this approved extension task-by-task. Review each deliverable before the next task.
+
+**Goal:** Complete the missing whole-namespace shutdown and profile projection prerequisite of original Task13 without bypassing the accepted per-node proof protocol.
+
+**Architecture:** Persistent namespace admission closure precedes all per-node maintenance. An explicit trusted operator composes existing Store and Maintainer methods, while scripts own validated environment/network/resource provenance. No new public API or authentication bypass.
+
+**Tech Stack:** Go1.26.6, pgx-v5, sqlc1.31.1, PG17+, existing Docker SDK/HTTP typed clients and hermetic Bash fixtures.
+
+**Spec:** [Approved design](<../specs/2026-10-04-local-docker-cloud-runtime-design.md#L284>) section14. Original Tasks1–12 SOURCE accepted660357f; WIP51b64e7 contains only five preserved partial scripts/configs, not acceptedTask13. OriginalTask13 global constraints still apply.
+
+## Global Constraints
+
+- SQL2s includes pool/locks/rollback; diagnosis5s; ordinaryDocker/Delete30s; bootstrap private5min original budget; no lease remint/renew or reconstructed Apply authority.
+- Namespace shared/exclusive prefix is new; original node→capacity→workspace→runtime→sorted agent/task order remains. All external I/O outside Tx.
+- No FK/cascade/implicit indexes; every concurrent index separate migration with runner cleanup maps. Regenerate via make sqlc, no manual generated-code edits.
+- default2CPU/4GiB/256PIDs/1run/node/2nodes/owner, positive explicit overrides. Claude-only, no automatic business Agent creation.
+- shared managed worktree DB/registry, no second PG/public rebind/guessed gateway/network/foreign resource adoption; approved profiles600 and model secrets absent SQL/env/images/logs.
+- User authorized source expansion and scoped SQL/Docker/fake-Claude verification. Lead verifies exact owned environment before physical actions; AWS requires target identity first. No global prune/automatic push/merge.
+
+### Task13A: Namespace gate and trusted operator
+
+**Files:** Create server/migrations/579_fleet_namespace_fences.{up,down}.sql and580_fleet_namespace_fences_namespace_index.{up,down}.sql; create server/internal/fleet/store/namespace.go, namespace_test.go; create server/internal/fleet/operator/operator.go, operator_test.go, profiles.go, profiles_test.go; create server/cmd/fleet-env/main.go, main_test.go. Modify server/pkg/db/queries/fleet.sql, generated/fleet.sql.go and generated/models.go; server/internal/fleet/store/intents.go,intents_test.go,maintenance.go,maintenance_test.go,schema_test.go; server/internal/fleetguard/claim.go,claim_test.go; server/cmd/migrate/main.go,main_test.go for index cleanup ONLY. Existing generator may change another generated file only if actual output requires it and recorded. No UI/cloud/AWS/provider/daemon changes.
+
+**Interfaces:** store.NamespaceFence contains Namespace,FleetID,OperationKey string, Generation int64, Closed bool. Store.CloseNamespace(ctx context.Context,fleetID,key string)(NamespaceFence,error), Store.OpenNamespace(ctx context.Context,expected NamespaceFence)error, Store.GetNamespaceFence(ctx context.Context)(NamespaceFence,error), Store.ListNamespaceNodes(ctx context.Context,after pgtype.UUID,limit int32)([]model.Node,error); exported store.CheckNamespaceAdmission(ctx context.Context,q *db.Queries,namespace string)error acquires shared lock and checks same-Tx gate. Only bounded private operation composition calls Close/Open; no public body accepts fence state. Existing producer transactions call helper BEFORE old locks. Missing row is generation0/open but missing schema/read error fails closed. Close samekey retry retains generation; wrongFleetID/key/epoch conflicts, no unconditional open.
+
+**Operator:** operator.Run(ctx context.Context, action string, cfg Config) error; Config has Namespace,FleetID,FleetURL,DatabaseURL,ConfigFile,ServiceKeyFile,ProfilesFile,OperationKey string and Timeout time.Duration. Command reads explicit inputs, never migrates or creates DB. Actions prepare|quiesce|destroy|resume|status; script-facing output only bounded nonsecret status. prepare validates strict private map shape version-positive-int + owners map[UUID]absolute-approved-path, then uses Store.UpsertProfiles. Existing profile loader handles credential contents outside Tx. Runner adapters use trusted SQL owners and typed refs for diagnosis/lifecycle; no direct raw SQL in shell. Injectable fake dependencies for command/default tests; real resource construction only after argument/config/ownership validation. Resume CAS must not silently reopen on prepare/status/error.
+
+- [ ] **Step1:** Add canonical default fake runner regressions named TestBusyQuiesceKeepsAPIAndFence, TestUnknownCleanupPreservesDatabase, TestNamespaceCloseRejectsNewWork, TestProfileMapRejectsBadOwnerAndVersion. Add SQL concurrency tests using actual testutil.NewFleetFixture and owned namespace, not hand-assumed PG. Minimal namespace test body:
+
+	repo := New(pool, ns, WithProvisioningConfig(fakeConfig(ns)))
+	fence, err := repo.CloseNamespace(ctx, "fixture-fleet", "shutdown-key")
+	if err != nil || !fence.Closed { t.Fatalf("close: %+v %v", fence, err) }
+	_, _, _, err = repo.CreateIntent(ctx, owner, model.CreateRequest{Name:"new", Spec:"local-small", IdempotencyKey:"after-close"})
+	if !errors.Is(err, model.ErrBusy) { t.Fatalf("new create crossed fence: %v", err) }
+
+Additional deterministic channels force a producer to hold shared lock, concurrent Close must wait/2s budget, aftercommit all owners/start/reboot/claim/reclaim/enqueue deny; positive ordinary runtime path untouched. Wrong key/epoch/FleetID open denies; correct deliberate resume works. Profile version stale/tombstone behavior stays canonical existing tests. Missingtable/columns startup unavailable.
+- [ ] **Step2:** Run narrow default fake tests before implementation. Missing identifier/setup/build errors are not behavior RED; minimal boundary stubs may precede actual collected behavioral RED. SQL case may run only after Lead supplies verified owned DB execution contract; absent environment is SETUP, not RED.
+- [ ] **Step3:** Implement table/query/advisory namespace gate then consumers. Migration579 contains table only;580 one concurrent unique namespace index. Add index up/down cleanup. Preserve same-key durable read-only replay, block new positive work atomically. Do not acquire namespace late after node locks; caller held-lock proofs include gate or reject whole transaction for rediscovery. All-owner listing stableUUID/100 bounded, no offset/racy single-owner snapshot.
+- [ ] **Step4:** Compose operator with actual Maintainer.Request/Review and existing client transport seams. Close fence first; approved node stop/delete same ref then await actual Worker/SQL completion with bounded status polling. Keep worker/API alive on busy/unknown; validate owned resources rather than aggregate row count alone. Explicit private profiles projection/strict mode/readability; no silent compatibility loader. Re-run default+narrow SQL/race against verified owned schema; capture actual RED/GREEN/counts/skips/secrets-free logs. No actual Docker/model required for13A source acceptance.
+- [ ] **Step5:** Record all source/schema/generated/test bytes PRE/POST/committed, gitdiffcheck, atomic feat(fleet): add namespace admission fence and trusted environment operator. Release source seat, fresh ONE full13A NET spec+quality review, then scoped fix NET only if findings. No selfacceptance/push/merge/whole-system claims.
+
+### Task13B: Finish managed environment scripts
+
+Original Task13 authorized10sourcefiles: docker-compose.fleet.yml,scripts/fleet-env.sh,scripts/fleet-env.test.sh,fleet-config.example.json,scripts/dev-env.sh,scripts/dev-env.test.sh,Makefile,.env.example,.gitignore,AGENTS.md. Only after13A SOURCE acceptance; own fresh source seat.
+
+- [ ] **Step1:** Extend canonical hermetic tests for TestSharedPGNetworkURLPreservesDatabaseAndOptions, TestLinuxLoopbackPGIsNotGateway, TestNodesDoNotJoinPGNetwork, BusyKeepsAPI and FailedResourceCleanupKeepsDBRegistry. Existing TestUnknownComponentDeniedBeforeAPIStop remains ONE canonical named regression, no duplicate policy matrices.
+- [ ] **Step2:** Real behavior RED before prepare implementation; full fake PATH/ownedHOME/Temp checkout no real fallback. Privatefixture owner/image/map/socketUID/GID/network and managed descriptor all supplied. Wrong/missing source/network/UID/profile/privatefiles produce named denial, not hidden fixturesetup success.
+- [ ] **Step3:** Implement prepare|up|status|quiesce|down|destroy using13A command and existing registry contract. migrate existingDB beforeAPI/Fleet/operator DB use; allocate/persist FleetID/namespace/port. Loopback8090 binding andhealthmatch. Fleet joins verifiedPG+node networks, nodes node-only; URL hostport substitution only, preserve API URL. Nonroot explicit readable600/socketgroup; no root/chown644 shortcut. down mustquiesce beforeAPIstop/keepvolumes; destroy originalref/ownership/data-last/DBregistrylast, failclosed.
+- [ ] **Step4:** bash scripts/fleet-env.test.sh + scripts/dev-env.test.sh; bash-n both helpers; parse Config/Profile via existing tests. Lead authorized real ownedDocker up/down/up/restore onlyafter exact registry/DB/network/labels preflight, collectphysicalreceipts separately. No secondPG or productionmodel call in defaulttests.
+- [ ] **Step5:** Atomic feat(dev): add optional managed Docker Fleet environment, input seals and release. ONE13B NET fresh review, scoped fixes; parentaggregate13A+13B+originalpartial WIP bytes before originalTask13 SOURCE accepted. Then Task14 gatedE2E and15 final11criteria/finalwholebranchreview.
+
+### Deployment phase after source and fake-chain verification
+
+AWSdeploy target instance/region/account and current stack overlays mustbe read/verified first; original sourcegoal didnot authorize guessing target. Preserve existingco-located stack/base+overlay, backup/config/rollback, deployonlyFleet/image/endpoint variables after stackinspection and targetedplan. Validate original503 resolution with actual authenticated runtime capabilities/Ready/execution outcomes, not /health alone. Real-provider smoke uses explicit namedtest, approvedcredentialpath and bounded request; never default CLI/account discovery. Any missing target/credential/migrationalcompatibility remains concrete gate, not fabricated deployed success.

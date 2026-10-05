@@ -741,10 +741,12 @@ action英文Create node/Start node/Stop node/Restart node/Delete node，中译�
 
 ### Task 13: 当前 checkout 可选 Fleet 环境组件
 
+**已批准补缺：** 先按 [namespace/operator extension](<2026-10-05-local-fleet-namespace-operator.md>) 完成并逐步复审13A backend gate/operator，再13B环境组件；两者聚合后本Task SOURCE accepted。用户已授权补缺及隔离SQL/Docker/fake链路验证，旧prepared artifact的未授权快照仅历史。AWS目标实例/region需核实，不能猜。
+
 **审查补充（本任务所有权与 canonical tests）：** baseline docker-compose.yml name=multica/service=postgres、内部 alias postgres/5432、只发布 loopback。prepare 以授权后的 Engine inspection/managed manifest 校验既有容器 ID/network ID/aliases/port 和 DB 来源，传 external network 名（例如经确认的 multica_default，不凭名字猜）。Fleet-only DB URL 保留 worktree DB/username/password/query options、替换 host/port，API URL 不变。找不到匹配来源（含 native PG）配置失败，不第二 DB/公开监听。Compose fleet 加 external shared PG network 及节点 network；动态节点 Task 8 只进节点 network。fleet-env.test.sh canonical TestSharedPGNetworkURLPreservesDatabaseAndOptions/TestLinuxLoopbackPGIsNotGateway/TestNodesDoNotJoinPGNetwork，仅 stub inspect fixtures；dynamic ExtraHosts 归 Task 8，Compose extra_hosts 只影响 Fleet。
 
 **Dependencies:** Tasks5、7–10。
-**Files:** Create `docker-compose.fleet.yml`、`scripts/fleet-env.sh`、`fleet-env.test.sh`、`fleet-config.example.json`；Modify [dev-env.sh](<../../../scripts/dev-env.sh#L42-L43>)、[dev-env.test.sh](<../../../scripts/dev-env.test.sh>)、[Makefile](<../../../Makefile#L157-L176>)、[env模板](<../../../.env.example>)、[gitignore](<../../../.gitignore>)、[AGENTS](<../../../AGENTS.md>)。
+**Files:** Create `docker-compose.fleet.yml`、`scripts/fleet-env.sh`、`scripts/fleet-env.test.sh`、`fleet-config.example.json`；Modify [dev-env.sh](<../../../scripts/dev-env.sh#L42-L43>)、[dev-env.test.sh](<../../../scripts/dev-env.test.sh>)、[Makefile](<../../../Makefile#L157-L176>)、[env模板](<../../../.env.example>)、[gitignore](<../../../.gitignore>)、[AGENTS](<../../../AGENTS.md>)。
 
 **Interfaces — Consumes:** Task7维护API、Task10readyz/cmd。**Produces:** `fleet-env.sh prepare|up|status|quiesce|down|destroy`，dev-env传绝对repo/env/registryID/namespace/port。prepare 用 URL parser 仅将 Fleet DB URL 的 host/port 替换为已验证的共享 PG Docker 网络内部 alias/port，dbname/凭证/query options 不变，API URL 不变；privatefiles600。quiesce全部nodes屏障，busy/unknown在关API前中止；destroy失败保留DB/registry用于恢复。
 
@@ -766,7 +768,7 @@ services:
       context: .
       dockerfile: docker/fleet/Dockerfile
     ports:
-      - "127.0.0.1:${MULTICA_LOCAL_FLEET_PORT:?Fleet port required}:8080"
+      - "127.0.0.1:${MULTICA_LOCAL_FLEET_PORT:?Fleet port required}:8090"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - "${MULTICA_FLEET_CONFIG_DIR:?Private config required}:/run/multica-fleet:ro"

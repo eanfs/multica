@@ -281,7 +281,25 @@ Fleet `POST /internal/v1/nodes/diagnose` 和 API `POST /internal/local-fleet/ope
 
 当前 origin main=ef253c73884ac9de2863075b195766b8abe45d80，迁移最高 563。Task 2 保持 564–575 顺序（执行前重查冲突），所有 ID/关系 ID/namespace/owner 必需字段显式 NOT NULL；无新 FK/内联 PK/UNIQUE 隐式索引。每个并发 index 迁移同时登记 cmd/migrate 的 concurrentIndexCleanups 和适用 concurrentDownIndexCleanups，测试既有 up/down map 覆盖与 INVALID index 重试。Aurora 已有 managed sandbox/auth/fleet 包不替代此本地 Claude-only Fleet；不改 Aurora launch/billing 或 AWS 部署，共享 Next.js 逻辑仍归 packages/nextjs。
 
-## 14. 后续步骤
+## 14. 已授权的 namespace/operator 补缺
+
+用户于本次继续请求“还有什么部署未处理完成的? 都授权处理”。这批准此前提出的 namespace admission fence、受限 operator 和显式 owner-profile 投影源码补缺，以及当前隔离 worktree 的 SQL/Docker/fake-Claude 集成验证。此前“本次不执行”的准备阶段限制保留为历史，不再阻止已批准的隔离验证。AWS 的真实目标实例/region 和已有部署配置必须先核实；不能从旧文档猜目标、全局 prune 或无目标 terraform apply。仍不自动 merge/push，不读取或写入其他 checkout 的数据。
+
+### 14.1 Namespace fence
+
+增加同一 PostgreSQL 内的 namespace fence 表；显式 namespace/FleetID/closed/generation/operation key 字段，NOT NULL、无 FK、无内联 PK/UNIQUE。namespace 唯一 index 在独立单语句 concurrent migration 中创建并注册现有 runner cleanup。缺表/错误状态为 unavailable，不当作开放；无 fence row 是明确的初始 open 状态，不是绕过缺失 schema 的 fallback。
+
+create/start/reboot 和 managed enqueue/claim/reclaim 的 owning Tx 先取得 namespace shared advisory fence，再保持原 node→capacity→workspace→runtime→sorted agent/task 相对顺序。多 namespace 锁按稳定字符串排序。operator 用短 Tx 的同 key exclusive namespace fence 持久 closed=true；已开启的生产者先完成，之后所有新 work 都拒绝，其他 owner 不能穿透。只读 durable replay 不再创建副作用；已有物理动作仍遵守原 winner、预算和 single-slot，关闭过程必须等待实际完成，不能由 namespace 状态重建 Apply 权限。
+
+### 14.2 Operator/profile composition
+
+新增受限 fleet-env 命令，显式 private config/service-key/approved profile-map/DB/Fleet URL/namespace 操作 key 输入。profile-map 使用既有 Store.UpsertProfiles 的 owner 存在检查、版本 CAS、disabled tombstone 规则；实际 credential file 由既有 loader 校验，不新增 public Config 字段、不发现用户 CLI/HOME credentials、不把模型密钥放 SQL/env/image/logs。
+
+quiesce 必须先持久关闭 namespace 准入，再 bounded keyset 枚举全部 owner 的 SQL nodes，调用既有 Maintainer.Request/Review。可信服务调用 owner 从 SQL node 取得，不伪造浏览器用户。每 node 的同 key/原 typed operation ref 继续原证明协议；只有所有 stop 已 approved/completed、实际 stopped/absence 且 SQL active/报告证明安全时返回成功。busy/unknown/timeout 保持 fence 和 API、数据、registry，不返回假成功。事务中不做 HTTP/Docker I/O。
+
+destroy 要求有效 fence generation/key、再次受控 Delete、原 ref→absence proof→data-last→SQL completion，等待完成；未知资源和 owner/labels 不一致保留 DB/registry。开放 fence 只能由显式 up/resume 的相同环境身份及 generation CAS，不能自动清除失败关闭屏障。profile prepare 不等于开放现有 fence。
+
+## 15. 后续步骤
 
 本文描述已授权实施的目标能力，不是已实现功能。保持现有 15 项实施计划，先实现 fake Provider、Store、配置分离和屏障，再接 Docker 镜像与共享界面。SQL 查询变更须重新生成 sqlc。
 
