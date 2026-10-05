@@ -20,8 +20,9 @@ import (
 
 // HealthResponse is returned by the daemon's local health endpoint.
 type HealthResponse struct {
-	Status string `json:"status"`
-	PID    int    `json:"pid"`
+	ReportQueueStats ReportQueueStats `json:"report_queue_stats"`
+	Status           string           `json:"status"`
+	PID              int              `json:"pid"`
 	// OS is the daemon's runtime.GOOS. The desktop app compares it against its
 	// own host OS to detect a daemon it cannot manage — e.g. a Windows desktop
 	// reaching a Linux daemon inside WSL2 over localhost forwarding. The
@@ -515,6 +516,8 @@ func (d *Daemon) healthHandler(startedAt time.Time) http.HandlerFunc {
 			resp.FailedTerminalReportCount = stats.FailedCount
 			resp.FailedTerminalReportBytes = stats.FailedBytes
 		}
+
+		resp.ReportQueueStats, _ = ScanReportQueueStats(d.cfg.WorkspacesRoot)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)

@@ -1,0 +1,17 @@
+#!/bin/sh
+# Synthetic Claude protocol fixture; no model, account, network or package lookup.
+# This version is deliberately not the real registry pin in claude-version.txt.
+if [ "$1" = "--version" ]; then
+ printf '%s\n' '2.1.100 (Claude Code)'
+ exit 0
+fi
+if [ -n "${FAKE_CLAUDE_ARGV:-}" ]; then printf '%s\n' "$@" > "$FAKE_CLAUDE_ARGV"; fi
+IFS= read -r request || exit 2
+printf '%s\n' '{"type":"log","message":"fake diagnostic, not final output"}'
+printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"intermediate narration, not final output"}]}}'
+case "${FAKE_CLAUDE_MODE:-success}" in
+ missing-result) exit 0 ;;
+ error) printf '%s\n' '{"type":"result","subtype":"error","is_error":true,"session_id":"00000000-0000-4000-8000-000000000007","result":"fake-only failure"}' ;;
+ success) printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"00000000-0000-4000-8000-000000000007","result":"fake Claude completed"}' ;;
+ *) exit 2 ;;
+esac

@@ -1075,3 +1075,52 @@ func TestManagedHealthReportsOneRuntimeAndNoCredential(t *testing.T) {
 		}
 	}
 }
+
+func TestHealthReportStatsErrorPreservesLivenessAndLegacyCounters(t *testing.T) {
+	root := t.TempDir()
+	store := newTerminalReportStore(Config{WorkspacesRoot: root, DaemonID: "unit"})
+	if err := os.MkdirAll(store.dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.dir, "report"), []byte("abc"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A non-directory namespace's failed path is unreadable, while the legacy namespace remains valid.
+	if err := os.MkdirAll(filepath.Join(store.root, "foreign"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.root, "foreign", "failed"), []byte("broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{WorkspacesRoot: root}, workspaces: map[string]*workspaceState{}, logger: slog.Default(), terminalReports: store}
+	d.ready.Store(true)
+	d.activeTasks.Store(2)
+	d.runningTasks.Store(1)
+	d.resourceWaitTasks.Store(1)
+	rec := httptest.NewRecorder()
+	d.healthHandler(time.Now()).ServeHTTP(rec, httptest.NewRequest("GET", "/health", nil))
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	var stats struct {
+		Known           bool
+		Pending, Failed int
+	}
+	if len(raw["report_queue_stats"]) == 0 {
+		t.Fatal("missing additive report_queue_stats")
+	}
+	if err := json.Unmarshal(raw["report_queue_stats"], &stats); err != nil {
+		t.Fatal(err)
+	}
+	if stats.Known {
+		t.Fatal("scan error must be unknown")
+	}
+	var response HealthResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 200 || response.Status != "running" || response.ActiveTaskCount != 2 || response.RunningTaskCount != 1 || response.ResourceWaitTaskCount != 1 || response.PendingTerminalReportCount != 1 || response.PendingTerminalReportBytes != 3 {
+		t.Fatalf("legacy health changed: %+v", response)
+	}
+}
