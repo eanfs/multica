@@ -83,10 +83,10 @@ vi.mock("@multica/core/agents", () => ({
   useWorkspacePresenceMap: () => ({ byAgent: new Map(), loading: false }),
 }));
 
-vi.mock("@multica/core/auth", () => ({
-  useAuthStore: (sel: (s: { user: { id: string } }) => unknown) =>
-    sel({ user: { id: "user-me" } }),
-}));
+vi.mock("@multica/core/auth", () => {
+  const state = { user: { id: "user-me" } };
+  return { useAuthStore: Object.assign((sel: (s: typeof state) => unknown) => sel(state), { getState: () => state }) };
+});
 
 vi.mock("../../common/actor-avatar", () => ({ ActorAvatar: () => null }));
 vi.mock("../../agents/presence", () => ({
@@ -175,6 +175,7 @@ function renderDialog(opts: {
     const q = queryArg as { queryKey?: readonly unknown[] };
     const key = q?.queryKey ?? [];
     const tail = key[key.length - 1];
+    if (key[0] === "cloud-runtime" && key[1] === "capabilities") return { data: undefined, isLoading: false };
     if (tail === "agents") {
       return { data: opts.cachedAgents ?? [], isLoading: false } as unknown as ReturnType<typeof useQuery>;
     }
@@ -198,6 +199,15 @@ function renderDialog(opts: {
 }
 
 describe("DeleteRuntimeDialog", () => {
+  it("redirects managed ordinary deletion to node management without deleting or unbinding agents", async () => {
+    const onDeleted = vi.fn();
+    renderDialog({ runtime: makeRuntime({ metadata: { managed_by: "local_fleet", fleet_node_id: "a09fe54c-0740-467f-812a-114e21c3db06" } }), onDeleted });
+    expect(await screen.findByRole("heading", { name: "Cloud Runtime" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete runtime" })).not.toBeInTheDocument();
+    expect(apiDeleteRuntime).not.toHaveBeenCalled();
+    expect(apiUnbindAgentsAndDeleteRuntime).not.toHaveBeenCalled();
+    expect(onDeleted).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     vi.clearAllMocks();
   });
