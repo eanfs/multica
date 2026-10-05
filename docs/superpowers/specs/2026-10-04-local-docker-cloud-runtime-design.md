@@ -307,6 +307,12 @@ destroy 要求有效 fence generation/key、再次受控 Delete、原 ref→abse
 
 已终结 stop cycle 后的 destroy 需要可信 operator 的相同身份、相同 key、expected-generation CAS：仍保持 closed，清除 finalized，推进 namespace generation，再执行新 cycle 的原 Delete 证明。完成 destroy 时重新终结。显式 resume 是另一项可信 CAS，不是公开节点操作的副作用。579/580 已在受控数据库中应用，新字段使用独立 581 additive migration，不能改写已应用的 579 来模拟升级。
 
+### 14.4 重试证明与输入边界补充
+
+终结状态必须同时持久保存原 cycle 的节点集合、typed refs、keys 与既有不可变字段证明。有效空集合与未保存证明必须可区分。终结重试及 stop→destroy 不能使用当前节点行重建原集合或快照；缺失或修改原节点必须拒绝，并保留关闭屏障。已终结但缺少证明的旧行 fail closed，不以当前状态自动回填。新的 destroy CAS 在 namespace exclusive SQL Tx 中重新核对原证明。新字段使用独立 582 additive migration，不改写已应用 579–581。保存证明不包含模型秘密、观察错误文本或密钥。
+
+私有 operator 必须消费单次 guarded read 的 config 字节，复用原 JSON parser 与默认值，不再次打开 path。数据库 URL 验证与 pgx 实际消费必须使用相同解释；拒绝重复键、身份覆盖、文件/service/TLS alias 与危险的继承发现设置。不修改进程全局环境，不通过默认 HOME 文件取得隐式凭据。
+
 ## 15. 后续步骤
 
 本文描述已授权实施的目标能力，不是已实现功能。保持现有 15 项实施计划，先实现 fake Provider、Store、配置分离和屏障，再接 Docker 镜像与共享界面。SQL 查询变更须重新生成 sqlc。
