@@ -556,7 +556,7 @@ func Owns(labels map[string]string,namespace,fleetID,nodeID,role string) bool {
 
 ### Task 9: 节点 bootstrap、固定 Claude 镜像与假 CLI
 
-**审查补充（本任务所有权与 canonical tests）：** 新增 Modify: `server/internal/daemon/health.go`、`server/internal/daemon/health_test.go`、`server/internal/daemon/terminal_report_queue.go`、`server/internal/daemon/terminal_report_queue_test.go`；Create `server/internal/daemon/report_queue_stats.go`、`server/internal/daemon/report_queue_stats_test.go`、`server/cmd/fleet-node/report_stats.go`、`server/cmd/fleet-node/report_stats_test.go`。`daemon.ReportQueueStats{Known bool; Pending,Failed int}` JSON known/pending/failed；`daemon.ScanReportQueueStats(workspacesRoot string)(ReportQueueStats,error)` 只读复用 terminalReportDirectoryStats/otherNamespaceStats 的 traversal 规则，所有 durable namespace+failed，不初始化 store、不创建目录/不 replay。扫描错误 Known=false；零只在已验证根中缺 report 子目录。
+**审查补充（本任务所有权与 canonical tests）：** 新增 Modify: `server/internal/daemon/health.go`、`server/internal/daemon/health_test.go`；Create `server/internal/daemon/report_queue_stats.go`、`server/internal/daemon/report_queue_stats_test.go`、`server/cmd/fleet-node/report_stats.go`、`server/cmd/fleet-node/report_stats_test.go`。`daemon.ReportQueueStats{Known bool; Pending,Failed int}` JSON known/pending/failed；`daemon.ScanReportQueueStats(workspacesRoot string)(ReportQueueStats,error)` 只读复用 terminalReportDirectoryStats/otherNamespaceStats 的 traversal 规则，所有 durable namespace+failed，不初始化 store、不创建目录/不 replay。扫描错误 Known=false；零只在已验证根中缺 report 子目录。 已有 `terminal_report_queue.go` 与 `terminal_report_queue_test.go` 的 Modify 范围仅在复用行为需要调整时启用；helper 与既有测试无需无意义改动，新增 scanner tests 拥有跨 namespace、failed 与错误矩阵覆盖。
 
 HealthResponse 新 ReportQueueStats 字段 JSON report_queue_stats（非 omitempty），不改变旧 health HTTP200/status/counters。canonical TestReportQueueStatsAllNamespacesAndFailed/TestReportQueueStatsReadErrorUnknown 在 scanner tests；TestHealthReportStatsErrorPreservesLivenessAndLegacyCounters 在 health_test.go。ReadObservation 只消费新 stats，旧/畸形 stats 默认 ReportStatsKnown=false，fleet-node health_test.go 拥有 decoding 回归。
 
@@ -568,7 +568,7 @@ run/health/report-stats 均验证同一 manifest/Task 1 ValidateLayoutManifest�
 
 **Interfaces:** `BootstrapFiles(home,secretDir string) (cli.CLIConfig,error)`；`ReadObservation(client *http.Client,healthURL string) (model.Observation,error)`；固定 CLI 子命令 `fleet-node run|health|bootstrap|report-stats`。使用现有 `cli.SaveCLIConfigForProfile(cfg, "")` 写默认profile，Token/ServerURL存CLIConfig；固定DaemonID保留在bootstrap并用--daemon-id传入，设置HOME为节点data volume。fake CLI 的版本检查和 stream-json 输出必须匹配现有 Claude backend，不把所有 stdout 当作聊天结果。
 
-- [ ] **Step 1:** TempDir 写测试专用 secret 文件，证明仅文件注入配置：
+- [x] **Step 1:** TempDir 写测试专用 secret 文件，证明仅文件注入配置：
 
 ```go
 func TestBootstrapDoesNotNeedMulticaTokenEnv(t *testing.T) {
@@ -582,8 +582,8 @@ func TestBootstrapDoesNotNeedMulticaTokenEnv(t *testing.T) {
 ```
 
 仅测试写这些 marker secrets；production 必须验证真实 mcn 格式/Daemon UUID。增加 owner/profile mismatch、现有 node data 保留、file mode、logs redacted。
-- [ ] **Step 2:** `go test ./cmd/fleet-node -count=1`，预期 config 初始化/health decode FAIL。
-- [ ] **Step 3:** 固定 go helper 读文件、写 CLIConfig，进程内部设置 `ANTHROPIC_API_KEY`、可选 `ANTHROPIC_BASE_URL`、default model，然后 `syscall.Exec` 现有 multica daemon foreground，flags `--no-auto-update --no-auto-reload --max-concurrent-tasks 1`，并以独立argv对传 `--daemon-id` 与Bootstrap.DaemonID（UUID公开身份，不传Token）。HTTP health 默认容器 loopback 19514；使用现有 `daemon.HealthResponse` 字段映射 ActiveTaskCount/Agents/Workspaces；维护 counts 只取新增 ReportQueueStats（known/pending/failed），不从旧默认零计数推断安全，Ready 判 Status=running、claude 已注册及 RuntimeCount>0。不要编造 ready_for_task_claims JSON 字段。
+- [x] **Step 2:** `go test ./cmd/fleet-node -count=1`，预期 config 初始化/health decode FAIL。
+- [x] **Step 3:** 固定 go helper 读文件、写 CLIConfig，进程内部设置 `ANTHROPIC_API_KEY`、可选 `ANTHROPIC_BASE_URL`、default model，然后 `syscall.Exec` 现有 multica daemon foreground，flags `--no-auto-update --no-auto-reload --max-concurrent-tasks 1`，并以独立argv对传 `--daemon-id` 与Bootstrap.DaemonID（UUID公开身份，不传Token）。HTTP health 默认容器 loopback 19514；使用现有 `daemon.HealthResponse` 字段映射 ActiveTaskCount/Agents/Workspaces；维护 counts 只取新增 ReportQueueStats（known/pending/failed），不从旧默认零计数推断安全，Ready 判 Status=running、claude 已注册及 RuntimeCount>0。不要编造 ready_for_task_claims JSON 字段。
 
 镜像代码关键结构：
 
@@ -604,8 +604,8 @@ HEALTHCHECK --interval=5s --timeout=5s CMD ["fleet-node","health"]
 ```
 
 当前go.mod为1.26.6，镜像builder固定同版本；实施时如Go版本变更，按同一提交更新两处，不能降级；Linux image 同时支持 amd64/arm64。增加 git、CA、必要 CLI 运行依赖，不安装其他 Agent。Task 的版本锁步骤是 `npm view @anthropic-ai/claude-code version` 只查 registry，不执行用户 CLI/账户，将返回的精确版本写入 claude-version.txt；build 只消费该文件，不接受 latest。真实 npm CLI 安装只发生在显式 image build，不进入默认测试。Dockerfile.test 改用 testdata 假 claude，绝不安装真实包。
-- [ ] **Step 4:** 全 bootstrap/health 测试 PASS，假 CLI backend 专项 PASS。镜像 build 属于 Task 14 opt-in；未获 Docker 许可只检查 Dockerfile/config builder，不声称镜像运行通过。
-- [ ] **Step 5:** 提交 `feat(fleet): bootstrap persistent Claude-only runtime images`。
+- [x] **Step 4:** 全 bootstrap/health 测试 PASS，假 CLI backend 专项 PASS。镜像 build 属于 Task 14 opt-in；未获 Docker 许可只检查 Dockerfile/config builder，不声称镜像运行通过。
+- [x] **Step 5:** 提交 `feat(fleet): bootstrap persistent Claude-only runtime images`。
 
 ### Task 10: Worker、恢复协调与独立 Fleet 程序
 
