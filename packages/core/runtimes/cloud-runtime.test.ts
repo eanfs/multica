@@ -96,7 +96,7 @@ describe("account cloud runtime queries and mutation lifecycle", () => {
       action: "create",
       hook: useCreateCloudRuntimeNode,
       variables: { spec: "small", name: "worker", idempotencyKey: "intent" },
-      body: { spec: "small", name: "worker" },
+      body: { instance_type: "small", name: "worker" },
     },
     {
       action: "start",

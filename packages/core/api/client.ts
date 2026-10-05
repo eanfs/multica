@@ -2066,7 +2066,7 @@ export class ApiClient {
 
   private async requestCloudRuntimeNode(
     path: string,
-    data: CreateCloudRuntimeNodeRequest | CreateDockerNodeRequest | { instance_id: string },
+    data: CreateCloudRuntimeNodeRequest | { instance_id: string },
     idempotencyKey?: string,
   ): Promise<CloudRuntimeNode> {
     const res = await this.fetchRaw(path, {
@@ -2093,7 +2093,9 @@ export class ApiClient {
     data: CreateCloudRuntimeNodeRequest | CreateDockerNodeRequest,
     idempotencyKey?: string,
   ): Promise<CloudRuntimeNode> {
-    return this.requestCloudRuntimeNode("/api/cloud-runtime/nodes", data, idempotencyKey);
+    // The public proxy accepts instance_type and translates it to Fleet's spec.
+    const body = "spec" in data ? { name: data.name, instance_type: data.spec } : data;
+    return this.requestCloudRuntimeNode("/api/cloud-runtime/nodes", body, idempotencyKey);
   }
 
   async startCloudRuntimeNode(instanceId: string, key: string): Promise<CloudRuntimeNode> {

@@ -1662,6 +1662,7 @@ export const CloudRuntimeCapabilitiesSchema = z
           cpus: z.number().positive().finite(),
           memory_bytes: z.number().positive().finite(),
           pids: z.number().positive().finite(),
+          max_runs: z.number().positive().finite().int().optional(),
         }),
       )
       .default([]),
@@ -1671,11 +1672,12 @@ export const CloudRuntimeCapabilitiesSchema = z
   .transform((caps) => ({
     provider: caps.provider,
     operations: caps.provider === "unknown" ? [] : caps.operations,
-    specs: caps.specs.map(({ id, cpus, memory_bytes, pids }) => ({
+    specs: caps.specs.map(({ id, cpus, memory_bytes, pids, max_runs }) => ({
       id,
       cpus,
       memoryBytes: memory_bytes,
       pids,
+      ...(max_runs !== undefined ? { maxRuns: max_runs } : {}),
     })),
     persistentStorage: caps.persistent_storage,
     diskQuotaSupported: caps.disk_quota_supported,

@@ -31,6 +31,20 @@ describe("cloud runtime action capabilities", () => {
       );
     }
   });
+  it("invalid advertised max_runs falls back without a selectable spec or create permission", () => {
+    const caps = parseWithFallback(
+      {
+        provider: "docker",
+        operations: ["create"],
+        specs: [{ id: "small", cpus: 2, memory_bytes: 4294967296, pids: 256, max_runs: 0 }],
+      },
+      CloudRuntimeCapabilitiesSchema,
+      EMPTY_CLOUD_RUNTIME_CAPABILITIES,
+      { endpoint: "GET /api/cloud-runtime/" },
+    );
+    expect(caps.specs).toEqual([]);
+    expect(supportsNodeAction(caps, "create")).toBe(false);
+  });
   it("malformed capabilities safely fall back with no selections or permissions", () => {
     const caps = parseWithFallback(
       { provider: "docker", specs: [{ id: "small", cpus: 0 }] },

@@ -96,6 +96,32 @@ describe("Task11 cloud runtime schemas", () => {
       diskQuotaSupported: false,
     });
   });
+  it.each([1, 3])("maps provided max_runs=%s without inventing a quota when absent", (maxRuns) => {
+    const parsed = CloudRuntimeCapabilitiesSchema.parse({
+      ...caps,
+      specs: [{ ...caps.specs[0], max_runs: maxRuns }],
+    });
+    expect(parsed.specs).toEqual([
+      { id: "small", cpus: 2, memoryBytes: 4294967296, pids: 256, maxRuns },
+    ]);
+    expect(CloudRuntimeCapabilitiesSchema.parse(caps).specs[0]).not.toHaveProperty("maxRuns");
+  });
+  it.each([
+    ["zero", 0],
+    ["negative", -1],
+    ["string", "2"],
+    ["null", null],
+    ["NaN", NaN],
+    ["Infinity", Infinity],
+    ["fractional", 1.5],
+  ])("rejects present %s max_runs rather than accepting an operational spec", (_label, value) => {
+    expect(
+      CloudRuntimeCapabilitiesSchema.safeParse({
+        ...caps,
+        specs: [{ ...caps.specs[0], max_runs: value }],
+      }).success,
+    ).toBe(false);
+  });
   it("unknown provider disables operations even when delete is advertised", () => {
     expect(CloudRuntimeCapabilitiesSchema.parse({ ...caps, provider: "future" })).toMatchObject({
       provider: "unknown",

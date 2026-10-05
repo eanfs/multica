@@ -53,7 +53,7 @@ describe("Task11 cloud runtime wire boundary", () => {
     expect(caps).toEqual({
       provider: "docker",
       operations: ["create", "stop"],
-      specs: [{ id: "small", cpus: 2, memoryBytes: 4294967296, pids: 256 }],
+      specs: [{ id: "small", cpus: 2, memoryBytes: 4294967296, pids: 256, maxRuns: 1 }],
       persistentStorage: true,
       diskQuotaSupported: false,
     });
@@ -109,7 +109,7 @@ describe("Task11 cloud runtime wire boundary", () => {
         );
         expect(c.method).toBe(action === "delete" ? "DELETE" : "POST");
         expect(c.body).toEqual(
-          action === "create" ? { spec: "small", name: "worker" } : { instance_id: "i-hosted-1" },
+          action === "create" ? { instance_type: "small", name: "worker" } : { instance_id: "i-hosted-1" },
         );
         expect(c.headers.get("Authorization")).toBe("Bearer caller-token");
         expect(c.headers.get("X-Workspace-Slug")).toBe("work");
@@ -145,8 +145,10 @@ describe("Task11 cloud runtime wire boundary", () => {
   );
 
   it("accepts queued Docker creation before a container id exists", async () => {
-    vi.stubGlobal("fetch", async () =>
-      response({
+    const bodies: unknown[] = [];
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return response({
         ...node,
         id: "fleet-node",
         instance_id: "",
@@ -154,12 +156,13 @@ describe("Task11 cloud runtime wire boundary", () => {
         ready: false,
         operation_id: "op-1",
         error_code: "",
-      }),
-    );
+      });
+    });
     const result = await new ApiClient("https://api.example.test").createCloudRuntimeNode(
       { spec: "small" },
       "intent",
     );
+    expect(bodies).toEqual([{ instance_type: "small" }]);
     expect(result).toMatchObject({
       id: "fleet-node",
       instance_id: "",
@@ -1683,7 +1686,17 @@ describe("ApiClient", () => {
     const client = new ApiClient("https://api.example.test");
     await client.listCloudRuntimeNodes({ limit: 20, offset: 5 });
     await client.createCloudRuntimeNode(
-      { instance_type: "g5.xlarge", name: "gpu-dev-01" },
+      {
+        instance_type: "g5.xlarge",
+        name: "gpu-dev-01",
+        region: "us-west-2",
+        image_id: "ami-1",
+        subnet_id: "subnet-1",
+        key_name: "ssh-key",
+        iam_instance_profile: "profile-1",
+        disk_size_gb: 100,
+        tags: { purpose: "development" },
+      },
     );
 
     const listCall = fetchMock.mock.calls[0]!;
@@ -1699,6 +1712,13 @@ describe("ApiClient", () => {
       body: JSON.stringify({
         instance_type: "g5.xlarge",
         name: "gpu-dev-01",
+        region: "us-west-2",
+        image_id: "ami-1",
+        subnet_id: "subnet-1",
+        key_name: "ssh-key",
+        iam_instance_profile: "profile-1",
+        disk_size_gb: 100,
+        tags: { purpose: "development" },
       }),
     });
   });
