@@ -219,10 +219,13 @@ func (s *Store) ListObservable(ctx context.Context, after pgtype.UUID) ([]model.
 	return out, nil
 }
 
-func (s *Store) ListRecoverable(ctx context.Context) ([]model.Operation, error) {
+func (s *Store) ListRecoverable(ctx context.Context, after pgtype.UUID) ([]model.Operation, error) {
 	ctx, cancel := context.WithTimeout(ctx, databaseTimeout)
 	defer cancel()
-	rows, e := db.New(s.pool).ListFleetRecoverable(ctx, s.namespace)
+	if !after.Valid {
+		after = pgtype.UUID{Valid: true}
+	}
+	rows, e := db.New(s.pool).ListFleetRecoverable(ctx, db.ListFleetRecoverableParams{Namespace: s.namespace, AfterID: after})
 	if e != nil {
 		return nil, e
 	}
@@ -413,6 +416,38 @@ func (s *Store) ExpireBootstrap(ctx context.Context, baseline RecoverySnapshot) 
 			return e
 		}
 		count, e = q.FleetExpireBootstrapOperation(ctx, db.FleetExpireBootstrapOperationParams{Namespace: s.namespace, OwnerID: n.OwnerID, NodeID: n.ID, OperationID: op.ID, Generation: op.Generation, ClaimedAt: timestamp(op.BootstrapClaimedAt)})
+		if e = affectedOne(count, e); e != nil {
+			return e
+		}
+		return q.RevokeFleetCredentials(ctx, db.RevokeFleetCredentialsParams{Namespace: s.namespace, OwnerID: n.OwnerID, NodeID: n.ID})
+	})
+}
+
+// confirmedCreateExpired uses the immutable SQL checkpoint, never updated_at or local scheduling time.
+func confirmedCreateExpired(s RecoverySnapshot) bool {
+	n, op := s.Node, s.Operation
+	return n.Generation == op.Generation && currentRecovery(s) == nil && op.Action == model.Create && op.Phase == "applying" && n.ContainerID != "" && op.BootstrapMinted && !op.BootstrapClaimedAt.IsZero() && !op.BootstrapClaimedAt.After(s.SQLNow) && !s.SQLNow.Before(op.BootstrapClaimedAt.Add(bootstrapLease))
+}
+
+// ExpireConfirmedCreate is a current-bound creation-failure disposition. No identity/data cleanup,
+// phase clearing, renewed claim or replacement is permitted; credentials are revoked atomically.
+func (s *Store) ExpireConfirmedCreate(ctx context.Context, baseline RecoverySnapshot) error {
+	ctx, cancel := context.WithTimeout(ctx, databaseTimeout)
+	defer cancel()
+	return s.WithTx(ctx, func(q *db.Queries) error {
+		snap, e := s.recoverySnapshot(ctx, q, baseline.Node.OwnerID, baseline.Ref())
+		if e != nil {
+			return e
+		}
+		if !sameRecoverySnapshot(baseline, snap) || !confirmedCreateExpired(snap) {
+			return model.ErrConflict
+		}
+		n, op := snap.Node, snap.Operation
+		count, e := q.FleetExpireConfirmedCreateNode(ctx, db.FleetExpireConfirmedCreateNodeParams{Namespace: s.namespace, OwnerID: n.OwnerID, NodeID: n.ID, OperationID: op.ID, Generation: op.Generation, ContainerID: n.ContainerID, ClaimedAt: timestamp(op.BootstrapClaimedAt)})
+		if e = affectedOne(count, e); e != nil {
+			return e
+		}
+		count, e = q.FleetExpireConfirmedCreateOperation(ctx, db.FleetExpireConfirmedCreateOperationParams{Namespace: s.namespace, OwnerID: n.OwnerID, NodeID: n.ID, OperationID: op.ID, Generation: op.Generation, ClaimedAt: timestamp(op.BootstrapClaimedAt)})
 		if e = affectedOne(count, e); e != nil {
 			return e
 		}

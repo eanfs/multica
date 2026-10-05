@@ -51,8 +51,18 @@ func (f *workerRepo) ListObservable(_ context.Context, after pgtype.UUID) ([]mod
 	}
 	return nodes, nil
 }
-func (f *workerRepo) ListRecoverable(context.Context) ([]model.Operation, error) {
-	return f.discovered, nil
+func (f *workerRepo) ListRecoverable(_ context.Context, after pgtype.UUID) ([]model.Operation, error) {
+	var ops []model.Operation
+	for _, op := range f.discovered {
+		if after.Valid && strings.Compare(string(op.ID.Bytes[:]), string(after.Bytes[:])) <= 0 {
+			continue
+		}
+		ops = append(ops, op)
+		if len(ops) == 100 {
+			break
+		}
+	}
+	return ops, nil
 }
 func (f *workerRepo) CurrentOperation(_ context.Context, owner pgtype.UUID, ref model.OperationRef) (store.RecoverySnapshot, error) {
 	f.currentCalls++
@@ -103,6 +113,17 @@ func (f *workerRepo) ExpireBootstrap(_ context.Context, s store.RecoverySnapshot
 	f.events = append(f.events, "expire")
 	f.snap.Operation.NonRetryable = true
 	f.snap.Node.Revoked = true
+	return nil
+}
+func (f *workerRepo) ExpireConfirmedCreate(_ context.Context, s store.RecoverySnapshot) error {
+	if !sameWorkerBinding(s, f.snap) || s.Node.ContainerID == "" || s.Operation.BootstrapClaimedAt.IsZero() || s.SQLNow.Before(s.Operation.BootstrapClaimedAt.Add(5*time.Minute)) {
+		return model.ErrConflict
+	}
+	f.events = append(f.events, "initialization-timeout")
+	f.snap.Operation.NonRetryable = true
+	f.snap.Operation.ErrorCode = "initialization-timeout"
+	f.snap.Node.Revoked = true
+	f.snap.Node.Ready = false
 	return nil
 }
 func (f *workerRepo) FinishDelete(_ context.Context, id pgtype.UUID, g int64) error {
@@ -538,6 +559,21 @@ func bootstrapFixture(t *testing.T) (*workerRepo, *workerProvider, *Reconciler, 
 	}
 	return f, p, r, c
 }
+func waitInitialization(t *testing.T, r *Reconciler) {
+	t.Helper()
+	r.mu.Lock()
+	slot := r.initialization
+	r.mu.Unlock()
+	if slot == nil {
+		return
+	}
+	select {
+	case <-slot.done:
+	case <-time.After(2 * time.Second):
+		slot.cancel()
+		t.Fatal("initialization not joined")
+	}
+}
 func TestRecoveryBootstrapWinningChoreography(t *testing.T) {
 	f, p, r, c := bootstrapFixture(t)
 	p.ensureCheck = func(ctx context.Context, n model.Node, b model.Bootstrap) {
@@ -549,12 +585,14 @@ func TestRecoveryBootstrapWinningChoreography(t *testing.T) {
 	if e := r.Tick(context.Background()); e != nil {
 		t.Fatal(e)
 	}
+	waitInitialization(t, r)
 	if c.mints != 1 || c.confirms != 1 || c.checks != 4 || !reflect.DeepEqual(f.events, []string{"check", "profile", "check", "check", "mint", "check", "confirm", "result"}) {
 		t.Fatalf("sequence %v", f.events)
 	}
 	if e := r.Tick(context.Background()); e != nil {
 		t.Fatal(e)
 	}
+	waitInitialization(t, r)
 	if !reflect.DeepEqual(p.actions, []string{"ensure", "inspect"}) || c.mints != 1 {
 		t.Fatal("bootstrap duplicated")
 	}
@@ -567,6 +605,7 @@ func TestRecoveryBootstrapEachBoundaryRechecked(t *testing.T) {
 			if e := r.Tick(context.Background()); e != nil {
 				t.Fatal(e)
 			}
+			waitInitialization(t, r)
 			if len(p.actions) != 0 || c.confirms != 0 || c.checks != check {
 				t.Fatalf("lost claimant acted: %v", p.actions)
 			}
@@ -591,10 +630,12 @@ func TestRecoveryBootstrapFailureIsFailClosed(t *testing.T) {
 	f, p, r, c := bootstrapFixture(t)
 	p.err = model.ErrUnavailable
 	_ = r.Tick(context.Background())
+	waitInitialization(t, r)
 	if c.mints != 1 || c.confirms != 0 || !f.snap.Node.Revoked || !f.snap.Operation.NonRetryable || f.snap.Node.DataVolume != "data" {
 		t.Fatal("bootstrap failure lost guards")
 	}
 	_ = r.Tick(context.Background())
+	waitInitialization(t, r)
 	if len(p.actions) != 1 {
 		t.Fatal("failed bootstrap reminted/ensured")
 	}
@@ -604,6 +645,7 @@ func TestRecoveryBootstrapOriginalDeadlineCannotRenew(t *testing.T) {
 	c.deadline = time.Now().Add(15 * time.Millisecond)
 	c.expireOnMint = true
 	_ = r.Tick(context.Background())
+	waitInitialization(t, r)
 	if c.mints != 1 || len(p.actions) != 0 || c.confirms != 0 {
 		t.Fatal("expired winner proceeded")
 	}
@@ -695,19 +737,20 @@ func TestRecoveryIdlePaginationAndCancellation(t *testing.T) {
 	if e := r.Tick(context.Background()); e != nil {
 		t.Fatal(e)
 	}
-	if len(p.actions) != 150 || r.observeAfter.Bytes[0] != 150 {
+	if len(p.actions) != 150 || r.observeAfter.Valid {
 		t.Fatal("tail dropped")
 	}
 	if e := r.Tick(context.Background()); e != nil {
 		t.Fatal(e)
 	}
-	if r.observeAfter.Valid {
-		t.Fatal("empty tail did not reset cursor")
+	if len(p.actions) != 250 || r.observeAfter.Bytes[0] != 100 {
+		t.Fatal("processed tail did not wrap without blank Tick")
 	}
+	r.observeAfter = pgtype.UUID{}
 	ctx, cancel := context.WithCancel(context.Background())
 	p.during = cancel
 	_ = r.Tick(ctx)
-	if len(p.actions) != 151 || r.observeAfter.Bytes[0] != 1 {
+	if len(p.actions) != 251 || r.observeAfter.Bytes[0] != 1 {
 		t.Fatal("cancellation dropped unprocessed page")
 	}
 }
@@ -771,6 +814,7 @@ func TestRecoveryBootstrapCompetingProcessAndLateGeneration(t *testing.T) {
 		if e := r.Tick(context.Background()); e != nil {
 			t.Fatal(e)
 		}
+		waitInitialization(t, r)
 		if c.mints != 1 || c.confirms != 1 || !reflect.DeepEqual(p.actions, []string{"ensure"}) {
 			t.Fatal("competing bootstrap repeated")
 		}
@@ -779,6 +823,7 @@ func TestRecoveryBootstrapCompetingProcessAndLateGeneration(t *testing.T) {
 		f, p, r, c := bootstrapFixture(t)
 		p.during = func() { f.snap.Node.Generation++; f.snap.Operation.Generation++ }
 		_ = r.Tick(context.Background())
+		waitInitialization(t, r)
 		if c.mints != 1 || c.confirms != 0 || f.snap.Node.Revoked || f.snap.Node.ContainerID != "" || f.snap.Operation.NonRetryable {
 			t.Fatal("late claimant confirmed/revoked new generation")
 		}
@@ -827,6 +872,355 @@ func TestRecoveryStoppedMissingCompletesWithoutRedispatch(t *testing.T) {
 	_ = r.Tick(context.Background())
 	if !reflect.DeepEqual(p.actions, []string{"inspect"}) || !reflect.DeepEqual(f.events, []string{"result"}) || f.snap.Operation.NonRetryable {
 		t.Fatal("trusted stop absence became a failed barrier")
+	}
+}
+
+// Sequential individually valid stages must have the original initialization budget.
+func TestRecoveryBootstrapSequentialStagesBeyondScheduler(t *testing.T) {
+	f, p, r, c := bootstrapFixture(t)
+	p.ensureCheck = func(ctx context.Context, n model.Node, b model.Bootstrap) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Error("missing original deadline")
+			return
+		}
+		clock := time.Now()
+		for _, stage := range []time.Duration{20 * time.Second, 20 * time.Second, 20 * time.Second} {
+			clock = clock.Add(stage)
+			if !clock.Before(deadline) {
+				p.err = context.DeadlineExceeded
+				return
+			}
+		}
+		f.snap.SQLNow = f.snap.SQLNow.Add(time.Minute)
+		p.observation.ObservedAt = f.snap.SQLNow
+	}
+	_ = r.Tick(context.Background())
+	waitInitialization(t, r)
+	if c.confirms != 1 || c.mints != 1 || f.snap.Node.ContainerID != "cid" || f.snap.Node.Revoked {
+		t.Fatalf("legitimate >30s initialization lost: confirms=%d events=%v", c.confirms, f.events)
+	}
+}
+func TestRecoveryConfirmedCreateOriginalTimeout(t *testing.T) {
+	f, p, r := workerFixture(model.Create, false)
+	f.snap.Operation.Phase = "applying"
+	f.snap.Operation.BootstrapClaimedAt = f.snap.SQLNow.Add(-5 * time.Minute)
+	f.snap.Operation.BootstrapMinted = true
+	f.discovered = []model.Operation{f.snap.Operation}
+	p.observation.Ready = false
+	_ = r.Tick(context.Background())
+	if !f.snap.Operation.NonRetryable || !f.snap.Node.Revoked || f.snap.Node.ContainerID != "cid" || f.snap.Node.DataVolume != "data" || f.snap.Operation.Phase != "applying" {
+		t.Fatalf("confirmed initialization spins past original deadline: %+v", f.snap)
+	}
+	if len(p.actions) != 0 {
+		t.Fatal("expired create performed physical work")
+	}
+}
+
+// A canceled slow recovery pass must not monopolize the oldest page or suppress idle work.
+type backlogRepo struct {
+	*workerRepo
+	snapshots map[pgtype.UUID]store.RecoverySnapshot
+	seen      map[pgtype.UUID]int
+	health    map[pgtype.UUID]time.Time
+	clock     *time.Time
+}
+
+func (f *backlogRepo) CurrentOperation(_ context.Context, owner pgtype.UUID, ref model.OperationRef) (store.RecoverySnapshot, error) {
+	s, ok := f.snapshots[ref.OperationID]
+	if !ok || s.Ref() != ref || owner != s.Node.OwnerID {
+		return s, model.ErrConflict
+	}
+	return s, nil
+}
+func (f *backlogRepo) ListRecoverable(ctx context.Context, after pgtype.UUID) ([]model.Operation, error) {
+	return f.workerRepo.ListRecoverable(ctx, after)
+}
+func (f *backlogRepo) RecordOperationResult(_ context.Context, s store.RecoverySnapshot, o model.Observation) error {
+	f.seen[s.Operation.ID]++
+	return nil
+}
+func (f *backlogRepo) RecordObservation(_ context.Context, id pgtype.UUID, g int64, o model.Observation) error {
+	if o.Ready {
+		f.health[id] = o.ObservedAt
+	}
+	if f.clock != nil {
+		*f.clock = f.clock.Add(2 * time.Second)
+	}
+	return nil
+}
+func (f *backlogRepo) ListObservable(ctx context.Context, after pgtype.UUID) ([]model.Node, error) {
+	if f.clock != nil {
+		*f.clock = f.clock.Add(2 * time.Second)
+	}
+	return f.workerRepo.ListObservable(ctx, after)
+}
+func TestRecoverySlowBacklogReservesIdleAndProgress(t *testing.T) {
+	base, p, r := workerFixture(model.Create, false)
+	f := &backlogRepo{workerRepo: base, snapshots: map[pgtype.UUID]store.RecoverySnapshot{}, seen: map[pgtype.UUID]int{}, health: map[pgtype.UUID]time.Time{}}
+	f.discovered = nil
+	for i := 1; i <= 150; i++ {
+		s := base.snap
+		s.Node.ID.Bytes[0] = byte(i)
+		s.Operation.ID.Bytes[0] = byte(i)
+		s.Operation.NodeID = s.Node.ID
+		f.snapshots[s.Operation.ID] = s
+		f.discovered = append(f.discovered, s.Operation)
+	}
+	for i := 250; i <= 251; i++ {
+		n := base.snap.Node
+		n.ID.Bytes[0] = byte(i)
+		f.observable = append(f.observable, n)
+	}
+	r.repo = f
+	var cancel context.CancelFunc
+	p.inspectCheck = func(n model.Node) {
+		p.observation.ContainerID = n.ContainerID
+		p.observation.Ready = n.ID.Bytes[0] >= 250
+		if n.ID.Bytes[0] < 250 {
+			f.seen[n.ID]++
+			cancel()
+		}
+	}
+	for tick := 0; tick < 155; tick++ {
+		var ctx context.Context
+		ctx, cancel = context.WithCancel(context.Background())
+		_ = r.Tick(ctx)
+		cancel()
+	}
+	if f.seen[f.discovered[149].ID] == 0 {
+		t.Error("later intent starved behind oldest100")
+	}
+	if len(f.health) != 2 {
+		t.Errorf("backlog suppressed recurring idle health: %d", len(f.health))
+	}
+}
+
+// Literal supported capacity: two idle nodes, 5s inspections, 2s writes/discovery,
+// with an entire 5s slow recovery reservation and 5s scheduling gap. Not a fleet-wide SLA.
+func TestRecoverySupportedIdleLoadWithSlowRecovery(t *testing.T) {
+	for _, count := range []int{2, 8} {
+		t.Run(map[int]string{2: "supported-two", 8: "over-capacity-failclosed"}[count], func(t *testing.T) {
+			base, p, r := workerFixture(model.Create, false)
+			clock := base.snap.SQLNow
+			f := &backlogRepo{workerRepo: base, snapshots: map[pgtype.UUID]store.RecoverySnapshot{}, seen: map[pgtype.UUID]int{}, health: map[pgtype.UUID]time.Time{}, clock: &clock}
+			f.discovered = nil
+			for i := 1; i <= 150; i++ {
+				s := base.snap
+				s.Node.ID.Bytes[0] = byte(i)
+				s.Operation.ID.Bytes[0] = byte(i)
+				s.Operation.NodeID = s.Node.ID
+				f.snapshots[s.Operation.ID] = s
+				f.discovered = append(f.discovered, s.Operation)
+			}
+			for i := 0; i < count; i++ {
+				n := base.snap.Node
+				n.ID.Bytes[0] = byte(240 + i)
+				f.observable = append(f.observable, n)
+				f.health[n.ID] = clock
+			}
+			r.repo = f
+			r.clock = func() time.Time { return clock }
+			p.inspectCheck = func(n model.Node) {
+				clock = clock.Add(5 * time.Second)
+				if count == 2 && n.ID.Bytes[0] >= 240 && clock.Sub(f.health[n.ID]) >= 30*time.Second {
+					t.Fatal("supported lease expired between observations")
+				}
+				p.observation.ObservedAt = clock
+				p.observation.Ready = n.ID.Bytes[0] >= 240
+				if n.ID.Bytes[0] < 240 {
+					f.seen[n.ID]++
+				}
+			}
+			ticks := 155
+			if count > 2 {
+				ticks = 4
+			}
+			for i := 0; i < ticks; i++ {
+				_ = r.Tick(context.Background())
+				if count == 2 {
+					for _, at := range f.health {
+						if clock.Sub(at) >= 30*time.Second {
+							t.Fatalf("supported healthy idle lease expired at Tick %d age=%s", i, clock.Sub(at))
+						}
+					}
+				}
+				clock = clock.Add(5 * time.Second)
+			}
+			if count == 2 && f.seen[f.discovered[149].ID] == 0 {
+				t.Fatal("later intent never progressed with slow prefix")
+			}
+			if count > 2 {
+				n := f.observable[0]
+				for _, candidate := range f.observable {
+					if f.health[candidate.ID].Before(f.health[n.ID]) {
+						n = candidate
+					}
+				}
+				if clock.Sub(f.health[n.ID]) < 30*time.Second {
+					t.Fatal("capacity overflow falsely promised all-node fresh health")
+				}
+				// Rotating batches can renew the first node again; the oldest lease must still age out.
+				if f.health[n.ID].Equal(clock) {
+					t.Fatal("fabricated health under overload")
+				}
+				stale := model.Observation{ContainerID: n.ContainerID, DaemonID: n.DaemonID, StartEpoch: n.StartEpoch, Status: "running", Ready: true, Agents: []string{"claude"}, RuntimeCount: 1, ObservedAt: f.health[n.ID]}
+				if workerHealth(store.RecoverySnapshot{Node: n, SQLNow: clock}, stale).Ready {
+					t.Fatal("overcapacity stale observation bypassed freshness")
+				}
+			}
+		})
+	}
+}
+
+func TestRecoveryConfirmedTimeoutBoundariesAndLateHealth(t *testing.T) {
+	for _, name := range []string{"before-deadline", "at-deadline", "inspect-crosses-deadline", "stale-generation", "stale-resource", "late-health"} {
+		t.Run(name, func(t *testing.T) {
+			f, p, r := workerFixture(model.Create, false)
+			f.snap.Operation.Phase = "applying"
+			f.snap.Operation.BootstrapMinted = true
+			f.snap.Operation.BootstrapClaimedAt = f.snap.SQLNow.Add(-5 * time.Minute)
+			p.observation.Ready = false
+			if name == "before-deadline" || name == "inspect-crosses-deadline" {
+				f.snap.Operation.BootstrapClaimedAt = f.snap.Operation.BootstrapClaimedAt.Add(time.Second)
+			}
+			if name == "inspect-crosses-deadline" {
+				p.during = func() {
+					f.snap.SQLNow = f.snap.SQLNow.Add(time.Second)
+					p.observation.Ready = true
+					p.observation.ObservedAt = f.snap.SQLNow
+				}
+			}
+			if name == "stale-generation" || name == "stale-resource" {
+				f.current = func(call int) error {
+					if call == 2 {
+						if name == "stale-generation" {
+							f.snap.Node.Generation++
+							f.snap.Operation.Generation++
+						} else {
+							f.snap.Node.DataVolume = "new-data"
+						}
+					}
+					return nil
+				}
+			}
+			f.discovered = []model.Operation{f.snap.Operation}
+			_ = r.Tick(context.Background())
+			denied := name == "before-deadline" || name == "stale-generation" || name == "stale-resource"
+			if f.snap.Node.Revoked == denied || f.snap.Operation.NonRetryable == denied {
+				t.Fatalf("timeout crossed current binding: events=%v", f.events)
+			}
+			if !denied && (f.snap.Operation.ErrorCode != "initialization-timeout" || f.snap.Operation.Phase != "applying" || f.snap.Node.ContainerID != "cid" || f.snap.Node.DataVolume != "data") {
+				t.Fatal("timeout lost visible error/identity/barrier")
+			}
+			if name == "late-health" {
+				before := len(p.actions)
+				p.observation.Ready = true
+				_ = r.Tick(context.Background())
+				if len(p.actions) != before || f.snap.Operation.Phase != "applying" || f.result.Ready {
+					t.Fatal("late health completed expired create")
+				}
+			}
+		})
+	}
+}
+
+func TestRecoveryInitializationRunCancellationJoins(t *testing.T) {
+	f, p, r, c := bootstrapFixture(t)
+	entered, exited := make(chan struct{}), make(chan struct{})
+	p.ensureCheck = func(ctx context.Context, _ model.Node, _ model.Bootstrap) {
+		close(entered)
+		<-ctx.Done()
+		p.err = ctx.Err()
+		close(exited)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("initialization never entered")
+	}
+	cancel()
+	select {
+	case e := <-done:
+		if e != nil {
+			t.Fatal(e)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not join initialization")
+	}
+	select {
+	case <-exited:
+	default:
+		t.Fatal("owned slot leaked")
+	}
+	if c.mints != 1 || c.confirms != 0 || f.snap.Node.Revoked || len(f.events) == 0 {
+		t.Fatal("cancellation resurrected initialization authority")
+	}
+	if e := r.Tick(context.Background()); !errors.Is(e, context.Canceled) {
+		t.Fatal("closed worker admitted new work")
+	}
+}
+func TestRecoveryProcessedCursorDoesNotSkipCanceledLookup(t *testing.T) {
+	f, p, r := workerFixture(model.Create, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	f.current = func(int) error { cancel(); return nil }
+	_ = r.Tick(ctx)
+	if r.recoverAfter.Valid || len(p.actions) != 0 {
+		t.Fatal("unprocessed row skipped after canceled SQL lookup")
+	}
+	f.current = nil
+	_ = r.Tick(context.Background())
+	if len(p.actions) != 1 {
+		t.Fatal("canceled lookup row never revisited")
+	}
+}
+func TestRecoveryInitializationSingleSlot(t *testing.T) {
+	f, p, r, c := bootstrapFixture(t)
+	repo := &backlogRepo{workerRepo: f, snapshots: map[pgtype.UUID]store.RecoverySnapshot{}, seen: map[pgtype.UUID]int{}, health: map[pgtype.UUID]time.Time{}}
+	first := f.snap
+	second := first
+	second.Node.ID.Bytes[0] = 4
+	second.Operation.ID.Bytes[0] = 4
+	second.Operation.NodeID = second.Node.ID
+	repo.snapshots[first.Operation.ID] = first
+	repo.snapshots[second.Operation.ID] = second
+	repo.discovered = append(repo.discovered, second.Operation)
+	r.repo = repo
+	for i := 250; i <= 251; i++ {
+		n := first.Node
+		n.ContainerID = "cid"
+		n.ID.Bytes[0] = byte(i)
+		repo.observable = append(repo.observable, n)
+	}
+	claims := 0
+	original := r.claimBootstrap
+	r.claimBootstrap = func(ctx context.Context, s store.RecoverySnapshot) (bootstrapHandle, error) {
+		claims++
+		return original(ctx, s)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	p.ensureCheck = func(context.Context, model.Node, model.Bootstrap) { close(entered); <-release }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if e := r.Tick(ctx); e != nil {
+		t.Fatal(e)
+	}
+	<-entered
+	_ = r.Tick(ctx)
+	if claims != 1 {
+		t.Fatal("more than one inflight winner")
+	}
+	if len(repo.health) != 2 {
+		t.Fatal("inflight initialization suppressed idle observation")
+	}
+	close(release)
+	waitInitialization(t, r)
+	if c.mints != 1 || c.confirms != 1 {
+		t.Fatal("owned winner lost its original claim")
 	}
 }
 func TestRecoveryIdleMissingDisablesReadyWithoutReplacement(t *testing.T) {

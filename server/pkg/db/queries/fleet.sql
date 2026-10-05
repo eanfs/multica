@@ -297,7 +297,8 @@ WHERE o.namespace= @namespace AND o.phase IN ('queued','preparing','prepared','a
  AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=clock_timestamp())
  AND (o.action<>'create' OR n.container_id<>'' OR o.bootstrap_claimed_at IS NULL
   OR (o.bootstrap_claimed_at<=clock_timestamp() AND o.bootstrap_claimed_at+interval '5 minutes'<=clock_timestamp()))
-ORDER BY o.created_at,o.id LIMIT 100;
+ AND o.id> @after_id::uuid
+ORDER BY o.id LIMIT 100;
 
 -- name: FleetClaimLifecycle :one
 UPDATE fleet_node_operations o SET action_claimed_at=clock_timestamp(),action_start_epoch= @start_epoch,phase='applying',updated_at=now()
@@ -359,6 +360,23 @@ WHERE namespace= @namespace AND owner_id= @owner_id AND node_id= @node_id AND id
  AND bootstrap_claimed_at= @claimed_at AND bootstrap_claimed_at<=clock_timestamp()
  AND bootstrap_claimed_at+interval '5 minutes'<=clock_timestamp();
 
+-- name: FleetExpireConfirmedCreateNode :execrows
+UPDATE fleet_nodes n SET revoked=true,ready=false,error_code='initialization-timeout',error_message='',updated_at=now()
+FROM fleet_node_operations o
+WHERE n.namespace= @namespace AND n.owner_id= @owner_id AND n.id= @node_id AND n.generation= @generation
+ AND n.container_id= @container_id AND n.container_id<>'' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running'
+ AND o.namespace=n.namespace AND o.owner_id=n.owner_id AND o.node_id=n.id AND o.generation=n.generation
+ AND o.id= @operation_id AND o.action='create' AND o.phase='applying' AND o.bootstrap_minted AND NOT o.non_retryable
+ AND o.bootstrap_claimed_at= @claimed_at AND o.bootstrap_claimed_at<=clock_timestamp()
+ AND o.bootstrap_claimed_at+interval '5 minutes'<=clock_timestamp();
+
+-- name: FleetExpireConfirmedCreateOperation :execrows
+UPDATE fleet_node_operations SET non_retryable=true,error_code='initialization-timeout',error_message='',next_attempt_at=NULL,updated_at=now()
+WHERE namespace= @namespace AND owner_id= @owner_id AND node_id= @node_id AND id= @operation_id
+ AND generation= @generation AND action='create' AND phase='applying' AND bootstrap_minted AND NOT non_retryable
+ AND bootstrap_claimed_at= @claimed_at AND bootstrap_claimed_at<=clock_timestamp()
+ AND bootstrap_claimed_at+interval '5 minutes'<=clock_timestamp();
+
 -- name: FleetRecordObservation :execrows
 UPDATE fleet_nodes SET observation= @observation,
  status=CASE WHEN desired IN ('terminating','terminated') THEN status ELSE @status END,
@@ -373,7 +391,9 @@ WHERE namespace= @namespace AND owner_id= @owner_id AND id= @node_id AND generat
 UPDATE fleet_node_operations SET phase='completed',error_code='',error_message='',next_attempt_at=NULL,updated_at=now()
 WHERE namespace= @namespace AND owner_id= @owner_id AND node_id= @node_id AND id= @operation_id
  AND generation= @generation AND action= @action AND approved= @approved AND phase= @phase
- AND phase IN ('queued','prepared','applying') AND NOT non_retryable;
+ AND phase IN ('queued','prepared','applying') AND NOT non_retryable
+ AND (action<>'create' OR bootstrap_claimed_at IS NULL
+  OR (bootstrap_claimed_at<=clock_timestamp() AND bootstrap_claimed_at+interval '5 minutes'>clock_timestamp()));
 
 -- name: FleetFinishLifecycleNode :execrows
 UPDATE fleet_nodes SET status= @status,start_epoch= @start_epoch,maintenance=false,ready= @ready,updated_at=now()

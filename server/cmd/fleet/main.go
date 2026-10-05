@@ -123,6 +123,12 @@ func probeReady(ctx context.Context, base string, c *http.Client) error {
 	}
 	return nil
 }
+
+// reviewClient is the process composition boundary; the transport is injectable without sockets.
+func reviewClient(cfg model.Config, key []byte, c *http.Client) *cloudruntime.Client {
+	return cloudruntime.NewClient(cloudruntime.Config{BaseURL: cfg.APIURL, ServiceSecret: key, Timeout: 5 * time.Second, HTTPClient: c})
+}
+
 func run(ctx context.Context) error {
 	// Explicit operator inputs only. No managed environment provisioning, migrations or HOME lookup.
 	cfgPath, keyPath, dbURL := os.Getenv("FLEET_CONFIG_FILE"), os.Getenv("FLEET_SERVICE_KEY_FILE"), os.Getenv("DATABASE_URL")
@@ -141,10 +147,10 @@ func run(ctx context.Context) error {
 	if addr == "" {
 		addr = "127.0.0.1:8090"
 	}
-	base, e := selfURL(addr)
-	if e != nil {
+	if _, e = selfURL(addr); e != nil {
 		return e
 	}
+	reviewer := reviewClient(cfg, key, nil)
 	poolCfg, e := pgxpool.ParseConfig(dbURL)
 	if e != nil {
 		return model.ErrUnavailable
@@ -170,7 +176,7 @@ func run(ctx context.Context) error {
 	provider := fleetdocker.New(fleetdocker.NewEngine(engine), cfg)
 	service := fleet.NewService(repo, cfg, provider)
 	worker := fleet.NewReconciler(repo, provider, cfg)
-	worker.SetReviewer(cloudruntime.NewClient(cloudruntime.Config{BaseURL: base, ServiceSecret: key, Timeout: 5 * time.Second}))
+	worker.SetReviewer(reviewer)
 	handler := service.Handler(key)
 	server := &http.Server{Addr: addr, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 40 * time.Second, IdleTimeout: 30 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if ctx.Err() != nil {

@@ -15,7 +15,7 @@ import (
 
 // recoveryStore is a test seam over the exact durable Store contracts, not authority.
 type recoveryStore interface {
-	ListRecoverable(context.Context) ([]model.Operation, error)
+	ListRecoverable(context.Context, pgtype.UUID) ([]model.Operation, error)
 	ListObservable(context.Context, pgtype.UUID) ([]model.Node, error)
 	CurrentOperation(context.Context, pgtype.UUID, model.OperationRef) (store.RecoverySnapshot, error)
 	RecordObservation(context.Context, pgtype.UUID, int64, model.Observation) error
@@ -28,6 +28,7 @@ type recoveryStore interface {
 	ConfirmBootstrap(context.Context, store.BootstrapClaim, model.Observation) error
 	FailBootstrap(context.Context, store.BootstrapClaim, string) error
 	ExpireBootstrap(context.Context, store.RecoverySnapshot) error
+	ExpireConfirmedCreate(context.Context, store.RecoverySnapshot) error
 	GetProfileForNode(context.Context, model.Node) (store.Profile, error)
 	FinishDelete(context.Context, pgtype.UUID, int64) error
 }
@@ -47,6 +48,12 @@ type Reconciler struct {
 	claimBootstrap func(context.Context, store.RecoverySnapshot) (bootstrapHandle, error)
 	mu             sync.Mutex
 	observeAfter   pgtype.UUID
+	recoverAfter   pgtype.UUID
+	initialization *initializationSlot
+	serviceContext context.Context
+	stopping       bool
+	running        bool
+	clock          func() time.Time
 }
 
 func NewReconciler(repo *store.Store, p model.Provider, cfg model.Config) *Reconciler {
@@ -66,49 +73,89 @@ func NewReconciler(repo *store.Store, p model.Provider, cfg model.Config) *Recon
 }
 func (r *Reconciler) SetReviewer(reviewer OperationReviewer) { r.reviewer = reviewer }
 
-// Tick is serial, bounded and returns after one pass; it never waits for health to become known.
-func (r *Reconciler) Tick(ctx context.Context) error {
+// Tick serializes scheduling, not initialization I/O. Each lane has its own fixed budget.
+func (r *Reconciler) Tick(parent context.Context) error {
 	if !r.mu.TryLock() {
 		return model.ErrBusy
 	}
 	defer r.mu.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+	if r.stopping {
+		return context.Canceled
+	}
+	if r.serviceContext != nil {
+		parent = r.serviceContext
+	}
+	if parent.Err() != nil {
+		return parent.Err()
+	}
 	if r.repo == nil || r.provider == nil {
 		return model.ErrUnavailable
 	}
-	ops, e := r.repo.ListRecoverable(ctx)
+	r.reapInitialization()
+	ctx, cancel := context.WithTimeout(parent, 24*time.Second)
+	defer cancel()
+	// Reserve health first. Supported steady load: two idle nodes at <=5s Inspect + <=2s write
+	// each, <=2s discovery, <=2s scheduling overhead, <=5s recovery and <=5s cadence.
+	// The 18s idle reservation includes slack; supported renewal age remains <30s.
+	idle, stopIdle := context.WithTimeout(ctx, 18*time.Second)
+	result := r.observeIdle(idle)
+	stopIdle()
+	recovery, stopRecovery := context.WithTimeout(ctx, 5*time.Second)
+	defer stopRecovery()
+	end := r.now().Add(5 * time.Second)
+	ops, e := r.repo.ListRecoverable(recovery, r.recoverAfter)
 	if e != nil {
 		return model.ErrUnavailable
 	}
-	var result error
+	if len(ops) == 0 {
+		r.recoverAfter = pgtype.UUID{}
+		return result
+	}
 	for _, op := range ops {
-		if e = ctx.Err(); e != nil {
-			return e
+		if recovery.Err() != nil || !r.now().Before(end) {
+			break
+		}
+		if r.initialization != nil && r.initialization.ref.OperationID == op.ID {
+			r.recoverAfter = op.ID
+			continue
 		}
 		ref := model.OperationRef{Namespace: r.cfg.Namespace, NodeID: op.NodeID, OperationID: op.ID, Generation: op.Generation, Action: op.Action}
-		snap, e := r.repo.CurrentOperation(ctx, op.OwnerID, ref)
+		snap, e := r.repo.CurrentOperation(recovery, op.OwnerID, ref)
+		// A row whose lookup never finished remains ahead of the processed cursor.
+		if recovery.Err() != nil {
+			break
+		}
 		if errors.Is(e, model.ErrConflict) || errors.Is(e, model.ErrBusy) || errors.Is(e, model.ErrForbidden) {
+			r.recoverAfter = op.ID
 			continue
 		}
 		if e != nil {
 			result = model.ErrUnavailable
-			continue
+			break
 		}
 		if snap.Operation.NonRetryable || snap.Operation.Attempts >= 5 {
+			r.recoverAfter = op.ID
 			continue
 		}
-		if e = r.reconcile(ctx, snap); e != nil {
+		if snap.Operation.Action == model.Create && snap.Node.ContainerID == "" && snap.Operation.BootstrapClaimedAt.IsZero() {
+			e = r.startInitialization(recovery, parent, snap)
+		} else {
+			e = r.reconcile(recovery, snap)
+		}
+		// The attempted row is processed even when its bounded I/O exhausted the pass.
+		r.recoverAfter = op.ID
+		if e != nil {
 			result = e
 		}
 	}
-	if e = r.observeIdle(ctx); e != nil {
-		result = e
+	if len(ops) < 100 && r.recoverAfter == ops[len(ops)-1].ID && recovery.Err() == nil && r.now().Before(end) {
+		r.recoverAfter = pgtype.UUID{}
 	}
 	return result
 }
 
 func (r *Reconciler) observeIdle(ctx context.Context) error {
+	end := r.now().Add(18 * time.Second)
 	nodes, e := r.repo.ListObservable(ctx, r.observeAfter)
 	if e != nil {
 		return model.ErrUnavailable
@@ -120,6 +167,9 @@ func (r *Reconciler) observeIdle(ctx context.Context) error {
 	for _, n := range nodes {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if !r.now().Before(end) {
+			return nil
 		}
 		// Discovery narrows read-only work; it never authorizes replacing or starting an identity.
 		if n.Namespace != r.cfg.Namespace || n.ContainerID == "" || n.Maintenance || n.Revoked || n.Desired != "running" {
@@ -148,6 +198,10 @@ func (r *Reconciler) observeIdle(ctx context.Context) error {
 		if e = r.repo.RecordObservation(ctx, n.ID, n.Generation, o); e != nil && !errors.Is(e, model.ErrConflict) && !errors.Is(e, model.ErrUnknownHealth) {
 			return model.ErrUnavailable
 		}
+	}
+	// A fully processed short page reached the tail; wrap without spending a blank health Tick.
+	if len(nodes) < 100 {
+		r.observeAfter = pgtype.UUID{}
 	}
 	return nil
 }
@@ -204,7 +258,14 @@ func (r *Reconciler) reconcile(ctx context.Context, s store.RecoverySnapshot) er
 			}
 			return r.repo.ExpireBootstrap(ctx, fresh)
 		}
-		return r.bootstrap(ctx, s)
+		return model.ErrBusy // Fresh initialization is admitted only by the owned scheduling slot.
+	}
+	if op.Action == model.Create && !op.BootstrapClaimedAt.IsZero() && !op.BootstrapClaimedAt.After(s.SQLNow) && !s.SQLNow.Before(op.BootstrapClaimedAt.Add(5*time.Minute)) {
+		fresh, e := r.current(ctx, s)
+		if e != nil {
+			return nil
+		}
+		return r.repo.ExpireConfirmedCreate(ctx, fresh)
 	}
 	if op.Action == model.Delete {
 		fresh, e := r.current(ctx, s)
@@ -344,6 +405,9 @@ func (r *Reconciler) inspect(ctx context.Context, s store.RecoverySnapshot) erro
 		}
 		return r.repo.RecordOperationError(ctx, current, "instance-lost", true)
 	}
+	if current.Operation.Action == model.Create && !current.Operation.BootstrapClaimedAt.IsZero() && !current.Operation.BootstrapClaimedAt.After(current.SQLNow) && !current.SQLNow.Before(current.Operation.BootstrapClaimedAt.Add(5*time.Minute)) {
+		return r.repo.ExpireConfirmedCreate(ctx, current)
+	}
 	health := current
 	if current.Operation.Action == model.Start || current.Operation.Action == model.Reboot {
 		health.Node.StartEpoch = ""
@@ -436,17 +500,7 @@ func (c sqlBootstrap) Confirm(ctx context.Context, o model.Observation) error {
 func (c sqlBootstrap) Fail(ctx context.Context, code string) error {
 	return c.repo.FailBootstrap(ctx, c.claim, code)
 }
-func (r *Reconciler) bootstrap(ctx context.Context, s store.RecoverySnapshot) error {
-	if r.claimBootstrap == nil {
-		return model.ErrUnavailable
-	}
-	claim, e := r.claimBootstrap(ctx, s)
-	if e != nil {
-		if errors.Is(e, model.ErrConflict) {
-			return nil
-		}
-		return r.recordError(ctx, s, e)
-	}
+func (r *Reconciler) initialize(ctx context.Context, s store.RecoverySnapshot, claim bootstrapHandle) error {
 	c, cancel := claim.Context(ctx)
 	defer cancel()
 	fail := func(e error) error {
@@ -507,7 +561,17 @@ func (r *Reconciler) bootstrap(ctx context.Context, s store.RecoverySnapshot) er
 }
 
 // Run owns a service context; request/browser cancellation never owns accepted intents.
-func (r *Reconciler) Run(ctx context.Context) error {
+func (r *Reconciler) Run(parent context.Context) error {
+	r.mu.Lock()
+	if r.running || r.stopping {
+		r.mu.Unlock()
+		return model.ErrBusy
+	}
+	ctx, cancel := context.WithCancel(parent)
+	r.running = true
+	r.serviceContext = ctx
+	r.mu.Unlock()
+	defer func() { cancel(); r.closeInitialization() }()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {

@@ -335,6 +335,8 @@ UPDATE fleet_node_operations SET phase='completed',error_code='',error_message='
 WHERE namespace= $1 AND owner_id= $2 AND node_id= $3 AND id= $4
  AND generation= $5 AND action= $6 AND approved= $7 AND phase= $8
  AND phase IN ('queued','prepared','applying') AND NOT non_retryable
+ AND (action<>'create' OR bootstrap_claimed_at IS NULL
+  OR (bootstrap_claimed_at<=clock_timestamp() AND bootstrap_claimed_at+interval '5 minutes'>clock_timestamp()))
 `
 
 type FleetCompleteOperationParams struct {
@@ -508,6 +510,75 @@ type FleetExpireBootstrapOperationParams struct {
 
 func (q *Queries) FleetExpireBootstrapOperation(ctx context.Context, arg FleetExpireBootstrapOperationParams) (int64, error) {
 	result, err := q.db.Exec(ctx, fleetExpireBootstrapOperation,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.NodeID,
+		arg.OperationID,
+		arg.Generation,
+		arg.ClaimedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const fleetExpireConfirmedCreateNode = `-- name: FleetExpireConfirmedCreateNode :execrows
+UPDATE fleet_nodes n SET revoked=true,ready=false,error_code='initialization-timeout',error_message='',updated_at=now()
+FROM fleet_node_operations o
+WHERE n.namespace= $1 AND n.owner_id= $2 AND n.id= $3 AND n.generation= $4
+ AND n.container_id= $5 AND n.container_id<>'' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running'
+ AND o.namespace=n.namespace AND o.owner_id=n.owner_id AND o.node_id=n.id AND o.generation=n.generation
+ AND o.id= $6 AND o.action='create' AND o.phase='applying' AND o.bootstrap_minted AND NOT o.non_retryable
+ AND o.bootstrap_claimed_at= $7 AND o.bootstrap_claimed_at<=clock_timestamp()
+ AND o.bootstrap_claimed_at+interval '5 minutes'<=clock_timestamp()
+`
+
+type FleetExpireConfirmedCreateNodeParams struct {
+	Namespace   string             `json:"namespace"`
+	OwnerID     pgtype.UUID        `json:"owner_id"`
+	NodeID      pgtype.UUID        `json:"node_id"`
+	Generation  int64              `json:"generation"`
+	ContainerID string             `json:"container_id"`
+	OperationID pgtype.UUID        `json:"operation_id"`
+	ClaimedAt   pgtype.Timestamptz `json:"claimed_at"`
+}
+
+func (q *Queries) FleetExpireConfirmedCreateNode(ctx context.Context, arg FleetExpireConfirmedCreateNodeParams) (int64, error) {
+	result, err := q.db.Exec(ctx, fleetExpireConfirmedCreateNode,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.NodeID,
+		arg.Generation,
+		arg.ContainerID,
+		arg.OperationID,
+		arg.ClaimedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const fleetExpireConfirmedCreateOperation = `-- name: FleetExpireConfirmedCreateOperation :execrows
+UPDATE fleet_node_operations SET non_retryable=true,error_code='initialization-timeout',error_message='',next_attempt_at=NULL,updated_at=now()
+WHERE namespace= $1 AND owner_id= $2 AND node_id= $3 AND id= $4
+ AND generation= $5 AND action='create' AND phase='applying' AND bootstrap_minted AND NOT non_retryable
+ AND bootstrap_claimed_at= $6 AND bootstrap_claimed_at<=clock_timestamp()
+ AND bootstrap_claimed_at+interval '5 minutes'<=clock_timestamp()
+`
+
+type FleetExpireConfirmedCreateOperationParams struct {
+	Namespace   string             `json:"namespace"`
+	OwnerID     pgtype.UUID        `json:"owner_id"`
+	NodeID      pgtype.UUID        `json:"node_id"`
+	OperationID pgtype.UUID        `json:"operation_id"`
+	Generation  int64              `json:"generation"`
+	ClaimedAt   pgtype.Timestamptz `json:"claimed_at"`
+}
+
+func (q *Queries) FleetExpireConfirmedCreateOperation(ctx context.Context, arg FleetExpireConfirmedCreateOperationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, fleetExpireConfirmedCreateOperation,
 		arg.Namespace,
 		arg.OwnerID,
 		arg.NodeID,
@@ -1910,12 +1981,18 @@ WHERE o.namespace= $1 AND o.phase IN ('queued','preparing','prepared','applying'
  AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=clock_timestamp())
  AND (o.action<>'create' OR n.container_id<>'' OR o.bootstrap_claimed_at IS NULL
   OR (o.bootstrap_claimed_at<=clock_timestamp() AND o.bootstrap_claimed_at+interval '5 minutes'<=clock_timestamp()))
-ORDER BY o.created_at,o.id LIMIT 100
+ AND o.id> $2::uuid
+ORDER BY o.id LIMIT 100
 `
 
+type ListFleetRecoverableParams struct {
+	Namespace string      `json:"namespace"`
+	AfterID   pgtype.UUID `json:"after_id"`
+}
+
 // Projections are scheduling candidates, not physical authority.
-func (q *Queries) ListFleetRecoverable(ctx context.Context, namespace string) ([]FleetNodeOperation, error) {
-	rows, err := q.db.Query(ctx, listFleetRecoverable, namespace)
+func (q *Queries) ListFleetRecoverable(ctx context.Context, arg ListFleetRecoverableParams) ([]FleetNodeOperation, error) {
+	rows, err := q.db.Query(ctx, listFleetRecoverable, arg.Namespace, arg.AfterID)
 	if err != nil {
 		return nil, err
 	}

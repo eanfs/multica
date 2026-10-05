@@ -18,6 +18,120 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
+// Confirmed timeout eligibility uses the SQL clock and immutable checkpoint, not mutable errors/time.
+func TestRecoveryConfirmedCreateSQLDeadlineMatrix(t *testing.T) {
+	now := time.Date(2026, 10, 5, 0, 5, 0, 0, time.UTC)
+	good := RecoverySnapshot{SQLNow: now, Node: model.Node{Generation: 3, Desired: "running", ContainerID: "cid", DataVolume: "data"}, Operation: model.Operation{Generation: 3, Action: model.Create, Phase: "applying", BootstrapMinted: true, BootstrapClaimedAt: now.Add(-5 * time.Minute)}}
+	if !confirmedCreateExpired(good) {
+		t.Fatal("original deadline not eligible")
+	}
+	for _, name := range []string{"before-deadline", "future-checkpoint", "no-checkpoint", "unminted", "unconfirmed", "new-generation", "completed", "nonretryable", "revoked", "maintenance", "not-running"} {
+		t.Run(name, func(t *testing.T) {
+			s := good
+			switch name {
+			case "before-deadline":
+				s.SQLNow = now.Add(-time.Nanosecond)
+			case "future-checkpoint":
+				s.Operation.BootstrapClaimedAt = now.Add(time.Second)
+			case "no-checkpoint":
+				s.Operation.BootstrapClaimedAt = time.Time{}
+			case "unminted":
+				s.Operation.BootstrapMinted = false
+			case "unconfirmed":
+				s.Node.ContainerID = ""
+			case "new-generation":
+				s.Node.Generation++
+			case "completed":
+				s.Operation.Phase = "completed"
+			case "nonretryable":
+				s.Operation.NonRetryable = true
+			case "revoked":
+				s.Node.Revoked = true
+			case "maintenance":
+				s.Node.Maintenance = true
+			case "not-running":
+				s.Node.Desired = "stopped"
+			}
+			if confirmedCreateExpired(s) {
+				t.Fatal("invalid timeout eligible")
+			}
+		})
+	}
+	good.Operation.UpdatedAt = now.Add(time.Hour)
+	good.Operation.ErrorCode = "unavailable"
+	if !confirmedCreateExpired(good) {
+		t.Fatal("mutable error refreshed deadline")
+	}
+}
+func TestRecoveryConfirmedCreateLateResultNoSQLWrites(t *testing.T) {
+	now := time.Date(2026, 10, 5, 0, 5, 0, 0, time.UTC)
+	s := RecoverySnapshot{SQLNow: now, Node: model.Node{Generation: 3, Desired: "running", ContainerID: "cid", DaemonID: "daemon", StartEpoch: "epoch"}, Operation: model.Operation{Generation: 3, Action: model.Create, Phase: "applying", BootstrapMinted: true, BootstrapClaimedAt: now.Add(-5 * time.Minute), CreatedAt: now.Add(-6 * time.Minute)}}
+	o := model.Observation{ContainerID: "cid", DaemonID: "daemon", StartEpoch: "epoch", Status: "running", Ready: true, Agents: []string{"claude"}, RuntimeCount: 1, ObservedAt: now}
+	c := &recoveryCapture{}
+	if e := New(nil, "owned").persistOperationResult(context.Background(), db.New(c), s, o, false); !errors.Is(e, model.ErrConflict) || c.sql != "" {
+		t.Fatal("late healthy create performed SQL writes")
+	}
+	s.SQLNow = now.Add(-time.Nanosecond)
+	o.ObservedAt = s.SQLNow
+	if e := New(nil, "owned").persistOperationResult(context.Background(), db.New(c), s, o, false); e != nil {
+		t.Fatalf("predeadline completion denied: %v", e)
+	}
+}
+func TestRecoveryConfirmedTimeoutCompiledCAS(t *testing.T) {
+	c := &recoveryCapture{}
+	q := db.New(c)
+	owner := uuid(t, "10000000-0000-0000-0000-000000000001")
+	node := uuid(t, "20000000-0000-0000-0000-000000000001")
+	op := uuid(t, "30000000-0000-0000-0000-000000000001")
+	stamp := timestamp(time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC))
+	_, e := q.FleetExpireConfirmedCreateNode(context.Background(), db.FleetExpireConfirmedCreateNodeParams{Namespace: "owned", OwnerID: owner, NodeID: node, OperationID: op, Generation: 3, ContainerID: "cid", ClaimedAt: stamp})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !reflect.DeepEqual(c.args, []any{"owned", owner, node, int64(3), "cid", op, stamp}) {
+		t.Fatalf("unbound current timeout: %v", c.args)
+	}
+	for _, guard := range []string{"n.container_id=", "n.generation=", "NOT n.revoked", "NOT n.maintenance", "o.id=", "o.action='create'", "o.phase='applying'", "o.bootstrap_minted", "NOT o.non_retryable", "o.bootstrap_claimed_at=", "interval '5 minutes'<=clock_timestamp()", "initialization-timeout"} {
+		if !strings.Contains(c.sql, guard) {
+			t.Fatalf("missing timeout guard %s", guard)
+		}
+	}
+	for _, forbidden := range []string{"container_id='',", "data_volume=", "phase='failed'", "phase='completed'"} {
+		if strings.Contains(c.sql, forbidden) {
+			t.Fatal("timeout cleared identity/data/barrier")
+		}
+	}
+	_, e = q.FleetExpireConfirmedCreateOperation(context.Background(), db.FleetExpireConfirmedCreateOperationParams{Namespace: "owned", OwnerID: owner, NodeID: node, OperationID: op, Generation: 3, ClaimedAt: stamp})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !reflect.DeepEqual(c.args, []any{"owned", owner, node, op, int64(3), stamp}) || !strings.Contains(c.sql, "non_retryable=true") || !strings.Contains(c.sql, "bootstrap_minted") {
+		t.Fatal("timeout operation binding lost")
+	}
+}
+
+// Even a transaction beginning before expiry must not commit completion after SQL-clock expiry.
+func TestRecoveryConfirmedCompletionClockCrossingCAS(t *testing.T) {
+	c := &recoveryCapture{}
+	_, _ = db.New(c).FleetCompleteOperation(context.Background(), db.FleetCompleteOperationParams{Namespace: "owned", Action: "create", Phase: "applying", Generation: 3})
+	if !strings.Contains(c.sql, "bootstrap_claimed_at+interval '5 minutes'>clock_timestamp()") {
+		t.Fatal("completion CAS can cross original SQL initialization deadline")
+	}
+}
+func TestRecoveryProcessedCursorCompiledQuery(t *testing.T) {
+	c := &lifecycleSQLCapture{}
+	after := uuid(t, "30000000-0000-0000-0000-000000000099")
+	_, _ = db.New(c).ListFleetRecoverable(context.Background(), db.ListFleetRecoverableParams{Namespace: "owned", AfterID: after})
+	if !reflect.DeepEqual(c.args, []any{"owned", after}) {
+		t.Fatal("processed cursor/namespace not bound")
+	}
+	for _, guard := range []string{"o.id>", "ORDER BY o.id LIMIT 100", "n.generation=o.generation", "NOT o.non_retryable", "o.attempts<5", "o.next_attempt_at", "bootstrap_claimed_at"} {
+		if !strings.Contains(c.sql, guard) {
+			t.Fatalf("missing recovery discovery guard %s", guard)
+		}
+	}
+}
+
 // Confirmation requires a post-checkpoint provider result, not merely a token or cached identity.
 func TestRecoveryBootstrapResultValidation(t *testing.T) {
 	now := time.Date(2026, 10, 4, 0, 1, 0, 0, time.UTC)

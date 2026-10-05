@@ -173,6 +173,10 @@ func (s *Store) persistOperationResult(ctx context.Context, q *db.Queries, snap 
 		}
 	}
 	n, op := snap.Node, snap.Operation
+	// A late healthy observation cannot complete a create beyond its original initialization window.
+	if op.Action == model.Create && !op.BootstrapClaimedAt.IsZero() && (!snap.SQLNow.Before(op.BootstrapClaimedAt.Add(bootstrapLease)) || op.BootstrapClaimedAt.After(snap.SQLNow)) {
+		return model.ErrConflict
+	}
 	if op.Action == model.Delete || (maintenanceAction(op.Action) && !op.Approved) || (op.Action == model.Create && n.ContainerID == "") || o.Offline || o.ObservedAt.Before(op.CreatedAt) {
 		return model.ErrConflict
 	}

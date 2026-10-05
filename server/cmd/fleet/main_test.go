@@ -191,6 +191,49 @@ func TestFleetMainReviewClientOriginalRefNoNetwork(t *testing.T) {
 		t.Fatalf("unknown review=%v calls=%d", e, calls)
 	}
 }
+
+// A self-origin review request is a regression even though the private client itself is correct.
+func TestFleetMainReviewCompositionUsesAPIOrigin(t *testing.T) {
+	id := func(b byte) pgtype.UUID { return pgtype.UUID{Bytes: [16]byte{b}, Valid: true} }
+	ref := model.OperationRef{Namespace: "owned", NodeID: id(1), OperationID: id(3), Generation: 7, Action: model.Delete}
+	owner := util.UUIDToString(id(2))
+	cfg := model.Config{APIURL: "http://api.owned.invalid:8000"}
+	reviews, probes := 0, 0
+	transport := &http.Client{Transport: ownedTransport(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/readyz" {
+			probes++
+			if req.URL.Host != "127.0.0.1:8090" {
+				t.Error("readyz lost Fleet origin")
+			}
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("ready"))}, nil
+		}
+		reviews++
+		var dto fleet.OperationRequestDTO
+		if e := json.NewDecoder(req.Body).Decode(&dto); e != nil {
+			t.Fatal(e)
+		}
+		got, e := dto.OperationRef()
+		if req.URL.Host != "api.owned.invalid:8000" || req.URL.Path != "/internal/local-fleet/operations/review" || req.Method != "POST" || e != nil || got != ref || req.Header.Get("X-User-ID") != owner || req.Header.Get("X-Fleet-Service-Key") != "owned-key" {
+			t.Errorf("composition review misbound: url=%s ref=%+v", req.URL, got)
+		}
+		return &http.Response{StatusCode: 409, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"error_code":"unknown_health"}`))}, nil
+	})}
+	client := reviewClient(cfg, []byte("owned-key"), transport)
+	_, e := client.ReviewOperation(context.Background(), owner, ref)
+	if !errors.Is(e, model.ErrUnknownHealth) {
+		t.Fatal(e)
+	}
+	base, e := selfURL("127.0.0.1:8090")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = probeReady(context.Background(), base, transport); e != nil {
+		t.Fatal(e)
+	}
+	if reviews != 1 || probes != 1 {
+		t.Fatal("composition not exercised")
+	}
+}
 func TestFleetMainMissingConfigStopsBeforeAnyDefaultLookup(t *testing.T) {
 	t.Setenv("FLEET_CONFIG_FILE", filepath.Join(t.TempDir(), "missing.json"))
 	t.Setenv("FLEET_SERVICE_KEY_FILE", filepath.Join(t.TempDir(), "missing-key"))
