@@ -58,7 +58,11 @@ case "$*" in
 esac
 EOF
 chmod +x "$fake_bin/curl" "$fake_bin/lsof"
-export PATH="$fake_bin:$PATH"
+for tool in bash dirname tr mkdir rm date chmod sed cat tail basename uname id grep cp ln touch awk cut cksum readlink mktemp wc head sort env sh; do
+  ln -s "$(command -v "$tool")" "$fake_bin/$tool"
+done
+ln -s "$(command -v node)" "$fake_bin/node"
+export PATH="$fake_bin"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -377,5 +381,25 @@ printf 'n\n' | dev_env destroy orphan-902 > "$out" 2>&1 || fail "declining destr
 require_contains "$out" "Cancelled."
 [ -d "$MULTICA_DEV_HOME/envs/orphan-902" ] || fail "declined destroy removed the environment anyway"
 
+# Canonical Fleet composition/lifecycle cases live only in fleet-env.test.sh.
+# This suite owns the managed environment component-selection wiring.
+(
+  source "$root_dir/scripts/dev-env.sh"
+  [ "$DEFAULT_COMPONENTS" = "api web" ] || fail "default unexpectedly enables Fleet"
+  case " $ALL_COMPONENTS " in *" fleet "*) ;; *) fail "optional Fleet is not selectable" ;; esac
+  COMPONENTS="$DEFAULT_COMPONENTS"
+  if component_selected fleet; then fail "Fleet selected by default"; fi
+) || fail "optional component contract"
+echo 'PASS: TestFleetOptionalDefaultComponents'
+status=0
+(
+  source "$root_dir/scripts/dev-env.sh"
+  DATABASE_URL='not-a-url-with-private-fixture-value'
+  rewrite_env_ports .env.worktree 1 18001 13001 fixture
+) > "$tmp_dir/url-denial" 2>&1 || status=$?
+[ "$status" -ne 0 ] || fail "invalid DSN accepted"
+if grep -Fq 'private-fixture-value' "$tmp_dir/url-denial"; then fail "invalid DSN leaked"; fi
+echo 'PASS: TestInvalidDatabaseDiagnosticIsSanitized'
+echo 'PASS: LegacyDevEnvironmentRegistrySuite'
 [ ! -s "$FIXTURE_MISSES" ] || fail "unmatched external fixture"
 echo "✓ dev-env.sh registry behaviour verified"
