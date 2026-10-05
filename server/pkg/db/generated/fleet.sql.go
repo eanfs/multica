@@ -11,6 +11,70 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const beginFleetNamespaceDestroy = `-- name: BeginFleetNamespaceDestroy :one
+UPDATE fleet_namespace_fences SET finalized=false,generation=generation+1
+WHERE namespace = $1 AND fleet_id = $2 AND operation_key = $3
+AND generation = $4 AND closed AND finalized RETURNING namespace, fleet_id, closed, generation, operation_key, finalized
+`
+
+type BeginFleetNamespaceDestroyParams struct {
+	Namespace    string `json:"namespace"`
+	FleetID      string `json:"fleet_id"`
+	OperationKey string `json:"operation_key"`
+	Generation   int64  `json:"generation"`
+}
+
+func (q *Queries) BeginFleetNamespaceDestroy(ctx context.Context, arg BeginFleetNamespaceDestroyParams) (FleetNamespaceFence, error) {
+	row := q.db.QueryRow(ctx, beginFleetNamespaceDestroy,
+		arg.Namespace,
+		arg.FleetID,
+		arg.OperationKey,
+		arg.Generation,
+	)
+	var i FleetNamespaceFence
+	err := row.Scan(
+		&i.Namespace,
+		&i.FleetID,
+		&i.Closed,
+		&i.Generation,
+		&i.OperationKey,
+		&i.Finalized,
+	)
+	return i, err
+}
+
+const closeFleetNamespaceFence = `-- name: CloseFleetNamespaceFence :one
+UPDATE fleet_namespace_fences SET closed=true,generation=generation+1,operation_key= $1
+WHERE namespace= $2 AND fleet_id= $3 AND generation= $4 AND NOT closed
+RETURNING namespace, fleet_id, closed, generation, operation_key, finalized
+`
+
+type CloseFleetNamespaceFenceParams struct {
+	OperationKey string `json:"operation_key"`
+	Namespace    string `json:"namespace"`
+	FleetID      string `json:"fleet_id"`
+	Generation   int64  `json:"generation"`
+}
+
+func (q *Queries) CloseFleetNamespaceFence(ctx context.Context, arg CloseFleetNamespaceFenceParams) (FleetNamespaceFence, error) {
+	row := q.db.QueryRow(ctx, closeFleetNamespaceFence,
+		arg.OperationKey,
+		arg.Namespace,
+		arg.FleetID,
+		arg.Generation,
+	)
+	var i FleetNamespaceFence
+	err := row.Scan(
+		&i.Namespace,
+		&i.FleetID,
+		&i.Closed,
+		&i.Generation,
+		&i.OperationKey,
+		&i.Finalized,
+	)
+	return i, err
+}
+
 const countFleetActiveRuns = `-- name: CountFleetActiveRuns :one
 SELECT count(*) FROM agent_task_queue t
 JOIN agent_runtime r ON r.id = t.runtime_id
@@ -73,6 +137,32 @@ func (q *Queries) CountFleetQueuedRuns(ctx context.Context, arg CountFleetQueued
 	return count, err
 }
 
+const finalizeFleetNamespaceFence = `-- name: FinalizeFleetNamespaceFence :execrows
+UPDATE fleet_namespace_fences SET finalized=true
+WHERE namespace = $1 AND fleet_id = $2 AND operation_key = $3
+AND generation = $4 AND closed AND NOT finalized
+`
+
+type FinalizeFleetNamespaceFenceParams struct {
+	Namespace    string `json:"namespace"`
+	FleetID      string `json:"fleet_id"`
+	OperationKey string `json:"operation_key"`
+	Generation   int64  `json:"generation"`
+}
+
+func (q *Queries) FinalizeFleetNamespaceFence(ctx context.Context, arg FinalizeFleetNamespaceFenceParams) (int64, error) {
+	result, err := q.db.Exec(ctx, finalizeFleetNamespaceFence,
+		arg.Namespace,
+		arg.FleetID,
+		arg.OperationKey,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const fleetAbortOperation = `-- name: FleetAbortOperation :execrows
 UPDATE fleet_node_operations SET approved=false,phase='failed',error_code='busy',updated_at=now()
 WHERE namespace = $1 AND owner_id = $2 AND id = $3 AND generation = $4 AND phase='preparing' AND NOT approved
@@ -101,6 +191,7 @@ func (q *Queries) FleetAbortOperation(ctx context.Context, arg FleetAbortOperati
 const fleetAdmissionLocksHeld = `-- name: FleetAdmissionLocksHeld :one
 WITH keys AS (
  SELECT hashtextextended($1::text || ':' || $2::uuid::text,0) AS key,'ShareLock'::text AS mode
+ UNION ALL SELECT hashtextextended('namespace:' || $1::text,0),'ShareLock'
  UNION ALL SELECT hashtextextended('capacity:' || $1::text || ':' || $2::uuid::text,0),'ExclusiveLock'
 )
 SELECT bool_and(EXISTS (
@@ -883,6 +974,24 @@ func (q *Queries) FleetMarkBootstrapMinted(ctx context.Context, arg FleetMarkBoo
 	return result.RowsAffected(), nil
 }
 
+const fleetNamespaceExclusiveLock = `-- name: FleetNamespaceExclusiveLock :exec
+SELECT pg_advisory_xact_lock(hashtextextended('namespace:' || $1::text,0))
+`
+
+func (q *Queries) FleetNamespaceExclusiveLock(ctx context.Context, namespace string) error {
+	_, err := q.db.Exec(ctx, fleetNamespaceExclusiveLock, namespace)
+	return err
+}
+
+const fleetNamespaceSharedLock = `-- name: FleetNamespaceSharedLock :exec
+SELECT pg_advisory_xact_lock_shared(hashtextextended('namespace:' || $1::text,0))
+`
+
+func (q *Queries) FleetNamespaceSharedLock(ctx context.Context, namespace string) error {
+	_, err := q.db.Exec(ctx, fleetNamespaceSharedLock, namespace)
+	return err
+}
+
 const fleetNodeCapacityLock = `-- name: FleetNodeCapacityLock :exec
 SELECT pg_advisory_xact_lock(hashtextextended('capacity:' || $1::text || ':' || $2::uuid::text, 0))
 `
@@ -1340,10 +1449,12 @@ SELECT n.id,
  r.owner_id,
  r.metadata,
  t.runtime_id,
- t.status
+ t.status,
+ f.namespace, f.fleet_id, f.closed, f.generation, f.operation_key, f.finalized
 FROM fleet_nodes n CROSS JOIN fleet_node_operations o
  CROSS JOIN fleet_node_credentials c CROSS JOIN fleet_credential_profiles p
  CROSS JOIN "user" u CROSS JOIN agent_runtime r CROSS JOIN agent_task_queue t
+ CROSS JOIN fleet_namespace_fences f
 WHERE false
 `
 
@@ -1475,6 +1586,24 @@ func (q *Queries) GetFleetIntentByKey(ctx context.Context, arg GetFleetIntentByK
 		&i.NextAttemptAt,
 		&i.ActionClaimedAt,
 		&i.ActionStartEpoch,
+	)
+	return i, err
+}
+
+const getFleetNamespaceFence = `-- name: GetFleetNamespaceFence :one
+SELECT namespace, fleet_id, closed, generation, operation_key, finalized FROM fleet_namespace_fences WHERE namespace = $1
+`
+
+func (q *Queries) GetFleetNamespaceFence(ctx context.Context, namespace string) (FleetNamespaceFence, error) {
+	row := q.db.QueryRow(ctx, getFleetNamespaceFence, namespace)
+	var i FleetNamespaceFence
+	err := row.Scan(
+		&i.Namespace,
+		&i.FleetID,
+		&i.Closed,
+		&i.Generation,
+		&i.OperationKey,
+		&i.Finalized,
 	)
 	return i, err
 }
@@ -1860,6 +1989,31 @@ func (q *Queries) InsertFleetLifecycleOperation(ctx context.Context, arg InsertF
 	return i, err
 }
 
+const insertFleetNamespaceFence = `-- name: InsertFleetNamespaceFence :one
+INSERT INTO fleet_namespace_fences (namespace,fleet_id,closed,generation,operation_key)
+VALUES ($1,$2,true,1,$3) RETURNING namespace, fleet_id, closed, generation, operation_key, finalized
+`
+
+type InsertFleetNamespaceFenceParams struct {
+	Namespace    string `json:"namespace"`
+	FleetID      string `json:"fleet_id"`
+	OperationKey string `json:"operation_key"`
+}
+
+func (q *Queries) InsertFleetNamespaceFence(ctx context.Context, arg InsertFleetNamespaceFenceParams) (FleetNamespaceFence, error) {
+	row := q.db.QueryRow(ctx, insertFleetNamespaceFence, arg.Namespace, arg.FleetID, arg.OperationKey)
+	var i FleetNamespaceFence
+	err := row.Scan(
+		&i.Namespace,
+		&i.FleetID,
+		&i.Closed,
+		&i.Generation,
+		&i.OperationKey,
+		&i.Finalized,
+	)
+	return i, err
+}
+
 const insertFleetNode = `-- name: InsertFleetNode :one
 INSERT INTO fleet_nodes (namespace, owner_id, name, spec, image, profile_ref, spec_config)
 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation
@@ -1917,6 +2071,67 @@ func (q *Queries) InsertFleetNode(ctx context.Context, arg InsertFleetNodeParams
 		&i.Observation,
 	)
 	return i, err
+}
+
+const listFleetNamespaceNodes = `-- name: ListFleetNamespaceNodes :many
+SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation FROM fleet_nodes WHERE namespace= $1
+AND ($2::uuid = '00000000-0000-0000-0000-000000000000'::uuid OR id > $2::uuid)
+ORDER BY id LIMIT $3
+`
+
+type ListFleetNamespaceNodesParams struct {
+	Namespace string      `json:"namespace"`
+	AfterID   pgtype.UUID `json:"after_id"`
+	PageLimit int32       `json:"page_limit"`
+}
+
+func (q *Queries) ListFleetNamespaceNodes(ctx context.Context, arg ListFleetNamespaceNodesParams) ([]FleetNode, error) {
+	rows, err := q.db.Query(ctx, listFleetNamespaceNodes, arg.Namespace, arg.AfterID, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FleetNode{}
+	for rows.Next() {
+		var i FleetNode
+		if err := rows.Scan(
+			&i.ID,
+			&i.Namespace,
+			&i.OwnerID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ContainerID,
+			&i.DaemonID,
+			&i.Name,
+			&i.Spec,
+			&i.Image,
+			&i.ProfileRef,
+			&i.StartEpoch,
+			&i.DataVolume,
+			&i.SecretsVolume,
+			&i.Desired,
+			&i.Status,
+			&i.Generation,
+			&i.Ready,
+			&i.HealthAt,
+			&i.ActiveRuns,
+			&i.PendingReports,
+			&i.FailedReports,
+			&i.Maintenance,
+			&i.Revoked,
+			&i.ErrorCode,
+			&i.ErrorMessage,
+			&i.SpecConfig,
+			&i.Observation,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listFleetNodesByOwner = `-- name: ListFleetNodesByOwner :many
@@ -2062,6 +2277,31 @@ func (q *Queries) MaxFleetCredentialGeneration(ctx context.Context, arg MaxFleet
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const openFleetNamespaceFence = `-- name: OpenFleetNamespaceFence :execrows
+UPDATE fleet_namespace_fences SET closed=false,finalized=false
+WHERE namespace= $1 AND fleet_id= $2 AND operation_key= $3 AND generation= $4 AND closed
+`
+
+type OpenFleetNamespaceFenceParams struct {
+	Namespace    string `json:"namespace"`
+	FleetID      string `json:"fleet_id"`
+	OperationKey string `json:"operation_key"`
+	Generation   int64  `json:"generation"`
+}
+
+func (q *Queries) OpenFleetNamespaceFence(ctx context.Context, arg OpenFleetNamespaceFenceParams) (int64, error) {
+	result, err := q.db.Exec(ctx, openFleetNamespaceFence,
+		arg.Namespace,
+		arg.FleetID,
+		arg.OperationKey,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const resolveFleetNodeReference = `-- name: ResolveFleetNodeReference :one

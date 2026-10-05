@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/fleet/model"
+	"github.com/multica-ai/multica/server/internal/fleet/store"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -164,6 +165,22 @@ func lockBindings(ctx context.Context, q *db.Queries, namespace string, ids []pg
 	if len(ordered) > 0 && NeedsManagedRediscovery(ctx) {
 		return nil, nil, ErrBindingChanged
 	}
+	// Acquire ALL stable namespace prefixes before ANY node/capacity/owner lock.
+	namespaces := map[string]bool{}
+	for _, n := range ordered {
+		namespaces[n.Namespace] = true
+	}
+	names := make([]string, 0, len(namespaces))
+	for ns := range namespaces {
+		names = append(names, ns)
+	}
+	sort.Strings(names)
+	for _, ns := range names {
+		if err := store.CheckNamespaceAdmission(ctx, q, ns); err != nil && !errors.Is(err, model.ErrBusy) {
+			return nil, nil, err
+		}
+	}
+	// Busy is evaluated per node below so mixed ordinary reclaim remains ordinary.
 	sort.Slice(ordered, func(i, j int) bool { return util.UUIDToString(ordered[i].ID) < util.UUIDToString(ordered[j].ID) })
 	for _, n := range ordered {
 		if err := q.FleetNodeSharedLock(ctx, db.FleetNodeSharedLockParams{Namespace: n.Namespace, NodeID: n.ID}); err != nil {
@@ -300,6 +317,9 @@ func lockReclaimAgents(ctx context.Context, q *db.Queries, bindings []db.FleetRe
 }
 
 func checkNodeClaim(ctx context.Context, q *db.Queries, n db.FleetNode, now time.Time, reclaim bool) error {
+	if err := store.CheckNamespaceAdmission(ctx, q, n.Namespace); err != nil {
+		return err
+	}
 	node := model.Node{Desired: n.Desired, Status: n.Status, Ready: n.Ready, HealthAt: n.HealthAt.Time, Revoked: n.Revoked, Maintenance: n.Maintenance}
 	if !n.HealthAt.Valid || !model.CanClaim(node, now) {
 		return model.ErrBusy
@@ -368,6 +388,9 @@ func CheckEnqueueForOwners(ctx context.Context, q *db.Queries, namespace string,
 		return err
 	}
 	for _, n := range nodes {
+		if err := store.CheckNamespaceAdmission(ctx, q, n.Namespace); err != nil {
+			return err
+		}
 		pending, err := q.FleetPendingDelete(ctx, db.FleetPendingDeleteParams{Namespace: n.Namespace, OwnerID: n.OwnerID, NodeID: n.ID, Generation: n.Generation})
 		if err != nil {
 			return err
@@ -402,7 +425,7 @@ func CheckCallerClaim(ctx context.Context, q *db.Queries, id pgtype.UUID) error 
 	if !held {
 		return ErrBindingChanged
 	}
-	return nil
+	return store.CheckNamespaceAdmission(ctx, q, n.Namespace)
 }
 
 // CheckCallerEnqueue never discovers/acquires a new node behind caller-owned
@@ -435,6 +458,8 @@ func CheckCallerEnqueue(ctx context.Context, q *db.Queries, runtimeID pgtype.UUI
 func CheckRegister(ctx context.Context, q *db.Queries, namespace string, nodeID pgtype.UUID) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
+	// Registration completes an already admitted bootstrap winner; closure must
+	// not mint new authority or invalidate that original single-slot budget.
 	if err := q.FleetNodeSharedLock(ctx, db.FleetNodeSharedLockParams{Namespace: namespace, NodeID: nodeID}); err != nil {
 		return err
 	}

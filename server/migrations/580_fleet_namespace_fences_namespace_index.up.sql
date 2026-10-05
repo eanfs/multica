@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX CONCURRENTLY fleet_namespace_fences_namespace_uidx ON fleet_namespace_fences (namespace);

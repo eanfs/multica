@@ -74,10 +74,12 @@ SELECT n.id,
  r.owner_id,
  r.metadata,
  t.runtime_id,
- t.status
+ t.status,
+ f.namespace, f.fleet_id, f.closed, f.generation, f.operation_key, f.finalized
 FROM fleet_nodes n CROSS JOIN fleet_node_operations o
  CROSS JOIN fleet_node_credentials c CROSS JOIN fleet_credential_profiles p
  CROSS JOIN "user" u CROSS JOIN agent_runtime r CROSS JOIN agent_task_queue t
+ CROSS JOIN fleet_namespace_fences f
 WHERE false;
 
 -- name: FleetPendingDelete :one
@@ -125,6 +127,7 @@ SELECT 1 FROM workspace w WHERE w.id IN (
 -- it may not acquire a newly discovered node after chat/workspace rows.
 WITH keys AS (
  SELECT hashtextextended(sqlc.arg(namespace)::text || ':' || sqlc.arg(node_id)::uuid::text,0) AS key,'ShareLock'::text AS mode
+ UNION ALL SELECT hashtextextended('namespace:' || sqlc.arg(namespace)::text,0),'ShareLock'
  UNION ALL SELECT hashtextextended('capacity:' || sqlc.arg(namespace)::text || ':' || sqlc.arg(node_id)::uuid::text,0),'ExclusiveLock'
 )
 SELECT bool_and(EXISTS (
@@ -135,6 +138,43 @@ SELECT bool_and(EXISTS (
  AND (to_jsonb(l)->>'objid')::bigint=(keys.key & 4294967295)
  AND (to_jsonb(l)->>'mode'=keys.mode OR (keys.mode='ShareLock' AND to_jsonb(l)->>'mode'='ExclusiveLock'))
 )) FROM keys;
+
+-- name: FleetNamespaceSharedLock :exec
+SELECT pg_advisory_xact_lock_shared(hashtextextended('namespace:' || sqlc.arg(namespace)::text,0));
+
+-- name: FleetNamespaceExclusiveLock :exec
+SELECT pg_advisory_xact_lock(hashtextextended('namespace:' || sqlc.arg(namespace)::text,0));
+
+-- name: GetFleetNamespaceFence :one
+SELECT * FROM fleet_namespace_fences WHERE namespace = @namespace;
+
+-- name: InsertFleetNamespaceFence :one
+INSERT INTO fleet_namespace_fences (namespace,fleet_id,closed,generation,operation_key)
+VALUES (@namespace,@fleet_id,true,1,@operation_key) RETURNING *;
+
+-- name: CloseFleetNamespaceFence :one
+UPDATE fleet_namespace_fences SET closed=true,generation=generation+1,operation_key= @operation_key
+WHERE namespace= @namespace AND fleet_id= @fleet_id AND generation= @generation AND NOT closed
+RETURNING *;
+
+-- name: OpenFleetNamespaceFence :execrows
+UPDATE fleet_namespace_fences SET closed=false,finalized=false
+WHERE namespace= @namespace AND fleet_id= @fleet_id AND operation_key= @operation_key AND generation= @generation AND closed;
+
+-- name: FinalizeFleetNamespaceFence :execrows
+UPDATE fleet_namespace_fences SET finalized=true
+WHERE namespace = @namespace AND fleet_id = @fleet_id AND operation_key = @operation_key
+AND generation = @generation AND closed AND NOT finalized;
+
+-- name: BeginFleetNamespaceDestroy :one
+UPDATE fleet_namespace_fences SET finalized=false,generation=generation+1
+WHERE namespace = @namespace AND fleet_id = @fleet_id AND operation_key = @operation_key
+AND generation = @generation AND closed AND finalized RETURNING *;
+
+-- name: ListFleetNamespaceNodes :many
+SELECT * FROM fleet_nodes WHERE namespace= @namespace
+AND (@after_id::uuid = '00000000-0000-0000-0000-000000000000'::uuid OR id > @after_id::uuid)
+ORDER BY id LIMIT @page_limit;
 
 -- name: FleetNodeSharedLock :exec
 SELECT pg_advisory_xact_lock_shared(hashtextextended(sqlc.arg(namespace)::text || ':' || sqlc.arg(node_id)::uuid::text, 0));

@@ -8,12 +8,67 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/fleet/model"
+	"github.com/multica-ai/multica/server/internal/fleet/store"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"testing"
 	"time"
 )
+
+func TestNamespaceSQLClaimReclaimEnqueueAndOrdinary(t *testing.T) {
+	pool, f := testutil.NewFleetFixture(t)
+	ns := "task1-guard-" + f.UserID
+	ctx := context.Background()
+	f.Cleanup(t, "DELETE FROM fleet_namespace_fences WHERE namespace=$1", ns)
+	node := f.FleetNode(t, ns, testutil.Cols{"status": "running"})
+	rt := f.Runtime(t, "managed", testutil.Cols{"metadata": json.RawMessage(fmt.Sprintf(`{"managed_by":"local_fleet","fleet_node_id":"%s"}`, node))})
+	ordinary := f.Runtime(t, "ordinary")
+	if _, err := store.New(pool, ns).CloseNamespace(ctx, "fixture-fleet", "close"); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"claim", "reclaim", "enqueue"} {
+		t.Run(kind, func(t *testing.T) {
+			tx, e := pool.Begin(ctx)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer tx.Rollback(ctx)
+			q := db.New(tx)
+			id := util.MustParseUUID(rt)
+			switch kind {
+			case "claim":
+				e = CheckClaim(ctx, q, ns, id, time.Now())
+			case "reclaim":
+				e = CheckReclaim(ctx, q, ns, []pgtype.UUID{id}, time.Now())
+			case "enqueue":
+				e = CheckEnqueue(ctx, q, ns, id, time.Now())
+			}
+			if !errors.Is(e, model.ErrBusy) {
+				t.Fatalf("%s crossed namespace fence: %v", kind, e)
+			}
+		})
+	}
+	registerTx, e := pool.Begin(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = CheckRegister(ctx, db.New(registerTx), ns, util.MustParseUUID(node)); e != nil {
+		t.Errorf("already-admitted bootstrap registration denied: %v", e)
+	}
+	if e = registerTx.Rollback(ctx); e != nil {
+		t.Fatal(e)
+	}
+	tx, e := pool.Begin(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer tx.Rollback(ctx)
+	ids, _, e := ReclaimCandidates(ctx, db.New(tx), []pgtype.UUID{util.MustParseUUID(rt), util.MustParseUUID(ordinary)}, time.Now())
+	if e != nil || len(ids) != 1 || ids[0] != util.MustParseUUID(ordinary) {
+		t.Fatalf("closed managed contaminated ordinary reclaim: %v %v", ids, e)
+	}
+}
 
 func TestClaimBarrierSeesMaintenance(t *testing.T) {
 	pool, f := testutil.NewFleetFixture(t)

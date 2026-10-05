@@ -183,6 +183,10 @@ func (s *Store) createIntent(ctx context.Context, owner pgtype.UUID, req model.C
 	}
 	fingerprint := createFingerprint(req)
 	err := s.WithTx(ctx, func(q *db.Queries) error {
+		admission := CheckNamespaceAdmission(ctx, q, s.namespace)
+		if admission != nil && !errors.Is(admission, model.ErrBusy) {
+			return admission
+		}
 		if err := q.FleetOwnerExclusiveLock(ctx, db.FleetOwnerExclusiveLockParams{Namespace: s.namespace, OwnerID: owner}); err != nil {
 			return err
 		}
@@ -190,6 +194,9 @@ func (s *Store) createIntent(ctx context.Context, owner pgtype.UUID, req model.C
 		node, op, replayed, err = s.lookupCreateIntent(ctx, q, owner, req, fingerprint)
 		if err != nil || replayed {
 			return err
+		}
+		if admission != nil {
+			return admission
 		}
 		if !s.validProvisioning() {
 			return model.ErrInvalidRequest

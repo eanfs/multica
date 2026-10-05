@@ -78,6 +78,10 @@ func (s *Store) lifecycleIntent(ctx context.Context, owner, node pgtype.UUID, ac
 	defer cancel()
 	var op model.Operation
 	e := s.WithTx(ctx, func(q *db.Queries) error {
+		admission := CheckNamespaceAdmission(ctx, q, s.namespace)
+		if admission != nil && !errors.Is(admission, model.ErrBusy) {
+			return admission
+		}
 		n, e := s.lockedNode(ctx, q, owner, node)
 		if e != nil {
 			return e
@@ -97,6 +101,16 @@ func (s *Store) lifecycleIntent(ctx context.Context, owner, node pgtype.UUID, ac
 		}
 		if !errors.Is(e, pgx.ErrNoRows) {
 			return e
+		}
+		fence, e := readNamespaceFence(ctx, q, s.namespace)
+		if e != nil {
+			return e
+		}
+		if fence.Finalized {
+			return model.ErrBusy
+		}
+		if (action == model.Start || action == model.Reboot) && admission != nil {
+			return admission
 		}
 		if n.Revoked || n.Maintenance || n.Desired == "terminating" || n.Desired == "terminated" || n.Status == "terminating" || n.Status == "terminated" || n.Generation == math.MaxInt64 {
 			return model.ErrConflict
