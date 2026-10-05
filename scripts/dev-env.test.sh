@@ -8,8 +8,20 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
+trap '[ "${MULTICA_KEEP_TEST_FIXTURES:-0}" = 1 ] || rm -rf "$tmp_dir"' EXIT
+# Copy only public source inputs; all registry DIR and cleanup paths are owned.
+source_root="$root_dir"
+root_dir="$tmp_dir/source"
+mkdir -p "$root_dir/scripts" "$root_dir/apps/desktop"
+cp "$source_root/scripts/dev-env.sh" "$root_dir/scripts/dev-env.sh"
+cp "$source_root/scripts/local-env.sh" "$root_dir/scripts/local-env.sh"
+cp "$source_root/.env.example" "$root_dir/.env.example"
+echo "Owned fixture tree: $tmp_dir"
 
+export HOME="$tmp_dir/home"
+export MULTICA_DEV_TMPDIR="$tmp_dir/dev-tmp"
+export FIXTURE_MISSES="$tmp_dir/fixture-misses"
+mkdir -p "$HOME"
 export MULTICA_DEV_HOME="$tmp_dir/dev"
 export MULTICA_DEV_WORKSPACES_PARENT="$tmp_dir/workspaces-parent"
 export MULTICA_DEV_DESKTOP_APP_DATA="$tmp_dir/app-data"
@@ -19,12 +31,33 @@ fake_bin="$tmp_dir/bin"
 mkdir -p "$fake_bin"
 cat > "$fake_bin/psql" <<'EOF'
 #!/usr/bin/env bash
-case " $* " in
+case "$*" in
   *" DROP DATABASE "*) [ "${FAIL_DROP:-0}" != 1 ] ;;
-  *) printf '1\n' ;;
+  *" -tAc SELECT 1"|*" -tAc SELECT 1 FROM pg_database WHERE datname="*) printf '1\n' ;;
+  *) echo psql >> "$FIXTURE_MISSES"; exit 97 ;;
 esac
 EOF
 chmod +x "$fake_bin/psql"
+# Every external service/process command is fixture-only. Unmatched calls fail.
+for tool in docker curl go pnpm make ps; do
+  printf '#!/usr/bin/env bash\necho %s >> "$FIXTURE_MISSES"\nexit 97\n' "$tool" > "$fake_bin/$tool"
+  chmod +x "$fake_bin/$tool"
+done
+cat > "$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  '-sf --max-time 3 http://localhost:18981/health'|'-sf --max-time 3 http://localhost:18982/health'|'-sf --max-time 3 http://localhost:18983/health'|'-sf --max-time 10 http://localhost:13901'|'-sf --max-time 10 http://localhost:6075') exit 22 ;;
+  *) printf 'curl %s\n' "$*" >> "$FIXTURE_MISSES"; echo 'unexpected HTTP fixture' >&2; exit 97 ;;
+esac
+EOF
+cat > "$fake_bin/lsof" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  '-nP -iTCP:18981 -sTCP:LISTEN -t'|'-nP -iTCP:13901 -sTCP:LISTEN -t'|'-nP -iTCP:6075 -sTCP:LISTEN -t'|'-nP -iTCP:18984 -sTCP:LISTEN -t'|'-nP -iTCP:13904 -sTCP:LISTEN -t'|'-nP -iTCP:6078 -sTCP:LISTEN -t') exit 1 ;;
+  *) echo lsof >> "$FIXTURE_MISSES"; echo 'unexpected process fixture' >&2; exit 97 ;;
+esac
+EOF
+chmod +x "$fake_bin/curl" "$fake_bin/lsof"
 export PATH="$fake_bin:$PATH"
 
 fail() {
@@ -344,4 +377,5 @@ printf 'n\n' | dev_env destroy orphan-902 > "$out" 2>&1 || fail "declining destr
 require_contains "$out" "Cancelled."
 [ -d "$MULTICA_DEV_HOME/envs/orphan-902" ] || fail "declined destroy removed the environment anyway"
 
+[ ! -s "$FIXTURE_MISSES" ] || fail "unmatched external fixture"
 echo "✓ dev-env.sh registry behaviour verified"

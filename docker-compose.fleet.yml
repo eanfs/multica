@@ -1,0 +1,48 @@
+# Control plane only. Dynamic nodes are managed through the Engine SDK.
+name: "${MULTICA_FLEET_PROJECT:?Owned Fleet project required}"
+services:
+  fleet:
+    build:
+      context: .
+      dockerfile: docker/fleet/Dockerfile
+    # Explicit non-root UID must match the private host files. No ownership repair.
+    user: "${MULTICA_FLEET_UID:?Validated non-root UID required}:${MULTICA_FLEET_GID:?Validated GID required}"
+    group_add:
+      - "${MULTICA_FLEET_SOCKET_GID:?Validated socket group required}"
+    environment:
+      FLEET_ADDR: "0.0.0.0:8090"
+      FLEET_CONFIG_FILE: /run/multica-fleet/config.json
+      FLEET_SERVICE_KEY_FILE: /run/multica-fleet/service-key
+    env_file:
+      - "${MULTICA_FLEET_RUNTIME_ENV_FILE:?Private Fleet DB environment required}"
+    ports:
+      - "127.0.0.1:${MULTICA_LOCAL_FLEET_PORT:?Allocated Fleet port required}:8090"
+    volumes:
+      - type: bind
+        source: "${MULTICA_FLEET_SOCKET:?Validated Engine socket required}"
+        target: /var/run/docker.sock
+      - type: bind
+        source: "${MULTICA_FLEET_CONFIG_DIR:?Private config required}"
+        target: /run/multica-fleet
+        read_only: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - shared-pg
+      - fleet-nodes
+    labels:
+      multica.fleet.namespace: "${MULTICA_FLEET_NAMESPACE:?Owned namespace required}"
+      multica.fleet.fleet_id: "${MULTICA_FLEET_ID:?Persistent Fleet ID required}"
+      multica.fleet.node: namespace
+      multica.fleet.role: control-plane
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+networks:
+  shared-pg:
+    external: true
+    name: "${MULTICA_SHARED_PG_NETWORK:?Verified existing PG network required}"
+  fleet-nodes:
+    external: true
+    name: "${MULTICA_FLEET_NODE_NETWORK:?Owned namespace node network required}"

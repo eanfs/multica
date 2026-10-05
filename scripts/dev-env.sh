@@ -1265,13 +1265,16 @@ cmd_down() {
       *) name="$1"; shift ;;
     esac
   done
+  local comp
+  # Validate the complete intent before stopping any component.
+  for comp in $requested; do
+    case " $ALL_COMPONENTS " in *" $comp "*) ;; *) die "Unknown component '$comp'. Valid: $ALL_COMPONENTS" ;; esac
+  done
   resolve_env_for_read "$name"
   export PORT="$BACKEND_PORT" FRONTEND_PORT DATABASE_URL POSTGRES_DB="$DB_NAME"
 
   step "Stopping $NAME: $requested"
-  local comp
   for comp in $requested; do
-    case " $ALL_COMPONENTS " in *" $comp "*) ;; *) die "Unknown component '$comp'. Valid: $ALL_COMPONENTS" ;; esac
     stop_component "$comp"
   done
   printf '\n%s✓ %s stopped.%s Database, profile and slot kept — `make up` restarts in seconds.\n' "$C_GREEN" "$NAME" "$C_OFF"
