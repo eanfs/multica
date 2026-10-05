@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   render,
   screen,
@@ -21,6 +22,7 @@ import { createAuthStore } from "@multica/core/auth";
 import { WSProvider } from "@multica/core/realtime";
 import { parseWithFallback } from "@multica/core/api/schema";
 import {
+  cloudRuntimeKeys,
   EMPTY_CLOUD_RUNTIME_CAPABILITIES,
   type CloudRuntimeCapabilities,
   type CloudRuntimeNode,
@@ -187,9 +189,12 @@ beforeEach(() => {
   cleanup();
   vi.clearAllMocks();
   vi.mocked(api.listWorkspaces).mockResolvedValue([workspace]);
-  vi.mocked(api.getCloudRuntimeCapabilities).mockResolvedValue(caps);
+  vi.mocked(api.getCloudRuntimeCapabilities)
+    .mockReset()
+    .mockResolvedValue(caps);
   vi.mocked(api.listCloudRuntimeNodes).mockReset().mockResolvedValue([node]);
   vi.mocked(api.startCloudRuntimeNode).mockReset();
+  vi.mocked(api.deleteCloudRuntimeNode).mockReset();
   vi.mocked(api.listRuntimes).mockResolvedValue([]);
   vi.mocked(api.listRuntimeProfiles).mockResolvedValue([]);
   vi.mocked(api.listAgents).mockResolvedValue([]);
@@ -198,6 +203,215 @@ beforeEach(() => {
   vi.mocked(api.createCloudRuntimeNode).mockReset().mockResolvedValue(node);
 });
 describe("cloud runtime manager", () => {
+  it.each([
+    { reason: "unknown", degraded: EMPTY_CLOUD_RUNTIME_CAPABILITIES },
+    {
+      reason: "removed create permission",
+      degraded: {
+        ...caps,
+        operations: caps.operations.filter((action) => action !== "create"),
+      },
+    },
+    { reason: "removed specs", degraded: { ...caps, specs: [] } },
+  ])(
+    "retains an open Docker manager and pending draft with $reason capabilities",
+    async ({ degraded }) => {
+      let reject!: (error: Error) => void;
+      vi.mocked(api.createCloudRuntimeNode).mockImplementationOnce(
+        () =>
+          new Promise((_resolve, r) => {
+            reject = r;
+          }),
+      );
+      const { qc } = mount(true);
+      const user = userEvent.setup();
+      await user.click(
+        await screen.findByRole("button", { name: "Cloud Runtime" }),
+      );
+      await user.type(await screen.findByLabelText("Name"), "retained-draft");
+      await user.click(screen.getByRole("button", { name: "Create node" }));
+      const key = vi.mocked(api.createCloudRuntimeNode).mock.calls[0]?.[1];
+      vi.mocked(api.getCloudRuntimeCapabilities).mockResolvedValue(degraded);
+      act(() => {
+        qc.setQueryData(cloudRuntimeKeys.capabilities(), degraded);
+      });
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("button", { name: "Cloud Runtime" }),
+        ).not.toBeInTheDocument(),
+      );
+      expect(screen.getByRole("dialog")).toBeVisible();
+      expect(screen.getByLabelText("Name")).toHaveValue("retained-draft");
+      expect(
+        screen.getByRole("button", { name: "Create node" }),
+      ).toHaveAttribute("aria-busy", "true");
+      expect(screen.getByRole("button", { name: "Refresh" })).toBeDisabled();
+      await user.keyboard("{Escape}");
+      expect(screen.getByRole("dialog")).toBeVisible();
+      act(() => reject(new Error("profile_missing")));
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        /configure your Claude credential profile/,
+      );
+      expect(screen.getByLabelText("Name")).toHaveValue("retained-draft");
+      expect(
+        screen.getByRole("button", { name: "Create node" }),
+      ).toBeDisabled();
+      vi.mocked(api.getCloudRuntimeCapabilities).mockResolvedValue(caps);
+      await user.click(screen.getByRole("button", { name: "Refresh" }));
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "Create node" }),
+        ).not.toBeDisabled(),
+      );
+      await user.click(screen.getByRole("button", { name: "Create node" }));
+      await waitFor(() =>
+        expect(api.createCloudRuntimeNode).toHaveBeenCalledTimes(2),
+      );
+      expect(api.createCloudRuntimeNode).toHaveBeenLastCalledWith(
+        { name: "retained-draft", spec: "local-small" },
+        key,
+      );
+    },
+  );
+  it("fails closed on a capability refetch error with retained old data and recovers through Refresh", async () => {
+    const { qc } = mount(true);
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: "Cloud Runtime" }),
+    );
+    await user.type(await screen.findByLabelText("Name"), "error-draft");
+    vi.mocked(api.getCloudRuntimeCapabilities).mockRejectedValue(
+      new Error("unavailable"),
+    );
+    await act(async () => {
+      await qc.refetchQueries({ queryKey: cloudRuntimeKeys.capabilities() });
+    });
+    expect(qc.getQueryData(cloudRuntimeKeys.capabilities())).toEqual(caps);
+    expect(
+      screen.queryByRole("button", { name: "Cloud Runtime" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(screen.getByLabelText("Name")).toHaveValue("error-draft");
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Create node" }),
+      ).toBeDisabled(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Start node" }),
+    ).not.toBeInTheDocument();
+    vi.mocked(api.getCloudRuntimeCapabilities).mockResolvedValue(caps);
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Create node" }),
+      ).not.toBeDisabled(),
+    );
+    expect(screen.getByLabelText("Name")).toHaveValue("error-draft");
+  });
+  it("retains a pending and then rejected delete confirmation through permission degradation and retries the same key", async () => {
+    let reject!: (error: Error) => void;
+    vi.mocked(api.deleteCloudRuntimeNode).mockImplementationOnce(
+      () =>
+        new Promise((_resolve, r) => {
+          reject = r;
+        }),
+    );
+    const { qc } = mount();
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: "Delete node" }),
+    );
+    const confirmation = screen.getByRole("alertdialog");
+    const confirm = within(confirmation).getByRole("button", {
+      name: "Delete node",
+    });
+    await user.click(confirm);
+    const key = vi.mocked(api.deleteCloudRuntimeNode).mock.calls[0]?.[1];
+    vi.mocked(api.getCloudRuntimeCapabilities).mockResolvedValue(
+      EMPTY_CLOUD_RUNTIME_CAPABILITIES,
+    );
+    act(() => {
+      qc.setQueryData(
+        cloudRuntimeKeys.capabilities(),
+        EMPTY_CLOUD_RUNTIME_CAPABILITIES,
+      );
+    });
+    expect(screen.getByRole("alertdialog")).toBe(confirmation);
+    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveAttribute("aria-busy", "true");
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("alertdialog")).toBe(confirmation);
+    act(() => reject(new Error("busy")));
+    expect(await within(confirmation).findByRole("alert")).toHaveTextContent(
+      /active runs and queued work/,
+    );
+    expect(confirm).toBeDisabled();
+    expect(
+      qc.getQueryData([...cloudRuntimeKeys.nodes(), { limit: 20, offset: 0 }]),
+    ).toEqual([node]);
+    const noDelete = {
+      ...caps,
+      operations: caps.operations.filter((action) => action !== "delete"),
+    };
+    act(() => {
+      qc.setQueryData(cloudRuntimeKeys.capabilities(), noDelete);
+    });
+    expect(screen.getByRole("alertdialog")).toBe(confirmation);
+    expect(confirm).toBeDisabled();
+    await user.click(confirm);
+    expect(api.deleteCloudRuntimeNode).toHaveBeenCalledOnce();
+    vi.mocked(api.getCloudRuntimeCapabilities).mockResolvedValue(caps);
+    vi.mocked(api.deleteCloudRuntimeNode).mockResolvedValueOnce(undefined);
+    act(() => {
+      qc.setQueryData(cloudRuntimeKeys.capabilities(), caps);
+    });
+    await waitFor(() => expect(confirm).not.toBeDisabled());
+    await user.click(confirm);
+    await waitFor(() =>
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
+    );
+    expect(api.deleteCloudRuntimeNode).toHaveBeenLastCalledWith(node.id, key);
+  });
+  it("Refresh retries nodes and unknown capabilities together and prevents duplicate refresh while either is pending", async () => {
+    vi.mocked(api.getCloudRuntimeCapabilities).mockResolvedValueOnce(
+      EMPTY_CLOUD_RUNTIME_CAPABILITIES,
+    );
+    mount(true, false, true);
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: "Cloud Runtime" }),
+    );
+    await screen.findByText("worker");
+    expect(screen.getByRole("button", { name: "Create node" })).toBeDisabled();
+    let resolve!: (value: CloudRuntimeCapabilities) => void;
+    vi.mocked(api.getCloudRuntimeCapabilities).mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    const refresh = screen.getByRole("button", { name: "Refresh" });
+    await user.click(refresh);
+    await waitFor(() =>
+      expect(api.listCloudRuntimeNodes).toHaveBeenCalledTimes(2),
+    );
+    expect(api.getCloudRuntimeCapabilities).toHaveBeenCalledTimes(2);
+    expect(refresh).toBeDisabled();
+    expect(refresh).toHaveAttribute("aria-busy", "true");
+    await user.click(refresh);
+    expect(api.getCloudRuntimeCapabilities).toHaveBeenCalledTimes(2);
+    act(() => resolve(caps));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Create node" }),
+      ).not.toBeDisabled(),
+    );
+    expect(screen.getByLabelText("Specification")).toHaveTextContent(
+      "local-small",
+    );
+    expect(refresh).not.toBeDisabled();
+  });
   it("offers only advertised Docker specifications and no hosted disk control", async () => {
     mount();
     expect(await screen.findByLabelText("Specification")).toHaveTextContent(
@@ -400,10 +614,7 @@ describe("cloud runtime manager", () => {
     await waitFor(() =>
       expect(api.startCloudRuntimeNode).toHaveBeenCalledTimes(2),
     );
-    expect(api.startCloudRuntimeNode).toHaveBeenLastCalledWith(
-      node.instance_id,
-      intent,
-    );
+    expect(api.startCloudRuntimeNode).toHaveBeenLastCalledWith(node.id, intent);
   });
   it("keeps node management open while a lifecycle action is pending", async () => {
     let resolve!: (value: typeof node) => void;

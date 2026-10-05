@@ -154,7 +154,7 @@ describe("cloud node actions", () => {
       expect(pendingButton).toHaveAttribute("aria-busy", "true");
       await user.click(pendingButton);
       expect(mutation).toHaveBeenCalledTimes(2);
-      expect(mutation).toHaveBeenLastCalledWith(node.instance_id, intent);
+      expect(mutation).toHaveBeenLastCalledWith(node.id, intent);
       expect(onDeleted).not.toHaveBeenCalled();
       resolve(node);
       await waitFor(() => expect(pendingButton).not.toBeDisabled());
@@ -204,7 +204,7 @@ describe("cloud node actions", () => {
     expect(onDeleted).not.toHaveBeenCalled();
     expect(api.deleteCloudRuntimeNode).toHaveBeenCalledTimes(2);
     expect(api.deleteCloudRuntimeNode).toHaveBeenLastCalledWith(
-      node.instance_id,
+      node.id,
       intent,
     );
     expect(qc.getQueryData(key)).toEqual([node]);
@@ -214,6 +214,45 @@ describe("cloud node actions", () => {
       expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
     );
     await waitFor(() => expect(opener).toHaveFocus());
+  });
+  it("allows controlled deletion of a failed Docker node without a container", async () => {
+    vi.mocked(api.deleteCloudRuntimeNode).mockResolvedValueOnce(undefined);
+    const { onDeleted } = mount(
+      nodeFixture({ ...node, status: "failed", instance_id: "" }),
+    );
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Delete node" }));
+    await user.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "Delete node",
+      }),
+    );
+    await waitFor(() => expect(onDeleted).toHaveBeenCalledOnce());
+    expect(api.deleteCloudRuntimeNode).toHaveBeenCalledWith(
+      node.id,
+      expect.any(String),
+    );
+  });
+  it("routes a hosted arbitrary instance string unchanged", async () => {
+    vi.mocked(api.startCloudRuntimeNode).mockResolvedValueOnce(node);
+    mount(
+      nodeFixture({
+        ...node,
+        provider: "cloud",
+        instance_id: "i-hosted/arbitrary-string",
+        ready: undefined,
+      }),
+      capabilitiesFixture({ provider: "cloud", operations: ["start"] }),
+    );
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Start node" }));
+    await waitFor(() =>
+      expect(api.startCloudRuntimeNode).toHaveBeenCalledWith(
+        "i-hosted/arbitrary-string",
+        expect.any(String),
+      ),
+    );
   });
   it("restores focus after Escape without deleting", async () => {
     mount();

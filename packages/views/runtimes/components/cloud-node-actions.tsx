@@ -58,11 +58,13 @@ export function CloudNodeActions({
     !["running", "stopped", "failed", "terminated"].includes(
       node.status.toLowerCase(),
     );
+  const actionTarget = node.provider === "docker" ? node.id : node.instance_id;
+  const canDelete = supportsNodeAction(capabilities, "delete");
   const unavailable =
     pending !== null ||
     isCloudRuntimeNodePending(node.status) ||
     unknown ||
-    !node.instance_id;
+    !actionTarget.trim();
   const labels = {
     start: t(($) => $.cloud_runtime.start),
     stop: t(($) => $.cloud_runtime.stop),
@@ -88,7 +90,7 @@ export function CloudNodeActions({
     }
     try {
       const variables = {
-        instanceId: node.instance_id,
+        instanceId: actionTarget,
         idempotencyKey: intent.key,
       };
       if (action === "start") await start.mutateAsync(variables);
@@ -130,7 +132,7 @@ export function CloudNodeActions({
               {labels[action]}
             </Button>
           ))}
-        {supportsNodeAction(capabilities, "delete") && (
+        {(canDelete || deleteOpen) && (
           <AlertDialog
             open={deleteOpen}
             onOpenChange={(open) => {
@@ -143,7 +145,7 @@ export function CloudNodeActions({
                   type="button"
                   variant="destructive"
                   size="sm"
-                  disabled={unavailable}
+                  disabled={unavailable || !canDelete}
                 />
               }
             >
@@ -172,7 +174,7 @@ export function CloudNodeActions({
                 <Button
                   type="button"
                   variant="destructive"
-                  disabled={unavailable}
+                  disabled={unavailable || !canDelete}
                   aria-busy={pending === "delete"}
                   onClick={() => void act("delete")}
                 >
@@ -192,7 +194,7 @@ export function CloudNodeActions({
         </p>
       )}
       {(unknown ||
-        (!node.instance_id && !isCloudRuntimeNodePending(node.status))) && (
+        (!actionTarget.trim() && !isCloudRuntimeNodePending(node.status))) && (
         <p className="text-caption text-warning">
           {t(($) => $.cloud_runtime.recovery.unknown)}
         </p>

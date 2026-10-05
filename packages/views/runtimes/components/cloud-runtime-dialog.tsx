@@ -85,9 +85,12 @@ function CloudRuntimeManager({
     else pendingNodes.current.delete(nodeId);
     setNodeActionPending(pendingNodes.current.size > 0);
   };
+  const refreshing = useRef(false);
   const intent = useRef<{ fingerprint: string; key: string } | null>(null);
   const capabilityQuery = useQuery(cloudRuntimeCapabilityOptions(wsId));
-  const capabilities = capabilityQuery.data ?? EMPTY_CLOUD_RUNTIME_CAPABILITIES;
+  const capabilities = capabilityQuery.isError
+    ? EMPTY_CLOUD_RUNTIME_CAPABILITIES
+    : (capabilityQuery.data ?? EMPTY_CLOUD_RUNTIME_CAPABILITIES);
   const local = capabilities.provider === "docker";
   const approvedSpec =
     capabilities.specs.find((choice) => choice.id === spec)?.id ??
@@ -101,6 +104,22 @@ function CloudRuntimeManager({
     cloudRuntimeNodeListOptions(wsId, { limit: 20, offset: 0 }),
   );
   const createNode = useCreateCloudRuntimeNode(wsId);
+  const refreshPending = nodesQuery.isFetching || capabilityQuery.isFetching;
+  async function refresh() {
+    if (
+      refreshing.current ||
+      refreshPending ||
+      inFlight.current ||
+      pendingNodes.current.size > 0
+    )
+      return;
+    refreshing.current = true;
+    try {
+      await Promise.all([nodesQuery.refetch(), capabilityQuery.refetch()]);
+    } finally {
+      refreshing.current = false;
+    }
+  }
 
   const sortedNodes = useMemo(
     () =>
@@ -185,60 +204,58 @@ function CloudRuntimeManager({
                 </h3>
               </div>
 
-              {capabilities.provider !== "unknown" && (
-                <fieldset
-                  disabled={createNode.isPending}
-                  className="grid gap-3 sm:grid-cols-2"
-                >
+              <fieldset
+                disabled={createNode.isPending}
+                className="grid gap-3 sm:grid-cols-2"
+              >
+                <LabeledInput
+                  id={`${idPrefix}-name`}
+                  label={t(($) => $.cloud_runtime.fields.name)}
+                  value={name}
+                  onChange={(value) => {
+                    intent.current = null;
+                    setName(value);
+                  }}
+                  placeholder={t(($) => $.cloud_runtime.placeholders.name)}
+                />
+                {local ? (
                   <LabeledInput
-                    id={`${idPrefix}-name`}
-                    label={t(($) => $.cloud_runtime.fields.name)}
-                    value={name}
+                    id={`${idPrefix}-spec`}
+                    label={t(($) => $.cloud_runtime.fields.spec)}
+                    value={approvedSpec}
                     onChange={(value) => {
                       intent.current = null;
-                      setName(value);
+                      setSpec(value);
                     }}
-                    placeholder={t(($) => $.cloud_runtime.placeholders.name)}
+                    options={capabilities.specs.map((choice) => choice.id)}
                   />
-                  {local ? (
+                ) : capabilities.provider === "cloud" ? (
+                  <>
                     <LabeledInput
-                      id={`${idPrefix}-spec`}
-                      label={t(($) => $.cloud_runtime.fields.spec)}
-                      value={approvedSpec}
+                      id={`${idPrefix}-instance-type`}
+                      label={t(($) => $.cloud_runtime.fields.instance_type)}
+                      value={instanceType}
                       onChange={(value) => {
                         intent.current = null;
-                        setSpec(value);
+                        setInstanceType(value);
                       }}
-                      options={capabilities.specs.map((choice) => choice.id)}
+                      options={CLOUD_RUNTIME_INSTANCE_TYPES}
                     />
-                  ) : (
-                    <>
-                      <LabeledInput
-                        id={`${idPrefix}-instance-type`}
-                        label={t(($) => $.cloud_runtime.fields.instance_type)}
-                        value={instanceType}
-                        onChange={(value) => {
-                          intent.current = null;
-                          setInstanceType(value);
-                        }}
-                        options={CLOUD_RUNTIME_INSTANCE_TYPES}
-                      />
-                      <LabeledInput
-                        id={`${idPrefix}-disk-size`}
-                        label={t(($) => $.cloud_runtime.fields.disk_size)}
-                        value={diskSizeGB}
-                        onChange={(value) => {
-                          intent.current = null;
-                          setDiskSizeGB(value);
-                        }}
-                        placeholder={String(DEFAULT_DISK_SIZE_GB)}
-                        type="number"
-                        inputMode="numeric"
-                      />
-                    </>
-                  )}
-                </fieldset>
-              )}
+                    <LabeledInput
+                      id={`${idPrefix}-disk-size`}
+                      label={t(($) => $.cloud_runtime.fields.disk_size)}
+                      value={diskSizeGB}
+                      onChange={(value) => {
+                        intent.current = null;
+                        setDiskSizeGB(value);
+                      }}
+                      placeholder={String(DEFAULT_DISK_SIZE_GB)}
+                      type="number"
+                      inputMode="numeric"
+                    />
+                  </>
+                ) : null}
+              </fieldset>
               {!canCreate && (
                 <p className="text-caption text-warning">
                   {t(($) => $.cloud_runtime.capabilities_unavailable)}
@@ -256,17 +273,16 @@ function CloudRuntimeManager({
                   type="button"
                   variant="ghost"
                   size="sm"
-                  onClick={() => void nodesQuery.refetch()}
+                  onClick={() => void refresh()}
+                  aria-busy={refreshPending}
                   disabled={
-                    nodesQuery.isFetching ||
-                    createNode.isPending ||
-                    nodeActionPending
+                    refreshPending || createNode.isPending || nodeActionPending
                   }
                 >
                   <RefreshCw
                     className={cn(
                       "h-3.5 w-3.5",
-                      nodesQuery.isFetching && "animate-spin",
+                      refreshPending && "animate-spin",
                     )}
                   />
                   {t(($) => $.cloud_runtime.refresh)}

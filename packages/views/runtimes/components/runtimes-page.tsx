@@ -91,7 +91,8 @@ export function RuntimesPage({
   const currentUserId = useAuthStore((state) => state.user?.id);
   const wsId = useWorkspaceId();
   const qc = useQueryClient();
-  const { data: capabilities } = useQuery(cloudRuntimeCapabilityOptions(wsId));
+  const capabilityQuery = useQuery(cloudRuntimeCapabilityOptions(wsId));
+  const capabilities = capabilityQuery.isError ? undefined : capabilityQuery.data;
   const showCloudEntry = cloudRuntimeEnabled || (capabilities?.provider === "docker" && supportsNodeAction(capabilities, "create") && capabilities.specs.length > 0);
   const [showConnectDialog, setShowConnectDialog] = useState(false);
   const [showCloudRuntimeDialog, setShowCloudRuntimeDialog] = useState(false);
@@ -171,7 +172,9 @@ export function RuntimesPage({
         totalCount={machines.length}
         onConnectRemote={() => setShowConnectDialog(true)}
         cloudRuntimeEnabled={showCloudEntry}
-        onOpenCloudRuntime={() => setShowCloudRuntimeDialog(true)}
+        onOpenCloudRuntime={() => {
+          if (showCloudEntry) setShowCloudRuntimeDialog(true);
+        }}
       />
 
       {showEmpty ? (
@@ -212,7 +215,7 @@ export function RuntimesPage({
       {showConnectDialog && (
         <ConnectRemoteDialog onClose={() => setShowConnectDialog(false)} />
       )}
-      {showCloudEntry && showCloudRuntimeDialog && (
+      {showCloudRuntimeDialog && (
         <CloudRuntimeDialog onClose={() => setShowCloudRuntimeDialog(false)} />
       )}
     </div>
