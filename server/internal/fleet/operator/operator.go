@@ -252,6 +252,11 @@ func validateInputsWithReader(action string, cfg Config, read func(string) ([]by
 
 // localDatabaseURI bounds the interpretation before pgx can discover files.
 func localDatabaseURI(raw string) (string, error) {
+	// Callers must omit HOME in the child environment, not mutate the parent.
+	// On macOS/Linux this makes os.UserHomeDir fail before pgx home defaults.
+	if os.Getenv("HOME") != "" {
+		return "", model.ErrInvalidRequest
+	}
 	for _, entry := range os.Environ() {
 		key, value, _ := strings.Cut(entry, "=")
 		if strings.HasPrefix(key, "PG") && value != "" {
@@ -310,11 +315,14 @@ func localDatabaseURI(raw string) (string, error) {
 	return u.String(), nil
 }
 func localPoolConfig(raw string) (*pgxpool.Config, error) {
+	return localPoolConfigWithParser(raw, pgxpool.ParseConfig)
+}
+func localPoolConfigWithParser(raw string, parse func(string) (*pgxpool.Config, error)) (*pgxpool.Config, error) {
 	canonical, err := localDatabaseURI(raw)
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := pgxpool.ParseConfig(canonical)
+	cfg, err := parse(canonical)
 	if err != nil {
 		return nil, model.ErrInvalidRequest
 	}

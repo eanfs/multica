@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/fleet/model"
 	"github.com/multica-ai/multica/server/internal/fleet/store"
 )
@@ -184,6 +185,79 @@ func TestPrivateConfigConsumesCheckedBytes(t *testing.T) {
 				t.Fatal("unchecked second FIFO open blocked validation")
 			}
 		})
+	}
+}
+
+// Removing the ambient HOME gate must fail before the parser can acquire paths.
+func TestPrivateDatabaseRejectsHomeBeforeParser(t *testing.T) {
+	for _, root := range []string{"absent", "malformed", "fifo"} {
+		t.Run(root, func(t *testing.T) {
+			home := t.TempDir()
+			dir := filepath.Join(home, ".postgresql")
+			if err := os.Mkdir(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "root.crt")
+			switch root {
+			case "malformed":
+				if err := os.WriteFile(path, []byte("not a certificate"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "fifo":
+				if err := syscall.Mkfifo(path, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("HOME", home)
+			cfg := privateConfig(t)
+			calls := 0
+			start := time.Now()
+			// Never invoke the real parser with HOME set, even during RED.
+			parsed, err := localPoolConfigWithParser(cfg.DatabaseURL, func(string) (*pgxpool.Config, error) {
+				calls++
+				return nil, errors.New("parser boundary reached")
+			})
+			if !errors.Is(err, model.ErrInvalidRequest) || parsed != nil || calls != 0 {
+				t.Errorf("HOME reached parser: calls=%d config=%v error=%v", calls, parsed != nil, err)
+			}
+			if err := Validate("status", cfg); !errors.Is(err, model.ErrInvalidRequest) {
+				t.Errorf("HOME accepted by Validate: %v", err)
+				return // Do not let pre-fix Run invoke pgx with the synthetic FIFO.
+			}
+			if err := Run(context.Background(), "status", cfg); !errors.Is(err, model.ErrInvalidRequest) {
+				t.Errorf("HOME accepted by Run: %v", err)
+			}
+			if time.Since(start) > time.Second {
+				t.Fatal("HOME denial did not return promptly")
+			}
+			if os.Getenv("HOME") != home {
+				t.Fatal("operator mutated HOME")
+			}
+		})
+	}
+}
+
+func TestPrivateDatabaseHomeFreeExplicitIdentity(t *testing.T) {
+	if os.Getenv("HOME") != "" {
+		t.Fatal("test requires the HOME-free private invocation")
+	}
+	for _, options := range []string{"", "&application_name=fixture%20operator&connect_timeout=2"} {
+		raw := "postgres://fixture:synthetic-password@127.0.0.1:1234/fixture?sslmode=disable" + options
+		calls := 0
+		cfg, err := localPoolConfigWithParser(raw, func(uri string) (*pgxpool.Config, error) {
+			calls++
+			return pgxpool.ParseConfig(uri)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := cfg.ConnConfig
+		if calls != 1 || c.Host != "127.0.0.1" || c.Port != 1234 || c.Database != "fixture" || c.User != "fixture" || c.Password != "synthetic-password" || c.TLSConfig != nil || len(c.Fallbacks) != 0 {
+			t.Fatal("HOME-free parsing changed explicit identity or transport")
+		}
+		if options != "" && (c.RuntimeParams["application_name"] != "fixture operator" || c.ConnectTimeout != 2*time.Second) {
+			t.Fatal("approved options changed")
+		}
 	}
 }
 

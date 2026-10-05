@@ -13,6 +13,8 @@ import (
 	"github.com/multica-ai/multica/server/internal/fleet/operator"
 )
 
+// The caller must launch this private command with a child-specific environment
+// that omits HOME and PG settings. Validation denies ambient credential discovery.
 // execute exposes only a bounded status, never private paths, URLs or errors.
 func execute(ctx context.Context, args []string, out io.Writer, runner func(context.Context, string, operator.Config) error) int {
 	deny := func() int { fmt.Fprintln(out, "fleet-env: denied"); return 1 }
