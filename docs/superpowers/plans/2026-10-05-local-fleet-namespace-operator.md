@@ -19,7 +19,7 @@
 - shared managed worktree DB/registry, no second PG/public rebind/guessed gateway/network/foreign resource adoption; approved profiles600 and model secrets absent SQL/env/images/logs.
 - User authorized source expansion and scoped SQL/Docker/fake-Claude verification. Lead verifies exact owned environment before physical actions; AWS requires target identity first. No global prune/automatic push/merge.
 
-### Task13A: Namespace gate and trusted operator
+### Task 1: Namespace gate and trusted operator (original Task13A)
 
 **Files:** Create server/migrations/579_fleet_namespace_fences.{up,down}.sql and580_fleet_namespace_fences_namespace_index.{up,down}.sql; create server/internal/fleet/store/namespace.go, namespace_test.go; create server/internal/fleet/operator/operator.go, operator_test.go, profiles.go, profiles_test.go; create server/cmd/fleet-env/main.go, main_test.go. Modify server/pkg/db/queries/fleet.sql, generated/fleet.sql.go and generated/models.go; server/internal/fleet/store/intents.go,intents_test.go,maintenance.go,maintenance_test.go,schema_test.go; server/internal/fleetguard/claim.go,claim_test.go; server/cmd/migrate/main.go,main_test.go for index cleanup ONLY. Existing generator may change another generated file only if actual output requires it and recorded. No UI/cloud/AWS/provider/daemon changes.
 
@@ -41,7 +41,7 @@ Additional deterministic channels force a producer to hold shared lock, concurre
 - [ ] **Step4:** Compose operator with actual Maintainer.Request/Review and existing client transport seams. Close fence first; approved node stop/delete same ref then await actual Worker/SQL completion with bounded status polling. Keep worker/API alive on busy/unknown; validate owned resources rather than aggregate row count alone. Explicit private profiles projection/strict mode/readability; no silent compatibility loader. Re-run default+narrow SQL/race against verified owned schema; capture actual RED/GREEN/counts/skips/secrets-free logs. No actual Docker/model required for13A source acceptance.
 - [ ] **Step5:** Record all source/schema/generated/test bytes PRE/POST/committed, gitdiffcheck, atomic feat(fleet): add namespace admission fence and trusted environment operator. Release source seat, fresh ONE full13A NET spec+quality review, then scoped fix NET only if findings. No selfacceptance/push/merge/whole-system claims.
 
-### Task13B: Finish managed environment scripts
+### Task 2: Finish managed environment scripts (original Task13B)
 
 Original Task13 authorized10sourcefiles: docker-compose.fleet.yml,scripts/fleet-env.sh,scripts/fleet-env.test.sh,fleet-config.example.json,scripts/dev-env.sh,scripts/dev-env.test.sh,Makefile,.env.example,.gitignore,AGENTS.md. Only after13A SOURCE acceptance; own fresh source seat.
 
