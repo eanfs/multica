@@ -18,7 +18,7 @@ describe("auroraSkillsSchema", () => {
   it("fills in the optional fields a minimal entry omits", () => {
     const res = auroraSkillsSchema.parse({
       skills: [
-        { id: "poster", name: "海报制作", credits: 760, category: "image" },
+        { id: "poster", name: "海报制作", credits: 76, category: "image" },
       ],
     });
 
@@ -36,7 +36,7 @@ describe("auroraSkillsSchema", () => {
           id: "poster",
           name: "海报制作",
           name_en: "Poster",
-          credits: 760,
+          credits: 76,
           category: "image",
         },
       ],
@@ -135,7 +135,7 @@ describe("auroraBalanceSchema", () => {
 describe("auroraTransactionsSchema", () => {
   it("defaults the optional ledger columns", () => {
     const res = auroraTransactionsSchema.parse({
-      transactions: [{ id: "tx-1", kind: "deduction", amountMicro: -760 }],
+      transactions: [{ id: "tx-1", kind: "deduction", amountMicro: -76 }],
     });
 
     expect(res.transactions[0]?.balanceAfterMicro).toBe(0);

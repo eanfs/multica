@@ -45,7 +45,7 @@ function generation(
     skillId: "poster",
     prompt: "a launch poster",
     status: "completed",
-    creditsReserved: 760 * MICRO,
+    creditsReserved: 76 * MICRO,
     ...overrides,
   };
 }
@@ -67,7 +67,7 @@ const POSTER: AuroraSkill = {
   name: "海报制作",
   nameEn: "Poster",
   category: "image",
-  credits: 760,
+  credits: 76,
   input: ["text"],
   output: ["image"],
   featured: false,
@@ -101,7 +101,7 @@ describe("WorksList", () => {
     expect(screen.getByText("a launch poster")).toBeInTheDocument();
     expect(screen.getByText("Poster")).toBeInTheDocument();
     expect(screen.getByText("Done")).toBeInTheDocument();
-    expect(screen.getByText("760 credits")).toBeInTheDocument();
+    expect(screen.getByText("76 credits")).toBeInTheDocument();
   });
 
   it("does not price a generation that was refunded", () => {
@@ -113,7 +113,7 @@ describe("WorksList", () => {
     renderWorks();
 
     expect(screen.getByText("Failed")).toBeInTheDocument();
-    expect(screen.queryByText("760 credits")).not.toBeInTheDocument();
+    expect(screen.queryByText("76 credits")).not.toBeInTheDocument();
   });
 
   it("names the skill as unknown rather than blank when the catalog has dropped it", () => {

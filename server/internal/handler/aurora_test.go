@@ -65,7 +65,7 @@ func TestListAuroraSkills(t *testing.T) {
 		t.Errorf("expected 13 available skills in response, got %d", available)
 	}
 	poster := out.Skills[0]
-	if poster.ID != "poster" || poster.Name != "海报制作" || poster.NameEn != "Poster" || poster.Category != "image" || poster.Credits != 760 ||
+	if poster.ID != "poster" || poster.Name != "海报制作" || poster.NameEn != "Poster" || poster.Category != "image" || poster.Credits != 76 ||
 		!reflect.DeepEqual(poster.Input, []string{"text", "image"}) || !reflect.DeepEqual(poster.Output, []string{"image"}) ||
 		poster.Featured == nil || !*poster.Featured || poster.Available == nil || !*poster.Available {
 		t.Errorf("unexpected poster response: %#v", poster)
@@ -111,7 +111,7 @@ func TestCreateAuroraGenerationReservesAndEnqueues(t *testing.T) {
 	ws := parseUUID(testWorkspaceID)
 
 	// Fund the caller so the reservation can succeed. The grant needs no
-	// particular size — 1000 credits covers xhs-image's 620 with room to spare
+	// particular size — 1000 credits covers xhs-image's 62 with room to spare
 	// and leaves the post-reservation balance easy to assert.
 	if err := testHandler.Credit.Grant(ctx, user, ws, 1_000_000_000, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
 		t.Fatalf("Grant: %v", err)
@@ -133,7 +133,7 @@ func TestCreateAuroraGenerationReservesAndEnqueues(t *testing.T) {
 	}](t, testHandler.CreateAuroraGeneration, req, http.StatusCreated)
 
 	gen := out.Generation
-	const wantReserved = 620_000_000 // xhs-image: 620 credits × 1e6 micro
+	const wantReserved = 62_000_000 // xhs-image: 62 credits × 1e6 micro
 	if gen.ID == "" {
 		t.Fatalf("expected non-empty id, got %q", gen.ID)
 	}
@@ -194,6 +194,19 @@ func TestCreateAuroraGenerationReservesAndEnqueues(t *testing.T) {
 func TestCreateAuroraGenerationRejectsInsufficientCredits(t *testing.T) {
 	creditTestReset(t)
 	cleanupAuroraSystemAgents(t)
+	ctx := context.Background()
+
+	// Every skill now costs less than the free monthly grant, so an empty wallet
+	// would afford xhs-image (62 credits) once the lazy grant tops it up to 200.
+	// Open the wallet with a debt instead: 200 - 150 = 50 is still short of 62,
+	// so this request remains the insufficient-credit case it pins. The debt is
+	// fixture-only; the service API can never drive a balance negative.
+	const openingDebtMicro = -150_000_000
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO credit_balance (user_id, available_micro) VALUES ($1, $2)`,
+		parseUUID(testUserID), openingDebtMicro); err != nil {
+		t.Fatalf("seed opening debt: %v", err)
+	}
 
 	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
 		"skillId": "xhs-image",
@@ -1056,8 +1069,8 @@ func TestGetAuroraGenerationIncludesAssets(t *testing.T) {
 
 	genID := insertGeneration(t, "detail prompt", testutil.Cols{
 		"status":           "completed",
-		"credits_reserved": 620_000_000,
-		"credits_charged":  620_000_000,
+		"credits_reserved": 62_000_000,
+		"credits_charged":  62_000_000,
 	})
 	dbfx.Insert(t, "aurora_asset", testutil.Cols{
 		"generation_id": genID,
@@ -1096,8 +1109,8 @@ func TestGetAuroraGenerationIncludesAssets(t *testing.T) {
 	if g.Status != "completed" {
 		t.Fatalf("status = %q, want completed", g.Status)
 	}
-	if g.CreditsReserved != 620_000_000 || g.CreditsCharged != 620_000_000 {
-		t.Fatalf("credits = %d reserved / %d charged, want 620000000", g.CreditsReserved, g.CreditsCharged)
+	if g.CreditsReserved != 62_000_000 || g.CreditsCharged != 62_000_000 {
+		t.Fatalf("credits = %d reserved / %d charged, want 62000000", g.CreditsReserved, g.CreditsCharged)
 	}
 	if g.Error != nil {
 		t.Fatalf("error = %q, want null", *g.Error)
@@ -2380,19 +2393,31 @@ func TestCreateAuroraGenerationRejectsOverConcurrency(t *testing.T) {
 	testutil.Call(t, testHandler.CreateAuroraGeneration, req).Want(http.StatusTooManyRequests)
 }
 
-// A free user with an empty wallet gets the month's free credits on their first
-// generation of the month — granted before the reservation, or the request
-// would be rejected for insufficient credits. A second generation in the same
-// month must not grant them again.
+// A free user's first generation of the month gets the month's free credits —
+// granted before the reservation, or the request would be rejected for
+// insufficient credits. A second generation in the same month must not grant
+// them again.
 func TestCreateAuroraGenerationGrantsFreeMonthlyCreditsOnce(t *testing.T) {
 	creditTestReset(t)
 	auroraSubscriptionTestReset(t)
 	cleanupAuroraSystemAgents(t)
 	ctx := context.Background()
 
-	// xhs-image costs 620 credits and the free grant is 200, so the first
-	// generation still fails for want of credits — what this test pins is that
-	// the grant happened, and happened once.
+	// The free grant is 200 credits, and after this pricing change every skill
+	// costs less than that, so an empty wallet can afford any single
+	// generation. The fixture opens the wallet with a debt instead: read after
+	// the grant, the balance is 50 credits, still short of xhs-image's 62, so
+	// the first request remains the insufficient-credit call this test has
+	// always inspected. The debt is fixture-only — the service API can never
+	// drive a balance below zero — and what the assertions pin is the grant: it
+	// lands once and is not repeated.
+	const openingDebtMicro = -150_000_000
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO credit_balance (user_id, available_micro) VALUES ($1, $2)`,
+		parseUUID(testUserID), openingDebtMicro); err != nil {
+		t.Fatalf("seed opening debt: %v", err)
+	}
+
 	req := func() *http.Request {
 		return newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
 			"skillId": "xhs-image",
@@ -2405,8 +2430,8 @@ func TestCreateAuroraGenerationGrantsFreeMonthlyCreditsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Balance: %v", err)
 	}
-	if bal != testHandler.Tiers.FreeMonthlyMicro() {
-		t.Fatalf("balance = %d, want the free monthly grant %d", bal, testHandler.Tiers.FreeMonthlyMicro())
+	if want := testHandler.Tiers.FreeMonthlyMicro() + openingDebtMicro; bal != want {
+		t.Fatalf("balance = %d, want the free monthly grant less the opening debt %d", bal, want)
 	}
 
 	testutil.Call(t, testHandler.CreateAuroraGeneration, req()).Want(http.StatusPaymentRequired)

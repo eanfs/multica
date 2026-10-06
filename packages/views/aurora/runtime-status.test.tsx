@@ -47,7 +47,7 @@ function generation(overrides: Record<string, unknown> = {}) {
     skillId: "poster",
     prompt: "a launch poster",
     status: "running",
-    creditsReserved: 760,
+    creditsReserved: 76,
     ...overrides,
   };
 }

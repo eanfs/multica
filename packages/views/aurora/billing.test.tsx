@@ -58,7 +58,7 @@ const POSTER: AuroraSkill = {
   name: "海报制作",
   nameEn: "Poster",
   category: "image",
-  credits: 760,
+  credits: 76,
   input: ["text"],
   output: ["image"],
   featured: false,
@@ -71,7 +71,7 @@ const GENERATION: AuroraGeneration = {
   skillId: "poster",
   prompt: "a launch poster",
   status: "completed",
-  creditsReserved: 760 * MICRO,
+  creditsReserved: 76 * MICRO,
 };
 
 function subscription(
@@ -94,8 +94,8 @@ function transaction(
   return {
     id: "txn-1",
     kind: "deduction",
-    amountMicro: -760 * MICRO,
-    balanceAfterMicro: 240 * MICRO,
+    amountMicro: -76 * MICRO,
+    balanceAfterMicro: 924 * MICRO,
     reference: "gen-1",
     createdAt: "2026-09-23T00:00:00Z",
     ...overrides,
@@ -198,8 +198,8 @@ describe("AuroraBilling", () => {
     // The ledger carries a generation id, which means nothing to a reader; the
     // catalog is what turns it back into a skill name.
     expect(screen.getByText("Poster")).toBeInTheDocument();
-    expect(screen.getByText("−760")).toBeInTheDocument();
-    expect(screen.getByText("Balance after: 240")).toBeInTheDocument();
+    expect(screen.getByText("−76")).toBeInTheDocument();
+    expect(screen.getByText("Balance after: 924")).toBeInTheDocument();
   });
 
   it("falls back to the kind's label when the reference is not a generation", () => {
