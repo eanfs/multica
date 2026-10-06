@@ -59,6 +59,10 @@ apps/web/test-results/
 .agent_context/
 .multica/
 
+# Private managed Fleet approval, SQL URI, service key and owner profiles
+.fleet-private/
+fleet-config.private.json
+
 # local settings
 .claude/
 .tool-versions

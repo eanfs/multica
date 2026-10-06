@@ -1,0 +1,65 @@
+CREATE TABLE IF NOT EXISTS fleet_nodes (
+ id uuid NOT NULL DEFAULT gen_random_uuid(),
+ namespace text NOT NULL,
+ owner_id uuid NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ container_id text NOT NULL DEFAULT '',
+ daemon_id uuid NOT NULL DEFAULT gen_random_uuid(),
+ name text NOT NULL DEFAULT '',
+ spec text NOT NULL DEFAULT 'standard',
+ image text NOT NULL DEFAULT '',
+ profile_ref text NOT NULL DEFAULT '',
+ start_epoch text NOT NULL DEFAULT '',
+ data_volume text NOT NULL DEFAULT '',
+ secrets_volume text NOT NULL DEFAULT '',
+ desired text NOT NULL DEFAULT 'running',
+ status text NOT NULL DEFAULT 'creating',
+ generation bigint NOT NULL DEFAULT 1,
+ ready boolean NOT NULL DEFAULT false,
+ health_at timestamptz,
+ active_runs integer NOT NULL DEFAULT 0,
+ pending_reports integer NOT NULL DEFAULT 0,
+ failed_reports integer NOT NULL DEFAULT 0,
+ maintenance boolean NOT NULL DEFAULT false,
+ revoked boolean NOT NULL DEFAULT false,
+ error_code text NOT NULL DEFAULT '',
+ error_message text NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS fleet_node_operations (
+ id uuid NOT NULL DEFAULT gen_random_uuid(),
+ namespace text NOT NULL,
+ owner_id uuid NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ node_id uuid NOT NULL,
+ action text NOT NULL,
+ idempotency_key text NOT NULL,
+ request_hash text NOT NULL,
+ phase text NOT NULL DEFAULT 'queued',
+ prior_desired text NOT NULL DEFAULT '',
+ generation bigint NOT NULL DEFAULT 1,
+ approved boolean NOT NULL DEFAULT false,
+ attempts integer NOT NULL DEFAULT 0,
+ error_code text NOT NULL DEFAULT '',
+ error_message text NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS fleet_node_credentials (
+ id uuid NOT NULL DEFAULT gen_random_uuid(),
+ namespace text NOT NULL,
+ owner_id uuid NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ node_id uuid NOT NULL,
+ token_hash text NOT NULL,
+ revoked_at timestamptz
+);
+CREATE TABLE IF NOT EXISTS fleet_credential_profiles (
+ id uuid NOT NULL DEFAULT gen_random_uuid(),
+ namespace text NOT NULL,
+ owner_id uuid NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ profile_ref text NOT NULL,
+ config_version bigint NOT NULL DEFAULT 1
+);

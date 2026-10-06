@@ -1640,21 +1640,82 @@ export const ChildIssueProgressResponseSchema = z.object({
     .default([]),
 }).loose();
 
-export const CloudRuntimeNodeSchema = z.object({
-  id: z.string(),
-  owner_id: z.string(),
-  instance_id: z.string(),
-  region: z.string(),
-  instance_type: z.string(),
-  image_id: z.string(),
-  subnet_id: z.string(),
-  name: z.string(),
-  status: z.string(),
-  tags: z.record(z.string(), z.string()).default({}),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-  created_at: z.string(),
-  updated_at: z.string(),
-}).loose();
+const CloudRuntimeProviderSchema = z
+  .string()
+  .transform((provider) => (provider === "docker" || provider === "cloud" ? provider : "unknown"));
+
+const NodeActionSchema = z.enum(["create", "start", "stop", "reboot", "delete"]);
+
+export const CloudRuntimeCapabilitiesSchema = z
+  .object({
+    provider: CloudRuntimeProviderSchema,
+    operations: z.array(z.string()).transform((operations) =>
+      operations.flatMap((operation) => {
+        const parsed = NodeActionSchema.safeParse(operation);
+        return parsed.success ? [parsed.data] : [];
+      }),
+    ),
+    specs: z
+      .array(
+        z.object({
+          id: z.string().trim().min(1),
+          cpus: z.number().positive().finite(),
+          memory_bytes: z.number().positive().finite(),
+          pids: z.number().positive().finite(),
+          max_runs: z.number().positive().finite().int().optional(),
+        }),
+      )
+      .default([]),
+    persistent_storage: z.boolean().default(false),
+    disk_quota_supported: z.boolean().default(false),
+  })
+  .transform((caps) => ({
+    provider: caps.provider,
+    operations: caps.provider === "unknown" ? [] : caps.operations,
+    specs: caps.specs.map(({ id, cpus, memory_bytes, pids, max_runs }) => ({
+      id,
+      cpus,
+      memoryBytes: memory_bytes,
+      pids,
+      ...(max_runs !== undefined ? { maxRuns: max_runs } : {}),
+    })),
+    persistentStorage: caps.persistent_storage,
+    diskQuotaSupported: caps.disk_quota_supported,
+  }));
+
+export const ManagedFleetRuntimeMetadataSchema = z.object({
+  managed_by: z.literal("local_fleet"),
+  fleet_node_id: z.string().uuid(),
+});
+
+export type ManagedFleetRuntimeMetadata = z.infer<typeof ManagedFleetRuntimeMetadataSchema>;
+
+export const CloudRuntimeNodeSchema = z
+  .object({
+    id: z.string(),
+    owner_id: z.string(),
+    instance_id: z.string(),
+    region: z.string(),
+    instance_type: z.string(),
+    image_id: z.string(),
+    subnet_id: z.string(),
+    name: z.string(),
+    status: z.string(),
+    tags: z.record(z.string(), z.string()).default({}),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+    created_at: z.string(),
+    updated_at: z.string(),
+    provider: CloudRuntimeProviderSchema.default("unknown"),
+    ready: z.boolean().default(false),
+    operation_id: z.string().default(""),
+    error_code: z.string().default(""),
+  })
+  .loose()
+  .transform(({ operation_id, error_code, ...node }) => ({
+    ...node,
+    operationId: operation_id,
+    errorCode: error_code,
+  }));
 
 export const CloudRuntimeNodeListSchema = z.array(CloudRuntimeNodeSchema);
 

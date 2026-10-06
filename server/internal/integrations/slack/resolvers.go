@@ -343,7 +343,7 @@ func (r *sessionBinder) StartSession(ctx context.Context, p engine.StartSessionP
 		Body:      p.Message.Text, CommandText: p.Message.CommandText, MessageID: p.Message.MessageID, ThreadID: replyThread,
 		ClaimToken: p.ClaimToken, MediaPendingSeconds: p.MediaPendingSeconds,
 		PersistMessage: p.PersistMessage, HistoryBoundaryPending: p.HistoryBoundaryPending,
-		BeforeCommit: p.BeforeCommit,
+		BeforeOwnerLocks: p.BeforeOwnerLocks, BeforeCommit: p.BeforeCommit,
 	})
 	return engine.StartSessionResult{SessionID: result.SessionID, BindingID: result.BindingID, RouteRevision: result.RouteRevision, Append: result.Append}, err
 }

@@ -1031,25 +1031,33 @@ func (s *AutopilotService) dispatchRunOnly(ctx context.Context, ap db.Autopilot,
 		return &errDispatchSkipped{reason: formatAdmissionReason(ap, "workspace fail-closed: no accountable human for autopilot run"), code: dispatch.ReasonAttributionBlocked}
 	}
 	apSource, _, apEvidenceKind, apEvidenceRef := attributionCreateParams(autopilotAttr)
-	task, err := s.Queries.CreateAutopilotTask(ctx, db.CreateAutopilotTaskParams{
-		ID:             dbid.NewV7(),
-		AgentID:        agent.ID,
-		RuntimeID:      agent.RuntimeID,
-		Priority:       0,
-		AutopilotRunID: run.ID,
-		// Snapshot the autopilot title so task rows self-describe later
-		// without joining back to autopilot. Truncated for the same
-		// transmission-cost reason as comment-driven summaries.
-		TriggerSummary: pgtype.Text{
-			String: truncateForSummary(ap.Title, triggerSummaryMaxLen),
-			Valid:  ap.Title != "",
-		},
-		OriginatorUserID:     autopilotAttr.UserID,
-		AccountableUserID:    autopilotAttr.AccountableUserID,
-		RuleVersionID:        autopilotAttr.RuleVersionID,
-		OriginatorSource:     apSource,
-		TriggerEvidenceKind:  apEvidenceKind,
-		TriggerEvidenceRefID: apEvidenceRef,
+	var task db.AgentTaskQueue
+	err = s.TaskSvc.runFleetTx(ctx, agent.ID, func(ctx context.Context, qtx *db.Queries) error {
+		locked, e := s.TaskSvc.admitEnqueueAgent(ctx, qtx, agent.ID)
+		if e != nil {
+			return e
+		}
+		task, err = qtx.CreateAutopilotTask(ctx, db.CreateAutopilotTaskParams{
+			ID:             dbid.NewV7(),
+			AgentID:        agent.ID,
+			RuntimeID:      locked.RuntimeID,
+			Priority:       0,
+			AutopilotRunID: run.ID,
+			// Snapshot the autopilot title so task rows self-describe later
+			// without joining back to autopilot. Truncated for the same
+			// transmission-cost reason as comment-driven summaries.
+			TriggerSummary: pgtype.Text{
+				String: truncateForSummary(ap.Title, triggerSummaryMaxLen),
+				Valid:  ap.Title != "",
+			},
+			OriginatorUserID:     autopilotAttr.UserID,
+			AccountableUserID:    autopilotAttr.AccountableUserID,
+			RuleVersionID:        autopilotAttr.RuleVersionID,
+			OriginatorSource:     apSource,
+			TriggerEvidenceKind:  apEvidenceKind,
+			TriggerEvidenceRefID: apEvidenceRef,
+		})
+		return err
 	})
 	if err != nil {
 		return fmt.Errorf("create autopilot task: %w", err)

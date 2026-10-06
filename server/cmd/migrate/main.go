@@ -140,6 +140,18 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
+	"580_fleet_namespace_fences_namespace_index":                "fleet_namespace_fences_namespace_uidx",
+	"565_fleet_nodes_id_index":                                  "public.fleet_nodes_id_idx",
+	"566_fleet_nodes_daemon_index":                              "public.fleet_nodes_daemon_idx",
+	"567_fleet_operations_id_index":                             "public.fleet_operations_id_idx",
+	"568_fleet_operations_idempotency_index":                    "public.fleet_operations_idempotency_idx",
+	"569_fleet_credentials_id_index":                            "public.fleet_credentials_id_idx",
+	"570_fleet_credentials_hash_index":                          "public.fleet_credentials_hash_idx",
+	"571_fleet_profiles_id_index":                               "public.fleet_profiles_id_idx",
+	"572_fleet_profiles_owner_index":                            "public.fleet_profiles_owner_idx",
+	"573_fleet_nodes_owner_index":                               "public.fleet_nodes_owner_idx",
+	"574_fleet_operations_pending_index":                        "public.fleet_operations_pending_idx",
+	"575_fleet_runtime_node_index":                              "public.fleet_runtime_node_idx",
 	"563_search_index_change_changed_at_index":                  "idx_search_index_change_changed_at",
 	"562_search_index_change_workspace_index":                   "idx_search_index_change_workspace_xid",
 	"552_agent_task_history_page_index":                         "idx_agent_task_queue_history_page",

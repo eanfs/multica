@@ -29,6 +29,7 @@ import {
 import { agentTaskSnapshotOptions } from "@multica/core/agents";
 import {
   deriveRuntimeHealth,
+  getManagedFleetNodeID,
   isRuntimeUsableForUser,
   runtimeProfileListOptions,
   runtimeUsageOptions,
@@ -59,6 +60,7 @@ import { useViewingTimezone } from "../../common/use-viewing-timezone";
 import { ProviderLogo } from "./provider-logo";
 import { HealthIcon, useHealthLabel } from "./shared";
 import { DeleteRuntimeDialog } from "./delete-runtime-dialog";
+import { CloudRuntimeDialog } from "./cloud-runtime-dialog";
 import { DeleteRuntimeProfileDialog } from "./delete-runtime-profile-dialog";
 import { RuntimeProfilesDialog } from "./runtime-profiles-dialog";
 import {
@@ -567,7 +569,9 @@ export function RuntimeRowMenu({
   const intentNavigate = useIntentNavigate();
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const isCustomRuntime = !!runtime.profile_id;
+  const managedNodeId = getManagedFleetNodeID(runtime);
+  const [nodeManagerOpen, setNodeManagerOpen] = useState(false);
+  const isCustomRuntime = !managedNodeId && !!runtime.profile_id;
   // Delete is the row's only management action; if the row can't run it, drop
   // the kebab entirely so the column doesn't render a near-empty popover. We
   // used to also hide it for self-healing runtimes (live local daemon
@@ -612,9 +616,10 @@ export function RuntimeRowMenu({
               {t(($) => $.list.edit_action)}
             </DropdownMenuItem>
           )}
+          {managedNodeId && <DropdownMenuItem onClick={() => setNodeManagerOpen(true)}>{t(($) => $.cloud_runtime.restart)}</DropdownMenuItem>}
           <DropdownMenuItem
             variant="destructive"
-            onClick={() => setDeleteOpen(true)}
+            onClick={() => managedNodeId ? setNodeManagerOpen(true) : setDeleteOpen(true)}
             title={t(($) => $.list.delete_permission_hint)}
           >
             <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
@@ -624,6 +629,7 @@ export function RuntimeRowMenu({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+      {managedNodeId && nodeManagerOpen && <CloudRuntimeDialog wsId={wsId} nodeId={managedNodeId} onClose={() => setNodeManagerOpen(false)} />}
       {isCustomRuntime && profile && editOpen && (
         <RuntimeProfilesDialog
           wsId={wsId}

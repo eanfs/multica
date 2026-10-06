@@ -90,6 +90,21 @@ DO UPDATE SET
     owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
     last_seen_at = now(),
     updated_at = now()
+-- Local Fleet ownership and node identity cannot be downgraded by an ordinary
+-- reconnect, including after local mode is disabled. Both values are server-derived.
+WHERE (
+    COALESCE(agent_runtime.metadata->>'managed_by', '') <> 'local_fleet'
+    OR (
+        EXCLUDED.metadata->>'managed_by' = 'local_fleet'
+        AND EXCLUDED.metadata->>'fleet_node_id' = agent_runtime.metadata->>'fleet_node_id'
+        AND EXCLUDED.owner_id = agent_runtime.owner_id
+    )
+)
+AND (
+    COALESCE(EXCLUDED.metadata->>'managed_by', '') <> 'local_fleet'
+    OR agent_runtime.owner_id IS NULL
+    OR EXCLUDED.owner_id = agent_runtime.owner_id
+)
 RETURNING *, (xmax = 0) AS inserted;
 
 -- name: UpsertAgentRuntimeWithProfile :one
@@ -124,6 +139,21 @@ DO UPDATE SET
     owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
     last_seen_at = now(),
     updated_at = now()
+-- Local Fleet ownership and node identity cannot be downgraded by an ordinary
+-- reconnect, including after local mode is disabled. Both values are server-derived.
+WHERE (
+    COALESCE(agent_runtime.metadata->>'managed_by', '') <> 'local_fleet'
+    OR (
+        EXCLUDED.metadata->>'managed_by' = 'local_fleet'
+        AND EXCLUDED.metadata->>'fleet_node_id' = agent_runtime.metadata->>'fleet_node_id'
+        AND EXCLUDED.owner_id = agent_runtime.owner_id
+    )
+)
+AND (
+    COALESCE(EXCLUDED.metadata->>'managed_by', '') <> 'local_fleet'
+    OR agent_runtime.owner_id IS NULL
+    OR EXCLUDED.owner_id = agent_runtime.owner_id
+)
 RETURNING *, (xmax = 0) AS inserted;
 
 -- name: UpdateAgentRuntimeVisibility :one
@@ -462,7 +492,7 @@ FOR KEY SHARE;
 --
 -- Returns the ids it actually locked: a caller that asked for two and got fewer
 -- knows a runtime disappeared before it got there and must abandon the merge.
-SELECT id FROM agent_runtime
+SELECT * FROM agent_runtime
 WHERE id = ANY(@runtime_ids::uuid[])
 ORDER BY id
 FOR UPDATE;

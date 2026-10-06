@@ -1,0 +1,15 @@
+{
+  "namespace": "<managed-checkout-namespace>",
+  "fleet_id": "<persistent-managed-fleet-id>",
+  "image": "<approved-node-image>@sha256:<approved-digest>",
+  "api_url": "http://host.docker.internal:<allocated-api-port>",
+  "specs": {
+    "local-small": {
+      "cpus": 2,
+      "memory_bytes": 4294967296,
+      "pids": 256,
+      "max_runs": 1
+    }
+  },
+  "max_nodes": 2
+}

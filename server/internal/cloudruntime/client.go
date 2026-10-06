@@ -30,9 +30,10 @@ type RequestRecorder interface {
 }
 
 type Config struct {
-	BaseURL    string
-	Timeout    time.Duration
-	HTTPClient *http.Client
+	BaseURL       string
+	ServiceSecret []byte
+	Timeout       time.Duration
+	HTTPClient    *http.Client
 	// Recorder, when non-nil, receives one observation per Do() call with
 	// the inferred op, status bucket, and elapsed time. Production wires
 	// this to the BusinessMetrics collector; tests leave it nil.
@@ -73,9 +74,10 @@ type Response struct {
 }
 
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
-	recorder   RequestRecorder
+	baseURL       string
+	serviceSecret []byte
+	httpClient    *http.Client
+	recorder      RequestRecorder
 }
 
 func NewClient(cfg Config) *Client {
@@ -87,10 +89,16 @@ func NewClient(cfg Config) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: timeout}
 	}
+	if len(cfg.ServiceSecret) > 0 {
+		copyClient := *httpClient
+		copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		httpClient = &copyClient
+	}
 	return &Client{
-		baseURL:    strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"),
-		httpClient: httpClient,
-		recorder:   cfg.Recorder,
+		baseURL:       strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"),
+		httpClient:    httpClient,
+		recorder:      cfg.Recorder,
+		serviceSecret: append([]byte(nil), cfg.ServiceSecret...),
 	}
 }
 
@@ -159,7 +167,7 @@ func (c *Client) doInner(ctx context.Context, req Request) (*Response, error) {
 		// fast path so calling it twice per iteration would double
 		// the per-request header overhead for no reason.
 		canon := http.CanonicalHeaderKey(k)
-		if canon == "X-User-Id" || canon == "X-Request-Id" {
+		if canon == "X-User-Id" || canon == "X-Request-Id" || canon == "X-Fleet-Service-Key" {
 			continue
 		}
 		httpReq.Header.Del(k)
@@ -174,6 +182,9 @@ func (c *Client) doInner(ctx context.Context, req Request) (*Response, error) {
 		httpReq.Header.Set("X-Request-ID", req.RequestID)
 	}
 
+	if len(c.serviceSecret) > 0 {
+		httpReq.Header.Set("X-Fleet-Service-Key", string(c.serviceSecret))
+	}
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, err

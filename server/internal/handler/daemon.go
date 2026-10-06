@@ -23,6 +23,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/daemonws"
+	"github.com/multica-ai/multica/server/internal/fleetguard"
 	"github.com/multica-ai/multica/server/internal/integrations/slack"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
@@ -105,6 +106,9 @@ func (h *Handler) requireDaemonRuntimeAccess(w http.ResponseWriter, r *http.Requ
 		return db.AgentRuntime{}, false
 	}
 	if !h.requireDaemonWorkspaceAccess(w, r, uuidToString(rt.WorkspaceID)) {
+		return db.AgentRuntime{}, false
+	}
+	if !h.requireLocalFleetRuntime(w, r, rt) {
 		return db.AgentRuntime{}, false
 	}
 	return rt, true
@@ -340,19 +344,34 @@ var errRuntimeProfileDisabled = errors.New("runtime profile is disabled")
 // enumerates runtime rows. This closes the stale-read window where deletion
 // could miss an instance inserted by a concurrently registering daemon.
 func (h *Handler) upsertRuntimeWithProfile(
-	ctx context.Context,
+	r *http.Request, node *db.FleetNode,
 	workspaceID, profileID pgtype.UUID,
 	build func(db.RuntimeProfile) db.UpsertAgentRuntimeWithProfileParams,
 ) (db.UpsertAgentRuntimeWithProfileRow, db.RuntimeProfile, error) {
 	var row db.UpsertAgentRuntimeWithProfileRow
 	var profile db.RuntimeProfile
+	ctx := r.Context()
+	if node != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+	}
 
 	tx, err := h.TxStarter.Begin(ctx)
 	if err != nil {
 		return row, profile, fmt.Errorf("begin profile runtime registration: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	rollbackCtx := ctx
+	if node != nil {
+		rollbackCtx = context.WithoutCancel(ctx)
+	}
+	defer tx.Rollback(rollbackCtx)
 	qtx := h.Queries.WithTx(tx)
+	if node != nil {
+		if err := h.checkFleetRegisterCredential(ctx, r, qtx, node); err != nil {
+			return row, profile, err
+		}
+	}
 
 	profile, err = qtx.LockRuntimeProfileForRegistration(ctx, db.LockRuntimeProfileForRegistrationParams{
 		ID:          profileID,
@@ -365,7 +384,14 @@ func (h *Handler) upsertRuntimeWithProfile(
 		return row, profile, errRuntimeProfileDisabled
 	}
 
-	row, err = qtx.UpsertAgentRuntimeWithProfile(ctx, build(profile))
+	params := build(profile)
+	if node != nil && (params.OwnerID != node.OwnerID || params.DaemonID.String != uuidToString(node.DaemonID)) {
+		return row, profile, errLocalFleetIdentityProtected
+	}
+	row, err = qtx.UpsertAgentRuntimeWithProfile(ctx, params)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return row, profile, errLocalFleetIdentityProtected
+	}
 	if err != nil {
 		return row, profile, fmt.Errorf("upsert profile runtime: %w", err)
 	}
@@ -450,6 +476,14 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		ownerID = member.UserID
 	}
 
+	localNode, localOK := h.localFleetRegistration(w, r, req.DaemonID)
+	if !localOK {
+		return
+	}
+	if localNode != nil {
+		ownerID = localNode.OwnerID
+		req.LegacyDaemonIDs = nil
+	}
 	ws, err := h.Queries.GetWorkspace(r.Context(), wsUUID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "workspace not found")
@@ -490,6 +524,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 			"capabilities": requestClientCapabilities(r),
 		})
 
+		metadata = localFleetMetadata(metadata, localNode)
 		var registered db.AgentRuntime
 		var inserted bool
 		isCustom := strings.TrimSpace(runtime.ProfileID) != ""
@@ -503,7 +538,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 			// the profile's stored runtime identity over the daemon-sent type so
 			// the provider used for task routing cannot drift from the profile.
 			prow, profile, err := h.upsertRuntimeWithProfile(
-				r.Context(),
+				r, localNode,
 				wsUUID,
 				profileUUID,
 				func(profile db.RuntimeProfile) db.UpsertAgentRuntimeWithProfileParams {
@@ -521,6 +556,10 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 					}
 				},
 			)
+			if errors.Is(err, errLocalFleetIdentityProtected) {
+				writeError(w, 403, "managed runtime identity is protected")
+				return
+			}
 			if errors.Is(err, pgx.ErrNoRows) {
 				writeError(w, http.StatusBadRequest, "unknown runtime profile: "+runtime.ProfileID)
 				return
@@ -564,7 +603,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				ProfileID:      prow.ProfileID,
 			}
 		} else {
-			row, err := h.Queries.UpsertAgentRuntime(r.Context(), db.UpsertAgentRuntimeParams{
+			row, err := h.upsertFleetRuntime(r, localNode, db.UpsertAgentRuntimeParams{
 				WorkspaceID: wsUUID,
 				DaemonID:    strToText(req.DaemonID),
 				Name:        name,
@@ -575,6 +614,10 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				Metadata:    metadata,
 				OwnerID:     ownerID,
 			})
+			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, errLocalFleetIdentityProtected) {
+				writeError(w, 403, "managed runtime identity is protected")
+				return
+			}
 			if err != nil {
 				obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.RuntimeFailed(
 					uuidToString(ownerID),
@@ -671,7 +714,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		commandName := strings.TrimSpace(failed.CommandName)
 		prow, _, err := h.upsertRuntimeWithProfile(
-			r.Context(),
+			r, localNode,
 			wsUUID,
 			profileUUID,
 			func(profile db.RuntimeProfile) db.UpsertAgentRuntimeWithProfileParams {
@@ -698,6 +741,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 					"runtime_profile_failure_reason":     reason,
 					"command_name":                       resolvedCommandName,
 				})
+				metadata = localFleetMetadata(metadata, localNode)
 				return db.UpsertAgentRuntimeWithProfileParams{
 					WorkspaceID: wsUUID,
 					DaemonID:    strToText(req.DaemonID),
@@ -712,6 +756,10 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				}
 			},
 		)
+		if errors.Is(err, errLocalFleetIdentityProtected) {
+			writeError(w, 403, "managed runtime identity is protected")
+			return
+		}
 		if err != nil {
 			slog.Warn("failed to record runtime profile registration failure",
 				"workspace_id", req.WorkspaceID, "daemon_id", req.DaemonID,
@@ -742,6 +790,53 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		"repos_version": repoResp.ReposVersion,
 		"settings":      repoResp.Settings,
 	})
+}
+
+// upsertFleetRuntime holds shared node admission from credential recheck through
+// the INITIAL insert as well as reconnect upserts. Ordinary registration is unchanged.
+func (h *Handler) upsertFleetRuntime(r *http.Request, node *db.FleetNode, params db.UpsertAgentRuntimeParams) (db.UpsertAgentRuntimeRow, error) {
+	if node == nil {
+		return h.Queries.UpsertAgentRuntime(r.Context(), params)
+	}
+	if h.TxStarter == nil {
+		return db.UpsertAgentRuntimeRow{}, errLocalFleetIdentityProtected
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return db.UpsertAgentRuntimeRow{}, err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	q := h.Queries.WithTx(tx)
+	if err := h.checkFleetRegisterCredential(ctx, r, q, node); err != nil {
+		return db.UpsertAgentRuntimeRow{}, err
+	}
+	if params.OwnerID != node.OwnerID || params.DaemonID.String != uuidToString(node.DaemonID) {
+		return db.UpsertAgentRuntimeRow{}, errLocalFleetIdentityProtected
+	}
+	row, err := q.UpsertAgentRuntime(ctx, params)
+	if err != nil {
+		return row, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return db.UpsertAgentRuntimeRow{}, err
+	}
+	return row, nil
+}
+
+// Shared registration admission precedes every profile/owner lock and initial write.
+func (h *Handler) checkFleetRegisterCredential(ctx context.Context, r *http.Request, q *db.Queries, node *db.FleetNode) error {
+	if err := fleetguard.CheckRegister(ctx, q, node.Namespace, node.ID); err != nil {
+		return errLocalFleetIdentityProtected
+	}
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	current, err := q.VerifyFleetCredential(ctx, db.VerifyFleetCredentialParams{Namespace: node.Namespace, TokenHash: auth.HashToken(token)})
+	identity, ok := middleware.CloudNodeIdentity(ctx)
+	if err != nil || !ok || current.ID != node.ID || current.OwnerID != node.OwnerID || current.Namespace != node.Namespace || current.DaemonID != node.DaemonID || current.ContainerID != identity.InstanceID {
+		return errLocalFleetIdentityProtected
+	}
+	return nil
 }
 
 // mergeLegacyRuntimes folds every runtime row keyed on a prior hostname-derived
@@ -831,12 +926,32 @@ var errRuntimeMergeFenced = errors.New("runtime merge refused by the task-write 
 // teardown cannot start deleting the target until this merge finishes, and any
 // failure rolls the whole merge back to its starting state.
 func (h *Handler) mergeLegacyRuntime(ctx context.Context, newRuntimeID, oldRuntimeID pgtype.UUID, legacyID, provider string) error {
+	for attempt := 0; attempt < 5; attempt++ {
+		attemptCtx, cancel, err := fleetguard.AttemptContext(ctx, h.Queries, pgtype.UUID{}, newRuntimeID, oldRuntimeID)
+		if err != nil {
+			return err
+		}
+		err = h.mergeLegacyRuntimeTx(attemptCtx, newRuntimeID, oldRuntimeID, legacyID, provider)
+		cancel()
+		if !errors.Is(err, fleetguard.ErrBindingChanged) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	return fleetguard.ErrBindingChanged
+}
+func (h *Handler) mergeLegacyRuntimeTx(ctx context.Context, newRuntimeID, oldRuntimeID pgtype.UUID, legacyID, provider string) error {
 	tx, err := h.TxStarter.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin merge tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(fleetguard.RollbackContext(ctx))
 	qtx := h.Queries.WithTx(tx)
+	if err := fleetguard.CheckRuntimeMerge(ctx, qtx, "", oldRuntimeID, newRuntimeID); err != nil {
+		return err
+	}
 
 	// Fence, in the same order every task write uses: workspace row first, then the
 	// owner rows. Without the FOR UPDATE on the runtimes, a concurrent enqueue
@@ -1151,6 +1266,10 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 	workspaceCheckMs = time.Since(wsCheckStart).Milliseconds()
 	if !wsOK {
 		outcome = "workspace_denied"
+		return
+	}
+	if !h.requireLocalFleetRuntime(w, r, rt) {
+		outcome = "node_identity_denied"
 		return
 	}
 	authMs = time.Since(start).Milliseconds()

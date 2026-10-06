@@ -3,14 +3,58 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/internal/testutil"
+	"github.com/multica-ai/multica/server/internal/util"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
+
+// Removing the managed fence lets installed clients tear down retained business data.
+func TestManagedRuntimeDeleteAndUnbindRejected(t *testing.T) {
+	for _, method := range []string{"DELETE", "POST"} {
+		t.Run(method, func(t *testing.T) {
+			pool, f := testutil.NewFleetFixture(t)
+			ns := "task7-legacy-" + f.UserID
+			t.Logf("Task7FixtureScope namespace=%s owner=%s workspace=%s", ns, f.UserID, f.WorkspaceID)
+			node := f.FleetNode(t, ns)
+			rt := f.Runtime(t, "managed", testutil.Cols{"metadata": json.RawMessage(fmt.Sprintf(`{"managed_by":"local_fleet","fleet_node_id":"%s"}`, node))})
+			ag := f.Agent(t, "retained", rt, testutil.Cols{"archived_at": time.Now().UTC()})
+			task := f.Task(t, ag, testutil.Cols{"runtime_id": rt, "status": "queued"})
+			h := &Handler{Queries: db.New(pool), TxStarter: pool, DB: pool, Bus: events.New()}
+			req := httptest.NewRequest(method, "/api/runtimes/"+rt, strings.NewReader(`{"expected_active_agent_ids":[]}`))
+			req.Header.Set("X-User-ID", f.UserID)
+			req = withURLParam(req, "runtimeId", rt)
+			w := httptest.NewRecorder()
+			if method == "DELETE" {
+				h.DeleteAgentRuntime(w, req)
+			} else {
+				h.UnbindAgentsAndDeleteRuntime(w, req)
+			}
+			if w.Code != 409 {
+				t.Errorf("managed teardown=%d %s", w.Code, w.Body.String())
+			}
+			if _, e := h.Queries.GetAgentRuntime(context.Background(), util.MustParseUUID(rt)); e != nil {
+				t.Error("runtime removed", e)
+			}
+			a, e := h.Queries.GetAgent(context.Background(), util.MustParseUUID(ag))
+			if e != nil || a.RuntimeID != util.MustParseUUID(rt) {
+				t.Error("agent binding changed", e)
+			}
+			q, e := h.Queries.GetAgentTask(context.Background(), util.MustParseUUID(task))
+			if e != nil || q.Status != "queued" || q.RuntimeID != util.MustParseUUID(rt) {
+				t.Error("business task changed", e)
+			}
+		})
+	}
+}
 
 func TestRuntimeHandlersRejectMalformedRuntimeID(t *testing.T) {
 	tests := []struct {

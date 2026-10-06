@@ -2,9 +2,11 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { AgentRuntime, RuntimeProfile } from "@multica/core/types";
 import { I18nProvider } from "@multica/core/i18n/react";
+import { api } from "@multica/core/api";
 import { NavigationProvider, type NavigationAdapter } from "../../navigation";
 import enCommon from "../../locales/en/common.json";
 import enRuntimes from "../../locales/en/runtimes.json";
@@ -22,9 +24,10 @@ vi.mock("@tanstack/react-query", async () => {
     await vi.importActual<typeof import("@tanstack/react-query")>(
       "@tanstack/react-query",
     );
+  const empty: never[] = [];
   return {
     ...actual,
-    useQuery: vi.fn(() => ({ data: [], isLoading: false })),
+    useQuery: vi.fn((query: { queryKey?: readonly unknown[] }) => ({ data: query.queryKey?.[0] === "cloud-runtime" && query.queryKey[1] === "capabilities" ? undefined : empty, isLoading: false })),
   };
 });
 
@@ -37,7 +40,8 @@ vi.mock("@multica/core/runtimes/mutations", () => ({
   }),
 }));
 
-vi.mock("@multica/core/runtimes", () => ({
+vi.mock("@multica/core/runtimes", async () => ({
+  ...await vi.importActual<typeof import("@multica/core/runtimes")>("@multica/core/runtimes"),
   deriveRuntimeHealth: () => "online",
   runtimeUsageOptions: () => ({ kind: "usage" }),
   runtimeProfileListOptions: () => ({ kind: "runtime-profiles" }),
@@ -65,10 +69,10 @@ vi.mock("@multica/core/agents", () => ({
 // The unified DeleteRuntimeDialog the kebab now opens reaches into auth +
 // the api singleton. The dialog never renders in these tests (`open=false`
 // throughout) but its hooks still mount; stub them so module init is clean.
-vi.mock("@multica/core/auth", () => ({
-  useAuthStore: (sel: (s: { user: { id: string } }) => unknown) =>
-    sel({ user: { id: "user-me" } }),
-}));
+vi.mock("@multica/core/auth", () => {
+  const state = { user: { id: "user-me" } };
+  return { useAuthStore: Object.assign((sel: (s: typeof state) => unknown) => sel(state), { getState: () => state }) };
+});
 
 vi.mock("@multica/core/api", () => ({
   api: {
@@ -188,6 +192,21 @@ function renderActionsCell(
 }
 
 describe("runtime list row menu", () => {
+  it.each(["Delete", "Restart node"])("managed runtime %s opens node management, never ordinary delete/unbind/restart", async action => {
+    renderActionsCell(makeRow(makeRuntime({ metadata: { managed_by: "local_fleet", fleet_node_id: "a09fe54c-0740-467f-812a-114e21c3db06" } })));
+    const user = userEvent.setup();
+    const opener = screen.getByLabelText("Row actions");
+    opener.focus();
+    await user.keyboard("{ArrowDown}");
+    await user.click(await screen.findByRole("menuitem", { name: action }));
+    expect(await screen.findByRole("heading", { name: "Cloud Runtime" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete runtime" })).not.toBeInTheDocument();
+    expect(api.deleteRuntime).not.toHaveBeenCalled();
+    expect(api.unbindAgentsAndDeleteRuntime).not.toHaveBeenCalled();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
   beforeEach(() => vi.clearAllMocks());
 
   it("renders the kebab menu for an online local runtime (self-healing is no longer hidden)", () => {

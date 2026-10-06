@@ -204,7 +204,7 @@ func assertEveryConcurrentBuildHasCleanup(t *testing.T, direction string, cleanu
 			t.Errorf("%s: builds %q concurrently on %s but has no %s cleanup", version, indexName, direction, direction)
 			continue
 		}
-		if registered != indexName {
+		if strings.TrimPrefix(registered, "public.") != indexName {
 			t.Errorf("%s: %s cleanup registers %q, migration builds %q", version, direction, registered, indexName)
 		}
 	}
@@ -230,7 +230,7 @@ func assertConcurrentIndexCleanupsMatchTheirMigrations(
 			t.Errorf("%s: has a cleanup hook but builds no index concurrently", version)
 			continue
 		}
-		if got := migration.builds[0]; got != indexName {
+		if got := migration.builds[0]; got != strings.TrimPrefix(indexName, "public.") {
 			t.Errorf("%s: hook cleans %q but the migration builds %q", version, indexName, got)
 		}
 		if hooks[version] == nil {

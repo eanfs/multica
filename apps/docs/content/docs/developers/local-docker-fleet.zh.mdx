@@ -1,0 +1,128 @@
+---
+title: 本地 Docker Fleet
+description: 运行并恢复可选的本地 Docker Fleet、其私有输入与验证门。
+---
+
+本地 Docker Fleet 是可选的组件，它把执行节点作为 Docker 容器管理，并与 API 共用当前 checkout 的 PostgreSQL 数据库。它复用现有的守护进程、运行时、任务队列和回传协议。本页说明本地 API 接入、可选托管环境组件、约束删除行为的安全规则、验证门，以及该方案不提供的能力。
+
+## 本地 API 接入
+
+通过两个变量启用本地 Fleet 接入：
+
+- `MULTICA_LOCAL_FLEET_URL` — API 调用的 Fleet URL。
+- `MULTICA_LOCAL_FLEET_SECRET_FILE` — 保存 Fleet 服务密钥的私有密钥文件路径。
+
+本地 URL **与 `MULTICA_CLOUD_URL` 互斥**。两者同时设置会在启动时失败，并报 `local Fleet and SaaS Cloud are mutually exclusive`。本地模式不会启用 Cloud Billing、entitlement 策略或严格的预购席位容量。
+
+URL 在启动时会经过校验：
+
+- scheme 必须是 `http` 或 `https`。
+- host 必须是 `localhost` 或回环 IP 地址。
+- 不允许 userinfo、query 和 fragment，path 必须为空或为 `/`。
+
+密钥文件在启动时会经过校验：
+
+- 绝对路径指向普通文件，不能是符号链接，并会与打开的 descriptor 再核对一次。
+- 所有者可读的私有权限：无 group 或 other 位，且设置所有者读位（`0600` 或 `0400`）。
+- 去除首尾空白后至少 32 字节、至多 65536 字节，且不含换行。
+
+本地模式创建 Fleet token 校验器时不配置 Redis 客户端，这会**禁用正向校验缓存**。每个节点（`mcn_`）token 都会重新向本地 Fleet 校验，而不是命中缓存。内部操作端点用常量时间比较校验复制的服务密钥，并在 SQL 中重新核对确切的节点凭据和容器身份。
+
+## 可选托管环境组件
+
+托管环境默认仍为 `api,web`。需要显式选择 Fleet 组件：
+
+```sh
+make up C=api,web,fleet
+make status
+make down
+```
+
+- `make down` 停止进程并保留数据。
+- `make destroy` 需要显式确认，并删除环境及其数据。
+- 默认的 `make up` 仍然只启动 `api,web`。
+
+该组件需要两个私有输入，两者都是绝对私有路径，而不是凭据值：
+
+- `MULTICA_FLEET_INPUT` — 私有描述文件。
+- `MULTICA_FLEET_OPERATOR` — 私有、仅所有者可执行的 Fleet 环境 operator，由 `server/cmd/fleet-env` 构建。
+
+`scripts/fleet-env.sh` 负责物理来源，提供这些动作：`prepare`、`up`、`status`、`quiesce`、`down` 和 `destroy`。
+
+`prepare` 会校验描述文件，验证所选 Docker Engine、PostgreSQL 容器、其 compose 标签、其发布的回环端口、其网络，以及容器内可见的 Docker socket 组，验证两个镜像都以摘要固定，拒绝占用已分配端口的无关监听者，在 `19000`–`20999` 范围内分配回环 Fleet 端口，持久化注册表身份，迁移现有 checkout 数据库，然后调用 operator 准备 profile。这里没有第二个 PostgreSQL 实例，也不会公开重新绑定。
+
+注册表持久化托管命名空间、Fleet ID、已分配端口和关闭（operation）密钥。之后的 `status`、`quiesce`、`down` 和 `destroy` 复用这些已保存的路径，因此同一 checkout 在重启后保持稳定身份，不同 worktree 之间保持隔离。
+
+网络被刻意收窄：
+
+- Fleet 只加入已验证的共享 PostgreSQL Docker 网络和自己的节点网络。
+- 节点只加入节点网络，绝不加入 PostgreSQL 网络。
+- 只发布 Fleet 端口，且只绑定回环。
+
+镜像必须使用以摘要固定的 `repository@sha256:...` 引用。`docker-compose.fleet.yml` 不发送 checkout 构建上下文，compose 创建使用 `--no-build`。
+
+version 1 描述文件声明这些字段：`version`、`database_name`、`database_lifecycle`、`context`、`engine_id`、`pg_container_id`、`pg_network_id`、`pg_alias`、`pg_port`、`pg_host_port`、`socket_path`、`uid`、`gid`、`socket_gid`、`node_image`、`fleet_image`、`api_url`、`profiles_file` 和 `service_key_file`。它必须指定确切的已注册数据库（`database_name` 必须等于 checkout 数据库），并且只有在单独的物理所有权预检之后才能声明 `database_lifecycle=exclusive-managed`。注册表成员身份不是所有权证明；任何托管的数据库使用前都要核实当前数据库身份。
+
+凭据 profile 使用严格的私有映射：
+
+```json
+{"version": 1, "owners": {"<canonical-nonzero-uuid>": "<absolute-private-path>"}}
+```
+
+owner 的值为空字符串表示禁用该 profile。凭据文件必须是普通、非符号链接的 `0600` 文件，由显式指定的非 root UID 拥有，其目录必须是 `0700`。`api_url` 是获准的 `host.docker.internal` API URL，会原样保留。
+
+## 安全与恢复
+
+Fleet 进程持有 Docker socket，这是高权限能力。它只绑定回环，绝不能对外暴露。节点容器不会获得 Docker socket，不以 privileged 运行，不使用 host 网络或 PID 命名空间，并以非 root（`10001:10001`）运行，使用 `cap_drop: ALL` 和 `no-new-privileges`。
+
+默认值为 2 CPU、4 GiB 内存、256 个进程、每节点并发 1 次运行，每个配置用户最多 2 个节点。
+
+删除是永久的，并且有顺序：
+
+- `delete` 会移除节点容器及其两个卷（data 和 secrets）。data 最后移除，因此更早的删除即使结果不确定，也总会保留 data 卷用于重新取证和重试。
+- 在整个命名空间 quiesce 完成之前，Fleet 会让 API 保持存活。`make down` 和 `make destroy` 会在停止 API 之前静默（quiesce）命名空间，与组件顺序无关。
+- busy、unknown-health 或清理失败都会**拒绝并保留恢复输入**（容器、卷、注册表和数据库）。没有 force 路径；不要自行构造。
+- queued 或 deferred 运行会阻止删除，必须先取消。对于需要先取消的活跃或排队工作，API 返回 `409 busy`；Fleet 不会静默取消排队的工作。
+- pending 或 failed 的终态回传同样阻止删除，无法取证的回传会报告为 `unknown_health`。failed 终态回传在清理之前需要恢复。
+- `destroy` 需要原始 SQL 完成加上当前物理所有权，先清理资源再移除数据库和注册表，失败时中止，从而保留数据库和注册表。
+
+## 验证门
+
+默认的 hermetic 检查无需 Docker、数据库或任何智能体 CLI 查找即可运行：
+
+```sh
+bash scripts/fleet-env.test.sh
+bash scripts/dev-env.test.sh
+```
+
+Docker 集成是**可选开启**的。Go 集成检查使用 `dockerintegration` build tag，并且只有在设置 `MULTICA_RUN_DOCKER_INTEGRATION=1` 时才运行。该门必须在任何 Docker Engine 或智能体 CLI 查找之前检查，因此跳过的运行不会触碰 socket：
+
+```sh
+(cd server && MULTICA_RUN_DOCKER_INTEGRATION=1 go test -tags=dockerintegration ./internal/fleet/integration -run TestDockerNodeRoundTrip -count=1 -v)
+```
+
+浏览器 `fleet-docker` Playwright 项目只在同一个 `MULTICA_RUN_DOCKER_INTEGRATION=1` 门下启用，绝不属于默认 suite。
+
+真实智能体烟测是独立的，需要 `MULTICA_RUN_REAL_AGENT_SMOKE=1` 和具名的 `agentintegration` 测试 `TestClaudeFleetRealAgentSmoke`：
+
+```sh
+(cd server && MULTICA_RUN_REAL_AGENT_SMOKE=1 go test -tags=agentintegration ./pkg/agent -run '^TestClaudeFleetRealAgentSmoke$' -count=1 -v)
+```
+
+该具名测试不在本次改动范围内。在它被新增并单独授权之前，其缺失或“no tests to run”都属于 setup pending，绝不是通过。
+
+被跳过的测试或"no tests to run"**不是**通过，缺失环境属于 setup pending（待配置），而不是失败的测试。只有在显式授权并具备确切的具名环境时，才运行这些可选门和真实模型检查。
+
+## 本方案不提供的能力
+
+- 不提供每个卷的磁盘配额。
+- 不提供物理或密码学擦除保证。
+- 不提供生产级多租户隔离。
+- Docker 是容器运行时，不是 VM 安全边界；节点容器经过加固，但不是虚拟机。
+- 不包含 Aurora 或 AWS 部署。AWS 目标实例、region、账号和 stack overlay 需要单独且确切的授权与核实。
+- 本页不声称任何可选门或真实模型运行已经执行或通过。
+
+## 接下来
+
+- [参与开发](/developers/contributing) — 本地环境、worktree 和测试位置。
+- [项目架构](/developers/architecture) — API、守护进程和共享包如何协作。

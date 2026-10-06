@@ -123,6 +123,7 @@ type StartSessionParams struct {
 	MediaPendingSeconds    float64
 	PersistMessage         bool
 	HistoryBoundaryPending bool
+	BeforeOwnerLocks       func(context.Context, pgx.Tx) error
 	BeforeCommit           func(context.Context, pgx.Tx, db.ChatSession) error
 }
 

@@ -18,7 +18,7 @@ import { MIKA_PLACEHOLDER_EMOJI } from "../../onboarding/components/mika-intro";
 import { useRequiredWorkspaceSlug, useWorkspacePaths } from "@multica/core/paths";
 import { agentTaskSnapshotOptions } from "@multica/core/agents";
 import { chatSessionsOptions } from "@multica/core/chat/queries";
-import { runtimeProfileListOptions } from "@multica/core/runtimes";
+import { cloudRuntimeCapabilityOptions, supportsNodeAction, runtimeProfileListOptions } from "@multica/core/runtimes";
 import { runtimeListOptions, runtimeKeys } from "@multica/core/runtimes/queries";
 import { useWSEvent } from "@multica/core/realtime";
 import { agentListOptions } from "@multica/core/workspace/queries";
@@ -67,7 +67,7 @@ export interface RuntimesPageProps {
   hasLocalMachine?: boolean;
   /** The bundled daemon is starting but has not registered yet. */
   bootstrapping?: boolean;
-  /** Web SaaS-only Cloud Runtime entrypoint. */
+  /** Hosted cloud entrypoint; Docker capability discovery is shared across platforms. */
   cloudRuntimeEnabled?: boolean;
 }
 
@@ -91,6 +91,9 @@ export function RuntimesPage({
   const currentUserId = useAuthStore((state) => state.user?.id);
   const wsId = useWorkspaceId();
   const qc = useQueryClient();
+  const capabilityQuery = useQuery(cloudRuntimeCapabilityOptions(wsId));
+  const capabilities = capabilityQuery.isError ? undefined : capabilityQuery.data;
+  const showCloudEntry = cloudRuntimeEnabled || (capabilities?.provider === "docker" && supportsNodeAction(capabilities, "create") && capabilities.specs.length > 0);
   const [showConnectDialog, setShowConnectDialog] = useState(false);
   const [showCloudRuntimeDialog, setShowCloudRuntimeDialog] = useState(false);
 
@@ -168,8 +171,10 @@ export function RuntimesPage({
       <PageHeaderBar
         totalCount={machines.length}
         onConnectRemote={() => setShowConnectDialog(true)}
-        cloudRuntimeEnabled={cloudRuntimeEnabled}
-        onOpenCloudRuntime={() => setShowCloudRuntimeDialog(true)}
+        cloudRuntimeEnabled={showCloudEntry}
+        onOpenCloudRuntime={() => {
+          if (showCloudEntry) setShowCloudRuntimeDialog(true);
+        }}
       />
 
       {showEmpty ? (
@@ -210,7 +215,7 @@ export function RuntimesPage({
       {showConnectDialog && (
         <ConnectRemoteDialog onClose={() => setShowConnectDialog(false)} />
       )}
-      {cloudRuntimeEnabled && showCloudRuntimeDialog && (
+      {showCloudRuntimeDialog && (
         <CloudRuntimeDialog onClose={() => setShowCloudRuntimeDialog(false)} />
       )}
     </div>

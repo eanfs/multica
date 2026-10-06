@@ -15,6 +15,33 @@ import (
 // fleetServerOpts configures the stub Fleet server used in tests. Each
 // field is optional — zero values give a default 200 success response
 // with a fixed owner/instance binding.
+func TestCloudPATLocalServiceSecretTransport(t *testing.T) {
+	secret := []byte("test-only-012345678901234567890123456789")
+	var revoked atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Fleet-Service-Key") != string(secret) || r.Header.Get("X-User-ID") != "" {
+			w.WriteHeader(401)
+			return
+		}
+		if revoked.Load() {
+			w.Write([]byte(`{"valid":false}`))
+			return
+		}
+		w.Write([]byte(`{"valid":true,"owner_id":"11111111-1111-4111-8111-111111111111","instance_record_id":"22222222-2222-4222-8222-222222222222"}`))
+	}))
+	defer srv.Close()
+	cfg := CloudPATVerifierConfig{FleetBaseURL: srv.URL}
+	cfg.ServiceSecret = secret
+	v := NewCloudPATVerifier(cfg)
+	if _, err := v.Verify(context.Background(), "mcn_fake", nil); err != nil {
+		t.Fatalf("authenticated verify: %v", err)
+	}
+	revoked.Store(true)
+	if _, err := v.Verify(context.Background(), "mcn_fake", nil); !errors.Is(err, ErrCloudPATInvalid) {
+		t.Fatalf("revoked token accepted: %v", err)
+	}
+}
+
 type fleetServerOpts struct {
 	statusCode int
 	body       string
@@ -344,7 +371,6 @@ func TestCloudPATVerifier_NegativesNotCached(t *testing.T) {
 		t.Fatalf("negative result must not be cached; expected 2 fleet calls, got %d", got)
 	}
 }
-
 
 // TestCloudPATVerifier_LookupRejectsUnknownOwner pins the new
 // owner-existence guard. Cloud says the token is valid, but the

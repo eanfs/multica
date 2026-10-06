@@ -39,8 +39,10 @@ DEV_CODE_DEFAULT=888888
 WORKSPACE_NAME="${MULTICA_DEV_WORKSPACE_NAME:-Dev}"
 WORKSPACE_SLUG="${MULTICA_DEV_WORKSPACE_SLUG:-dev}"
 
-ALL_COMPONENTS="api web daemon desktop"
+ALL_COMPONENTS="api web daemon desktop fleet"
 DEFAULT_COMPONENTS="api web"
+# Only validated managed entry points set this private composition marker.
+MULTICA_MANAGED_API_CONFIG=""
 
 # An agent runs with TMPDIR=/tmp/multica-task-<id>, deleted when the run ends.
 # Anything the Go toolchain builds there goes with it, so a binary started from
@@ -337,7 +339,7 @@ ensure_dev_code() {
 rewrite_env_ports() {
   local file="$REPO_ROOT/$1" offset=$2 backend=$3 frontend=$4 db=$5 tmp database_url escaped_database_url
   database_url="$(database_url_with_name "${DATABASE_URL:-}" "$db")" \
-    || die "DATABASE_URL is not a valid PostgreSQL URL: ${DATABASE_URL:-<unset>}"
+    || die "DATABASE_URL is not a valid PostgreSQL URL (credentials redacted)."
   escaped_database_url="$(printf '%s' "$database_url" | sed 's/[\\&|]/\\&/g')"
   tmp="$(mktemp)"
   sed \
@@ -383,7 +385,7 @@ diagnose_database() {
   printf '\n'
   warn "The database the tooling created is not the one the application reaches."
   info "Port ${POSTGRES_PORT:-5432} is served by: ${owner:-nothing}"
-  info "DATABASE_URL: ${DATABASE_URL}"
+  info "DATABASE_URL: credentials redacted"
   info "If that is a native PostgreSQL, the Docker container never bound the host port."
   info "Either stop it (brew services stop postgresql@17) or point DATABASE_URL at it."
 }
@@ -550,14 +552,15 @@ start_api() {
   local launched_at health waited=0 expected_commit
   expected_commit="$(checkout_commit)"
   if health="$(health_json)" && [ -n "$health" ] && component_pid api >/dev/null; then
-    if api_identity_matches "$health" "$expected_commit"; then
+    if api_identity_matches "$health" "$expected_commit" && managed_api_reusable; then
       record_component_listener api "$BACKEND_PORT" >/dev/null \
         || die "The API listener changed while its identity was being verified. Refusing to reuse it."
       ok "api already running on :$BACKEND_PORT (pid $(json_field "$health" pid), commit $expected_commit)"
       return 0
     fi
     if health_belongs_to_api "$health"; then
-      warn "api on :$BACKEND_PORT is ours but not commit $expected_commit; restarting it."
+      warn "api on :$BACKEND_PORT is ours but its composition changed; restarting it."
+      if [ -n "${MULTICA_MANAGED_API_CONFIG:-}" ]; then fleet_action quiesce; fi
       stop_component api
     else
       die "Port $BACKEND_PORT answers /health, but its pid/commit does not match this environment. Refusing to reuse or kill it."
@@ -569,7 +572,13 @@ Run 'make down' here first — a leftover instance answers /health with 200 and 
   fi
 
   launched_at="$(now_epoch)"
-  launch_detached api make -C "$REPO_ROOT" -s api-dev ENV_FILE="$ENV_FILE"
+  if [ -n "${MULTICA_MANAGED_API_CONFIG:-}" ]; then
+    launch_detached api make -C "$REPO_ROOT" -s api-dev ENV_FILE="$ENV_FILE" \
+      MULTICA_LOCAL_FLEET_URL="$MULTICA_LOCAL_FLEET_URL" \
+      MULTICA_LOCAL_FLEET_SECRET_FILE="$MULTICA_LOCAL_FLEET_SECRET_FILE"
+  else
+    launch_detached api make -C "$REPO_ROOT" -s api-dev ENV_FILE="$ENV_FILE"
+  fi
   info "api launching (pid $(cat "$(pid_file api)")), log: $(log_file api)"
 
   while [ "$waited" -lt 300 ]; do
@@ -585,6 +594,7 @@ Run 'make down' here first — a leftover instance answers /health with 200 and 
         stop_component api
         die "The API listener changed while its identity was being recorded."
       fi
+      save_managed_api_receipt
       ok "api healthy at http://localhost:$BACKEND_PORT (pid $(json_field "$health" pid), commit $expected_commit)"
       return 0
     fi
@@ -919,6 +929,15 @@ stop_component() {
 
 component_state() {
   case "$1" in
+    fleet)
+      if ! fleet_managed; then
+        printf 'disabled||not selected'
+      elif fleet_action status >/dev/null 2>&1; then
+        printf 'verified||operator status complete'
+      else
+        printf 'denied||environment retained'
+      fi
+      ;;
     api)
       local health
       health="$(health_json || true)"
@@ -982,7 +1001,7 @@ print_status_human() {
     url="${row%%|*}"; detail="${row#*|}"
     printf '  %-9s %-9s %-32s %s\n' "$comp" "$state" "${url:--}" "${detail:--}"
   done
-  printf '  %-9s %-9s %-32s %s\n' database "$(database_state)" "$DB_NAME" "${DATABASE_URL%%\?*}"
+  printf '  %-9s %-9s %-32s %s\n' database "$(database_state)" "$DB_NAME" "credentials redacted"
   printf '\n  owner %s · created %s%s\n' "$OWNER" "$CREATED_AT" "$( [ "${TTL_HOURS:-0}" != 0 ] && printf ' · expires %s' "$EXPIRES_AT" )"
   printf '  logs  %s\n' "$LOG_DIR"
 }
@@ -1046,6 +1065,61 @@ ${C_GREEN}✓ Environment ready.${C_OFF}
 EOF
 }
 
+# The descriptor is explicit approval, never a discovered preview.
+# One explicit SQL lifecycle budget includes connect, probe, locks and completion.
+bounded_database_drop() {
+  node - "$1" "$2" <<'NODE'
+const cp=require('child_process'),end=Date.now()+2000,uri=process.argv[2],name=process.argv[3];
+if(!/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(name))process.exit(1);
+const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>!k.startsWith('PG')));
+function sql(args){const remaining=end-Date.now();if(remaining<=0)return false;const r=cp.spawnSync('psql',['--no-psqlrc',uri,...args],{env:{...env,PGOPTIONS:'-c statement_timeout='+remaining+' -c lock_timeout='+remaining},timeout:remaining,stdio:'ignore'});return r.status===0&&!r.error&&!r.signal;}
+process.exit(sql(['-tAc','SELECT 1'])&&sql(['-v','ON_ERROR_STOP=1','-c','DROP DATABASE IF EXISTS "'+name+'" WITH (FORCE)'])?0:1);
+NODE
+}
+
+fleet_cleanup_started() {
+  node - "$STATE_DIR/fleet/identity.json" <<'NODE'
+const id=JSON.parse(require('fs').readFileSync(process.argv[2],'utf8'));
+process.exit(id.cleanup_intent_key===id.operation_key||id.cleanup_operation_key===id.operation_key?0:1);
+NODE
+}
+
+fleet_managed() { [ -f "$STATE_DIR/fleet/identity.json" ]; }
+fleet_action() {
+  if fleet_managed; then
+    MULTICA_FLEET_INPUT="${MULTICA_FLEET_INPUT:-$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1])).input_path)' "$STATE_DIR/fleet/identity.json")}"
+    MULTICA_FLEET_OPERATOR="${MULTICA_FLEET_OPERATOR:-$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1])).operator_path)' "$STATE_DIR/fleet/identity.json")}"
+  fi
+  [ -n "${MULTICA_FLEET_INPUT:-}" ] && [ -n "${MULTICA_FLEET_OPERATOR:-}" ] \
+    || die "fleet-env: denied (explicit private input and operator required)"
+  bash "$DIR/scripts/fleet-env.sh" "$1" --repo "$DIR" --state "$STATE_DIR" \
+    --name "$NAME" --database-url "$DATABASE_URL" --db-name "$DB_NAME" \
+    --api-port "$BACKEND_PORT" --offset "$OFFSET" --input "$MULTICA_FLEET_INPUT" \
+    --operator "$MULTICA_FLEET_OPERATOR" || die "fleet-env: denied"
+}
+managed_api_reusable() {
+  [ -n "${MULTICA_MANAGED_API_CONFIG:-}" ] || return 0
+  node - "$STATE_DIR/api-fleet.json" "$MULTICA_MANAGED_API_CONFIG" "$(component_pid api)" "$(port_listener_pid "$BACKEND_PORT")" <<'NODE'
+const fs=require('fs');try{const p=process.argv[2],s=fs.lstatSync(p);if(!s.isFile()||s.isSymbolicLink()||s.uid!==process.getuid()||(s.mode&511)!==384)process.exit(1);const r=JSON.parse(fs.readFileSync(p));process.exit(r.configuration===process.argv[3]&&r.launcher===process.argv[4]&&r.listener===process.argv[5]?0:1);}catch{process.exit(1);}
+NODE
+}
+save_managed_api_receipt() {
+  [ -n "${MULTICA_MANAGED_API_CONFIG:-}" ] || return 0
+  node - "$STATE_DIR/api-fleet.json" "$MULTICA_MANAGED_API_CONFIG" "$(component_pid api)" "$(port_listener_pid "$BACKEND_PORT")" <<'NODE'
+const fs=require('fs'),p=process.argv[2],t=p+'.new-'+process.pid;fs.writeFileSync(t,JSON.stringify({configuration:process.argv[3],launcher:process.argv[4],listener:process.argv[5]}),{mode:0o600,flag:'wx'});fs.renameSync(t,p);
+NODE
+}
+fleet_api_config() {
+  local fleet_port
+  fleet_port="$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1])).port))' "$STATE_DIR/fleet/identity.json")"
+  export MULTICA_LOCAL_FLEET_URL="http://127.0.0.1:$fleet_port"
+  export MULTICA_LOCAL_FLEET_SECRET_FILE="$STATE_DIR/fleet/service-key"
+  MULTICA_MANAGED_API_CONFIG="$(node - "$STATE_DIR/fleet/identity.json" "$MULTICA_LOCAL_FLEET_URL" "$MULTICA_LOCAL_FLEET_SECRET_FILE" <<'NODE'
+const fs=require('fs'),crypto=require('crypto'),id=JSON.parse(fs.readFileSync(process.argv[2]));process.stdout.write(crypto.createHash('sha256').update(JSON.stringify([id.repo,id.name,id.namespace,id.fleet_id,id.input_hash,id.prepared_hash,process.argv[3],process.argv[4]])).digest('hex'));
+NODE
+)"
+}
+
 # ------------------------------------------------------------------- verbs ---
 
 resolve_env_for_read() {
@@ -1077,6 +1151,7 @@ bind_paths() {
 }
 
 save_manifest() {
+  umask 077
   {
     write_manifest_value NAME "$NAME"
     write_manifest_value DIR "$DIR"
@@ -1100,6 +1175,7 @@ save_manifest() {
 }
 
 cmd_up() {
+  umask 077
   local requested="$DEFAULT_COMPONENTS" name="" owner=human ttl=0 lifecycle_requested=0 comp
 
   while [ $# -gt 0 ]; do
@@ -1243,12 +1319,19 @@ Start the rest with 'make up C=api,web', or run 'make up C=daemon' from your own
   fi
 
   step "Database"
-  ensure_database
-  migrate_database
+  if component_selected fleet || fleet_managed; then
+    # Verify explicit ownership before migrating its existing DB. No second PG.
+    fleet_action prepare
+    fleet_api_config
+  else
+    ensure_database
+    migrate_database
+  fi
   ok "$DB_NAME reachable through DATABASE_URL and migrated"
 
   step "Components: $COMPONENTS"
   component_selected api && start_api
+  if component_selected fleet; then fleet_action up; fi
   component_selected web && start_web
   component_selected daemon && start_daemon
   component_selected desktop && start_desktop
@@ -1265,13 +1348,24 @@ cmd_down() {
       *) name="$1"; shift ;;
     esac
   done
+  local comp
+  # Validate the complete intent before stopping any component.
+  for comp in $requested; do
+    case " $ALL_COMPONENTS " in *" $comp "*) ;; *) die "Unknown component '$comp'. Valid: $ALL_COMPONENTS" ;; esac
+  done
   resolve_env_for_read "$name"
   export PORT="$BACKEND_PORT" FRONTEND_PORT DATABASE_URL POSTGRES_DB="$DB_NAME"
 
+  # Quiesce the whole namespace before any API stop, regardless of C= ordering.
+  if fleet_managed; then
+    case " $requested " in
+      *" api "*|*" fleet "*) fleet_action quiesce ;;
+    esac
+    case " $requested " in *" fleet "*) fleet_action down ;; esac
+  fi
   step "Stopping $NAME: $requested"
-  local comp
   for comp in $requested; do
-    case " $ALL_COMPONENTS " in *" $comp "*) ;; *) die "Unknown component '$comp'. Valid: $ALL_COMPONENTS" ;; esac
+    [ "$comp" != fleet ] || continue
     stop_component "$comp"
   done
   printf '\n%s✓ %s stopped.%s Database, profile and slot kept — `make up` restarts in seconds.\n' "$C_GREEN" "$NAME" "$C_OFF"
@@ -1297,28 +1391,25 @@ cmd_destroy() {
 
   export PORT="$BACKEND_PORT" FRONTEND_PORT DATABASE_URL POSTGRES_DB="$DB_NAME"
   step "Destroying $NAME"
+  # SQL original-ref completion and physical cleanup both precede API/data/DB.
+  if fleet_managed; then
+    # Validate saved private inputs/current ownership before an owned API restart.
+    fleet_action status
+    # A physical phase marker never replaces the trusted SQL destroy check.
+    if ! fleet_cleanup_started; then
+      fleet_action quiesce
+      fleet_api_config
+      start_api
+    fi
+    fleet_action destroy
+  fi
   local comp
   for comp in $ALL_COMPONENTS; do
+    [ "$comp" != fleet ] || continue
     if ! stop_component "$comp"; then failures=$((failures + 1)); fi
   done
+  [ "$failures" -eq 0 ] || die "Cleanup failed; database and registry kept."
 
-  if command -v psql >/dev/null 2>&1; then
-    admin_url="$(admin_database_url "$DATABASE_URL")"
-    if PGCONNECT_TIMEOUT=3 psql "$admin_url" -tAc 'SELECT 1' >/dev/null 2>&1; then
-      if psql "$admin_url" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"$DB_NAME\" WITH (FORCE)" >/dev/null; then
-        ok "dropped database $DB_NAME"
-      else
-        warn "failed to drop database $DB_NAME; keeping its manifest"
-        failures=$((failures + 1))
-      fi
-    else
-      warn "Nothing answered on the database host; $DB_NAME was left in place."
-      failures=$((failures + 1))
-    fi
-  else
-    warn "psql not found; $DB_NAME was left in place."
-    failures=$((failures + 1))
-  fi
 
   if rm -rf "$PROFILE_DIR"; then
     ok "removed CLI profile $PROFILE"
@@ -1363,6 +1454,20 @@ cmd_destroy() {
     die "$NAME was only partially destroyed ($failures cleanup failure(s)). Its manifest and slot were kept so 'make destroy' can retry."
   fi
 
+  if command -v psql >/dev/null 2>&1; then
+    admin_url="$(admin_database_url "$DATABASE_URL")"
+    if bounded_database_drop "$admin_url" "$DB_NAME"; then
+      ok "dropped database $DB_NAME"
+    else
+      warn "failed to drop database $DB_NAME; keeping its manifest"
+      failures=$((failures + 1))
+    fi
+  else
+    warn "psql not found; $DB_NAME was left in place."
+    failures=$((failures + 1))
+  fi
+
+  [ "$failures" -eq 0 ] || die "Database removal failed; manifest and slot were kept."
   rm -rf "$(env_dir "$NAME")"
   ok "released slot $OFFSET"
   printf '\n%s✓ %s destroyed.%s\n' "$C_GREEN" "$NAME" "$C_OFF"

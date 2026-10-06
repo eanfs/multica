@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1
+# Opt-in Docker integration fixture. No real Claude/npm package is installed.
+FROM golang:1.26.6-bookworm AS builder
+WORKDIR /src
+COPY server/ ./
+RUN CGO_ENABLED=0 go build -o /out/multica ./cmd/multica && CGO_ENABLED=0 go build -o /out/fleet-node ./cmd/fleet-node
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --gid 10001 runtime && useradd --uid 10001 --gid 10001 --create-home runtime
+COPY --from=builder /out/ /usr/local/bin/
+COPY --chmod=0755 server/internal/fleet/integration/testdata/claude /usr/local/bin/claude
+# Fixed layout owned by the node UID so a fresh named volume mounted at /data or
+# /secrets is initialised writable for the non-root node and bootstrap helper.
+RUN install -d -o 10001 -g 10001 -m 0700 /data /data/home /data/workspaces /secrets
+USER 10001:10001
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/data/home
+ENTRYPOINT ["/usr/local/bin/fleet-node","run"]
+HEALTHCHECK --interval=5s --timeout=5s CMD ["/usr/local/bin/fleet-node","health"]

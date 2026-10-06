@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { useQuery } from "@tanstack/react-query";
 import { ApiError } from "@multica/core/api";
 import type { Agent, AgentRuntime, MemberWithUser } from "@multica/core/types";
-import { runtimeDisplayLabel } from "@multica/core/runtimes";
+import { getManagedFleetNodeID, runtimeDisplayLabel } from "@multica/core/runtimes";
 import {
   useDeleteRuntime,
   useUnbindAgentsAndDeleteRuntime,
@@ -30,6 +30,7 @@ import { ActorAvatar } from "../../common/actor-avatar";
 import { availabilityConfig, workloadConfig } from "../../agents/presence";
 import { useT } from "../../i18n";
 import { isSelfHealingRuntime } from "../utils";
+import { CloudRuntimeDialog } from "./cloud-runtime-dialog";
 
 // DeleteRuntimeDialog is the single confirmation surface for runtime
 // deletion across the list-page kebab and the detail-page Diagnostics
@@ -69,7 +70,13 @@ export interface DeleteRuntimeDialogProps {
   onDeleted: () => void;
 }
 
-export function DeleteRuntimeDialog({
+export function DeleteRuntimeDialog(props: DeleteRuntimeDialogProps) {
+  const nodeId = getManagedFleetNodeID(props.runtime);
+  if (nodeId) return props.open ? <CloudRuntimeDialog wsId={props.wsId} nodeId={nodeId} onClose={() => props.onOpenChange(false)} /> : null;
+  return <OrdinaryDeleteRuntimeDialog {...props} />;
+}
+
+function OrdinaryDeleteRuntimeDialog({
   open,
   onOpenChange,
   runtime,

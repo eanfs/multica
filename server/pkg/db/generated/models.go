@@ -819,6 +819,94 @@ type Feedback struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type FleetCredentialProfile struct {
+	ID            pgtype.UUID        `json:"id"`
+	Namespace     string             `json:"namespace"`
+	OwnerID       pgtype.UUID        `json:"owner_id"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	ProfileRef    string             `json:"profile_ref"`
+	ConfigVersion int64              `json:"config_version"`
+}
+
+type FleetNamespaceFence struct {
+	Namespace          string `json:"namespace"`
+	FleetID            string `json:"fleet_id"`
+	Closed             bool   `json:"closed"`
+	Generation         int64  `json:"generation"`
+	OperationKey       string `json:"operation_key"`
+	Finalized          bool   `json:"finalized"`
+	CompletionManifest []byte `json:"completion_manifest"`
+}
+
+type FleetNode struct {
+	ID             pgtype.UUID        `json:"id"`
+	Namespace      string             `json:"namespace"`
+	OwnerID        pgtype.UUID        `json:"owner_id"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ContainerID    string             `json:"container_id"`
+	DaemonID       pgtype.UUID        `json:"daemon_id"`
+	Name           string             `json:"name"`
+	Spec           string             `json:"spec"`
+	Image          string             `json:"image"`
+	ProfileRef     string             `json:"profile_ref"`
+	StartEpoch     string             `json:"start_epoch"`
+	DataVolume     string             `json:"data_volume"`
+	SecretsVolume  string             `json:"secrets_volume"`
+	Desired        string             `json:"desired"`
+	Status         string             `json:"status"`
+	Generation     int64              `json:"generation"`
+	Ready          bool               `json:"ready"`
+	HealthAt       pgtype.Timestamptz `json:"health_at"`
+	ActiveRuns     int32              `json:"active_runs"`
+	PendingReports int32              `json:"pending_reports"`
+	FailedReports  int32              `json:"failed_reports"`
+	Maintenance    bool               `json:"maintenance"`
+	Revoked        bool               `json:"revoked"`
+	ErrorCode      string             `json:"error_code"`
+	ErrorMessage   string             `json:"error_message"`
+	SpecConfig     []byte             `json:"spec_config"`
+	Observation    []byte             `json:"observation"`
+}
+
+type FleetNodeCredential struct {
+	ID         pgtype.UUID        `json:"id"`
+	Namespace  string             `json:"namespace"`
+	OwnerID    pgtype.UUID        `json:"owner_id"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
+	NodeID     pgtype.UUID        `json:"node_id"`
+	TokenHash  string             `json:"token_hash"`
+	RevokedAt  pgtype.Timestamptz `json:"revoked_at"`
+	Generation int64              `json:"generation"`
+}
+
+type FleetNodeOperation struct {
+	ID                 pgtype.UUID        `json:"id"`
+	Namespace          string             `json:"namespace"`
+	OwnerID            pgtype.UUID        `json:"owner_id"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	NodeID             pgtype.UUID        `json:"node_id"`
+	Action             string             `json:"action"`
+	IdempotencyKey     string             `json:"idempotency_key"`
+	RequestHash        string             `json:"request_hash"`
+	Phase              string             `json:"phase"`
+	PriorDesired       string             `json:"prior_desired"`
+	Generation         int64              `json:"generation"`
+	Approved           bool               `json:"approved"`
+	Attempts           int32              `json:"attempts"`
+	ErrorCode          string             `json:"error_code"`
+	ErrorMessage       string             `json:"error_message"`
+	BootstrapClaimedAt pgtype.Timestamptz `json:"bootstrap_claimed_at"`
+	BootstrapMinted    bool               `json:"bootstrap_minted"`
+	NonRetryable       bool               `json:"non_retryable"`
+	NextAttemptAt      pgtype.Timestamptz `json:"next_attempt_at"`
+	ActionClaimedAt    pgtype.Timestamptz `json:"action_claimed_at"`
+	ActionStartEpoch   string             `json:"action_start_epoch"`
+}
+
 type GithubInstallation struct {
 	ID               pgtype.UUID        `json:"id"`
 	WorkspaceID      pgtype.UUID        `json:"workspace_id"`

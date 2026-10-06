@@ -133,6 +133,10 @@ func newFake() *fakeSessionQueries {
 
 func bindKey(inst pgtype.UUID, chat string) string { return fmt.Sprintf("%x|%s", inst.Bytes, chat) }
 
+func (f *fakeSessionQueries) AttemptContext(ctx context.Context, agentID, sessionID pgtype.UUID) (context.Context, context.CancelFunc, error) {
+	return ctx, func() {}, nil
+}
+
 func (f *fakeSessionQueries) WithTx(tx pgx.Tx) SessionQueries { return f }
 
 func (f *fakeSessionQueries) GetChannelChatSessionBinding(_ context.Context, arg db.GetChannelChatSessionBindingParams) (db.ChannelChatSessionBinding, error) {
@@ -475,6 +479,34 @@ func TestStartSessionMediaBeforeTextUsesUserTextForTitle(t *testing.T) {
 	}
 	if f.lastSessionCreate.Title != "点评一下" || result.Append.InitialTitle != "点评一下" {
 		t.Fatalf("media-before-text title = stored %q result %q, want user text", f.lastSessionCreate.Title, result.Append.InitialTitle)
+	}
+}
+
+func TestFleetChannelAdmissionBeforeAllOwnerLocks(t *testing.T) {
+	for _, path := range []string{"start", "append"} {
+		t.Run(path, func(t *testing.T) {
+			f := newFake()
+			tx := &recordingTx{}
+			s := newChatSessionWith(f, recordingTxStarter{tx: tx}, channel.Type("slack"), SessionTitles{})
+			want := errors.New("terminal node admission")
+			called := false
+			admission := func(_ context.Context, got pgx.Tx) error {
+				called = true
+				if got != tx || f.lockedWorkspace != 0 || len(f.messages) != 0 || f.touched != 0 || f.createdSessions != 0 {
+					t.Fatal("admission was not first in owner transaction")
+				}
+				return want
+			}
+			var err error
+			if path == "start" {
+				_, err = s.StartSession(context.Background(), StartSessionInput{EnsureSessionInput: EnsureSessionInput{WorkspaceID: uid(2), AgentID: uid(3), InstallationID: uid(1), Sender: uid(7), BindingKey: "chatA", ChatType: channel.ChatTypeP2P}, Initiator: uid(7), Body: "test", PersistMessage: true, BeforeOwnerLocks: admission})
+			} else {
+				_, err = s.AppendUserMessage(context.Background(), AppendInput{SessionID: uid(2), Body: "test", BeforeOwnerLocks: admission})
+			}
+			if !called || !errors.Is(err, want) || tx.commits != 0 || f.lockedWorkspace != 0 || len(f.messages) != 0 {
+				t.Fatalf("admission failed to prevent writes: called=%v err=%v commits=%d locks=%d messages=%d", called, err, tx.commits, f.lockedWorkspace, len(f.messages))
+			}
+		})
 	}
 }
 

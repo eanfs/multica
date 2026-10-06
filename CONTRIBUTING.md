@@ -467,6 +467,29 @@ path-derived fallback when it is run outside `make up`.
 
 Log in with `dev@localhost` and `888888`.
 
+### Docker Fleet (optional)
+
+```bash
+make up C=api,web,fleet
+```
+
+This adds the optional local Docker Fleet to the same checkout database; the
+default remains `api,web`. It requires the approved private descriptor path in
+`MULTICA_FLEET_INPUT` and the private operator executable in
+`MULTICA_FLEET_OPERATOR`, and it uses digest-pinned images with no checkout
+build context. Only the loopback Fleet port is published; nodes get no Docker
+socket and run non-root.
+
+`make status` shows the environment, `make down` stops it and keeps the data,
+and `make destroy` asks for confirmation before removing the environment and
+its data. `down` and `destroy` quiesce the whole namespace before stopping the
+API. Busy, unknown-health, or failed cleanup denies and keeps recovery inputs:
+queued or deferred runs must be cancelled before a node can be deleted, and
+deleting a node permanently removes its container and both volumes.
+
+See [Local Docker Fleet](apps/docs/content/docs/developers/local-docker-fleet.mdx)
+for the environment variables, descriptor fields, and verification gates.
+
 ### Isolation Guarantee
 
 Nothing in this flow touches the system-installed `multica` or the default

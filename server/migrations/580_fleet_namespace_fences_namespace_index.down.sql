@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS fleet_namespace_fences_namespace_uidx;

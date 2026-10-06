@@ -371,7 +371,7 @@ func (r *sessionBinder) StartSession(ctx context.Context, p engine.StartSessionP
 		Body:      p.Message.Text, CommandText: p.Message.CommandText, MessageID: p.Message.MessageID, ThreadID: p.Message.Source.ThreadID,
 		ClaimToken: p.ClaimToken, MediaPendingSeconds: p.MediaPendingSeconds,
 		PersistMessage: p.PersistMessage, HistoryBoundaryPending: p.HistoryBoundaryPending,
-		BeforeCommit: beforeCommit,
+		BeforeOwnerLocks: p.BeforeOwnerLocks, BeforeCommit: beforeCommit,
 	})
 	if err != nil {
 		return engine.StartSessionResult{}, err

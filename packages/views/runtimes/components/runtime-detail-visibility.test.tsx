@@ -90,6 +90,12 @@ vi.mock("@multica/core/runtimes", async () => ({
     queryKey: ["runtime-profiles", wsId],
   }),
   parseRuntimeProfileBoundConflict: () => null,
+  runtimeDisplayLabel: (
+    await vi.importActual<typeof import("@multica/core/runtimes")>(
+      "@multica/core/runtimes",
+    )
+  ).runtimeDisplayLabel,
+  getManagedFleetNodeID: () => null,
   useDeleteRuntimeProfile: () => ({
     mutate: vi.fn(),
     isPending: false,
