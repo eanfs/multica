@@ -2021,8 +2021,13 @@ func (q *Queries) InsertFleetNamespaceFence(ctx context.Context, arg InsertFleet
 }
 
 const insertFleetNode = `-- name: InsertFleetNode :one
-INSERT INTO fleet_nodes (namespace, owner_id, name, spec, image, profile_ref, spec_config)
-VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation
+WITH new_node AS (SELECT gen_random_uuid() AS id)
+INSERT INTO fleet_nodes (id, namespace, owner_id, name, spec, image, profile_ref, spec_config, data_volume, secrets_volume)
+SELECT n.id, $1, $2, $3, $4, $5, $6, $7,
+       'multica-fleet-' || n.id::text || '-data',
+       'multica-fleet-' || n.id::text || '-secrets'
+FROM new_node n
+RETURNING id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation
 `
 
 type InsertFleetNodeParams struct {
@@ -2035,6 +2040,8 @@ type InsertFleetNodeParams struct {
 	SpecConfig []byte      `json:"spec_config"`
 }
 
+// Volume names are durable node identity: they are derived from the generated
+// node UUID so a retried create/adopt finds the same owned volumes.
 func (q *Queries) InsertFleetNode(ctx context.Context, arg InsertFleetNodeParams) (FleetNode, error) {
 	row := q.db.QueryRow(ctx, insertFleetNode,
 		arg.Namespace,
@@ -2142,6 +2149,7 @@ func (q *Queries) ListFleetNamespaceNodes(ctx context.Context, arg ListFleetName
 
 const listFleetNodesByOwner = `-- name: ListFleetNodesByOwner :many
 SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation FROM fleet_nodes WHERE namespace = $1 AND owner_id = $2
+ AND NOT (desired = 'terminated' AND status = 'terminated')
 ORDER BY created_at, id LIMIT $4 OFFSET $3
 `
 
@@ -2152,6 +2160,8 @@ type ListFleetNodesByOwnerParams struct {
 	PageLimit  int32       `json:"page_limit"`
 }
 
+// Fully terminated tombstones stay durable but are not provisioned nodes, so the
+// owner-facing list hides them exactly like the provisioned-node count does.
 func (q *Queries) ListFleetNodesByOwner(ctx context.Context, arg ListFleetNodesByOwnerParams) ([]FleetNode, error) {
 	rows, err := q.db.Query(ctx, listFleetNodesByOwner,
 		arg.Namespace,

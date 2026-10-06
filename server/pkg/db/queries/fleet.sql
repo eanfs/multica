@@ -189,7 +189,10 @@ SELECT pg_advisory_xact_lock(hashtextextended('capacity:' || sqlc.arg(namespace)
 SELECT * FROM fleet_nodes WHERE namespace = @namespace AND owner_id = @owner_id AND id = @node_id;
 
 -- name: ListFleetNodesByOwner :many
+-- Fully terminated tombstones stay durable but are not provisioned nodes, so the
+-- owner-facing list hides them exactly like the provisioned-node count does.
 SELECT * FROM fleet_nodes WHERE namespace = @namespace AND owner_id = @owner_id
+ AND NOT (desired = 'terminated' AND status = 'terminated')
 ORDER BY created_at, id LIMIT @page_limit OFFSET @page_offset;
 
 -- name: ResolveFleetNodeReference :one
@@ -247,8 +250,15 @@ SELECT count(*) FROM fleet_nodes WHERE namespace = @namespace AND owner_id = @ow
  AND NOT (desired = 'terminated' AND status = 'terminated');
 
 -- name: InsertFleetNode :one
-INSERT INTO fleet_nodes (namespace, owner_id, name, spec, image, profile_ref, spec_config)
-VALUES (@namespace, @owner_id, @name, @spec, @image, @profile_ref, @spec_config) RETURNING *;
+-- Volume names are durable node identity: they are derived from the generated
+-- node UUID so a retried create/adopt finds the same owned volumes.
+WITH new_node AS (SELECT gen_random_uuid() AS id)
+INSERT INTO fleet_nodes (id, namespace, owner_id, name, spec, image, profile_ref, spec_config, data_volume, secrets_volume)
+SELECT n.id, @namespace, @owner_id, @name, @spec, @image, @profile_ref, @spec_config,
+       'multica-fleet-' || n.id::text || '-data',
+       'multica-fleet-' || n.id::text || '-secrets'
+FROM new_node n
+RETURNING *;
 
 -- name: InsertFleetCreateOperation :one
 INSERT INTO fleet_node_operations (namespace, owner_id, node_id, action, idempotency_key, request_hash)
