@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -134,6 +135,18 @@ func inspectEnvironment(env []string, maxRuns int, aurora *model.AuroraConfig) b
 	return true
 }
 
+// sameBindSource reports whether an inspected bind-mount source is the
+// configured host source. Docker Desktop reports every bind source translated
+// into the VM's path space, observed as the fixed prefix "/host_mnt" followed by
+// the absolute host path, while Linux reports the source verbatim. Accept exactly
+// those two forms; every other difference still fails closed.
+func sameBindSource(inspected, want string) bool {
+	if inspected == want {
+		return true
+	}
+	return filepath.IsAbs(want) && inspected == "/host_mnt"+want
+}
+
 // validateNodeInspection is the adoption authority. It reconstructs the exact
 // HostConfig and mount set for the configured profile, so any drift between the
 // builder and a live container is rejected. The Claude profile (cfg.Aurora nil)
@@ -180,7 +193,7 @@ func validateNodeInspection(r container.InspectResponse, n model.Node, networkNa
 				continue
 			}
 			if wantMount.Type == mount.TypeBind {
-				matched = m.Source == wantMount.Source
+				matched = sameBindSource(m.Source, wantMount.Source)
 			} else {
 				matched = m.Name == wantMount.Name
 			}
