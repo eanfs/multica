@@ -2254,3 +2254,68 @@ func TestPromptCarriesJoinedWakeups(t *testing.T) {
 		t.Errorf("prompt without joined wakeups mentions them:\n%s", out)
 	}
 }
+
+// TestBuildAuroraPromptSelectsBrokerTool pins the task-20 fix: a managed
+// Aurora generation is enqueued through the quick-create carrier, so before
+// this fix it received the quick-create prompt that told it to run
+// `multica issue create` — a command its narrowed surface denies — while the
+// brokered MCP tool it had to call was never named. The Aurora per-turn prompt
+// must name the qualified tool, carry the generation prompt, and explicitly
+// forbid shell/CLI use.
+func TestBuildAuroraPromptSelectsBrokerTool(t *testing.T) {
+	t.Parallel()
+
+	task := Task{
+		Agent:                    &AgentData{SystemKey: "aurora:poster"},
+		QuickCreatePrompt:        "橘猫窗台晒太阳图片生成（暖色调，生成一张高清图）",
+		QuickCreateAttachmentIDs: []string{"11111111-1111-4111-8111-111111111111"},
+	}
+	out := BuildPrompt(task, "claude")
+
+	for _, want := range []string{
+		"mcp__aurora__aurora.seedream_generate",
+		"Skill: `poster`",
+		"橘猫窗台晒太阳",
+		"11111111-1111-4111-8111-111111111111",
+		"no shell",
+		"do not call the `multica` CLI",
+		"Canonical skill workflow",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Aurora prompt missing %q\n---\n%s", want, out)
+		}
+	}
+	for _, banned := range []string{
+		"quick-create assistant",
+		"multica issue create",
+		"Your assigned issue ID",
+	} {
+		if strings.Contains(out, banned) {
+			t.Errorf("Aurora prompt must not carry %q (task-20 regression)\n---\n%s", banned, out)
+		}
+	}
+
+	// The same carrier without the trusted system key must keep the generic
+	// quick-create prompt: Aurora detection is additive.
+	generic := BuildPrompt(Task{QuickCreatePrompt: "fix the login button"}, "claude")
+	if !strings.Contains(generic, "quick-create assistant") || !strings.Contains(generic, "multica issue create") {
+		t.Errorf("non-Aurora quick-create prompt changed\n---\n%s", generic)
+	}
+}
+
+// TestBuildAuroraPromptNamesEveryRequiredTool proves the prompt derives the
+// qualified names from the trusted skill policy, not from a hardcoded list: a
+// two-tool skill names both.
+func TestBuildAuroraPromptNamesEveryRequiredTool(t *testing.T) {
+	t.Parallel()
+
+	out := BuildPrompt(Task{Agent: &AgentData{SystemKey: "aurora:video-captions"}}, "claude")
+	for _, want := range []string{
+		"mcp__aurora__aurora.volc_asr_transcribe",
+		"mcp__aurora__aurora.render_video_captions",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("video-captions prompt missing %q\n---\n%s", want, out)
+		}
+	}
+}

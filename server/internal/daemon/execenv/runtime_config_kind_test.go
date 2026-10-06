@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestClassifyTask pins the precedence rule on classifyTask. All four
+// TestClassifyTask pins the precedence rule on classifyTask. All five
 // kinds plus tiebreak cases for safety.
 func TestClassifyTask(t *testing.T) {
 	t.Parallel()
@@ -16,6 +16,10 @@ func TestClassifyTask(t *testing.T) {
 	}{
 		{"chat", TaskContextForEnv{ChatSessionID: "c"}, kindChat},
 		{"quick-create", TaskContextForEnv{QuickCreatePrompt: "p"}, kindQuickCreate},
+		// An Aurora generation is enqueued through the quick-create carrier, so
+		// the QuickCreatePrompt is also set; AuroraSkillID must win.
+		{"aurora", TaskContextForEnv{AuroraSkillID: "poster", QuickCreatePrompt: "p"}, kindAurora},
+		{"tiebreak-aurora-vs-chat", TaskContextForEnv{AuroraSkillID: "poster", ChatSessionID: "c"}, kindAurora},
 		{"autopilot", TaskContextForEnv{AutopilotRunID: "r"}, kindAutopilotRunOnly},
 		{"issue-comment-triggered", TaskContextForEnv{IssueID: "i", TriggerCommentID: "c"}, kindIssue},
 		{"issue-assignment-triggered", TaskContextForEnv{IssueID: "i"}, kindIssue},
@@ -47,6 +51,7 @@ func TestTaskKindHasIssueContext(t *testing.T) {
 		{kindAutopilotRunOnly, false},
 		{kindQuickCreate, false},
 		{kindChat, false},
+		{kindAurora, false},
 	}
 	for _, tc := range cases {
 		if got := tc.kind.hasIssueContext(); got != tc.want {
@@ -127,6 +132,12 @@ func TestBuildMetaSkillContentSlimKindMatrix(t *testing.T) {
 	}
 	allKinds := map[taskKind]bool{
 		kindIssue: true, kindAutopilotRunOnly: true,
+		kindQuickCreate: true, kindChat: true, kindAurora: true,
+	}
+	// Aurora is the one kind with no Multica CLI at all, so it is the only kind
+	// that must NOT carry the always-use-CLI section.
+	nonAuroraKinds := map[taskKind]bool{
+		kindIssue: true, kindAutopilotRunOnly: true,
 		kindQuickCreate: true, kindChat: true,
 	}
 	issueKinds := map[taskKind]bool{kindIssue: true}
@@ -137,7 +148,7 @@ func TestBuildMetaSkillContentSlimKindMatrix(t *testing.T) {
 		{"## Available Commands", allKinds},
 		{"## Issue Body Formatting", allKinds},
 		{"### Workflow", allKinds},
-		{"## Important: Always Use the `multica` CLI", allKinds},
+		{"## Important: Always Use the `multica` CLI", nonAuroraKinds},
 		{"## Output", allKinds},
 		{"## Comment Formatting", issueKinds},
 		{"## Repositories", map[taskKind]bool{
@@ -160,6 +171,8 @@ func TestBuildMetaSkillContentSlimKindMatrix(t *testing.T) {
 		kindAutopilotRunOnly: {AutopilotRunID: "r-1", AgentName: "Eve", AgentID: "eve-1",
 			Repos: baseRepo, AgentSkills: baseSkill},
 		kindIssue: {IssueID: "i-1", AgentName: "Eve", AgentID: "eve-1",
+			Repos: baseRepo, AgentSkills: baseSkill},
+		kindAurora: {AuroraSkillID: "poster", QuickCreatePrompt: "p", AgentName: "Eve", AgentID: "eve-1",
 			Repos: baseRepo, AgentSkills: baseSkill},
 	}
 
@@ -377,5 +390,44 @@ func TestBackgroundTaskSafetySlimHardPins(t *testing.T) {
 	// precisely no longer run-owned after handoff.
 	if strings.Contains(out, "The rules above") {
 		t.Errorf("slim Background Task Safety must not reintroduce the ambiguous \"The rules above\" scoping sentence\n---\n%s", out)
+	}
+}
+
+// TestBuildMetaSkillContentAuroraUsesBrokerWorkflow pins the Aurora brief
+// selection: an Aurora generation must render the broker workflow, must NOT
+// render the quick-create guardrail that tells it to run `multica issue
+// create`, and must NOT advertise the Multica CLI it does not have. Before
+// kindAurora existed the generation was classified as quick-create and the
+// sandbox agent was told to use a command its surface denies (task-20).
+func TestBuildMetaSkillContentAuroraUsesBrokerWorkflow(t *testing.T) {
+	t.Parallel()
+
+	out := buildMetaSkillContent("claude", TaskContextForEnv{
+		AuroraSkillID:     "poster",
+		QuickCreatePrompt: "橘猫窗台晒太阳图片生成",
+		AgentName:         "Eve",
+		AgentID:           "eve-1",
+	})
+
+	for _, want := range []string{
+		"## Available Commands",
+		"no shell and no `multica` CLI",
+		"This is a managed Aurora generation run.",
+		"The broker writes the artifact and its manifest",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Aurora brief missing %q\n---\n%s", want, out)
+		}
+	}
+
+	for _, banned := range []string{
+		"Run exactly one `multica issue create --output json` invocation",
+		"quick-create assistant",
+		"## Important: Always Use the",
+		"multica issue comment add",
+	} {
+		if strings.Contains(out, banned) {
+			t.Errorf("Aurora brief must not carry %q\n---\n%s", banned, out)
+		}
 	}
 }

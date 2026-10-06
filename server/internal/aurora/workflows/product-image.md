@@ -2,19 +2,21 @@
 
 The product-image skill turns a written request and optional product references into product images.
 
+This skill runs in a managed sandbox with no shell and no Multica CLI. The only execution path is the reviewed Aurora MCP broker; call its tools by the qualified Claude names given below.
+
 ## Inputs
 
 - prompt: the required user instruction.
-- image_ids: zero to four product or reference image identifiers, possibly empty.
+- attachment_ids: zero to four staged product or reference image identifiers, possibly empty.
 
 ## Steps
 
-1. When image_ids is empty, call aurora.openai_image with prompt.
-2. When image_ids is not empty, call aurora.openai_image with prompt and image_ids.
+1. When `attachment_ids` is empty, call the brokered MCP tool `mcp__aurora__aurora.openai_image` (broker method `aurora.openai_image`) with `prompt`.
+2. When `attachment_ids` is not empty, call `mcp__aurora__aurora.openai_image` with `prompt` and `attachment_ids`.
 
 ## Required outputs
 
-- One or more primary image artifact identifiers returned by the tool that ran.
+- One or more primary image artifact identifiers returned by `aurora.openai_image`.
 
 ## Failure behavior
 

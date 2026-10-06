@@ -7924,6 +7924,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// Prepare isolated execution environment.
 	// Repos are passed as metadata only — the agent checks them out on demand
 	// via `multica repo checkout <url>`.
+	//
+	// A managed Aurora generation is enqueued through the quick-create
+	// carrier, so it carries QuickCreatePrompt too. Its trusted skill id is
+	// what selects the Aurora brief and per-turn prompt instead of the generic
+	// issue-creation one (task-20).
+	taskAuroraSkillID, _ := auroraSkillID(task)
 	taskCtx := execenv.TaskContextForEnv{
 		IssueID:             task.IssueID,
 		TriggerCommentID:    task.TriggerCommentID,
@@ -7957,6 +7963,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		AutopilotSource:                  task.AutopilotSource,
 		AutopilotTriggerPayload:          strings.TrimSpace(string(task.AutopilotTriggerPayload)),
 		QuickCreatePrompt:                task.QuickCreatePrompt,
+		AuroraSkillID:                    taskAuroraSkillID,
 		IsSquadLeader:                    taskIsSquadLeader(task),
 		RequestingUserName:               task.RequestingUserName,
 		RequestingUserProfileDescription: task.RequestingUserProfileDescription,
