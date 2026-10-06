@@ -9,6 +9,10 @@ import pg from "pg";
 import { z } from "zod";
 import type { CloudRuntimeNode } from "@multica/core/runtimes";
 import {
+  auroraGenerationDetailSchema,
+  auroraGenerationResponseSchema,
+} from "@multica/core/aurora";
+import {
   ChatSessionSchema,
   CloudRuntimeNodeListSchema,
   CloudRuntimeNodeSchema,
@@ -44,6 +48,17 @@ const FleetRuntimeRowSchema = z
   .loose();
 
 const FleetRuntimeListSchema = z.array(FleetRuntimeRowSchema);
+
+/**
+ * The Aurora detail wire row adds credits_charged to the client schema, which
+ * deliberately keeps only consumer-facing fields. Defining the extra field here
+ * (rather than casting) keeps the settlement assertion schema-checked.
+ */
+const AuroraGenerationDetailWireSchema = auroraGenerationDetailSchema.extend({
+  generation: auroraGenerationDetailSchema.shape.generation.extend({
+    creditsCharged: z.number().default(0),
+  }),
+});
 
 /** One intent, one key: retries of the same intent must reuse the key. */
 export function fleetIdempotencyKey(): string {
@@ -630,6 +645,44 @@ export class TestApiClient {
       throw new Error("Test API client workspace is not initialized");
     }
     return this.workspaceSlug;
+  }
+
+  // ---------------------------------------------------------------------
+  // Aurora generations. The create call is the whole server-side entry point:
+  // it provisions the workspace sandbox, reserves credits and enqueues the
+  // skill task, so a 503 aurora_runtime_unavailable is a real precondition
+  // failure the caller must see rather than swallow.
+  // ---------------------------------------------------------------------
+
+  async createAuroraGeneration(
+    skillId: string,
+    prompt: string,
+    attachmentIds: string[] = [],
+  ): Promise<{ id: string; skillId: string; status: string; creditsReserved: number }> {
+    const res = await this.authedFetch("/api/aurora/generations", {
+      method: "POST",
+      body: JSON.stringify({ skillId, prompt, attachmentIds }),
+    });
+    if (!res.ok) {
+      throw new Error(`create aurora generation failed: ${res.status} ${await res.text()}`);
+    }
+    const parsed = auroraGenerationResponseSchema.safeParse(await res.json());
+    if (!parsed.success) {
+      throw new Error(`invalid aurora generation response: ${parsed.error.message}`);
+    }
+    return parsed.data.generation;
+  }
+
+  async getAuroraGeneration(id: string) {
+    const res = await this.authedFetch(`/api/aurora/generations/${id}`);
+    if (!res.ok) {
+      throw new Error(`get aurora generation failed: ${res.status} ${await res.text()}`);
+    }
+    const parsed = AuroraGenerationDetailWireSchema.safeParse(await res.json());
+    if (!parsed.success) {
+      throw new Error(`invalid aurora generation detail: ${parsed.error.message}`);
+    }
+    return parsed.data.generation;
   }
 
   private parseFleetNode(raw: unknown, endpoint: string): CloudRuntimeNode {

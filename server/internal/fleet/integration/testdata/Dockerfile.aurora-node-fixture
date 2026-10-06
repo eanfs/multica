@@ -1,0 +1,19 @@
+# Throwaway Fleet node fixture for the Task 7 real-engine tests.
+#
+# It carries only the fixed fleet-node subcommands the provider calls and the
+# single image env PATH/HOME the strict node inspection allows, so a real
+# dockerd can admit and adopt it without the release sandbox image. It is built
+# locally by the test and never pushed.
+FROM alpine:3.20
+RUN cat > /usr/local/bin/fleet-node <<'SCRIPT'
+#!/bin/sh
+case "${1:-}" in
+  bootstrap) test -d /data && test -d /secrets ;;
+  run) while :; do sleep 3600; done ;;
+  health) printf '%s' '{"daemon_id":"00000000-0000-4000-8000-000000000000","ready":true,"runtime_count":1,"active_runs":0,"agents":["claude"],"report_queue_stats":{"known":true,"pending":0,"failed":0}}' ;;
+  report-stats) printf '%s' '{"known":true,"pending":0,"failed":0}' ;;
+  *) echo failed >&2; exit 1 ;;
+esac
+SCRIPT
+RUN chmod 0555 /usr/local/bin/fleet-node
+ENV HOME=/data/home
