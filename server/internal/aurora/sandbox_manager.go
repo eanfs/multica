@@ -10,17 +10,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/multica-ai/multica/server/internal/aurorafleet"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
-
-// FleetControl is the narrow fleet surface the sandbox manager drives. It is
-// satisfied by *aurorafleet.ControlClient.
-type FleetControl interface {
-	EnsureWorkspaceNode(ctx context.Context, req aurorafleet.EnsureRequest) (aurorafleet.Node, error)
-}
 
 // WorkspaceSandboxManager provisions or confirms the workspace's managed
 // sandbox before a generation reserves credits. The handler depends on this
@@ -37,16 +30,26 @@ type WorkspaceSandboxManager interface {
 type SandboxManager struct {
 	queries     *db.Queries
 	tx          TxBeginner
-	fleet       FleetControl
+	fleet       FleetProvisioner
 	imageDigest string
 	now         func() time.Time
 }
 
-// NewSandboxManager wires the manager to its database, fleet client, deployed
+// sandboxArm is one arm decision: the scrubbed node, the Fleet node owner read
+// under the same lock, the raw secret to ship (empty when adopting an existing
+// node), and whether the Fleet must be called at all.
+type sandboxArm struct {
+	node      db.AuroraSandboxNode
+	ownerID   string
+	token     string
+	needFleet bool
+}
+
+// NewSandboxManager wires the manager to its database, provisioner, deployed
 // image digest, and clock. imageDigest must be the same pinned reference the
 // fleet runs, so a node armed for a different image is re-provisioned. now
 // defaults to time.Now only when omitted.
-func NewSandboxManager(queries *db.Queries, tx TxBeginner, fleet FleetControl, imageDigest string, now func() time.Time) *SandboxManager {
+func NewSandboxManager(queries *db.Queries, tx TxBeginner, fleet FleetProvisioner, imageDigest string, now func() time.Time) *SandboxManager {
 	if now == nil {
 		now = time.Now
 	}
@@ -74,30 +77,33 @@ func (m *SandboxManager) Ensure(ctx context.Context, workspaceID, runtimeID pgty
 		return db.AuroraSandboxNode{}, fmt.Errorf("sandbox image %q must end with @sha256: and 64 lowercase hex characters", m.imageDigest)
 	}
 
-	node, token, needFleet, err := m.arm(ctx, workspaceID, runtimeID)
+	armed, err := m.arm(ctx, workspaceID, runtimeID)
 	if err != nil {
 		return db.AuroraSandboxNode{}, err
 	}
-	if !needFleet {
-		return node, nil
+	if !armed.needFleet {
+		return armed.node, nil
 	}
 
-	fleetNode, err := m.fleet.EnsureWorkspaceNode(ctx, aurorafleet.EnsureRequest{
-		NodeID:          util.UUIDToString(node.ID),
+	fleetNode, err := m.fleet.EnsureWorkspaceNode(ctx, armed.ownerID, FleetEnsureRequest{
+		NodeID:          util.UUIDToString(armed.node.ID),
 		WorkspaceID:     util.UUIDToString(workspaceID),
 		RuntimeID:       util.UUIDToString(runtimeID),
-		DaemonID:        node.DaemonID,
-		EnrollmentToken: token,
+		DaemonID:        armed.node.DaemonID,
+		EnrollmentToken: armed.token,
+		ImageDigest:     m.imageDigest,
+		Name:            auroraFleetNodeName,
+		Spec:            auroraFleetNodeSpec,
 	})
 	if err != nil {
-		m.markFailed(ctx, workspaceID, node.ID, err)
+		m.markFailed(ctx, workspaceID, armed.node.ID, err)
 		return db.AuroraSandboxNode{}, fmt.Errorf("ensure workspace sandbox: %w", err)
 	}
 
 	// Persist the backend id the fleet assigned. The node stays starting until
 	// its daemon spends the enrollment secret, so this is bookkeeping only.
 	updated, err := m.queries.SetAuroraSandboxNodeBackend(ctx, db.SetAuroraSandboxNodeBackendParams{
-		ID:            node.ID,
+		ID:            armed.node.ID,
 		BackendNodeID: pgtype.Text{String: fleetNode.ID, Valid: fleetNode.ID != ""},
 		WorkspaceID:   workspaceID,
 	})
@@ -108,20 +114,21 @@ func (m *SandboxManager) Ensure(ctx context.Context, workspaceID, runtimeID pgty
 }
 
 // arm decides whether the existing node already satisfies the request and, when
-// it does not, arms a fresh enrollment. It returns the scrubbed node, the raw
-// secret (empty when no new secret was minted), and whether the fleet must be
-// called. The workspace advisory lock is held for the whole decision, so
-// concurrent callers cannot both arm a node.
-func (m *SandboxManager) arm(ctx context.Context, workspaceID, runtimeID pgtype.UUID) (db.AuroraSandboxNode, string, bool, error) {
+// it does not, arms a fresh enrollment. It returns the scrubbed node, the
+// locked runtime owner the Fleet call must carry, the raw secret (empty when no
+// new secret was minted), and whether the fleet must be called. The workspace
+// advisory lock is held for the whole decision, so concurrent callers cannot
+// both arm a node.
+func (m *SandboxManager) arm(ctx context.Context, workspaceID, runtimeID pgtype.UUID) (sandboxArm, error) {
 	tx, err := m.tx.Begin(ctx)
 	if err != nil {
-		return db.AuroraSandboxNode{}, "", false, err
+		return sandboxArm{}, err
 	}
 	defer tx.Rollback(ctx)
 	qtx := m.queries.WithTx(tx)
 
 	if err := qtx.LockAuroraSandboxEnrollmentWorkspace(ctx, workspaceID); err != nil {
-		return db.AuroraSandboxNode{}, "", false, fmt.Errorf("lock workspace enrollment: %w", err)
+		return sandboxArm{}, fmt.Errorf("lock workspace enrollment: %w", err)
 	}
 	managed, err := qtx.GetAuroraManagedRuntime(ctx, db.GetAuroraManagedRuntimeParams{
 		WorkspaceID: workspaceID,
@@ -129,34 +136,35 @@ func (m *SandboxManager) arm(ctx context.Context, workspaceID, runtimeID pgtype.
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return db.AuroraSandboxNode{}, "", false, fmt.Errorf("workspace %s has no managed runtime", util.UUIDToString(workspaceID))
+			return sandboxArm{}, fmt.Errorf("workspace %s has no managed runtime", util.UUIDToString(workspaceID))
 		}
-		return db.AuroraSandboxNode{}, "", false, err
+		return sandboxArm{}, err
 	}
 	if managed.ID != runtimeID {
-		return db.AuroraSandboxNode{}, "", false, fmt.Errorf(
+		return sandboxArm{}, fmt.Errorf(
 			"runtime %s is not the workspace's managed runtime %s",
 			util.UUIDToString(runtimeID), util.UUIDToString(managed.ID))
 	}
+	ownerID := util.UUIDToString(managed.OwnerID)
 
 	existing, err := qtx.LockAuroraSandboxNodeByWorkspace(ctx, workspaceID)
 	noRow := errors.Is(err, pgx.ErrNoRows)
 	if err != nil && !noRow {
-		return db.AuroraSandboxNode{}, "", false, err
+		return sandboxArm{}, err
 	}
 	if !noRow && m.reusable(existing, runtimeID) &&
 		(existing.State == "online" || m.freshStarting(existing)) {
 		// Already serving, or a live secret armed by another caller is still
 		// pending: adopt the row instead of calling the fleet again.
 		if err := tx.Commit(ctx); err != nil {
-			return db.AuroraSandboxNode{}, "", false, err
+			return sandboxArm{}, err
 		}
-		return scrubEnrollment(existing), "", false, nil
+		return sandboxArm{node: scrubEnrollment(existing), ownerID: ownerID}, nil
 	}
 
 	raw, err := auth.GenerateManagedEnrollmentToken()
 	if err != nil {
-		return db.AuroraSandboxNode{}, "", false, err
+		return sandboxArm{}, err
 	}
 	expiresAt := m.now().Add(enrollmentTokenTTL)
 	hash := pgtype.Text{String: auth.HashToken(raw), Valid: true}
@@ -176,7 +184,7 @@ func (m *SandboxManager) arm(ctx context.Context, workspaceID, runtimeID pgtype.
 			EnrollmentExpiresAt: expiry,
 		})
 		if err != nil {
-			return db.AuroraSandboxNode{}, "", false, fmt.Errorf("create sandbox node: %w", err)
+			return sandboxArm{}, fmt.Errorf("create sandbox node: %w", err)
 		}
 	} else {
 		// Stopped, failed, stale-starting, or derived from another runtime or
@@ -190,14 +198,14 @@ func (m *SandboxManager) arm(ctx context.Context, workspaceID, runtimeID pgtype.
 			EnrollmentExpiresAt: expiry,
 		})
 		if err != nil {
-			return db.AuroraSandboxNode{}, "", false, fmt.Errorf("re-arm sandbox node: %w", err)
+			return sandboxArm{}, fmt.Errorf("re-arm sandbox node: %w", err)
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return db.AuroraSandboxNode{}, "", false, err
+		return sandboxArm{}, err
 	}
-	return scrubEnrollment(node), raw, true, nil
+	return sandboxArm{node: scrubEnrollment(node), ownerID: ownerID, token: raw, needFleet: true}, nil
 }
 
 // reusable reports whether the node is bound to the requested runtime and was

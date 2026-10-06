@@ -323,3 +323,86 @@ func TestLocalFleetPATIgnoresAvailableRedis(t *testing.T) {
 		t.Fatalf("local Redis accepted revoked PAT: %v", err)
 	}
 }
+
+// TestLegacyAuroraFleetConfigRejected pins the retired control plane: the
+// removed AURORA_FLEET_* variables stop the boot instead of being ignored.
+func TestLegacyAuroraFleetConfigRejected(t *testing.T) {
+	t.Setenv("AURORA_FLEET_URL", "")
+	t.Setenv("AURORA_FLEET_CONTROL_TOKEN_FILE", "")
+	if err := legacyAuroraFleetConfigError(); err != nil {
+		t.Fatalf("unset legacy config rejected: %v", err)
+	}
+	for _, tc := range []struct {
+		name, variable string
+	}{
+		{"url", "AURORA_FLEET_URL"},
+		{"token_file", "AURORA_FLEET_CONTROL_TOKEN_FILE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AURORA_FLEET_URL", "")
+			t.Setenv("AURORA_FLEET_CONTROL_TOKEN_FILE", "")
+			t.Setenv(tc.variable, "legacy-value")
+			err := legacyAuroraFleetConfigError()
+			if err == nil || !strings.Contains(err.Error(), tc.variable) {
+				t.Fatalf("legacy %s error = %v, want a named rejection", tc.variable, err)
+			}
+		})
+	}
+}
+
+// TestWorkspaceSandboxManagerFailClosed pins the three-variable gate: the
+// manager stays nil until the local Fleet URL, its service key, and the
+// sandbox image are all present, preserving the 503 behaviour.
+func TestWorkspaceSandboxManagerFailClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "service-key")
+	if err := os.WriteFile(path, []byte(strings.Repeat("k", 32)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, url, secret, image string
+		wantEnabled              bool
+	}{
+		{"nothing", "", "", "", false},
+		{"url_only", "http://127.0.0.1:19001", "", "", false},
+		{"missing_image", "http://127.0.0.1:19001", path, "", false},
+		{"missing_secret", "http://127.0.0.1:19001", "", "ghcr.io/eanfs/multica-aurora@sha256:" + strings.Repeat("a", 64), false},
+		{"all_present", "http://127.0.0.1:19001", path, "ghcr.io/eanfs/multica-aurora@sha256:" + strings.Repeat("a", 64), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AURORA_FLEET_URL", "")
+			t.Setenv("AURORA_FLEET_CONTROL_TOKEN_FILE", "")
+			t.Setenv("MULTICA_LOCAL_FLEET_URL", tc.url)
+			t.Setenv("MULTICA_LOCAL_FLEET_SECRET_FILE", tc.secret)
+			t.Setenv("AURORA_SANDBOX_IMAGE", tc.image)
+			mgr := newWorkspaceSandboxManager(nil, nil)
+			if (mgr != nil) != tc.wantEnabled {
+				t.Fatalf("manager enabled = %v, want %v", mgr != nil, tc.wantEnabled)
+			}
+			reaper := newSandboxReaper(nil, nil, nil)
+			if (reaper != nil) != (tc.url != "" && tc.secret != "") {
+				t.Fatalf("reaper enabled = %v, want %v", reaper != nil, tc.url != "" && tc.secret != "")
+			}
+		})
+	}
+}
+
+// TestWorkspaceSandboxManagerRejectsInvalidSecret pins fail-closed parsing: a
+// local Fleet URL whose key file is not an owner-readable private regular file
+// keeps the manager disabled rather than starting with an unusable client.
+func TestWorkspaceSandboxManagerRejectsInvalidSecret(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "service-key")
+	if err := os.WriteFile(path, []byte(strings.Repeat("k", 32)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AURORA_FLEET_URL", "")
+	t.Setenv("AURORA_FLEET_CONTROL_TOKEN_FILE", "")
+	t.Setenv("MULTICA_LOCAL_FLEET_URL", "http://127.0.0.1:19001")
+	t.Setenv("MULTICA_LOCAL_FLEET_SECRET_FILE", path)
+	t.Setenv("AURORA_SANDBOX_IMAGE", "ghcr.io/eanfs/multica-aurora@sha256:"+strings.Repeat("a", 64))
+	if mgr := newWorkspaceSandboxManager(nil, nil); mgr != nil {
+		t.Fatal("manager enabled with a non-private service key file")
+	}
+	if reaper := newSandboxReaper(nil, nil, nil); reaper != nil {
+		t.Fatal("reaper enabled with a non-private service key file")
+	}
+}

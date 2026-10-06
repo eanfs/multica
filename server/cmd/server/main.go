@@ -16,8 +16,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/aurora"
-	"github.com/multica-ai/multica/server/internal/aurorafleet"
 	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/cloudruntime"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/database"
 	"github.com/multica-ai/multica/server/internal/dbreader"
@@ -328,6 +328,13 @@ func newMainHTTPServer(addr string, handler http.Handler) *http.Server {
 
 func main() {
 	logger.Init()
+	// The legacy Aurora fleet control plane was retired in favour of the local
+	// Docker Fleet. Refuse to start rather than silently ignore a deployment
+	// that still points at a service nothing implements.
+	if err := legacyAuroraFleetConfigError(); err != nil {
+		slog.Error("refusing to start: " + err.Error())
+		os.Exit(1)
+	}
 	// Read the opt-out before constructing any telemetry dependency. In the
 	// disabled case no collector or HTTP client is ever created.
 	telemetryConfig := selfhosttelemetry.ConfigFromDoNotTrack(os.Getenv("DO_NOT_TRACK"))
@@ -990,44 +997,66 @@ func main() {
 	slog.Info("server stopped")
 }
 
+// legacyAuroraFleetConfigError reports the removed Aurora fleet control-plane
+// variables. The local Docker Fleet replaced them; a deployment that still sets
+// either one is refused at startup rather than silently pointed at nothing.
+func legacyAuroraFleetConfigError() error {
+	removed := make([]string, 0, 2)
+	if strings.TrimSpace(os.Getenv("AURORA_FLEET_URL")) != "" {
+		removed = append(removed, "AURORA_FLEET_URL")
+	}
+	if strings.TrimSpace(os.Getenv("AURORA_FLEET_CONTROL_TOKEN_FILE")) != "" {
+		removed = append(removed, "AURORA_FLEET_CONTROL_TOKEN_FILE")
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s is no longer supported; configure MULTICA_LOCAL_FLEET_URL and MULTICA_LOCAL_FLEET_SECRET_FILE instead", strings.Join(removed, " and "))
+}
+
+// newLocalFleetProvisioner parses the local Fleet URL and service-key file with
+// resolveLocalFleet and builds the provider-neutral provisioner both the Aurora
+// manager and reaper drive. It returns nil when the local Fleet is not
+// configured, so the Aurora sandbox surface stays fail-closed.
+func newLocalFleetProvisioner() aurora.FleetProvisioner {
+	local, err := resolveLocalFleet("", os.Getenv("MULTICA_LOCAL_FLEET_URL"), os.Getenv("MULTICA_LOCAL_FLEET_SECRET_FILE"))
+	if err != nil {
+		slog.Error("local Fleet configuration rejected", "error", err)
+		return nil
+	}
+	if !local.Enabled {
+		return nil
+	}
+	client := cloudruntime.NewClient(cloudruntime.Config{BaseURL: local.URL, ServiceSecret: local.Secret})
+	return aurora.NewFleetProvisioner(client)
+}
+
 // newWorkspaceSandboxManager builds the Aurora autoprovisioning manager from
 // environment configuration. It returns nil — the fail-closed default — unless
-// the fleet URL, the control-token file, and the digest-pinned sandbox image
-// are all present and the client accepts them. A nil manager makes generation
-// creation answer 503 with aurora_runtime_unavailable before any reservation;
-// the catalog and library endpoints are unaffected.
+// the local Fleet URL, its service-key file, and the digest-pinned sandbox
+// image are all present and the client accepts them. A nil manager makes
+// generation creation answer 503 with aurora_runtime_unavailable before any
+// reservation; the catalog and library endpoints are unaffected.
 func newWorkspaceSandboxManager(pool *pgxpool.Pool, queries *db.Queries) aurora.WorkspaceSandboxManager {
-	fleetURL := strings.TrimSpace(os.Getenv("AURORA_FLEET_URL"))
-	tokenFile := strings.TrimSpace(os.Getenv("AURORA_FLEET_CONTROL_TOKEN_FILE"))
 	image := strings.TrimSpace(os.Getenv("AURORA_SANDBOX_IMAGE"))
-	if fleetURL == "" || tokenFile == "" || image == "" {
+	provisioner := newLocalFleetProvisioner()
+	if provisioner == nil || image == "" {
 		slog.Info("aurora sandbox autoprovisioning disabled",
-			"fleet_url_set", fleetURL != "",
-			"control_token_file_set", tokenFile != "",
+			"local_fleet_configured", provisioner != nil,
 			"sandbox_image_set", image != "")
 		return nil
 	}
-	client, err := aurorafleet.NewControlClient(fleetURL, tokenFile)
-	if err != nil {
-		slog.Error("aurora fleet control client disabled", "error", err)
-		return nil
-	}
-	return aurora.NewSandboxManager(queries, pool, client, image, nil)
+	return aurora.NewSandboxManager(queries, pool, provisioner, image, nil)
 }
 
 // newSandboxReaper builds the managed sandbox lifecycle reaper with the same
-// fail-closed gate as the sandbox manager: no fleet client means no reaper, so
-// a deployment without fleet configuration never deletes fleet resources.
+// fail-closed gate as the sandbox manager: no local Fleet provisioner means no
+// reaper, so a deployment without Fleet configuration never deletes Fleet
+// resources.
 func newSandboxReaper(pool *pgxpool.Pool, queries *db.Queries, taskSvc *service.TaskService) *aurora.SandboxReaper {
-	fleetURL := strings.TrimSpace(os.Getenv("AURORA_FLEET_URL"))
-	tokenFile := strings.TrimSpace(os.Getenv("AURORA_FLEET_CONTROL_TOKEN_FILE"))
-	if fleetURL == "" || tokenFile == "" {
+	provisioner := newLocalFleetProvisioner()
+	if provisioner == nil {
 		return nil
 	}
-	client, err := aurorafleet.NewControlClient(fleetURL, tokenFile)
-	if err != nil {
-		slog.Error("aurora sandbox reaper disabled", "error", err)
-		return nil
-	}
-	return aurora.NewSandboxReaper(queries, pool, client, taskSvc, nil)
+	return aurora.NewSandboxReaper(queries, pool, provisioner, taskSvc, nil)
 }
