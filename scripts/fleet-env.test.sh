@@ -54,7 +54,7 @@ function fixture(name="fixture"){
  const privateFile=(name,value)=>{const p=path.join(dir,name);fs.writeFileSync(p,typeof value==='string'?value:JSON.stringify(value),{mode:0o600});return p;};
  const profile=privateFile('profile.json',{api_key:'fixture',base_url:'https://provider.invalid',model:'fixture'}),profiles=privateFile('profiles.json',{version:1,owners:{'11111111-1111-4111-8111-111111111111':profile}}),key=privateFile('service-key','k'.repeat(64));
  const digest='@sha256:'+'a'.repeat(64);
- const input=privateFile('approved.json',{version:1,database_name:'worktree_test',database_lifecycle:'exclusive-managed',context:'fixture-engine',engine_id:'engine-id',pg_container_id:'pg-id',pg_network_id:'pg-net-id',pg_alias:'postgres',pg_port:5432,pg_host_port:15432,socket_path:'/var/run/docker.sock',uid:process.getuid(),gid:process.getgid(),socket_gid:0,node_image:'node'+digest,fleet_image:'fleet'+digest,api_url:'http://host.docker.internal:18401',profiles_file:profiles,service_key_file:key,aurora:{server_url:'https://multica.example.com',proxy_image:'ghcr.io/eanfs/multica-aurora-egress'+digest,seccomp_profile:'/etc/multica/aurora/seccomp.json',apparmor_profile:'multica-aurora-sandbox',egress_hosts:['api.anthropic.com:443'],anthropic_base_url:'',anthropic_model:'',claude_env:{'ANTHROPIC_DEFAULT_SONNET_MODEL':'glm-5.3-flash[1M]','API_TIMEOUT_MS':'600000'},provider_secret_files:{'anthropic-api-key':'/etc/multica/aurora/anthropic-api-key'}}});
+ const input=privateFile('approved.json',{version:1,database_name:'worktree_test',database_lifecycle:'exclusive-managed',context:'fixture-engine',engine_id:'engine-id',pg_container_id:'pg-id',pg_network_id:'pg-net-id',pg_alias:'postgres',pg_port:5432,pg_host_port:15432,socket_path:'/var/run/docker.sock',uid:process.getuid(),gid:process.getgid(),socket_gid:0,node_image:'node'+digest,fleet_image:'fleet'+digest,api_url:'http://host.docker.internal:18401',profiles_file:profiles,service_key_file:key,aurora:{server_url:'https://multica.example.com',proxy_image:'ghcr.io/eanfs/multica-aurora-egress'+digest,seccomp_profile:'/etc/multica/aurora/seccomp.json',apparmor_profile:'multica-aurora-sandbox',egress_hosts:['api.anthropic.com:443'],egress_pins:{},anthropic_base_url:'',anthropic_model:'',claude_env:{'ANTHROPIC_DEFAULT_SONNET_MODEL':'glm-5.3-flash[1M]','API_TIMEOUT_MS':'600000'},provider_secret_files:{'anthropic-api-key':'/etc/multica/aurora/anthropic-api-key'}}});
  const db='postgresql://u%40ser:p%40ss%2Fword@127.0.0.1:15432/worktree%5Ftest?sslmode=disable&application_name=fleet%20test&connect_timeout=3';
  const env={PATH:bin,HOME:home,PGSSLCERT:path.join(home,'bad.crt'),PGPASSFILE:path.join(home,'pass-fifo'),FIXTURE_LOG:log,FIXTURE_INPUT:input};
  fs.writeFileSync(env.PGSSLCERT,'malformed certificate');cp.execFileSync('/usr/bin/mkfifo',[env.PGPASSFILE]);fs.mkdirSync(path.join(home,'.postgresql'),{mode:0o700});cp.execFileSync('/usr/bin/mkfifo',[path.join(home,'.postgresql','postgresql.crt')]);fs.writeFileSync(path.join(home,'.postgresql','postgresql.key'),'malformed key');fs.symlinkSync(node,path.join(bin,'node'));
@@ -142,6 +142,28 @@ test('TestAuroraProfileUsesOwnedUplinkAndSandboxSpec',()=>{const f=fixture(),id=
 test('TestAuroraClaudeEnvCarriedAndCredentialDenied',()=>{const f=fixture(),id=f.prepare(),c=JSON.parse(fs.readFileSync(path.join(f.state,'fleet','config.json')));check(c.aurora.claude_env&&c.aurora.claude_env['ANTHROPIC_DEFAULT_SONNET_MODEL']==='glm-5.3-flash[1M]'&&c.aurora.claude_env['API_TIMEOUT_MS']==='600000','claude_env not carried into the config');check(id.fleet_id&&c.aurora.uplink_network===id.node_network,'prepare identity changed');const before=fs.readFileSync(f.log,'utf8'),input=JSON.parse(fs.readFileSync(f.input));input.aurora.claude_env={ANTHROPIC_API_KEY:'secret'};fs.writeFileSync(f.input,JSON.stringify(input));const r=f.invoke('prepare');check(r.status!==0&&r.stdout.includes('denied'),'credential claude_env accepted');check(fs.readFileSync(f.log,'utf8').split('operator ').length===before.split('operator ').length,'operator invoked before claude_env validation');});
 test('TestAuroraClaudeEnvUnknownOrBadValueDenied',()=>{for(const claudeEnv of [{CLAUDE_CODE_UNKNOWN:'x'},{ENABLE_TOOL_SEARCH:'true '},{API_TIMEOUT_MS:'soon'}]){const f=fixture();f.prepare();const before=fs.readFileSync(f.log,'utf8'),input=JSON.parse(fs.readFileSync(f.input));input.aurora.claude_env=claudeEnv;fs.writeFileSync(f.input,JSON.stringify(input));const r=f.invoke('prepare');check(r.status!==0&&r.stdout.includes('denied'),'bad claude_env accepted: '+JSON.stringify(claudeEnv));check(fs.readFileSync(f.log,'utf8').split('operator ').length===before.split('operator ').length,'operator invoked before claude_env validation');}});
 test('TestAuroraTagOnlyProxyDeniedBeforeOperator',()=>{const f=fixture();f.prepare();const before=fs.readFileSync(f.log,'utf8'),input=JSON.parse(fs.readFileSync(f.input));input.aurora.proxy_image='ghcr.io/eanfs/multica-aurora-egress:latest';fs.writeFileSync(f.input,JSON.stringify(input));const r=f.invoke('prepare');check(r.status!==0&&r.stdout.includes('denied'),'tag-only proxy accepted');check(fs.readFileSync(f.log,'utf8').split('operator ').length===before.split('operator ').length,'operator invoked before aurora validation');});
+test('TestAuroraEgressPinsCarriedAndUnsafeDenied',()=>{
+ const f=fixture();const input=JSON.parse(fs.readFileSync(f.input));input.aurora.egress_pins={'ark.cn-beijing.volces.com':['180.184.47.154'],'api.anthropic.com':['2606:4700::1111']};fs.writeFileSync(f.input,JSON.stringify(input));
+ f.prepare();const c=JSON.parse(fs.readFileSync(path.join(f.state,'fleet','config.json')));
+ check(c.aurora.egress_pins&&c.aurora.egress_pins['ark.cn-beijing.volces.com'][0]==='180.184.47.154'&&c.aurora.egress_pins['api.anthropic.com'][0]==='2606:4700::1111','egress_pins not carried into the config');
+ const cases=[
+  {'ark.cn-beijing.volces.com':['198.18.0.5']},
+  {'ark.cn-beijing.volces.com':['10.0.0.1']},
+  {'ark.cn-beijing.volces.com':['fe80::1']},
+  {'evil.example.com':['93.184.216.34']},
+  {'ark.cn-beijing.volces.com:443':['93.184.216.34']},
+  {'93.184.216.34':['93.184.216.34']},
+  {'ARK.cn-beijing.volces.com':['93.184.216.34']},
+  {'*.ark.cn-beijing.volces.com':['93.184.216.34']},
+  {'ark.cn-beijing.volces.com':[]},
+  {'ark.cn-beijing.volces.com':Array(9).fill('93.184.216.34')},
+  {'ark.cn-beijing.volces.com':['not-an-ip']},
+  {'ark.cn-beijing.volces.com':['93.184.216.34:443']},
+  {'ark.cn-beijing.volces.com':'93.184.216.34'},
+  [],
+ ];
+ for(const pins of cases){const g=fixture();const bad=JSON.parse(fs.readFileSync(g.input));bad.aurora.egress_pins=pins;fs.writeFileSync(g.input,JSON.stringify(bad));const r=g.invoke('prepare');check(r.status!==0&&r.stdout.includes('denied'),'unsafe egress_pins accepted: '+JSON.stringify(pins));check(!fs.readFileSync(g.log,'utf8').includes('operator '),'operator invoked before egress_pins validation');}
+});
 for(const [name,mutate] of [
  ['TestWrongPGOwnershipDenied',f=>f.engine('engine_id','foreign')],
  ['TestMissingPGNetworkDenied',f=>f.engine('pg_network_id','foreign')],

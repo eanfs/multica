@@ -23,6 +23,7 @@
       "api.openai.com:443",
       "openspeech.bytedance.com:443"
     ],
+    "egress_pins": {},
     "anthropic_base_url": "",
     "anthropic_model": "",
     "claude_env": {},

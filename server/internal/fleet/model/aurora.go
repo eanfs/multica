@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"github.com/multica-ai/multica/server/internal/auroraegress"
 )
 
 // The managed Aurora sandbox runtime reads exactly one single-use enrollment
@@ -107,6 +109,13 @@ func (a AuroraConfig) ProviderSecretMounts() []ProviderSecretMount {
 	return mounts
 }
 
+// EgressPinsEnv renders the configured provider pins in a deterministic order
+// for the egress sidecar environment. An absent or empty map renders "", which
+// keeps the sidecar's DNS-only behaviour exactly.
+func (a AuroraConfig) EgressPinsEnv() string {
+	return auroraegress.FormatPins(a.EgressPins)
+}
+
 // ClaudeEnvPairs returns the configured extra Claude Code variables as KEY=value
 // entries in deterministic key order, so one configuration always yields one
 // node environment. An absent or empty map returns nil and adds nothing.
@@ -147,6 +156,13 @@ type AuroraConfig struct {
 	// EgressHosts is the explicit exact host:443 allowlist the sidecar accepts
 	// in addition to the provider hosts compiled into the proxy image.
 	EgressHosts []string `json:"egress_hosts"`
+	// EgressPins maps an already-allowed provider hostname (bare, lowercase, no
+	// port) to the public addresses the egress sidecar must dial instead of
+	// resolving. It is operator-owned public configuration and never a way to
+	// add a host: every pin host must already be a compiled or configured
+	// provider target, and every address must be public. An absent map preserves
+	// today's DNS behaviour exactly.
+	EgressPins map[string][]string `json:"egress_pins"`
 	// AnthropicBaseURL and AnthropicModel forward the optional managed Claude
 	// endpoint override. Empty preserves the provider default.
 	AnthropicBaseURL string `json:"anthropic_base_url"`
@@ -187,6 +203,9 @@ func (a AuroraConfig) Validate() error {
 		if !validEgressHost(host) {
 			return fmt.Errorf("%w: aurora egress_hosts must be exact host:443 entries", ErrInvalidRequest)
 		}
+	}
+	if err := auroraegress.ValidateEgressPins(a.EgressPins, a.EgressHosts); err != nil {
+		return fmt.Errorf("%w: aurora egress_pins must pin only already-allowed provider hosts to public addresses", ErrInvalidRequest)
 	}
 	if a.AnthropicBaseURL != "" && !ValidAnthropicBaseURL(a.AnthropicBaseURL) {
 		return fmt.Errorf("%w: aurora anthropic_base_url must be a single https host without credentials, query or fragment, with an optional path prefix", ErrInvalidRequest)

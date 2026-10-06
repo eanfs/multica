@@ -130,8 +130,11 @@ func TestProviderEnsureAuroraProfile(t *testing.T) {
 	if proxy.name != egressName || proxy.net != cfg.Aurora.UplinkNetwork || proxy.cfg.Image != cfg.Aurora.ProxyImage {
 		t.Fatalf("egress create = %+v", proxy)
 	}
-	if len(proxy.host.Mounts) != 0 || len(proxy.cfg.Env) != 2 || proxy.host.ReadonlyRootfs == false || proxy.host.NetworkMode != container.NetworkMode(cfg.Aurora.UplinkNetwork) {
+	if len(proxy.host.Mounts) != 0 || len(proxy.cfg.Env) != 3 || proxy.host.ReadonlyRootfs == false || proxy.host.NetworkMode != container.NetworkMode(cfg.Aurora.UplinkNetwork) {
 		t.Fatalf("egress host = %+v env=%v", proxy.host, proxy.cfg.Env)
+	}
+	if proxy.cfg.Env[2] != egressPinsEn+"=" {
+		t.Fatalf("egress pins env = %q, want an owned empty value", proxy.cfg.Env[2])
 	}
 	if strings.Contains(strings.Join(proxy.cfg.Env, " "), "API_KEY=") {
 		t.Fatalf("sidecar carries a credential: %v", proxy.cfg.Env)

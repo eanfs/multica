@@ -60,6 +60,11 @@ func TestLoadConfigAuroraAnthropicBaseURL(t *testing.T) {
 }
 
 func TestLoadConfigRejectsUnsafeAuroraProfile(t *testing.T) {
+	pinAnchor := `"anthropic_model":"ark-model",`
+	withPins := func(raw string) string {
+		return strings.Replace(auroraConfig, pinAnchor, pinAnchor+`"egress_pins":`+raw+`,`, 1)
+	}
+	tooManyPins := `{"ark.cn-beijing.volces.com":[` + strings.TrimSuffix(strings.Repeat(`"93.184.216.34",`, 9), ",") + `]}`
 	cases := map[string]string{
 		"missing server url":          strings.Replace(auroraConfig, `"server_url":"http://api.internal:8080"`, "", 1),
 		"credentials in url":          strings.Replace(auroraConfig, "http://api.internal:8080", "http://user:pass@api.internal:8080", 1),
@@ -98,6 +103,17 @@ func TestLoadConfigRejectsUnsafeAuroraProfile(t *testing.T) {
 		"nested null":                 strings.Replace(auroraConfig, `"readonly_rootfs":true`, `"readonly_rootfs":null`, 1),
 		"server url type":             strings.Replace(auroraConfig, `"server_url":"http://api.internal:8080"`, `"server_url":7`, 1),
 		"provider files as array":     strings.Replace(auroraConfig, `"provider_secret_files":{"anthropic-api-key":"/etc/multica/aurora/anthropic-api-key"}`, `"provider_secret_files":[]`, 1),
+		"egress pin unknown host":     withPins(`{"evil.example.com":["93.184.216.34"]}`),
+		"egress pin non public":       withPins(`{"ark.cn-beijing.volces.com":["198.18.0.5"]}`),
+		"egress pin private":          withPins(`{"ark.cn-beijing.volces.com":["10.0.0.1"]}`),
+		"egress pin host port":        withPins(`{"ark.cn-beijing.volces.com:443":["93.184.216.34"]}`),
+		"egress pin ip literal host":  withPins(`{"93.184.216.34":["93.184.216.34"]}`),
+		"egress pin uppercase host":   withPins(`{"ARK.cn-beijing.volces.com":["93.184.216.34"]}`),
+		"egress pin empty list":       withPins(`{"ark.cn-beijing.volces.com":[]}`),
+		"egress pin too many":         withPins(tooManyPins),
+		"egress pin malformed":        withPins(`{"ark.cn-beijing.volces.com":["not-an-ip"]}`),
+		"egress pin address port":     withPins(`{"ark.cn-beijing.volces.com":["93.184.216.34:443"]}`),
+		"egress pins as array":        withPins(`[]`),
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -135,6 +151,33 @@ func TestLoadConfigAuroraClaudeEnv(t *testing.T) {
 	plain, err := loadTestConfig(t, auroraConfig)
 	if err != nil || len(plain.Aurora.ClaudeEnv) != 0 || plain.Aurora.ClaudeEnvPairs() != nil {
 		t.Fatalf("absent claude_env not empty: %+v err=%v", plain.Aurora.ClaudeEnv, err)
+	}
+}
+
+// TestLoadConfigAuroraEgressPins proves an operator pin map loads for both a
+// compiled provider host and an operator-added egress host, is deterministic,
+// and is absent by default (today's DNS behaviour).
+func TestLoadConfigAuroraEgressPins(t *testing.T) {
+	raw := strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`,
+		`"anthropic_model":"ark-model","egress_pins":{"ark.cn-beijing.volces.com":["180.184.47.154","2606:4700::1111"],"api.example.com":["93.184.216.34"]},`, 1)
+	cfg, err := loadTestConfig(t, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{
+		"ark.cn-beijing.volces.com": {"180.184.47.154", "2606:4700::1111"},
+		"api.example.com":           {"93.184.216.34"},
+	}
+	if !reflect.DeepEqual(cfg.Aurora.EgressPins, want) {
+		t.Fatalf("egress_pins = %+v", cfg.Aurora.EgressPins)
+	}
+	if got := cfg.Aurora.EgressPinsEnv(); got != "api.example.com=93.184.216.34;ark.cn-beijing.volces.com=180.184.47.154|2606:4700::1111" {
+		t.Fatalf("EgressPinsEnv = %q", got)
+	}
+	// An absent map is a no-op: nil pins and an empty sidecar value.
+	plain, err := loadTestConfig(t, auroraConfig)
+	if err != nil || plain.Aurora.EgressPins != nil || plain.Aurora.EgressPinsEnv() != "" {
+		t.Fatalf("absent egress_pins not a no-op: %+v err=%v", plain.Aurora.EgressPins, err)
 	}
 }
 

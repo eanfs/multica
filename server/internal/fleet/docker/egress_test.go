@@ -86,7 +86,7 @@ func TestEgressSidecarPolicy(t *testing.T) {
 // an exact env comparison rejected every real egress sidecar. The owned proxy
 // variables remain exact and every other key is still drift.
 func TestEgressEnvMatchesToleratesImagePATH(t *testing.T) {
-	owned := []string{"MULTICA_EGRESS_SERVER_ORIGIN=https://multica.test", "MULTICA_EGRESS_ALLOWED_HOSTS="}
+	owned := []string{"MULTICA_EGRESS_SERVER_ORIGIN=https://multica.test", "MULTICA_EGRESS_ALLOWED_HOSTS=", "MULTICA_EGRESS_PINS="}
 	basePATH := "PATH=" + defaultImagePATH
 	cases := []struct {
 		name   string
@@ -153,5 +153,68 @@ func TestClaudeProfileEnvUnchanged(t *testing.T) {
 	r := container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "cid", HostConfig: &h}, Config: &container.Config{Image: n.Image, User: "10001:10001", Env: []string{"HOME=/data/home", "FLEET_NODE_MAX_RUNS=1"}, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"run"}}, NetworkSettings: &container.NetworkSettings{Networks: map[string]*network.EndpointSettings{"node-net": {}}}, Mounts: []container.MountPoint{{Type: mount.TypeVolume, Name: n.DataVolume, Destination: model.DataMount, RW: true}, {Type: mount.TypeVolume, Name: n.SecretsVolume, Destination: "/secrets", RW: false}}}
 	if err := validateNodeInspection(r, n, "node-net", fixtureConfig()); err != nil {
 		t.Fatalf("claude snapshot rejected: %v", err)
+	}
+}
+
+// TestEgressSidecarCarriesConfiguredPins proves the built sidecar spec and CLI
+// argv carry the deterministic owned pins value, so the sidecar can dial the
+// pinned public addresses instead of resolving.
+func TestEgressSidecarCarriesConfiguredPins(t *testing.T) {
+	cfg := auroraConfig()
+	cfg.Aurora.EgressPins = map[string][]string{
+		"ark.cn-beijing.volces.com": {"180.184.47.154"},
+		"api.anthropic.com":         {"160.79.104.10"},
+	}
+	n := auroraNode()
+	proxyName := New(fakeCalls{}, cfg).egressName(n)
+	want := egressPinsEn + "=api.anthropic.com=160.79.104.10;ark.cn-beijing.volces.com=180.184.47.154"
+	spec, _, err := egressProxySpec(cfg, n, proxyName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range spec.Env {
+		if entry == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("sidecar env = %v, want %q", spec.Env, want)
+	}
+	workspace := New(fakeCalls{}, cfg).workspaceNetwork(n).Name
+	args, err := EgressProxyArgs(cfg, proxyName, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if joined := strings.Join(args, " "); !strings.Contains(joined, want) {
+		t.Fatalf("sidecar argv missing pins: %v", args)
+	}
+}
+
+// TestEgressEnvMatchesOwnsPins proves the pins variable is an owned sidecar value
+// exactly like the allowlist: a mutated value or a sidecar that omits it is
+// adoption drift, while the image's default PATH is still tolerated.
+func TestEgressEnvMatchesOwnsPins(t *testing.T) {
+	owned := []string{
+		"MULTICA_EGRESS_SERVER_ORIGIN=https://multica.test",
+		"MULTICA_EGRESS_ALLOWED_HOSTS=",
+		egressPinsEn + "=ark.cn-beijing.volces.com=180.184.47.154",
+	}
+	basePATH := "PATH=" + defaultImagePATH
+	cases := []struct {
+		name   string
+		actual []string
+		want   bool
+	}{
+		{"owned only", owned, true},
+		{"owned plus image path", append(append([]string{}, owned...), basePATH), true},
+		{"mutated pins", []string{"MULTICA_EGRESS_SERVER_ORIGIN=https://multica.test", "MULTICA_EGRESS_ALLOWED_HOSTS=", egressPinsEn + "=ark.cn-beijing.volces.com=1.2.3.4"}, false},
+		{"missing pins", []string{"MULTICA_EGRESS_SERVER_ORIGIN=https://multica.test", "MULTICA_EGRESS_ALLOWED_HOSTS="}, false},
+		{"extra pins key", append(append([]string{}, owned...), "MULTICA_EGRESS_PINS_EXTRA=x"), false},
+	}
+	for _, tc := range cases {
+		if got := egressEnvMatches(tc.actual, owned); got != tc.want {
+			t.Fatalf("%s: egressEnvMatches = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

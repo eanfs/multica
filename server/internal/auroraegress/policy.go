@@ -1,7 +1,8 @@
 // Package auroraegress enforces Aurora sandbox outbound access through a
 // narrow HTTP/CONNECT proxy. Only the exact Multica server origin and the
-// compiled provider hosts are reachable, and provider targets must resolve
-// exclusively to public addresses.
+// compiled provider hosts are reachable. A provider target must resolve
+// exclusively to public addresses, or use an operator-pinned public address
+// instead of DNS; either way only public addresses are ever dialed.
 package auroraegress
 
 import (
@@ -10,6 +11,8 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -51,6 +54,10 @@ type Policy struct {
 	ServerOrigin *url.URL
 	// AllowedTLSHosts holds the exact host:port keys usable as CONNECT targets.
 	AllowedTLSHosts map[string]struct{}
+	// Pins, when non-nil, maps an allowed provider host:port key to the exact
+	// public addresses the sidecar must dial without resolving. A pinned key
+	// never widens AllowedTLSHosts; a pin is only ever a replacement for DNS.
+	Pins map[string][]net.IPAddr
 	// Resolve returns the A/AAAA answers for a host. It defaults to the system
 	// resolver and is replaced wholesale in tests.
 	Resolve ResolveFunc
@@ -67,8 +74,11 @@ type Target struct {
 }
 
 // NewPolicy builds a policy for the configured server origin plus optional
-// extra exact host:443 entries. It fails closed on malformed or wildcard input.
-func NewPolicy(serverOrigin string, extraAllowed []string) (Policy, error) {
+// extra exact host:443 entries and optional operator-pinned addresses. It fails
+// closed on malformed, wildcard or non-public input. Pins are only ever a
+// replacement for DNS resolution of an already-allowed provider host: a pin can
+// never add a host, port, scheme or IP-literal target.
+func NewPolicy(serverOrigin string, extraAllowed []string, pins map[string][]string) (Policy, error) {
 	origin, err := url.Parse(strings.TrimSpace(serverOrigin))
 	if err != nil {
 		return Policy{}, fmt.Errorf("invalid server origin %q: %w", serverOrigin, err)
@@ -86,6 +96,26 @@ func NewPolicy(serverOrigin string, extraAllowed []string) (Policy, error) {
 		return Policy{}, fmt.Errorf("server origin %q must be an origin without a path, query or fragment", serverOrigin)
 	}
 
+	allowed, err := allowedHostSet(extraAllowed)
+	if err != nil {
+		return Policy{}, err
+	}
+	pinned, err := buildPins(pins, allowed)
+	if err != nil {
+		return Policy{}, err
+	}
+
+	return Policy{
+		ServerOrigin:    origin,
+		AllowedTLSHosts: allowed,
+		Pins:            pinned,
+		Resolve:         net.DefaultResolver.LookupIPAddr,
+	}, nil
+}
+
+// allowedHostSet is the compiled provider hosts plus the validated extra
+// host:443 entries. A pin host must already belong to it.
+func allowedHostSet(extraAllowed []string) (map[string]struct{}, error) {
 	allowed := make(map[string]struct{}, len(CompiledProviderHosts)+len(extraAllowed))
 	for _, host := range CompiledProviderHosts {
 		allowed[host] = struct{}{}
@@ -93,16 +123,11 @@ func NewPolicy(serverOrigin string, extraAllowed []string) (Policy, error) {
 	for _, raw := range extraAllowed {
 		host, err := validateEgressHost(raw)
 		if err != nil {
-			return Policy{}, err
+			return nil, err
 		}
 		allowed[host] = struct{}{}
 	}
-
-	return Policy{
-		ServerOrigin:    origin,
-		AllowedTLSHosts: allowed,
-		Resolve:         net.DefaultResolver.LookupIPAddr,
-	}, nil
+	return allowed, nil
 }
 
 // validateEgressHost accepts only an exact host name bound to port 443.
@@ -125,6 +150,114 @@ func validateEgressHost(raw string) (string, error) {
 		return "", fmt.Errorf("egress host %q must be a name, not an IP literal", raw)
 	}
 	return host, nil
+}
+
+// MaxEgressPinAddresses bounds one provider host's operator-pinned address list.
+const MaxEgressPinAddresses = 8
+
+// pinHostPattern matches an already-lowercase bare DNS hostname. It rejects
+// ports, wildcards, IP literals, underscores and empty labels.
+var pinHostPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+
+// ValidateEgressPins rejects a pin map that could add a host, point at a
+// non-public address, or carry more than MaxEgressPinAddresses addresses. The
+// extraAllowed list is the same exact host:443 allowlist the sidecar receives; a
+// pin host must already be in CompiledProviderHosts or extraAllowed.
+func ValidateEgressPins(pins map[string][]string, extraAllowed []string) error {
+	allowed, err := allowedHostSet(extraAllowed)
+	if err != nil {
+		return err
+	}
+	_, err = buildPins(pins, allowed)
+	return err
+}
+
+// buildPins turns the bare-hostname pin map into the host:443 keyed policy map.
+// It fails closed on any host, address or count that is not already allowed.
+func buildPins(pins map[string][]string, allowed map[string]struct{}) (map[string][]net.IPAddr, error) {
+	if len(pins) == 0 {
+		return nil, nil
+	}
+	out := make(map[string][]net.IPAddr, len(pins))
+	for host, rawAddrs := range pins {
+		if err := validatePinHost(host); err != nil {
+			return nil, err
+		}
+		key := net.JoinHostPort(host, "443")
+		if _, ok := allowed[key]; !ok {
+			return nil, fmt.Errorf("egress pin host %q is not an allowed provider target", host)
+		}
+		if len(rawAddrs) == 0 {
+			return nil, fmt.Errorf("egress pin host %q must carry at least one address", host)
+		}
+		if len(rawAddrs) > MaxEgressPinAddresses {
+			return nil, fmt.Errorf("egress pin host %q must carry at most %d addresses", host, MaxEgressPinAddresses)
+		}
+		addrs := make([]net.IPAddr, 0, len(rawAddrs))
+		for _, raw := range rawAddrs {
+			ip := net.ParseIP(strings.TrimSpace(raw))
+			if ip == nil {
+				return nil, fmt.Errorf("egress pin host %q address %q must be a bare IP address", host, raw)
+			}
+			if !IsPublicIP(ip) {
+				return nil, fmt.Errorf("egress pin host %q address %q is not a public address", host, ip)
+			}
+			addrs = append(addrs, net.IPAddr{IP: ip})
+		}
+		out[key] = addrs
+	}
+	return out, nil
+}
+
+// validatePinHost accepts only a lowercase bare DNS hostname with no port, no
+// wildcard and no IP literal.
+func validatePinHost(host string) error {
+	if host == "" || len(host) > 253 || host != strings.TrimSpace(host) || host != strings.ToLower(host) ||
+		strings.ContainsAny(host, "*:/ \t") || net.ParseIP(host) != nil || !pinHostPattern.MatchString(host) {
+		return fmt.Errorf("egress pin host %q must be a lowercase bare DNS hostname", host)
+	}
+	return nil
+}
+
+// FormatPins renders a pin map as a deterministic sidecar env value:
+// "host=ip|ip;host=ip" with host names sorted. An empty map renders "".
+func FormatPins(pins map[string][]string) string {
+	if len(pins) == 0 {
+		return ""
+	}
+	hosts := make([]string, 0, len(pins))
+	for host := range pins {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	parts := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		parts = append(parts, host+"="+strings.Join(pins[host], "|"))
+	}
+	return strings.Join(parts, ";")
+}
+
+// ParsePins parses the sidecar pin env value. It is the inverse of FormatPins
+// and rejects structural junk; address and allowlist policy is enforced by
+// NewPolicy. An empty value is no pins.
+func ParsePins(raw string) (map[string][]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	pins := map[string][]string{}
+	for _, entry := range strings.Split(raw, ";") {
+		entry = strings.TrimSpace(entry)
+		host, addresses, ok := strings.Cut(entry, "=")
+		if !ok || host == "" || addresses == "" {
+			return nil, fmt.Errorf("egress pin entry %q must be host=address|address", entry)
+		}
+		if _, dup := pins[host]; dup {
+			return nil, fmt.Errorf("egress pin host %q is repeated", host)
+		}
+		pins[host] = strings.Split(addresses, "|")
+	}
+	return pins, nil
 }
 
 // Authorize reports whether the target may be reached through the proxy.
@@ -177,6 +310,21 @@ func (p Policy) Validate(ctx context.Context, target *url.URL, isConnect bool) (
 	key := net.JoinHostPort(host, port)
 	if _, ok := p.AllowedTLSHosts[key]; !ok {
 		return Target{}, refuse("host %s is not allowed", key)
+	}
+	// An operator pin replaces DNS for this already-allowed provider host. The
+	// addresses were checked when the policy was built and are checked again
+	// here; the allowlist, https/443, no-IP-literal and server-origin rules above
+	// are never bypassed, and the target still dials only these addresses.
+	if pinned, ok := p.Pins[key]; ok {
+		if len(pinned) == 0 {
+			return Target{}, refuse("host %s has an empty pin", key)
+		}
+		for _, addr := range pinned {
+			if !IsPublicIP(addr.IP) {
+				return Target{}, refuse("host %s is pinned to non-public address %s", host, addr.IP)
+			}
+		}
+		return Target{Host: key, Addrs: pinned, Upstream: target}, nil
 	}
 	if p.Resolve == nil {
 		return Target{}, refuse("no resolver configured for %s", key)

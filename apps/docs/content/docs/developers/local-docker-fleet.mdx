@@ -90,6 +90,7 @@ configuration, not a credential:
 - `seccomp_profile` — the absolute host path of the deployed seccomp profile. The Fleet reads and validates it and inlines it into the node's `HostConfig`; the host path never reaches the Docker API.
 - `apparmor_profile` — the loaded AppArmor profile name. Loading the profile is an operator step.
 - `egress_hosts` — exact `host:443` entries added to the sidecar's allowlist.
+- `egress_pins` — optional map from an already-allowed provider hostname (bare, lowercase, no port) to one or more public IPv4/IPv6 addresses the sidecar dials instead of resolving DNS.
 - `anthropic_base_url` and `anthropic_model` — optional managed Claude endpoint override; the base URL may carry an optional path prefix such as `/api/plan`, and empty keeps the provider default.
 - `claude_env` — optional map of extra Claude Code variables for the managed child.
 - `provider_secret_files` — fixed target name to absolute host file, mounted read-only at `/run/secrets/<name>`.
@@ -105,6 +106,15 @@ configuration, not a credential:
 credentials: any key naming an API key, auth token, token, secret, or password is
 refused at config load, and every value is bounded and checked for whitespace and
 control characters.
+
+`egress_pins` is for networks whose DNS is hijacked or answers with fake-IP
+addresses (for example a Clash-style transparent proxy that resolves every
+provider host to a benchmark address such as `198.18.x.x`). Pinning a provider
+host to the public addresses a trusted resolver reports makes the sidecar dial
+those addresses directly, with no DNS lookup. A pin only ever narrows DNS: its
+host must already be compiled into the proxy image or listed in `egress_hosts`,
+so a pin can never add a host, and the `https`/443, no-IP-literal, public-address
+and server-origin rules are unchanged.
 
 A managed node starts from the fixed `fleet-node run` entrypoint, which
 `exec`s `multica daemon start --managed`. Its single-use enrollment secret

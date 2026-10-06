@@ -19,6 +19,7 @@ const (
 	egressProxyRole      = "egress-proxy"
 	egressServerOriginEn = "MULTICA_EGRESS_SERVER_ORIGIN"
 	egressAllowedHostsEn = "MULTICA_EGRESS_ALLOWED_HOSTS"
+	egressPinsEn         = "MULTICA_EGRESS_PINS"
 )
 
 // Aurora node tmpfs surfaces. Every writable directory is nosuid, nodev and
@@ -56,6 +57,7 @@ func EgressProxyArgs(cfg model.Config, proxyName, workspaceNetwork string) ([]st
 		"--network", a.UplinkNetwork,
 		"-e", egressServerOriginEn + "=" + a.ServerURL,
 		"-e", egressAllowedHostsEn + "=" + strings.Join(a.EgressHosts, ","),
+		"-e", egressPinsEn + "=" + a.EgressPinsEnv(),
 		// The image is final so nothing can follow it as a command.
 		a.ProxyImage,
 	}, nil
@@ -85,6 +87,7 @@ func egressProxySpec(cfg model.Config, n model.Node, proxyName string) (*contain
 			Env: []string{
 				egressServerOriginEn + "=" + a.ServerURL,
 				egressAllowedHostsEn + "=" + strings.Join(a.EgressHosts, ","),
+				egressPinsEn + "=" + a.EgressPinsEnv(),
 			},
 		}, container.HostConfig{
 			NetworkMode:    container.NetworkMode(a.UplinkNetwork),

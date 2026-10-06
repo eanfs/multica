@@ -22,6 +22,7 @@ import (
 const (
 	envServerOrigin = "MULTICA_EGRESS_SERVER_ORIGIN"
 	envAllowedHosts = "MULTICA_EGRESS_ALLOWED_HOSTS"
+	envPins         = "MULTICA_EGRESS_PINS"
 	envListenAddr   = "MULTICA_EGRESS_LISTEN_ADDR"
 	envHealthAddr   = "MULTICA_EGRESS_HEALTH_ADDR"
 
@@ -49,9 +50,17 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("%s is required", envServerOrigin)
 	}
 
-	// NewPolicy rejects wildcard hosts and any entry that is not an exact
-	// host:443, so a malformed or over-broad allowlist fails closed at startup.
-	policy, err := auroraegress.NewPolicy(origin, splitList(os.Getenv(envAllowedHosts)))
+	// Operator pins are structural here; NewPolicy applies the full policy:
+	// every pin must name an already-allowed provider host and a public address.
+	pins, err := auroraegress.ParsePins(strings.TrimSpace(os.Getenv(envPins)))
+	if err != nil {
+		return err
+	}
+
+	// NewPolicy rejects wildcard hosts, any entry that is not an exact host:443,
+	// and any pin that would add a host or point at a non-public address, so a
+	// malformed or over-broad allowlist or pin map fails closed at startup.
+	policy, err := auroraegress.NewPolicy(origin, splitList(os.Getenv(envAllowedHosts)), pins)
 	if err != nil {
 		return err
 	}
@@ -96,6 +105,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		"listen", listenAddr,
 		"health", healthAddr,
 		"providers", len(auroraegress.CompiledProviderTLSHosts()),
+		"pinned", len(policy.Pins),
 	)
 
 	var runErr error

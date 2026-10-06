@@ -46,7 +46,7 @@ func TestProxyBoundsHeadersBodiesAndTunnelLifetime(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		p, err := NewPolicy("http://localhost:"+u.Port(), nil)
+		p, err := NewPolicy("http://localhost:"+u.Port(), nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
