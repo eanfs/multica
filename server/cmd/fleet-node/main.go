@@ -66,15 +66,13 @@ func runManagedNode(secrets, path string, exec func(string, []string, []string) 
 // enrollment secret inside the read-only node secrets volume.
 const managedEnrollmentName = "aurora-enrollment"
 
-// readManagedEnrollment accepts only an owner-only regular file carrying one
-// well-formed enrollment secret. Anything else fails closed.
+// readManagedEnrollment accepts only an owner-only, non-symlink, mode-0600
+// regular file carrying one well-formed enrollment secret. It reuses the
+// canonical private-file reader, so ownership and mode stay exact. Anything
+// else fails closed.
 func readManagedEnrollment(path string) (string, error) {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() > 256 {
-		return "", model.ErrInvalidRequest
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
+	raw, err := readPrivateFile(path)
+	if err != nil || len(raw) > 256 {
 		return "", model.ErrInvalidRequest
 	}
 	token := strings.TrimSpace(string(raw))
@@ -90,8 +88,7 @@ func command(args []string, out io.Writer) error {
 	}
 	switch args[0] {
 	case "bootstrap":
-		_, err := BootstrapFiles(model.NodeHome, "/secrets")
-		return err
+		return bootstrapNode(model.NodeHome, model.AuroraEnrollmentDir)
 	case "run":
 		return runNode(model.NodeHome, "/secrets", os.Getenv("FLEET_NODE_MAX_RUNS"), syscall.Exec)
 	case "health":

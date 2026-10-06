@@ -19,6 +19,59 @@ func BootstrapFiles(home, secretDir string) (cli.CLIConfig, error) {
 	cfg, _, err := bootstrapFiles(home, secretDir)
 	return cfg, err
 }
+
+// bootstrapNode consumes exactly one installer payload from the fixed secrets
+// directory. The Claude payload (bootstrap.json) keeps the historical behaviour
+// byte for byte; the Aurora payload (aurora-enrollment) validates installer-owned
+// files only, writes no CLI profile, reads no node token or API key and never
+// touches the user home. A secrets directory carrying neither payload fails
+// closed.
+func bootstrapNode(home, secretDir string) error {
+	claude, err := fixedPayloadPresent(filepath.Join(secretDir, "bootstrap.json"))
+	if err != nil {
+		return err
+	}
+	if claude {
+		_, err := BootstrapFiles(home, secretDir)
+		return err
+	}
+	aurora, err := fixedPayloadPresent(filepath.Join(secretDir, managedEnrollmentName))
+	if err != nil {
+		return err
+	}
+	if aurora {
+		return bootstrapAuroraNode(home, secretDir)
+	}
+	return model.ErrInvalidRequest
+}
+
+// fixedPayloadPresent reports whether the fixed installer file exists. Any
+// filesystem error other than absence fails closed.
+func fixedPayloadPresent(path string) (bool, error) {
+	if _, err := os.Lstat(path); err == nil {
+		return true, nil
+	} else if !os.IsNotExist(err) {
+		return false, model.ErrInvalidRequest
+	}
+	return false, nil
+}
+
+// bootstrapAuroraNode validates the two-file Aurora installer payload: the
+// canonical layout manifest under the data mount plus the single-use managed
+// enrollment secret. It reuses the existing manifest and private-file readers,
+// so identity, mode, ownership and symlink handling stay canonical.
+func bootstrapAuroraNode(home, secretDir string) error {
+	if !filepath.IsAbs(home) || filepath.Base(home) != "home" || !filepath.IsAbs(secretDir) {
+		return model.ErrInvalidRequest
+	}
+	if _, _, err := readLayout(filepath.Dir(home)); err != nil {
+		return model.ErrInvalidRequest
+	}
+	if _, err := readManagedEnrollment(filepath.Join(secretDir, managedEnrollmentName)); err != nil {
+		return model.ErrInvalidRequest
+	}
+	return nil
+}
 func bootstrapFiles(home, secretDir string) (cli.CLIConfig, model.Bootstrap, error) {
 	fail := func() (cli.CLIConfig, model.Bootstrap, error) {
 		return cli.CLIConfig{}, model.Bootstrap{}, model.ErrInvalidRequest

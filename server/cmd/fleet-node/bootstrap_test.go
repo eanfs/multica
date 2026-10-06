@@ -311,3 +311,110 @@ func encodeFixture(t *testing.T, value any) []byte {
 	checkFixture(t, err)
 	return raw
 }
+
+// auroraNodeFixture builds the Aurora installer payload in private temp dirs:
+// the Claude bootstrap.json is absent, the layout manifest is present and the
+// one-time enrollment secret is a 0600 owner-only file.
+func auroraNodeFixture(t *testing.T) (string, string, string) {
+	t.Helper()
+	data, home, secrets := nodeFixture(t)
+	checkFixture(t, os.Remove(filepath.Join(secrets, "bootstrap.json")))
+	checkFixture(t, os.WriteFile(filepath.Join(secrets, managedEnrollmentName), []byte(managedEnrollmentToken), 0600))
+	return data, home, secrets
+}
+
+// TestBootstrapNodeSelectsClaudePayloadUnchanged proves that the presence of
+// bootstrap.json keeps the historical Claude path byte for byte: a malformed
+// Aurora file beside it must not change validation or CLI-config behaviour.
+func TestBootstrapNodeSelectsClaudePayloadUnchanged(t *testing.T) {
+	_, home, secrets := nodeFixture(t)
+	checkFixture(t, os.WriteFile(filepath.Join(secrets, managedEnrollmentName), []byte("not-a-token"), 0600))
+	if err := bootstrapNode(home, secrets); err != nil {
+		t.Fatalf("claude payload rejected: %v", err)
+	}
+	loaded, err := cli.LoadCLIConfigForProfile("")
+	if err != nil || loaded.Token != testNodeToken || loaded.ServerURL != "http://api.test" {
+		t.Fatalf("claude profile not written: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(home, ".multica", "config.json"))
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("claude profile is not private: %v", err)
+	}
+}
+
+// TestBootstrapNodeAuroraPayloadWritesNoCLIConfig proves the Aurora payload is
+// accepted without a node token or API key and creates no CLI profile.
+func TestBootstrapNodeAuroraPayloadWritesNoCLIConfig(t *testing.T) {
+	data, home, secrets := auroraNodeFixture(t)
+	manifestPath := filepath.Join(data, "fleet-layout.json")
+	before := readFixture(t, manifestPath)
+	if err := bootstrapNode(home, secrets); err != nil {
+		t.Fatalf("aurora payload rejected: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".multica")); !os.IsNotExist(err) {
+		t.Fatalf("aurora bootstrap created a CLI profile: %v", err)
+	}
+	if after := readFixture(t, manifestPath); string(before) != string(after) {
+		t.Fatal("aurora bootstrap rewrote the manifest")
+	}
+}
+
+// TestBootstrapNodeAuroraPayloadFailsClosed covers missing, wrong-permission,
+// wrong-content, symlinked and malformed Aurora payloads.
+func TestBootstrapNodeAuroraPayloadFailsClosed(t *testing.T) {
+	for _, kind := range []string{"missing-manifest", "manifest-mode", "manifest-path", "missing-enrollment", "enrollment-mode-0644", "enrollment-mode-0400", "enrollment-symlink", "enrollment-bad-token", "enrollment-multi-token", "enrollment-oversized"} {
+		t.Run(kind, func(t *testing.T) {
+			data, home, secrets := auroraNodeFixture(t)
+			manifestPath := filepath.Join(data, "fleet-layout.json")
+			enrollmentPath := filepath.Join(secrets, managedEnrollmentName)
+			switch kind {
+			case "missing-manifest":
+				checkFixture(t, os.Remove(manifestPath))
+			case "manifest-mode":
+				checkFixture(t, os.Chmod(manifestPath, 0644))
+			case "manifest-path":
+				var m model.LayoutManifestData
+				checkFixture(t, json.Unmarshal(readFixture(t, manifestPath), &m))
+				m.WorkspacesRoot = "/wrong"
+				checkFixture(t, os.WriteFile(manifestPath, encodeFixture(t, m), 0600))
+			case "missing-enrollment":
+				checkFixture(t, os.Remove(enrollmentPath))
+			case "enrollment-mode-0644":
+				checkFixture(t, os.Chmod(enrollmentPath, 0644))
+			case "enrollment-mode-0400":
+				checkFixture(t, os.Chmod(enrollmentPath, 0400))
+			case "enrollment-symlink":
+				target := filepath.Join(secrets, "target")
+				checkFixture(t, os.Rename(enrollmentPath, target))
+				checkFixture(t, os.Symlink(target, enrollmentPath))
+			case "enrollment-bad-token":
+				checkFixture(t, os.WriteFile(enrollmentPath, []byte("not-an-enrollment-token"), 0600))
+			case "enrollment-multi-token":
+				checkFixture(t, os.WriteFile(enrollmentPath, []byte(managedEnrollmentToken+"\n"+managedEnrollmentToken), 0600))
+			case "enrollment-oversized":
+				checkFixture(t, os.WriteFile(enrollmentPath, []byte(managedEnrollmentToken+"\n"+strings.Repeat("x", 512)), 0600))
+			}
+			err := bootstrapNode(home, secrets)
+			if !errors.Is(err, model.ErrInvalidRequest) {
+				t.Fatalf("unsafe aurora payload error = %v, want ErrInvalidRequest", err)
+			}
+			if strings.Contains(err.Error(), managedEnrollmentToken) || strings.Contains(err.Error(), secrets) {
+				t.Fatal("error leaks private inputs")
+			}
+			if _, statErr := os.Stat(filepath.Join(home, ".multica")); !os.IsNotExist(statErr) {
+				t.Fatalf("failed aurora bootstrap created a CLI profile: %v", statErr)
+			}
+		})
+	}
+}
+
+// TestBootstrapNodeRejectsDirectoryWithoutPayload proves a secrets directory
+// with neither installer file still fails closed.
+func TestBootstrapNodeRejectsDirectoryWithoutPayload(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	checkFixture(t, os.Mkdir(home, 0700))
+	secrets := t.TempDir()
+	if err := bootstrapNode(home, secrets); !errors.Is(err, model.ErrInvalidRequest) {
+		t.Fatalf("payload-free directory = %v, want ErrInvalidRequest", err)
+	}
+}
