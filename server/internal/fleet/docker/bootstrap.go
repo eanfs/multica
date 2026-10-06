@@ -40,6 +40,12 @@ func (e *sdkEngine) InstallBootstrap(ctx context.Context, vols []Resource, raw [
 		}
 	}
 	h := diagnosticHost()
+	// The daemon refuses CopyToContainer into a read-only rootfs, and the fixed
+	// fleet-node bootstrap command consumes files from the mounted volumes rather
+	// than stdin. Keep the installer writable while every other control (network
+	// none, cap drop ALL, no-new-privileges, non-root, pid/memory limits) applies;
+	// the archive still lands only in the two owned volumes.
+	h.ReadonlyRootfs = false
 	h.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: data.ID, Target: model.DataMount}, {Type: mount.TypeVolume, Source: secrets.ID, Target: "/secrets"}}
 	c := &container.Config{Image: e.cfg.Image, User: "10001:10001", Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"bootstrap"}, Labels: labels(e.cfg.Namespace, e.cfg.FleetID, data.Labels["multica.fleet.node"], "bootstrap"), NetworkDisabled: true}
 	_, err := e.runHelper(ctx, c, &h, raw)

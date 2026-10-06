@@ -444,6 +444,10 @@ func (e *sdkEngine) validateRecoveryHelper(ctx context.Context, actual container
 		if !volumeName.MatchString(n.SecretsVolume) || n.SecretsVolume == n.DataVolume {
 			return model.ErrForbidden
 		}
+		// The bootstrap installer keeps a writable rootfs because the daemon
+		// refuses CopyToContainer into a read-only one; mirror that here so
+		// recovery validates the helper the adapter actually created.
+		h.ReadonlyRootfs = false
 		h.Mounts[0].ReadOnly = false
 		h.Mounts = append(h.Mounts, mount.Mount{Type: mount.TypeVolume, Source: n.SecretsVolume, Target: "/secrets"})
 		cmd = "bootstrap"
@@ -568,7 +572,7 @@ func validateHelper(actual container.InspectResponse, c *container.Config, h *co
 		}
 	}
 	ah := actual.HostConfig
-	if ah.NetworkMode != "none" || !ah.ReadonlyRootfs || ah.Privileged || ah.PidMode != "" || len(ah.CapAdd) != 0 || len(ah.ExtraHosts) != 0 || len(ah.Devices) != 0 || len(ah.DeviceRequests) != 0 || ah.RestartPolicy.Name != container.RestartPolicyDisabled || len(ah.Binds) != 0 || len(ah.PortBindings) != 0 || len(ah.VolumesFrom) != 0 || ah.PublishAllPorts || !reflect.DeepEqual(ah.CapDrop, h.CapDrop) || !reflect.DeepEqual(ah.SecurityOpt, h.SecurityOpt) || ah.NanoCPUs != h.NanoCPUs || ah.Memory != h.Memory || ah.PidsLimit == nil || *ah.PidsLimit != *h.PidsLimit || len(actual.Mounts) != len(h.Mounts) {
+	if ah.NetworkMode != "none" || ah.ReadonlyRootfs != h.ReadonlyRootfs || ah.Privileged || ah.PidMode != "" || len(ah.CapAdd) != 0 || len(ah.ExtraHosts) != 0 || len(ah.Devices) != 0 || len(ah.DeviceRequests) != 0 || ah.RestartPolicy.Name != container.RestartPolicyDisabled || len(ah.Binds) != 0 || len(ah.PortBindings) != 0 || len(ah.VolumesFrom) != 0 || ah.PublishAllPorts || !reflect.DeepEqual(ah.CapDrop, h.CapDrop) || !reflect.DeepEqual(ah.SecurityOpt, h.SecurityOpt) || ah.NanoCPUs != h.NanoCPUs || ah.Memory != h.Memory || ah.PidsLimit == nil || *ah.PidsLimit != *h.PidsLimit || len(actual.Mounts) != len(h.Mounts) {
 		return model.ErrForbidden
 	}
 	for _, want := range h.Mounts {

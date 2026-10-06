@@ -643,6 +643,9 @@ func TestOfflineRecoveryWaitResetsAndNeverCachesProof(t *testing.T) {
 				b.ID = "bootstrap-leftover"
 				b.Config = &container.Config{Image: fixtureConfig().Image, User: "10001:10001", Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"bootstrap"}, Labels: fixtureLabels("bootstrap"), NetworkDisabled: true}
 				bh := diagnosticHost()
+				// The adapter's bootstrap installer keeps a writable rootfs
+				// because the daemon refuses CopyToContainer into a read-only one.
+				bh.ReadonlyRootfs = false
 				bh.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: "data-vol", Target: "/data"}, {Type: mount.TypeVolume, Source: "secrets-vol", Target: "/secrets"}}
 				b.HostConfig = &bh
 				b.Mounts = []container.MountPoint{{Type: mount.TypeVolume, Name: "data-vol", Destination: "/data", RW: true}, {Type: mount.TypeVolume, Name: "secrets-vol", Destination: "/secrets", RW: true}}
