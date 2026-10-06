@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback, useEffect, useState } from "react";
 import { CircleAlert, Gauge } from "lucide-react";
 import { Badge } from "@multica/ui/components/ui/badge";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
@@ -49,14 +50,31 @@ export function RuntimeStatus() {
   const { t } = useT("aurora");
   const runtime = useAuroraRuntime();
   const generations = useAuroraGenerations();
+  // Ids whose own detail read has reported a terminal status. The list read is
+  // a one-shot snapshot — it has no interval and the client disables
+  // refetch-on-focus — so its stored status can stay "queued" long after the
+  // generation settles. The row's polled detail is the live source, and it is
+  // what removes the row rather than only flipping its badge.
+  const [settled, setSettled] = useState<ReadonlySet<string>>(() => new Set());
 
   const target = runtime.data?.value;
-  // The list read carries the stored status, which stays "queued" until the
-  // execution layer writes the terminal one back. Only terminal rows are
-  // dropped; the row's own detail read keeps the label live.
+  // A row leaves the running list when either read says it is terminal: the
+  // list already filters the statuses it knows, and a row whose detail settles
+  // is dropped even before the list catches up.
   const active = (generations.data?.value ?? []).filter(
-    (generation) => !isAuroraGenerationTerminal(generation.status),
+    (generation) =>
+      !isAuroraGenerationTerminal(generation.status) &&
+      !settled.has(generation.id),
   );
+
+  const markSettled = useCallback((id: string) => {
+    setSettled((previous) => {
+      if (previous.has(id)) return previous;
+      const next = new Set(previous);
+      next.add(id);
+      return next;
+    });
+  }, []);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -84,6 +102,7 @@ export function RuntimeStatus() {
                   <ActiveGenerationRow
                     key={generation.id}
                     generation={generation}
+                    onSettled={markSettled}
                   />
                 ))}
               </ul>
@@ -147,17 +166,27 @@ function RuntimeNodeCard({
  *
  * Its own detail query is the polling source: it reuses the existing 3s
  * cadence and stops itself once the server reports a terminal status, so the
- * row is live without a second status channel.
+ * row is live without a second status channel. Reporting that terminal status
+ * up is also what removes the row — the list snapshot cannot be trusted to
+ * catch up on its own.
  */
 function ActiveGenerationRow({
   generation,
+  onSettled,
 }: {
   generation: AuroraGeneration;
+  onSettled: (id: string) => void;
 }) {
   const { t } = useT("aurora");
   const detail = useAuroraGenerationDetail(generation.id);
   const current = detail.data?.value ?? generation;
   const status = generationStatusLabel(current.status);
+
+  useEffect(() => {
+    if (isAuroraGenerationTerminal(current.status)) {
+      onSettled(generation.id);
+    }
+  }, [current.status, generation.id, onSettled]);
 
   return (
     <li className="flex items-center gap-3 border-b border-surface-border px-3 py-2 last:border-b-0">

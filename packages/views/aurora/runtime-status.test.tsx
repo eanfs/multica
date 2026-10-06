@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, screen } from "@testing-library/react";
+import { act, cleanup, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { setApiInstance } from "@multica/core/api";
 import type { ApiClient } from "@multica/core/api/client";
@@ -161,6 +161,44 @@ describe("RuntimeStatus", () => {
     expect(await screen.findByText("Generating")).toBeInTheDocument();
     expect(screen.queryByText("Queued")).not.toBeInTheDocument();
   });
+
+  it.each(["completed", "failed"])(
+    "removes a generation from the running list once its detail settles to %s",
+    async (settledStatus: string) => {
+      // The list read is a one-shot snapshot that still says "queued" — the
+      // server has not written the terminal status back — so removal has to be
+      // driven by the row's polled detail. Without that the row outlives the
+      // generation and only its badge changes.
+      let settle: (body: unknown) => void = () => {};
+      installApi((path) => {
+        if (path === "/api/aurora/runtime") return TARGET;
+        if (path === "/api/aurora/generations") {
+          return { generations: [generation({ status: "queued" })] };
+        }
+        if (path === "/api/aurora/generations/gen-1") {
+          return new Promise((resolve) => {
+            settle = resolve;
+          });
+        }
+        throw new Error(`unexpected path ${path}`);
+      });
+      renderRuntime();
+
+      // The row is on the running list while its detail read is still in flight.
+      expect(await screen.findByText("a launch poster")).toBeInTheDocument();
+
+      await act(async () => {
+        settle({
+          generation: generation({ status: settledStatus, assets: [] }),
+        });
+      });
+
+      await waitFor(() =>
+        expect(screen.queryByText("a launch poster")).not.toBeInTheDocument(),
+      );
+      expect(await screen.findByText("Nothing is running.")).toBeInTheDocument();
+    },
+  );
 
   it("offers the empty copy when nothing is running", async () => {
     renderRuntime();
