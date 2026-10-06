@@ -132,7 +132,12 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 	// like "claude exited with error: exit status 3" — which is useless for
 	// root-causing V8 aborts, Bun panics, or any other CLI-side crash.
 	stderrBuf := newStderrTail(newLogWriter(b.cfg.Logger, "[claude:stderr] "), agentStderrTailBytes)
-	cmd.Stderr = stderrBuf
+	// A custom Anthropic-compatible endpoint legitimately serves model ids
+	// Claude Code does not know, so its per-run unrecognized-model registry
+	// diagnostic is filtered out; a first-party run keeps it because there it
+	// signals a real misconfiguration.
+	stderrSink, claudeStderrFilter := claudeStderrSink(b.cfg.Env, stderrBuf)
+	cmd.Stderr = stderrSink
 
 	if err := startOwnedProcessTree(cmd, b.cfg.Logger); err != nil {
 		closeStdin()
@@ -339,6 +344,13 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 		// Wait for process exit, then release the cancellation handler.
 		exitErr := cmd.Wait()
 		close(procDone)
+		// Flush any final unterminated stderr line through the diagnostic
+		// filter before the tail is sampled for the failure message below.
+		if claudeStderrFilter != nil {
+			if flushErr := claudeStderrFilter.Flush(); flushErr != nil {
+				b.cfg.Logger.Warn("claude: flush filtered stderr", "error", flushErr)
+			}
+		}
 		// The leader is reaped; drop ownership. On Windows that closes the Job
 		// Object, which kills anything still inside it — precisely what should
 		// happen to a descendant that outlived the CLI (GH #7522).

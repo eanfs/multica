@@ -169,6 +169,19 @@ type managedProviderSecrets struct {
 // only: the Anthropic credential value plus the operator endpoint overrides
 // when configured. When neither override is set the map is byte-for-byte the
 // historical {ANTHROPIC_API_KEY}.
+//
+// The operator model is forwarded verbatim, never lowercased or stripped.
+// Verified against Claude Code 2.1.289: for a model id outside its built-in
+// registry (any ARK Agent Plan model) Claude Code emits one
+// "[claude-code:unrecognized_model]" diagnostic naming its own lowercased
+// canonical key, so "[1M]" prints as "[1m]". That key never reaches the wire:
+// the Messages request keeps the configured base name with its original case
+// and moves a trailing "[1M]" context marker into the context-1m beta header,
+// and the ARK endpoint answers 200 for both spellings. The diagnostic is
+// therefore cosmetic; normalizing the value here would not silence it. The
+// Claude backend filters that one diagnostic (claude_stderr.go) only when a
+// custom endpoint is configured, so the daemon does not paper over a
+// first-party misconfiguration.
 func (s managedProviderSecrets) claudeChildEnv() map[string]string {
 	env := map[string]string{"ANTHROPIC_API_KEY": s.AnthropicAPIKey.Value()}
 	if s.AnthropicBaseURL != "" {
