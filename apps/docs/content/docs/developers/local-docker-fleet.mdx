@@ -91,9 +91,20 @@ configuration, not a credential:
 - `apparmor_profile` — the loaded AppArmor profile name. Loading the profile is an operator step.
 - `egress_hosts` — exact `host:443` entries added to the sidecar's allowlist.
 - `anthropic_base_url` and `anthropic_model` — optional managed Claude endpoint override; empty keeps the provider default.
+- `claude_env` — optional map of extra Claude Code variables for the managed child.
 - `provider_secret_files` — fixed target name to absolute host file, mounted read-only at `/run/secrets/<name>`.
 - `readonly_rootfs` — must be explicitly `true`.
 - `uplink_network` — the operator network only the egress sidecar joins.
+
+`claude_env` accepts only a fixed allowlist of model-routing and tool variables:
+`ANTHROPIC_DEFAULT_{FABLE,HAIKU,OPUS,SONNET}_MODEL`, their `_NAME` variants,
+`CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `ENABLE_TOOL_SEARCH`, and
+`API_TIMEOUT_MS`; a model value may use the bracketed suffix form such as
+`glm-5.3-flash[1M]`. This is operator configuration and must never carry
+credentials: any key naming an API key, auth token, token, secret, or password is
+refused at config load, and every value is bounded and checked for whitespace and
+control characters.
 
 A managed node starts from the fixed `fleet-node run` entrypoint, which
 `exec`s `multica daemon start --managed`. Its single-use enrollment secret

@@ -6,7 +6,9 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"unicode"
 )
 
 // The managed Aurora sandbox runtime reads exactly one single-use enrollment
@@ -105,6 +107,25 @@ func (a AuroraConfig) ProviderSecretMounts() []ProviderSecretMount {
 	return mounts
 }
 
+// ClaudeEnvPairs returns the configured extra Claude Code variables as KEY=value
+// entries in deterministic key order, so one configuration always yields one
+// node environment. An absent or empty map returns nil and adds nothing.
+func (a AuroraConfig) ClaudeEnvPairs() []string {
+	if len(a.ClaudeEnv) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(a.ClaudeEnv))
+	for key := range a.ClaudeEnv {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	pairs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		pairs = append(pairs, key+"="+a.ClaudeEnv[key])
+	}
+	return pairs
+}
+
 // AuroraConfig selects the managed-sandbox execution profile for one Fleet
 // deployment. It is administrator-owned public configuration: the sandbox image
 // is Config.Image and model credentials belong to the sandbox's own provider
@@ -130,6 +151,11 @@ type AuroraConfig struct {
 	// endpoint override. Empty preserves the provider default.
 	AnthropicBaseURL string `json:"anthropic_base_url"`
 	AnthropicModel   string `json:"anthropic_model"`
+	// ClaudeEnv carries the optional extra Claude Code variables for the
+	// managed child. It is a fixed allowlist of non-secret model-routing and
+	// tool variables, validated at load; an absent map adds nothing to the node
+	// environment. Credentials belong in ProviderSecretFiles, never here.
+	ClaudeEnv map[string]string `json:"claude_env"`
 	// ProviderSecretFiles maps each fixed target name to an absolute host file
 	// mounted read-only at /run/secrets/<name>. Empty values mount nothing.
 	ProviderSecretFiles map[string]string `json:"provider_secret_files"`
@@ -168,6 +194,17 @@ func (a AuroraConfig) Validate() error {
 	if a.AnthropicModel != "" && !validModelName(a.AnthropicModel) {
 		return fmt.Errorf("%w: aurora anthropic_model must be a non-empty model name", ErrInvalidRequest)
 	}
+	for key, value := range a.ClaudeEnv {
+		if isSecretClaudeEnvKey(key) {
+			return fmt.Errorf("%w: aurora claude_env must never carry a credential", ErrInvalidRequest)
+		}
+		if !claudeCodeEnvAllowlist[key] {
+			return fmt.Errorf("%w: aurora claude_env key is not in the fixed allowlist", ErrInvalidRequest)
+		}
+		if !validClaudeEnvValue(key, value) {
+			return fmt.Errorf("%w: aurora claude_env value is invalid", ErrInvalidRequest)
+		}
+	}
 	for key, source := range a.ProviderSecretFiles {
 		if _, ok := ProviderSecretTargets[key]; !ok {
 			return fmt.Errorf("%w: aurora provider_secret_files target name is not fixed", ErrInvalidRequest)
@@ -199,6 +236,50 @@ var (
 	// cleanPathPattern rejects control characters and whitespace in mount paths.
 	cleanPathPattern = regexp.MustCompile("^/[!-~]+$")
 )
+
+// claudeCodeEnvAllowlist is the exact set of additional Claude Code variables
+// an operator may set through AuroraConfig.ClaudeEnv. It is a fixed allowlist of
+// non-secret model-routing and tool variables; every other key is refused at
+// config load, so the channel can never carry an unvetted variable.
+var claudeCodeEnvAllowlist = map[string]bool{
+	"ANTHROPIC_DEFAULT_FABLE_MODEL":            true,
+	"ANTHROPIC_DEFAULT_FABLE_MODEL_NAME":       true,
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL":            true,
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":       true,
+	"ANTHROPIC_DEFAULT_OPUS_MODEL":             true,
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":        true,
+	"ANTHROPIC_DEFAULT_SONNET_MODEL":           true,
+	"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME":      true,
+	"CLAUDE_CODE_SUBAGENT_MODEL":               true,
+	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": true,
+	"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":     true,
+	"ENABLE_TOOL_SEARCH":                       true,
+	"API_TIMEOUT_MS":                           true,
+}
+
+// claudeEnvSecretMarkers are the substrings that mark a claude_env key as
+// credential-bearing. The channel is operator configuration and never carries a
+// credential, so such a key is refused before the allowlist is even consulted.
+var claudeEnvSecretMarkers = []string{"API_KEY", "AUTH_TOKEN", "TOKEN", "SECRET", "PASSWORD"}
+
+// maxClaudeEnvValueLen bounds one operator-supplied claude_env value.
+const maxClaudeEnvValueLen = 256
+
+// apiTimeoutPattern admits only a whole number of milliseconds.
+var apiTimeoutPattern = regexp.MustCompile("^[0-9]+$")
+
+// isSecretClaudeEnvKey reports whether a claude_env key names a credential. The
+// test is case-insensitive so an unusual spelling cannot smuggle a secret past
+// the exact allowlist.
+func isSecretClaudeEnvKey(key string) bool {
+	upper := strings.ToUpper(key)
+	for _, marker := range claudeEnvSecretMarkers {
+		if strings.Contains(upper, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 // validEgressHost accepts only an exact host:443 entry with no wildcard.
 func validEgressHost(raw string) bool {
@@ -234,6 +315,22 @@ func validModelName(raw string) bool {
 		}
 	}
 	return true
+}
+
+// validClaudeEnvValue accepts a non-empty value with no surrounding or embedded
+// whitespace or control characters, within the length bound; API_TIMEOUT_MS is
+// additionally digits-only. Bracketed model suffixes such as glm-5.3-flash[1M]
+// are ordinary printable characters and remain valid.
+func validClaudeEnvValue(key, value string) bool {
+	if value == "" || strings.TrimSpace(value) != value || len(value) > maxClaudeEnvValueLen {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return key != "API_TIMEOUT_MS" || apiTimeoutPattern.MatchString(value)
 }
 
 // ValidEnrollmentToken reports whether token matches the server-issued managed

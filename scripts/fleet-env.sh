@@ -32,7 +32,7 @@ try{
 // Aurora profile fields. The uplink network is the owned fleet-nodes network
 // and is written below; every credential stays a host file path, never a value.
 const aurora=input.aurora;need(aurora&&typeof aurora==='object'&&!Array.isArray(aurora));
-const auroraKeys=['server_url','proxy_image','seccomp_profile','apparmor_profile','egress_hosts','anthropic_base_url','anthropic_model','provider_secret_files'];
+const auroraKeys=['server_url','proxy_image','seccomp_profile','apparmor_profile','egress_hosts','anthropic_base_url','anthropic_model','claude_env','provider_secret_files'];
 need(Object.keys(aurora).length===auroraKeys.length&&auroraKeys.every(k=>Object.hasOwn(aurora,k)));
 const serverOrigin=new URL(aurora.server_url);need(['http:','https:'].includes(serverOrigin.protocol)&&serverOrigin.hostname&&!serverOrigin.username&&!serverOrigin.password&&!serverOrigin.search&&!serverOrigin.hash&&serverOrigin.pathname==='/');
 need(/^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$/.test(aurora.proxy_image));
@@ -42,6 +42,18 @@ need(Array.isArray(aurora.egress_hosts)&&aurora.egress_hosts.every(h=>typeof h==
 need(typeof aurora.anthropic_base_url==='string'&&typeof aurora.anthropic_model==='string');
 if(aurora.anthropic_base_url!==''){const base=new URL(aurora.anthropic_base_url);need(base.protocol==='https:'&&base.hostname&&!base.port&&!base.username&&!base.password&&!base.search&&!base.hash&&(base.pathname===''||base.pathname==='/'));}
 if(aurora.anthropic_model!=='')need(aurora.anthropic_model.trim()===aurora.anthropic_model&&!/[\s]/.test(aurora.anthropic_model));
+// Extra Claude Code variables: exact allowlist, operator config only, never a
+// credential value. API_TIMEOUT_MS is digits only; a model value may carry the
+// bracketed suffix form.
+const claudeEnvKeys=['ANTHROPIC_DEFAULT_FABLE_MODEL','ANTHROPIC_DEFAULT_FABLE_MODEL_NAME','ANTHROPIC_DEFAULT_HAIKU_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME','ANTHROPIC_DEFAULT_OPUS_MODEL','ANTHROPIC_DEFAULT_OPUS_MODEL_NAME','ANTHROPIC_DEFAULT_SONNET_MODEL','ANTHROPIC_DEFAULT_SONNET_MODEL_NAME','CLAUDE_CODE_SUBAGENT_MODEL','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC','CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS','ENABLE_TOOL_SEARCH','API_TIMEOUT_MS'];
+const claudeEnv=aurora.claude_env;need(claudeEnv&&typeof claudeEnv==='object'&&!Array.isArray(claudeEnv));
+for(const [key,value] of Object.entries(claudeEnv)){
+ need(typeof value==='string');
+ const upper=key.toUpperCase();need(!['API_KEY','AUTH_TOKEN','TOKEN','SECRET','PASSWORD'].some(m=>upper.includes(m)));
+ need(claudeEnvKeys.includes(key));
+ need(value.length>0&&value.length<=256&&value.trim()===value&&!/[\s\x00-\x1f\x7f-\x9f]/.test(value));
+ if(key==='API_TIMEOUT_MS')need(/^[0-9]+$/.test(value));
+}
 const secretFiles=aurora.provider_secret_files;need(secretFiles&&typeof secretFiles==='object'&&!Array.isArray(secretFiles));
 const secretTargets=['anthropic-api-key','ark-api-key','openai-api-key','volc-asr-api-key'];need(Object.keys(secretFiles).every(k=>secretTargets.includes(k)));
 for(const source of Object.values(secretFiles)){need(typeof source==='string');if(source!=='')need(path.isAbsolute(source)&&path.normalize(source)===source&&!/[\x00-\x20\x7f-\x9f]/.test(source));}
@@ -134,7 +146,7 @@ for(const source of Object.values(secretFiles)){need(typeof source==='string');i
  if(action==='prepare'){
   // Preserve raw URI credentials, database encoding and query ordering.
   const m=dsn.match(/^(postgres(?:ql)?:\/\/[^/]*@)([^/]+)(\/.*)$/);need(m);writePrivate(dbPath,m[1]+input.pg_alias+':'+input.pg_port+m[3]);
-  writePrivate(configPath,{namespace:id.namespace,fleet_id:id.fleet_id,image:input.node_image,api_url:input.api_url,max_nodes:2,specs:{sandbox:{cpus:2,memory_bytes:4294967296,pids:256,max_runs:1}},aurora:{server_url:input.aurora.server_url,proxy_image:input.aurora.proxy_image,seccomp_profile:input.aurora.seccomp_profile,apparmor_profile:input.aurora.apparmor_profile,egress_hosts:input.aurora.egress_hosts,anthropic_base_url:input.aurora.anthropic_base_url,anthropic_model:input.aurora.anthropic_model,provider_secret_files:input.aurora.provider_secret_files,readonly_rootfs:true,uplink_network:id.node_network}});writePrivate(keyPath,key);
+  writePrivate(configPath,{namespace:id.namespace,fleet_id:id.fleet_id,image:input.node_image,api_url:input.api_url,max_nodes:2,specs:{sandbox:{cpus:2,memory_bytes:4294967296,pids:256,max_runs:1}},aurora:{server_url:input.aurora.server_url,proxy_image:input.aurora.proxy_image,seccomp_profile:input.aurora.seccomp_profile,apparmor_profile:input.aurora.apparmor_profile,egress_hosts:input.aurora.egress_hosts,anthropic_base_url:input.aurora.anthropic_base_url,anthropic_model:input.aurora.anthropic_model,claude_env:input.aurora.claude_env,provider_secret_files:input.aurora.provider_secret_files,readonly_rootfs:true,uplink_network:id.node_network}});writePrivate(keyPath,key);
   // Parent-approved exception: load DB URI into only the original Fleet process.
   const startup='IFS= read -r DATABASE_URL < /run/multica-fleet/database-url || test -n "$$DATABASE_URL"; test -n "$$DATABASE_URL" || exit 1; export DATABASE_URL; exec /usr/local/bin/fleet';
   writePrivate(composePath,{services:{fleet:{container_name:id.node_network+'-control',image:input.fleet_image,user:input.uid+':'+input.gid,group_add:[String(input.socket_gid)],entrypoint:['/bin/sh','-ec'],command:[startup],environment:{FLEET_ADDR:'0.0.0.0:8090',FLEET_CONFIG_FILE:'/run/multica-fleet/config.json',FLEET_SERVICE_KEY_FILE:'/run/multica-fleet/service-key'},ports:['127.0.0.1:'+id.port+':8090'],volumes:[{type:'bind',source:input.socket_path,target:'/var/run/docker.sock'},{type:'bind',source:fleetDir,target:'/run/multica-fleet',read_only:true},...mounts],labels:{...labels,'multica.fleet.role':'control'},extra_hosts:['host.docker.internal:host-gateway'],networks:['shared-pg','fleet-nodes'],healthcheck:{test:['CMD','/usr/local/bin/fleet','readyz'],interval:'5s',timeout:'10s',retries:12},read_only:true,cap_drop:['ALL'],security_opt:['no-new-privileges:true'],restart:'unless-stopped'}},networks:{'shared-pg':{external:true,name:pgNet.Name},'fleet-nodes':{external:true,name:id.node_network}}});need(!readPrivate(composePath).includes(dsn)&&!readPrivate(composePath).includes(key.trim()));

@@ -25,6 +25,7 @@
     ],
     "anthropic_base_url": "",
     "anthropic_model": "",
+    "claude_env": {},
     "provider_secret_files": {
       "anthropic-api-key": "/etc/multica/aurora/anthropic-api-key",
       "ark-api-key": "/etc/multica/aurora/ark-api-key",

@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -35,29 +36,40 @@ func TestLoadConfigAuroraProfile(t *testing.T) {
 
 func TestLoadConfigRejectsUnsafeAuroraProfile(t *testing.T) {
 	cases := map[string]string{
-		"missing server url":      strings.Replace(auroraConfig, `"server_url":"http://api.internal:8080"`, "", 1),
-		"credentials in url":      strings.Replace(auroraConfig, "http://api.internal:8080", "http://user:pass@api.internal:8080", 1),
-		"path in url":             strings.Replace(auroraConfig, "http://api.internal:8080", "http://api.internal:8080/api", 1),
-		"tag-only proxy":          strings.Replace(auroraConfig, auroraEgressImage, "ghcr.io/eanfs/multica-aurora-egress:latest", 1),
-		"uppercase proxy digest":  strings.Replace(auroraConfig, "a123456789abcdef", "A123456789ABCDEF", 1),
-		"relative seccomp":        strings.Replace(auroraConfig, "/etc/multica/aurora/seccomp.json", "seccomp.json", 1),
-		"dirty seccomp":           strings.Replace(auroraConfig, "/etc/multica/aurora/seccomp.json", "/etc/multica/aurora/../seccomp.json", 1),
-		"empty apparmor":          strings.Replace(auroraConfig, "multica-aurora-sandbox", "", 1),
-		"wildcard egress":         strings.Replace(auroraConfig, "api.example.com:443", "*.example.com:443", 1),
-		"non-443 egress":          strings.Replace(auroraConfig, "api.example.com:443", "api.example.com:8443", 1),
-		"egress without port":     strings.Replace(auroraConfig, "api.example.com:443", "api.example.com", 1),
-		"http anthropic base":     strings.Replace(auroraConfig, "https://ark.example.com", "http://ark.example.com", 1),
-		"anthropic path":          strings.Replace(auroraConfig, "https://ark.example.com", "https://ark.example.com/v1", 1),
-		"unknown secret target":   strings.Replace(auroraConfig, "anthropic-api-key", "evil-key", 1),
-		"relative secret source":  strings.Replace(auroraConfig, "/etc/multica/aurora/anthropic-api-key", "anthropic-api-key", 1),
-		"readonly false":          strings.Replace(auroraConfig, `"readonly_rootfs":true`, `"readonly_rootfs":false`, 1),
-		"missing readonly":        strings.Replace(auroraConfig, `"readonly_rootfs":true,`, "", 1),
-		"empty uplink":            strings.Replace(auroraConfig, "aurora-egress-uplink", "", 1),
-		"unsafe uplink":           strings.Replace(auroraConfig, "aurora-egress-uplink", "uplink/evil", 1),
-		"unknown nested key":      strings.Replace(auroraConfig, `"aurora":{"server_url"`, `"aurora":{"image":"evil","server_url"`, 1),
-		"nested null":             strings.Replace(auroraConfig, `"readonly_rootfs":true`, `"readonly_rootfs":null`, 1),
-		"server url type":         strings.Replace(auroraConfig, `"server_url":"http://api.internal:8080"`, `"server_url":7`, 1),
-		"provider files as array": strings.Replace(auroraConfig, `"provider_secret_files":{"anthropic-api-key":"/etc/multica/aurora/anthropic-api-key"}`, `"provider_secret_files":[]`, 1),
+		"missing server url":          strings.Replace(auroraConfig, `"server_url":"http://api.internal:8080"`, "", 1),
+		"credentials in url":          strings.Replace(auroraConfig, "http://api.internal:8080", "http://user:pass@api.internal:8080", 1),
+		"path in url":                 strings.Replace(auroraConfig, "http://api.internal:8080", "http://api.internal:8080/api", 1),
+		"tag-only proxy":              strings.Replace(auroraConfig, auroraEgressImage, "ghcr.io/eanfs/multica-aurora-egress:latest", 1),
+		"uppercase proxy digest":      strings.Replace(auroraConfig, "a123456789abcdef", "A123456789ABCDEF", 1),
+		"relative seccomp":            strings.Replace(auroraConfig, "/etc/multica/aurora/seccomp.json", "seccomp.json", 1),
+		"dirty seccomp":               strings.Replace(auroraConfig, "/etc/multica/aurora/seccomp.json", "/etc/multica/aurora/../seccomp.json", 1),
+		"empty apparmor":              strings.Replace(auroraConfig, "multica-aurora-sandbox", "", 1),
+		"wildcard egress":             strings.Replace(auroraConfig, "api.example.com:443", "*.example.com:443", 1),
+		"non-443 egress":              strings.Replace(auroraConfig, "api.example.com:443", "api.example.com:8443", 1),
+		"egress without port":         strings.Replace(auroraConfig, "api.example.com:443", "api.example.com", 1),
+		"http anthropic base":         strings.Replace(auroraConfig, "https://ark.example.com", "http://ark.example.com", 1),
+		"anthropic path":              strings.Replace(auroraConfig, "https://ark.example.com", "https://ark.example.com/v1", 1),
+		"claude env api key":          strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"ANTHROPIC_API_KEY":"leak"},`, 1),
+		"claude env auth token":       strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"ANTHROPIC_AUTH_TOKEN":"leak"},`, 1),
+		"claude env secret key":       strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"MY_SECRET_VALUE":"leak"},`, 1),
+		"claude env unknown key":      strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"CLAUDE_CODE_UNKNOWN":"x"},`, 1),
+		"claude env empty value":      strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"ENABLE_TOOL_SEARCH":""},`, 1),
+		"claude env leading ws":       strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"ENABLE_TOOL_SEARCH":" true"},`, 1),
+		"claude env control char":     strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"ENABLE_TOOL_SEARCH":"true\t1"},`, 1),
+		"claude env bad timeout":      strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"API_TIMEOUT_MS":"soon"},`, 1),
+		"claude env negative timeout": strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"API_TIMEOUT_MS":"-1"},`, 1),
+		"claude env too long":         strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"ENABLE_TOOL_SEARCH":"`+strings.Repeat("a", 257)+`"},`, 1),
+		"claude env array":            strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":[],`, 1),
+		"unknown secret target":       strings.Replace(auroraConfig, "anthropic-api-key", "evil-key", 1),
+		"relative secret source":      strings.Replace(auroraConfig, "/etc/multica/aurora/anthropic-api-key", "anthropic-api-key", 1),
+		"readonly false":              strings.Replace(auroraConfig, `"readonly_rootfs":true`, `"readonly_rootfs":false`, 1),
+		"missing readonly":            strings.Replace(auroraConfig, `"readonly_rootfs":true,`, "", 1),
+		"empty uplink":                strings.Replace(auroraConfig, "aurora-egress-uplink", "", 1),
+		"unsafe uplink":               strings.Replace(auroraConfig, "aurora-egress-uplink", "uplink/evil", 1),
+		"unknown nested key":          strings.Replace(auroraConfig, `"aurora":{"server_url"`, `"aurora":{"image":"evil","server_url"`, 1),
+		"nested null":                 strings.Replace(auroraConfig, `"readonly_rootfs":true`, `"readonly_rootfs":null`, 1),
+		"server url type":             strings.Replace(auroraConfig, `"server_url":"http://api.internal:8080"`, `"server_url":7`, 1),
+		"provider files as array":     strings.Replace(auroraConfig, `"provider_secret_files":{"anthropic-api-key":"/etc/multica/aurora/anthropic-api-key"}`, `"provider_secret_files":[]`, 1),
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -66,6 +78,52 @@ func TestLoadConfigRejectsUnsafeAuroraProfile(t *testing.T) {
 				t.Fatalf("LoadConfig error = %v, want ErrInvalidRequest", err)
 			}
 		})
+	}
+}
+
+// TestLoadConfigAuroraClaudeEnv proves the optional extra Claude Code map is
+// accepted for every allowlisted key, including the bracketed model suffix, and
+// is empty when the field is omitted.
+func TestLoadConfigAuroraClaudeEnv(t *testing.T) {
+	raw := strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`,
+		`"anthropic_model":"ark-model","claude_env":{"ANTHROPIC_DEFAULT_SONNET_MODEL":"glm-5.3-flash[1M]","ANTHROPIC_DEFAULT_SONNET_MODEL_NAME":"glm-5.3-flash[1M]","CLAUDE_CODE_SUBAGENT_MODEL":"glm-5.3-flash[1M]","CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"1","CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":"1","ENABLE_TOOL_SEARCH":"true","API_TIMEOUT_MS":"600000"},`, 1)
+	cfg, err := loadTestConfig(t, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"ANTHROPIC_DEFAULT_SONNET_MODEL":           "glm-5.3-flash[1M]",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME":      "glm-5.3-flash[1M]",
+		"CLAUDE_CODE_SUBAGENT_MODEL":               "glm-5.3-flash[1M]",
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+		"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":     "1",
+		"ENABLE_TOOL_SEARCH":                       "true",
+		"API_TIMEOUT_MS":                           "600000",
+	}
+	if !reflect.DeepEqual(cfg.Aurora.ClaudeEnv, want) {
+		t.Fatalf("claude_env = %+v", cfg.Aurora.ClaudeEnv)
+	}
+	// An absent map adds no node environment and is not an empty-but-present one.
+	plain, err := loadTestConfig(t, auroraConfig)
+	if err != nil || len(plain.Aurora.ClaudeEnv) != 0 || plain.Aurora.ClaudeEnvPairs() != nil {
+		t.Fatalf("absent claude_env not empty: %+v err=%v", plain.Aurora.ClaudeEnv, err)
+	}
+}
+
+// TestAuroraClaudeEnvPairsDeterministic pins the sorted KEY=value order and the
+// nil result for an empty map, so one configuration yields one node env.
+func TestAuroraClaudeEnvPairsDeterministic(t *testing.T) {
+	cfg := AuroraConfig{ClaudeEnv: map[string]string{
+		"ENABLE_TOOL_SEARCH":         "true",
+		"API_TIMEOUT_MS":             "5",
+		"CLAUDE_CODE_SUBAGENT_MODEL": "m",
+	}}
+	want := []string{"API_TIMEOUT_MS=5", "CLAUDE_CODE_SUBAGENT_MODEL=m", "ENABLE_TOOL_SEARCH=true"}
+	if got := cfg.ClaudeEnvPairs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pairs = %v, want %v", got, want)
+	}
+	if got := (AuroraConfig{}).ClaudeEnvPairs(); got != nil {
+		t.Fatalf("empty pairs = %v, want nil", got)
 	}
 }
 

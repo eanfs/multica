@@ -83,9 +83,19 @@ Fleet 配置的 `aurora` 块用于选择受管沙箱 profile（见 `fleet-config
 - `apparmor_profile` — 已加载的 AppArmor profile 名称。加载 profile 是 operator 步骤。
 - `egress_hosts` — 追加到 sidecar 允许列表的精确 `host:443` 条目。
 - `anthropic_base_url` 和 `anthropic_model` — 可选的受管 Claude 端点覆盖；为空时保留供应商默认值。
+- `claude_env` — 传给受管子进程的额外 Claude Code 变量映射（可选）。
 - `provider_secret_files` — 固定目标名到宿主机绝对文件的映射，以只读方式挂载到 `/run/secrets/<name>`。
 - `readonly_rootfs` — 必须显式为 `true`。
 - `uplink_network` — 只有出口 sidecar 加入的 operator 网络。
+
+`claude_env` 只接受固定允许列表中的模型选择与工具路由变量：
+`ANTHROPIC_DEFAULT_{FABLE,HAIKU,OPUS,SONNET}_MODEL` 及其 `_NAME` 变体、
+`CLAUDE_CODE_SUBAGENT_MODEL`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`、
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`、`ENABLE_TOOL_SEARCH` 和
+`API_TIMEOUT_MS`；模型值可以使用带方括号后缀的形式，例如
+`glm-5.3-flash[1M]`。这是 operator 配置，绝不能携带凭据：任何名称包含
+API key、auth token、token、secret 或 password 的键都会在配置加载时被拒绝，
+每个值都有长度上限并会检查空白与控制字符。
 
 受管节点以固定的 `fleet-node run` entrypoint 启动，并 `exec` 为 `multica daemon start --managed`。它的一次性注册密钥（`mse_`）写入节点只读 secrets 卷的 `/secrets/aurora-enrollment`；SQL 只存哈希，Fleet 只在进程内交接表中持有明文。沙箱以非 root（`10001:10001`）运行在只读根文件系统上，使用 `cap_drop: ALL`、`no-new-privileges`、seccomp 和 AppArmor，并且只加入自己的工作区内网络。供应商凭据只以只读 bind 出现在固定的 `/run/secrets/*` 路径，绝不进入容器环境。
 

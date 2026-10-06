@@ -352,3 +352,93 @@ func TestInspectAuroraEnvironmentRejectsConfigDrift(t *testing.T) {
 		t.Fatal("override-free config rejected a node without anthropic variables")
 	}
 }
+
+// TestProviderNodeEnvAuroraClaudeEnv proves the Aurora node environment carries
+// exactly the configured claude_env pairs, in deterministic order, after the
+// fixed managed variables. The Claude profile stays at its original two entries
+// (pinned by TestClaudeProfileEnvUnchanged).
+func TestProviderNodeEnvAuroraClaudeEnv(t *testing.T) {
+	cfg := auroraConfig()
+	cfg.Aurora.ClaudeEnv = map[string]string{
+		"ENABLE_TOOL_SEARCH":             "true",
+		"API_TIMEOUT_MS":                 "600000",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.3-flash[1M]",
+	}
+	p := &Provider{cfg: cfg}
+	want := []string{
+		"HOME=" + model.NodeHome,
+		"FLEET_NODE_MAX_RUNS=1",
+		"MULTICA_MANAGED=1",
+		"MULTICA_SERVER_URL=http://api.internal:8080",
+		"MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE=" + model.AuroraEnrollmentFile,
+		"HTTP_PROXY=" + model.AuroraEgressProxyEndpoint,
+		"HTTPS_PROXY=" + model.AuroraEgressProxyEndpoint,
+		"NO_PROXY=" + model.AuroraNoProxyValue,
+		"MULTICA_CLAUDE_PATH=" + model.AuroraClaudePath,
+		"ANTHROPIC_BASE_URL=https://ark.example.com",
+		"ANTHROPIC_MODEL=ark-model",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.3-flash[1M]",
+		"API_TIMEOUT_MS=600000",
+		"ENABLE_TOOL_SEARCH=true",
+	}
+	if got := p.nodeEnv(auroraNode()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("aurora node env = %v, want %v", got, want)
+	}
+	// An empty map adds nothing to the pre-existing environment.
+	empty := auroraConfig()
+	if got := (&Provider{cfg: empty}).nodeEnv(auroraNode()); len(got) != 11 {
+		t.Fatalf("empty claude_env changed env: %v", got)
+	}
+}
+
+// TestInspectAuroraClaudeEnvExact pins the adoption authority for claude_env:
+// exactly the configured key/value pairs are accepted, a missing or mutated
+// configured pair is rejected, and any other key -- allowlisted or not -- fails
+// closed unless the configuration carries it.
+func TestInspectAuroraClaudeEnvExact(t *testing.T) {
+	cfg := auroraConfig()
+	cfg.Aurora.ClaudeEnv = map[string]string{
+		"CLAUDE_CODE_SUBAGENT_MODEL": "m",
+		"API_TIMEOUT_MS":             "5",
+	}
+	fixed := []string{
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"HOME=" + model.NodeHome,
+		"FLEET_NODE_MAX_RUNS=1",
+		"MULTICA_MANAGED=1",
+		"MULTICA_SERVER_URL=" + cfg.Aurora.ServerURL,
+		"MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE=" + model.AuroraEnrollmentFile,
+		"HTTP_PROXY=" + model.AuroraEgressProxyEndpoint,
+		"HTTPS_PROXY=" + model.AuroraEgressProxyEndpoint,
+		"NO_PROXY=" + model.AuroraNoProxyValue,
+		"MULTICA_CLAUDE_PATH=" + model.AuroraClaudePath,
+		"ANTHROPIC_BASE_URL=" + cfg.Aurora.AnthropicBaseURL,
+		"ANTHROPIC_MODEL=" + cfg.Aurora.AnthropicModel,
+	}
+	with := func(entries ...string) []string { return append(append([]string{}, fixed...), entries...) }
+	if !inspectEnvironment(with("API_TIMEOUT_MS=5", "CLAUDE_CODE_SUBAGENT_MODEL=m"), 1, cfg.Aurora) {
+		t.Fatal("exact claude_env set rejected")
+	}
+	if inspectEnvironment(with("CLAUDE_CODE_SUBAGENT_MODEL=m"), 1, cfg.Aurora) {
+		t.Fatal("missing configured claude_env key accepted")
+	}
+	if inspectEnvironment(with("API_TIMEOUT_MS=6", "CLAUDE_CODE_SUBAGENT_MODEL=m"), 1, cfg.Aurora) {
+		t.Fatal("mutated claude_env value accepted")
+	}
+	if inspectEnvironment(with("API_TIMEOUT_MS=5", "CLAUDE_CODE_SUBAGENT_MODEL=m", "ENABLE_TOOL_SEARCH=true"), 1, cfg.Aurora) {
+		t.Fatal("allowlisted but unconfigured claude_env key accepted")
+	}
+	if inspectEnvironment(with("API_TIMEOUT_MS=5", "CLAUDE_CODE_SUBAGENT_MODEL=m", "ANTHROPIC_API_KEY=secret"), 1, cfg.Aurora) {
+		t.Fatal("unknown credential key accepted")
+	}
+	// A configuration with no claude_env rejects any extra variable and accepts
+	// the fixed environment unchanged.
+	none := *cfg.Aurora
+	none.ClaudeEnv = nil
+	if inspectEnvironment(with("API_TIMEOUT_MS=5", "CLAUDE_CODE_SUBAGENT_MODEL=m"), 1, &none) {
+		t.Fatal("claude_env accepted when the config carries none")
+	}
+	if !inspectEnvironment(fixed, 1, &none) {
+		t.Fatal("clean node rejected when the config carries no claude_env")
+	}
+}

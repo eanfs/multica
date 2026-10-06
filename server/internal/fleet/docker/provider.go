@@ -233,6 +233,10 @@ func (p *Provider) nodeEnv(n model.Node) []string {
 		if p.cfg.Aurora.AnthropicModel != "" {
 			env = append(env, model.AuroraAnthropicModelEnv+"="+p.cfg.Aurora.AnthropicModel)
 		}
+		// Operator-configured extra Claude Code variables, in deterministic key
+		// order. An empty map appends nothing, so the node env stays
+		// byte-identical when claude_env is absent.
+		env = append(env, p.cfg.Aurora.ClaudeEnvPairs()...)
 	}
 	return env
 }

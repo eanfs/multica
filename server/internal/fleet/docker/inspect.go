@@ -41,6 +41,10 @@ func decodeReports(raw []byte) (reportStats, error) {
 
 // Image defaults are inspected against one fixed whitelist, never administrator or caller env.
 func inspectEnvironment(env []string, maxRuns int, aurora *model.AuroraConfig) bool {
+	var claudeEnv map[string]string
+	if aurora != nil {
+		claudeEnv = aurora.ClaudeEnv
+	}
 	seen := map[string]bool{}
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
@@ -109,7 +113,13 @@ func inspectEnvironment(env []string, maxRuns int, aurora *model.AuroraConfig) b
 				return false
 			}
 		default:
-			return false
+			// Every key outside the fixed built-ins must be exactly one of the
+			// operator-configured claude_env pairs. An allowlisted key the
+			// configuration does not carry is drift, not an acceptable extra.
+			want, configured := claudeEnv[key]
+			if !configured || value != want {
+				return false
+			}
 		}
 	}
 	if maxRuns == 0 {
@@ -130,6 +140,13 @@ func inspectEnvironment(env []string, maxRuns int, aurora *model.AuroraConfig) b
 		}
 		if aurora.AnthropicModel != "" && !seen[model.AuroraAnthropicModelEnv] {
 			return false
+		}
+		// Every configured claude_env pair must actually be present: adopting a
+		// container missing one would silently drop operator configuration.
+		for key := range aurora.ClaudeEnv {
+			if !seen[key] {
+				return false
+			}
 		}
 	}
 	return true
