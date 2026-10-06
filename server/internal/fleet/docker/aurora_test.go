@@ -17,7 +17,20 @@ const auroraEnrollmentToken = "mse_0123456789abcdef0123456789abcdef01234567"
 
 func auroraConfig() model.Config {
 	cfg := fixtureConfig()
-	cfg.Aurora = &model.AuroraConfig{ServerURL: "http://api.internal:8080"}
+	cfg.Aurora = &model.AuroraConfig{
+		ServerURL:        "http://api.internal:8080",
+		ProxyImage:       "ghcr.io/eanfs/multica-aurora-egress@sha256:b123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		SeccompProfile:   "/etc/multica/aurora/seccomp.json",
+		AppArmorProfile:  "multica-aurora-sandbox",
+		EgressHosts:      []string{"api.anthropic.com:443"},
+		AnthropicBaseURL: "https://ark.example.com",
+		AnthropicModel:   "ark-model",
+		ProviderSecretFiles: map[string]string{
+			"anthropic-api-key": "/etc/multica/aurora/anthropic-api-key",
+		},
+		ReadonlyRootfs: true,
+		UplinkNetwork:  "aurora-egress-uplink",
+	}
 	return cfg
 }
 
@@ -32,43 +45,105 @@ func auroraBootstrap(n model.Node) model.Bootstrap {
 	return model.Bootstrap{EnrollmentToken: auroraEnrollmentToken, ServerURL: "http://api.internal:8080", DaemonID: n.DaemonID}
 }
 
+// TestProviderEnsureAuroraProfile drives the full Aurora admission: an owned
+// internal workspace network, one credential-free egress sidecar on the uplink
+// network, and a sandbox node that only joins the workspace network.
 func TestProviderEnsureAuroraProfile(t *testing.T) {
+	cfg := auroraConfig()
 	n := auroraNode()
-	created := false
-	var installed []byte
-	inspect := func(context.Context, string) (Inspection, error) {
-		if !created {
+	base := New(fakeCalls{}, cfg)
+	nodeName := base.containerName(n)
+	egressName := base.egressName(n)
+	workspace := base.workspaceNetwork(n).Name
+
+	type createCall struct {
+		cfg  *container.Config
+		host container.HostConfig
+		net  string
+		name string
+	}
+	var creates []createCall
+	var connected []string
+	var networks []Resource
+	inspect := func(_ context.Context, id string) (Inspection, error) {
+		switch id {
+		case "egress-id":
+			return Inspection{ID: "egress-id", State: "created", Labels: labels(n.Namespace, cfg.FleetID, nodeID(n), egressProxyRole)}, nil
+		case "node-id":
+			return Inspection{ID: "node-id", State: "created", Labels: labels(n.Namespace, cfg.FleetID, nodeID(n), "node")}, nil
+		default:
 			return Inspection{}, errdefs.ErrNotFound
 		}
-		return Inspection{ID: "cid", State: "created", Labels: fixtureLabels("node")}, nil
 	}
-	e := fakeCalls{inspect: inspect,
-		ensureNetwork: func(context.Context, Resource) error { return nil },
+	e := fakeCalls{
+		inspect:       inspect,
+		ensureNetwork: func(_ context.Context, r Resource) error { networks = append(networks, r); return nil },
 		ensureVolume:  func(context.Context, Resource) error { return nil },
-		bootstrap:     func(_ context.Context, _ []Resource, raw []byte) error { installed = raw; return nil },
-		create: func(_ context.Context, c *container.Config, h *container.HostConfig, _, _ string) (string, error) {
-			created = true
-			if c.Image != "node-snapshot" || !reflect.DeepEqual([]string(c.Entrypoint), []string{"/usr/local/bin/fleet-node"}) || !reflect.DeepEqual([]string(c.Cmd), []string{"run"}) {
-				t.Fatalf("aurora node must keep the fixed fleet-node entrypoint: %+v %v", c.Entrypoint, c.Cmd)
+		bootstrap:     func(context.Context, []Resource, []byte) error { return nil },
+		connectNetwork: func(_ context.Context, net, id string, aliases []string) error {
+			connected = append(connected, net+"|"+id+"|"+strings.Join(aliases, ","))
+			return nil
+		},
+		removeNetwork: func(context.Context, Resource) error { return nil },
+		create: func(_ context.Context, c *container.Config, h *container.HostConfig, net, name string) (string, error) {
+			creates = append(creates, createCall{cfg: c, host: *h, net: net, name: name})
+			if name == egressName {
+				return "egress-id", nil
 			}
-			wantEnv := []string{"HOME=" + model.NodeHome, "FLEET_NODE_MAX_RUNS=1", "MULTICA_MANAGED=1", "MULTICA_SERVER_URL=http://api.internal:8080", "MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE=" + model.AuroraEnrollmentFile}
-			if !reflect.DeepEqual(c.Env, wantEnv) {
-				t.Fatalf("aurora env = %v", c.Env)
-			}
-			if len(h.Mounts) != 2 || h.Mounts[1].Target != model.AuroraEnrollmentDir || !h.Mounts[1].ReadOnly {
-				t.Fatalf("aurora mounts = %+v", h.Mounts)
-			}
-			return "", nil
+			return "node-id", nil
 		},
 		start:  func(context.Context, string) error { return nil },
 		health: func(context.Context, string) ([]byte, error) { return []byte(goodHealth), nil },
 	}
-	p := New(e, auroraConfig())
+	p := New(e, cfg)
 	if _, err := p.Ensure(context.Background(), n, auroraBootstrap(n)); err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
-	if !strings.Contains(string(installed), "secrets/aurora-enrollment") || strings.Contains(string(installed), "bootstrap.json") {
-		t.Fatal("aurora installer must carry only the managed enrollment secret")
+	if len(networks) != 2 || networks[0].Internal || !networks[1].Internal || networks[1].Role != "workspace-network" || networks[1].Name != workspace {
+		t.Fatalf("networks = %+v", networks)
+	}
+	if len(creates) != 2 {
+		t.Fatalf("creates = %d", len(creates))
+	}
+	proxy, node := creates[0], creates[1]
+	if proxy.name != egressName || proxy.net != cfg.Aurora.UplinkNetwork || proxy.cfg.Image != cfg.Aurora.ProxyImage {
+		t.Fatalf("egress create = %+v", proxy)
+	}
+	if len(proxy.host.Mounts) != 0 || len(proxy.cfg.Env) != 2 || proxy.host.ReadonlyRootfs == false || proxy.host.NetworkMode != container.NetworkMode(cfg.Aurora.UplinkNetwork) {
+		t.Fatalf("egress host = %+v env=%v", proxy.host, proxy.cfg.Env)
+	}
+	if strings.Contains(strings.Join(proxy.cfg.Env, " "), "API_KEY=") {
+		t.Fatalf("sidecar carries a credential: %v", proxy.cfg.Env)
+	}
+	if node.name != nodeName || node.net != workspace {
+		t.Fatalf("node create = %+v", node)
+	}
+	wantEnv := []string{
+		"HOME=" + model.NodeHome,
+		"FLEET_NODE_MAX_RUNS=1",
+		"MULTICA_MANAGED=1",
+		"MULTICA_SERVER_URL=http://api.internal:8080",
+		"MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE=" + model.AuroraEnrollmentFile,
+		"HTTP_PROXY=" + model.AuroraEgressProxyEndpoint,
+		"HTTPS_PROXY=" + model.AuroraEgressProxyEndpoint,
+		"NO_PROXY=" + model.AuroraNoProxyValue,
+		"ANTHROPIC_BASE_URL=https://ark.example.com",
+		"ANTHROPIC_MODEL=ark-model",
+	}
+	if !reflect.DeepEqual(node.cfg.Env, wantEnv) {
+		t.Fatalf("node env = %v", node.cfg.Env)
+	}
+	if node.host.NetworkMode != container.NetworkMode(workspace) || !node.host.ReadonlyRootfs || !reflect.DeepEqual(node.host.SecurityOpt, []string{"no-new-privileges:true", "seccomp=" + cfg.Aurora.SeccompProfile, "apparmor=" + cfg.Aurora.AppArmorProfile}) {
+		t.Fatalf("node host = %+v", node.host)
+	}
+	if len(node.host.Mounts) != 3 || node.host.Mounts[2].Type != "bind" || !node.host.Mounts[2].ReadOnly || node.host.Mounts[2].Target != model.AuroraAnthropicAPIKeyTarget {
+		t.Fatalf("node mounts = %+v", node.host.Mounts)
+	}
+	if len(connected) != 1 || connected[0] != workspace+"|egress-id|"+model.AuroraEgressAlias {
+		t.Fatalf("connect = %v", connected)
+	}
+	if !reflect.DeepEqual([]string(node.cfg.Entrypoint), []string{"/usr/local/bin/fleet-node"}) || !reflect.DeepEqual([]string(node.cfg.Cmd), []string{"run"}) {
+		t.Fatalf("entrypoint changed: %v %v", node.cfg.Entrypoint, node.cfg.Cmd)
 	}
 }
 
@@ -125,7 +200,9 @@ func TestAuroraBootstrapValidationRejectsForeignPayload(t *testing.T) {
 
 func TestInspectAuroraEnvironment(t *testing.T) {
 	base := []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=" + model.NodeHome, "FLEET_NODE_MAX_RUNS=1"}
-	full := append(append([]string{}, base...), "MULTICA_MANAGED=1", "MULTICA_SERVER_URL=http://api.internal:8080", "MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE="+model.AuroraEnrollmentFile)
+	managed := []string{"MULTICA_MANAGED=1", "MULTICA_SERVER_URL=http://api.internal:8080", "MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE=" + model.AuroraEnrollmentFile}
+	proxy := []string{"HTTP_PROXY=" + model.AuroraEgressProxyEndpoint, "HTTPS_PROXY=" + model.AuroraEgressProxyEndpoint, "NO_PROXY=" + model.AuroraNoProxyValue}
+	full := append(append(append(append([]string{}, base...), managed...), proxy...), "ANTHROPIC_BASE_URL=https://ark.example.com", "ANTHROPIC_MODEL=ark-model")
 	if !inspectEnvironment(full, 1, true) {
 		t.Fatal("valid aurora environment rejected")
 	}
@@ -135,7 +212,12 @@ func TestInspectAuroraEnvironment(t *testing.T) {
 	if inspectEnvironment(base, 1, true) {
 		t.Fatal("missing managed enrollment environment accepted")
 	}
+	noProxy := append(append([]string{}, base...), managed...)
+	if inspectEnvironment(noProxy, 1, true) {
+		t.Fatal("missing egress proxy environment accepted")
+	}
 	credentialed := append(append([]string{}, base...), "MULTICA_MANAGED=1", "MULTICA_SERVER_URL=http://user:pass@api.internal:8080", "MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE="+model.AuroraEnrollmentFile)
+	credentialed = append(credentialed, proxy...)
 	if inspectEnvironment(credentialed, 1, true) {
 		t.Fatal("credentialed server url accepted")
 	}

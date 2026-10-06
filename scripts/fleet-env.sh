@@ -18,7 +18,7 @@ try{
  need(args.repo===root&&path.isAbsolute(args.state)&&path.basename(args.state)===args.name&&/^[a-z0-9][a-z0-9_-]{0,127}$/.test(args.name));directories(args.state);need((fs.statSync(args.state).mode&0o777)===0o700&&fs.statSync(args.state).uid===process.getuid());
  const dsn=args['database-url'],url=new URL(dsn);need(dsn.length<=8192&&['postgres:','postgresql:'].includes(url.protocol)&&url.username&&url.password&&!url.hash&&decodeURIComponent(url.pathname.slice(1))===args['db-name']&&url.searchParams.get('sslmode')==='disable'&&!/[\x00-\x20\x7f-\x9f]/.test(dsn));need(['localhost','127.0.0.1','[::1]'].includes(url.hostname));
  const apiPort=Number(args['api-port']),offset=Number(args.offset);need(Number.isInteger(apiPort)&&apiPort>0&&apiPort<=65535&&Number.isInteger(offset)&&offset>=0&&offset<1000);
- const input=json(args.input),fields=['version','database_name','database_lifecycle','context','engine_id','pg_container_id','pg_network_id','pg_alias','pg_port','pg_host_port','socket_path','uid','gid','socket_gid','node_image','fleet_image','api_url','profiles_file','service_key_file'];
+ const input=json(args.input),fields=['version','database_name','database_lifecycle','context','engine_id','pg_container_id','pg_network_id','pg_alias','pg_port','pg_host_port','socket_path','uid','gid','socket_gid','node_image','fleet_image','api_url','profiles_file','service_key_file','aurora'];
  need(Object.keys(input).length===fields.length&&fields.every(k=>Object.hasOwn(input,k))&&input.version===1);
  need(input.database_lifecycle==='exclusive-managed'&&input.database_name===args['db-name']);
  need(/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(args['db-name']));
@@ -29,6 +29,22 @@ try{
  need(input.uid===process.getuid()&&input.uid>0&&input.gid===process.getgid()&&input.gid>0&&Number.isInteger(input.socket_gid)&&input.socket_gid>=0);
  need(path.isAbsolute(input.socket_path)&&input.pg_alias==='postgres'&&input.pg_port===5432&&Number(url.port||5432)===input.pg_host_port);
  for(const k of ['node_image','fleet_image'])need(typeof input[k]==='string'&&/^[a-zA-Z0-9._/:-]+@sha256:[a-f0-9]{64}$/.test(input[k]));
+// Aurora profile fields. The uplink network is the owned fleet-nodes network
+// and is written below; every credential stays a host file path, never a value.
+const aurora=input.aurora;need(aurora&&typeof aurora==='object'&&!Array.isArray(aurora));
+const auroraKeys=['server_url','proxy_image','seccomp_profile','apparmor_profile','egress_hosts','anthropic_base_url','anthropic_model','provider_secret_files'];
+need(Object.keys(aurora).length===auroraKeys.length&&auroraKeys.every(k=>Object.hasOwn(aurora,k)));
+const serverOrigin=new URL(aurora.server_url);need(['http:','https:'].includes(serverOrigin.protocol)&&serverOrigin.hostname&&!serverOrigin.username&&!serverOrigin.password&&!serverOrigin.search&&!serverOrigin.hash&&serverOrigin.pathname==='/');
+need(/^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$/.test(aurora.proxy_image));
+need(typeof aurora.seccomp_profile==='string'&&path.isAbsolute(aurora.seccomp_profile)&&path.normalize(aurora.seccomp_profile)===aurora.seccomp_profile&&!/[\x00-\x20\x7f-\x9f]/.test(aurora.seccomp_profile));
+need(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(aurora.apparmor_profile));
+need(Array.isArray(aurora.egress_hosts)&&aurora.egress_hosts.every(h=>typeof h==='string'&&/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?:443$/.test(h)));
+need(typeof aurora.anthropic_base_url==='string'&&typeof aurora.anthropic_model==='string');
+if(aurora.anthropic_base_url!==''){const base=new URL(aurora.anthropic_base_url);need(base.protocol==='https:'&&base.hostname&&!base.port&&!base.username&&!base.password&&!base.search&&!base.hash&&(base.pathname===''||base.pathname==='/'));}
+if(aurora.anthropic_model!=='')need(aurora.anthropic_model.trim()===aurora.anthropic_model&&!/[\s]/.test(aurora.anthropic_model));
+const secretFiles=aurora.provider_secret_files;need(secretFiles&&typeof secretFiles==='object'&&!Array.isArray(secretFiles));
+const secretTargets=['anthropic-api-key','ark-api-key','openai-api-key','volc-asr-api-key'];need(Object.keys(secretFiles).every(k=>secretTargets.includes(k)));
+for(const source of Object.values(secretFiles)){need(typeof source==='string');if(source!=='')need(path.isAbsolute(source)&&path.normalize(source)===source&&!/[\x00-\x20\x7f-\x9f]/.test(source));}
  const api=new URL(input.api_url);need(api.protocol==='http:'&&api.hostname==='host.docker.internal'&&Number(api.port)===apiPort&&!api.username&&!api.password&&!api.search&&!api.hash&&api.pathname==='/');
  const key=readPrivate(input.service_key_file);need(key.trim().length>=32&&key.trim().length<=4096&&!/[\x00-\x20\x7f]/.test(key.trim()));
  const profiles=json(input.profiles_file);need(profiles.version===1&&profiles.owners&&typeof profiles.owners==='object'&&!Array.isArray(profiles.owners)&&Object.keys(profiles).sort().join()==='owners,version');
@@ -118,7 +134,7 @@ try{
  if(action==='prepare'){
   // Preserve raw URI credentials, database encoding and query ordering.
   const m=dsn.match(/^(postgres(?:ql)?:\/\/[^/]*@)([^/]+)(\/.*)$/);need(m);writePrivate(dbPath,m[1]+input.pg_alias+':'+input.pg_port+m[3]);
-  writePrivate(configPath,{namespace:id.namespace,fleet_id:id.fleet_id,image:input.node_image,api_url:input.api_url,max_nodes:2,specs:{'local-small':{cpus:2,memory_bytes:4294967296,pids:256,max_runs:1}}});writePrivate(keyPath,key);
+  writePrivate(configPath,{namespace:id.namespace,fleet_id:id.fleet_id,image:input.node_image,api_url:input.api_url,max_nodes:2,specs:{sandbox:{cpus:2,memory_bytes:4294967296,pids:256,max_runs:1}},aurora:{server_url:input.aurora.server_url,proxy_image:input.aurora.proxy_image,seccomp_profile:input.aurora.seccomp_profile,apparmor_profile:input.aurora.apparmor_profile,egress_hosts:input.aurora.egress_hosts,anthropic_base_url:input.aurora.anthropic_base_url,anthropic_model:input.aurora.anthropic_model,provider_secret_files:input.aurora.provider_secret_files,readonly_rootfs:true,uplink_network:id.node_network}});writePrivate(keyPath,key);
   // Parent-approved exception: load DB URI into only the original Fleet process.
   const startup='IFS= read -r DATABASE_URL < /run/multica-fleet/database-url || test -n "$$DATABASE_URL"; test -n "$$DATABASE_URL" || exit 1; export DATABASE_URL; exec /usr/local/bin/fleet';
   writePrivate(composePath,{services:{fleet:{container_name:id.node_network+'-control',image:input.fleet_image,user:input.uid+':'+input.gid,group_add:[String(input.socket_gid)],entrypoint:['/bin/sh','-ec'],command:[startup],environment:{FLEET_ADDR:'0.0.0.0:8090',FLEET_CONFIG_FILE:'/run/multica-fleet/config.json',FLEET_SERVICE_KEY_FILE:'/run/multica-fleet/service-key'},ports:['127.0.0.1:'+id.port+':8090'],volumes:[{type:'bind',source:input.socket_path,target:'/var/run/docker.sock'},{type:'bind',source:fleetDir,target:'/run/multica-fleet',read_only:true},...mounts],labels:{...labels,'multica.fleet.role':'control'},extra_hosts:['host.docker.internal:host-gateway'],networks:['shared-pg','fleet-nodes'],healthcheck:{test:['CMD','/usr/local/bin/fleet','readyz'],interval:'5s',timeout:'10s',retries:12},read_only:true,cap_drop:['ALL'],security_opt:['no-new-privileges:true'],restart:'unless-stopped'}},networks:{'shared-pg':{external:true,name:pgNet.Name},'fleet-nodes':{external:true,name:id.node_network}}});need(!readPrivate(composePath).includes(dsn)&&!readPrivate(composePath).includes(key.trim()));

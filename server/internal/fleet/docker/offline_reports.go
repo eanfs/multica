@@ -13,6 +13,7 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/network"
 	"github.com/google/uuid"
 	"github.com/multica-ai/multica/server/internal/fleet/model"
 )
@@ -147,6 +148,11 @@ func (p *Provider) Delete(ctx context.Context, n model.Node, ref model.Operation
 			return safeError(e)
 		}
 	}
+	if p.cfg.Aurora != nil {
+		if e = p.removeEgress(ctx, n); e != nil {
+			return safeError(e)
+		}
+	}
 	// Data is last: a crash or uncertain earlier deletion always leaves data for fresh proof/retry.
 	for _, r := range []Resource{p.volume(n, "secrets"), p.volume(n, "data")} {
 		if r.Role == "data" {
@@ -207,13 +213,26 @@ func (e *sdkEngine) nodeResourcesAbsent(ctx context.Context, n model.Node) (bool
 			return false, model.ErrForbidden
 		}
 		if r.ID != n.ContainerID {
-			if r.Role != "diagnostic" && r.Role != "bootstrap" {
+			if r.Role != "diagnostic" && r.Role != "bootstrap" && r.Role != egressProxyRole {
 				return false, model.ErrUnknownHealth
 			}
 			absent = false
 			continue
 		}
 		absent = false
+	}
+	// An Aurora node also owns its internal workspace network; completion needs
+	// that network gone, not only its containers and volumes.
+	if absent && e.cfg.Aurora != nil {
+		nw, err := e.client.NetworkInspect(ctx, p.workspaceNetwork(n).Name, network.InspectOptions{})
+		if err == nil {
+			if nw.Name != p.workspaceNetwork(n).Name || nw.ID == "" || !sameLabels(nw.Labels, p.workspaceNetwork(n).Labels) {
+				return false, model.ErrForbidden
+			}
+			absent = false
+		} else if !errdefs.IsNotFound(err) {
+			return false, model.ErrUnknownHealth
+		}
 	}
 	if absent && e.helpers != nil {
 		e.helpers.prune(n.Namespace+"\x00"+e.cfg.FleetID+"\x00"+nodeID(n), map[string]bool{})
@@ -281,7 +300,11 @@ func (e *sdkEngine) offlineIdentity(ctx context.Context, n model.Node) error {
 				return model.ErrUnknownHealth
 			}
 			p := Provider{cfg: e.cfg}
-			if err := validateNodeInspection(c, n, p.networkName(), p.cfg.Aurora != nil); err != nil {
+			network := p.networkName()
+			if p.cfg.Aurora != nil {
+				network = p.workspaceNetwork(n).Name
+			}
+			if err := validateNodeInspection(c, n, network, p.cfg); err != nil {
 				return err
 			}
 			if c.State.Status != "exited" && c.State.Status != "created" {
@@ -310,6 +333,10 @@ func (e *sdkEngine) recoverHelpers(ctx context.Context, n model.Node) error {
 		}
 		if !Owns(r.Labels, n.Namespace, e.cfg.FleetID, nodeID(n), r.Role) {
 			return model.ErrForbidden
+		}
+		if r.Role == egressProxyRole {
+			// The egress sidecar is not a helper; Delete owns its removal.
+			continue
 		}
 		if r.Role != "diagnostic" && r.Role != "bootstrap" {
 			return model.ErrUnknownHealth

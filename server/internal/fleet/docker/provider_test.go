@@ -14,15 +14,17 @@ import (
 
 type fakeCalls struct {
 	Engine
-	inspect       func(context.Context, string) (Inspection, error)
-	find          func(context.Context, map[string]string) ([]Resource, error)
-	create        func(context.Context, *container.Config, *container.HostConfig, string, string) (string, error)
-	ensureVolume  func(context.Context, Resource) error
-	ensureNetwork func(context.Context, Resource) error
-	bootstrap     func(context.Context, []Resource, []byte) error
-	start         func(context.Context, string) error
-	stop          func(context.Context, string) error
-	health        func(context.Context, string) ([]byte, error)
+	inspect        func(context.Context, string) (Inspection, error)
+	find           func(context.Context, map[string]string) ([]Resource, error)
+	create         func(context.Context, *container.Config, *container.HostConfig, string, string) (string, error)
+	ensureVolume   func(context.Context, Resource) error
+	ensureNetwork  func(context.Context, Resource) error
+	connectNetwork func(context.Context, string, string, []string) error
+	removeNetwork  func(context.Context, Resource) error
+	bootstrap      func(context.Context, []Resource, []byte) error
+	start          func(context.Context, string) error
+	stop           func(context.Context, string) error
+	health         func(context.Context, string) ([]byte, error)
 }
 
 func (f fakeCalls) Inspect(c context.Context, id string) (Inspection, error) { return f.inspect(c, id) }
@@ -34,6 +36,10 @@ func (f fakeCalls) Create(c context.Context, a *container.Config, h *container.H
 }
 func (f fakeCalls) EnsureVolume(c context.Context, r Resource) error  { return f.ensureVolume(c, r) }
 func (f fakeCalls) EnsureNetwork(c context.Context, r Resource) error { return f.ensureNetwork(c, r) }
+func (f fakeCalls) ConnectNetwork(c context.Context, net, id string, aliases []string) error {
+	return f.connectNetwork(c, net, id, aliases)
+}
+func (f fakeCalls) RemoveNetwork(c context.Context, r Resource) error { return f.removeNetwork(c, r) }
 func (f fakeCalls) InstallBootstrap(c context.Context, r []Resource, b []byte) error {
 	return f.bootstrap(c, r, b)
 }
@@ -235,7 +241,7 @@ func TestProviderEnsureTimeoutAfterCreateAdoptsWithoutDuplicate(t *testing.T) {
 }
 
 func TestNodeHostConfigIsRestricted(t *testing.T) {
-	h := NodeHostConfig(model.Spec{CPUs: 2, MemoryBytes: 4 << 30, Pids: 256, MaxRuns: 1}, true)
+	h := NodeHostConfig(model.Spec{CPUs: 2, MemoryBytes: 4 << 30, Pids: 256, MaxRuns: 1}, true, nil)
 	if h.Privileged || h.NetworkMode == "host" || h.PidMode == "host" || len(h.PortBindings) != 0 || h.PublishAllPorts {
 		t.Fatal("unsafe isolation")
 	}
@@ -248,7 +254,7 @@ func TestNodeHostConfigIsRestricted(t *testing.T) {
 	if !reflect.DeepEqual(h.ExtraHosts, []string{"host.docker.internal:host-gateway"}) {
 		t.Fatal("Linux gateway missing")
 	}
-	if len(NodeHostConfig(model.Spec{}, false).ExtraHosts) != 0 {
+	if len(NodeHostConfig(model.Spec{}, false, nil).ExtraHosts) != 0 {
 		t.Fatal("unrequested gateway")
 	}
 }

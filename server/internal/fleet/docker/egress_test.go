@@ -1,0 +1,131 @@
+package docker
+
+import (
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/network"
+	"github.com/multica-ai/multica/server/internal/fleet/model"
+)
+
+func TestAuroraNodeHostConfigRestricted(t *testing.T) {
+	spec := model.Spec{CPUs: 2, MemoryBytes: 4 << 30, Pids: 256, MaxRuns: 1}
+	aurora := auroraConfig().Aurora
+	h := NodeHostConfig(spec, true, aurora)
+	if !h.ReadonlyRootfs || h.Privileged || h.PidMode != "" || len(h.PortBindings) != 0 || h.PublishAllPorts || h.NetworkMode == "host" {
+		t.Fatalf("unsafe aurora isolation: %+v", h)
+	}
+	if !reflect.DeepEqual(h.SecurityOpt, []string{"no-new-privileges:true", "seccomp=" + aurora.SeccompProfile, "apparmor=" + aurora.AppArmorProfile}) {
+		t.Fatalf("security opt = %v", h.SecurityOpt)
+	}
+	wantTmpfs := map[string]string{
+		model.AuroraWorkspaceMount: auroraWorkspaceTmpfs,
+		model.AuroraTmpMount:       auroraTmpTmpfs,
+		model.AuroraRunMount:       auroraRunTmpfs,
+	}
+	if !reflect.DeepEqual(h.Tmpfs, wantTmpfs) {
+		t.Fatalf("tmpfs = %v", h.Tmpfs)
+	}
+	for _, f := range []string{auroraWorkspaceTmpfs, auroraTmpTmpfs, auroraRunTmpfs} {
+		for _, want := range []string{"nosuid", "nodev", "noexec", "uid=10001", "gid=10001"} {
+			if !strings.Contains(f, want) {
+				t.Fatalf("tmpfs missing %s: %s", want, f)
+			}
+		}
+	}
+	// The Claude profile must be byte-for-byte identical to the pre-Aurora builder.
+	claude := NodeHostConfig(spec, true, nil)
+	if claude.ReadonlyRootfs || len(claude.Tmpfs) != 0 || !reflect.DeepEqual(claude.SecurityOpt, []string{"no-new-privileges:true"}) {
+		t.Fatalf("claude hostconfig changed: %+v", claude)
+	}
+}
+
+func TestEgressSidecarPolicy(t *testing.T) {
+	cfg := auroraConfig()
+	n := auroraNode()
+	proxyName := New(fakeCalls{}, cfg).egressName(n)
+	workspace := New(fakeCalls{}, cfg).workspaceNetwork(n).Name
+	args, err := EgressProxyArgs(cfg, proxyName, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--network "+cfg.Aurora.UplinkNetwork) {
+		t.Fatalf("sidecar not on uplink: %v", args)
+	}
+	if strings.Contains(joined, "mount") || strings.Contains(joined, "API_KEY") || strings.Contains(joined, "enrollment") {
+		t.Fatalf("sidecar mounts a credential: %v", args)
+	}
+	if args[len(args)-1] != cfg.Aurora.ProxyImage {
+		t.Fatalf("sidecar image not final: %v", args)
+	}
+	if got := EgressNetworkConnectArgs(proxyName, workspace); !reflect.DeepEqual(got, []string{"network", "connect", "--alias", model.AuroraEgressAlias, workspace, proxyName}) {
+		t.Fatalf("connect args = %v", got)
+	}
+	// The Engine-level spec encodes the same policy: uplink only, no mounts and
+	// no provider credential.
+	spec, host, err := egressProxySpec(cfg, n, proxyName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host.NetworkMode != container.NetworkMode(cfg.Aurora.UplinkNetwork) || !host.ReadonlyRootfs || len(host.Mounts) != 0 {
+		t.Fatalf("sidecar host = %+v", host)
+	}
+	for _, entry := range spec.Env {
+		if strings.Contains(entry, "API_KEY") || strings.Contains(entry, "ENROLLMENT") {
+			t.Fatalf("sidecar env carries a credential: %v", spec.Env)
+		}
+	}
+}
+
+func TestAuroraProviderSecretMountsAreReadOnly(t *testing.T) {
+	cfg := auroraConfig()
+	cfg.Aurora.ProviderSecretFiles = map[string]string{
+		"anthropic-api-key": "/etc/multica/aurora/anthropic-api-key",
+		"ark-api-key":       "/etc/multica/aurora/ark-api-key",
+		"openai-api-key":    "/etc/multica/aurora/openai-api-key",
+		"volc-asr-api-key":  "/etc/multica/aurora/volc-asr-api-key",
+	}
+	mounts := providerSecretMounts(cfg.Aurora)
+	if len(mounts) != 4 {
+		t.Fatalf("mounts = %d", len(mounts))
+	}
+	want := map[string]string{
+		"/etc/multica/aurora/anthropic-api-key": model.AuroraAnthropicAPIKeyTarget,
+		"/etc/multica/aurora/ark-api-key":       model.AuroraArkAPIKeyTarget,
+		"/etc/multica/aurora/openai-api-key":    model.AuroraOpenAIAPIKeyTarget,
+		"/etc/multica/aurora/volc-asr-api-key":  model.AuroraVolcASRAPIKeyTarget,
+	}
+	for _, m := range mounts {
+		if m.Type != mount.TypeBind || !m.ReadOnly || want[m.Source] != m.Target {
+			t.Fatalf("unsafe provider mount: %+v", m)
+		}
+	}
+	if providerSecretMounts(nil) != nil {
+		t.Fatal("claude profile must mount nothing")
+	}
+}
+
+func TestClaudeProfileEnvUnchanged(t *testing.T) {
+	p := &Provider{cfg: fixtureConfig()}
+	n := fixtureNode()
+	if got := p.nodeEnv(n); !reflect.DeepEqual(got, []string{"HOME=" + model.NodeHome, "FLEET_NODE_MAX_RUNS=1"}) {
+		t.Fatalf("claude env changed: %v", got)
+	}
+	if inspectEnvironment([]string{"HTTP_PROXY=" + model.AuroraEgressProxyEndpoint}, 0, false) {
+		t.Fatal("claude profile accepted a proxy variable")
+	}
+	if inspectEnvironment([]string{"MULTICA_MANAGED=1"}, 0, false) {
+		t.Fatal("claude profile accepted managed env")
+	}
+	// Build a valid Claude snapshot exactly as the builder does and adopt it.
+	h := NodeHostConfig(n.Resources, true, nil)
+	h.NetworkMode = "node-net"
+	r := container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "cid", HostConfig: &h}, Config: &container.Config{Image: n.Image, User: "10001:10001", Env: []string{"HOME=/data/home", "FLEET_NODE_MAX_RUNS=1"}, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"run"}}, NetworkSettings: &container.NetworkSettings{Networks: map[string]*network.EndpointSettings{"node-net": {}}}, Mounts: []container.MountPoint{{Type: mount.TypeVolume, Name: n.DataVolume, Destination: model.DataMount, RW: true}, {Type: mount.TypeVolume, Name: n.SecretsVolume, Destination: "/secrets", RW: false}}}
+	if err := validateNodeInspection(r, n, "node-net", fixtureConfig()); err != nil {
+		t.Fatalf("claude snapshot rejected: %v", err)
+	}
+}

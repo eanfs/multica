@@ -61,6 +61,25 @@ func (p *Provider) networkName() string {
 	return "multica-fleet-" + hex.EncodeToString(sum[:12])
 }
 func (p *Provider) containerName(n model.Node) string { return p.networkName() + "-" + nodeID(n) }
+
+// workspaceNetwork is the per-node, --internal workspace network an Aurora node
+// joins. It is derived deterministically from the namespace, Fleet and node, so
+// workspace-controlled input never reaches a Docker name or label.
+func (p *Provider) workspaceNetwork(n model.Node) Resource {
+	sum := sha256.Sum256([]byte(p.cfg.Namespace + "\x00" + p.cfg.FleetID + "\x00" + nodeID(n) + "\x00workspace"))
+	return Resource{
+		Name:     "multica-fleet-ws-" + hex.EncodeToString(sum[:9]),
+		Role:     "workspace-network",
+		Internal: true,
+		Labels:   labels(n.Namespace, p.cfg.FleetID, nodeID(n), "workspace-network"),
+	}
+}
+
+// egressName is the deterministic name of one node's egress sidecar.
+func (p *Provider) egressName(n model.Node) string {
+	sum := sha256.Sum256([]byte(p.cfg.Namespace + "\x00" + p.cfg.FleetID + "\x00" + nodeID(n) + "\x00egress"))
+	return "multica-fleet-eg-" + hex.EncodeToString(sum[:9])
+}
 func (p *Provider) volume(n model.Node, role string) Resource {
 	name := n.DataVolume
 	if role == "secrets" {
@@ -112,6 +131,16 @@ func (p *Provider) Ensure(ctx context.Context, n model.Node, b model.Bootstrap) 
 	if e = bounded(ctx, func(c context.Context) error { return p.engine.EnsureNetwork(c, network) }); e != nil {
 		return model.Observation{}, safeError(e)
 	}
+	workspace := network
+	if p.cfg.Aurora != nil {
+		// Aurora nodes never join the namespace network. They join their own
+		// internal workspace network, whose only reachable peer is the egress
+		// sidecar attached under the fixed "egress" alias.
+		workspace = p.workspaceNetwork(n)
+		if e = bounded(ctx, func(c context.Context) error { return p.engine.EnsureNetwork(c, workspace) }); e != nil {
+			return model.Observation{}, safeError(e)
+		}
+	}
 	vols := []Resource{p.volume(n, "data"), p.volume(n, "secrets")}
 	for _, r := range vols {
 		if e = bounded(ctx, func(c context.Context) error { return p.engine.EnsureVolume(c, r) }); e != nil {
@@ -125,12 +154,18 @@ func (p *Provider) Ensure(ctx context.Context, n model.Node, b model.Bootstrap) 
 	if e = bounded(ctx, func(c context.Context) error { return p.engine.InstallBootstrap(c, vols, tar) }); e != nil {
 		return model.Observation{}, safeError(e)
 	}
-	h := NodeHostConfig(n.Resources, true)
-	h.NetworkMode = container.NetworkMode(network.Name)
+	if p.cfg.Aurora != nil {
+		if e = p.ensureEgress(ctx, n, workspace); e != nil {
+			return model.Observation{}, safeError(e)
+		}
+	}
+	h := NodeHostConfig(n.Resources, true, p.cfg.Aurora)
+	h.NetworkMode = container.NetworkMode(workspace.Name)
 	h.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: n.DataVolume, Target: model.DataMount}, {Type: mount.TypeVolume, Source: n.SecretsVolume, Target: model.AuroraEnrollmentDir, ReadOnly: true}}
+	h.Mounts = append(h.Mounts, providerSecretMounts(p.cfg.Aurora)...)
 	c := &container.Config{Image: n.Image, User: "10001:10001", Labels: labels(n.Namespace, p.cfg.FleetID, nodeID(n), "node"), Env: p.nodeEnv(n), Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"run"}, Healthcheck: &container.HealthConfig{Test: []string{"CMD", "/usr/local/bin/fleet-node", "health"}, Interval: 5 * time.Second, Timeout: 5 * time.Second, Retries: 3}}
 	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	created, createErr := p.engine.Create(callCtx, c, &h, network.Name, p.containerName(n))
+	created, createErr := p.engine.Create(callCtx, c, &h, workspace.Name, p.containerName(n))
 	cancel()
 	// Even an uncertain create is followed by a new independent inspect before adoption/retry.
 	lookup := created
@@ -169,8 +204,8 @@ func (p *Provider) validBootstrap(n model.Node, b model.Bootstrap) error {
 }
 
 // nodeEnv is the exact container environment for a node. The managed Aurora
-// profile adds only the three fixed enrollment variables; the daemon still
-// reads its secret from the read-only secrets mount.
+// profile adds only the fixed enrollment and egress-proxy variables; the daemon
+// still reads its secret from the read-only secrets mount.
 func (p *Provider) nodeEnv(n model.Node) []string {
 	env := []string{"HOME=" + model.NodeHome, "FLEET_NODE_MAX_RUNS=" + strconv.Itoa(n.Resources.MaxRuns)}
 	if p.cfg.Aurora != nil {
@@ -178,9 +213,76 @@ func (p *Provider) nodeEnv(n model.Node) []string {
 			model.AuroraManagedEnv+"=1",
 			model.AuroraServerURLEnv+"="+p.cfg.Aurora.ServerURL,
 			model.AuroraEnrollmentFileEnv+"="+model.AuroraEnrollmentFile,
+			model.AuroraHTTPProxyEnv+"="+model.AuroraEgressProxyEndpoint,
+			model.AuroraHTTPSProxyEnv+"="+model.AuroraEgressProxyEndpoint,
+			model.AuroraNoProxyEnv+"="+model.AuroraNoProxyValue,
 		)
+		if p.cfg.Aurora.AnthropicBaseURL != "" {
+			env = append(env, model.AuroraAnthropicBaseURLEnv+"="+p.cfg.Aurora.AnthropicBaseURL)
+		}
+		if p.cfg.Aurora.AnthropicModel != "" {
+			env = append(env, model.AuroraAnthropicModelEnv+"="+p.cfg.Aurora.AnthropicModel)
+		}
 	}
 	return env
+}
+
+// ensureEgress admits (or adopts) one node's egress sidecar on the uplink
+// network and attaches it to the workspace-internal network under the fixed
+// "egress" alias. It never holds a credential, and it is created before the node
+// so the sandbox can resolve the alias at startup.
+func (p *Provider) ensureEgress(ctx context.Context, n model.Node, workspace Resource) error {
+	proxyName := p.egressName(n)
+	c, h, err := egressProxySpec(p.cfg, n, proxyName)
+	if err != nil {
+		return err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	created, createErr := p.engine.Create(callCtx, c, &h, p.cfg.Aurora.UplinkNetwork, proxyName)
+	cancel()
+	lookup := created
+	if lookup == "" {
+		lookup = proxyName
+	}
+	i, inspectErr := p.engine.Inspect(ctx, lookup)
+	if inspectErr != nil {
+		if createErr != nil {
+			return createErr
+		}
+		return inspectErr
+	}
+	if i.ID == "" || !Owns(i.Labels, n.Namespace, p.cfg.FleetID, nodeID(n), egressProxyRole) {
+		return model.ErrForbidden
+	}
+	if i.sdk != nil {
+		if err := validateEgressSidecar(p.cfg, n, proxyName, *i.sdk); err != nil {
+			return err
+		}
+	}
+	return bounded(ctx, func(c context.Context) error {
+		return p.engine.ConnectNetwork(c, workspace.Name, i.ID, []string{model.AuroraEgressAlias})
+	})
+}
+
+// removeEgress removes one node's egress sidecar and then the workspace-internal
+// network. Both removals are idempotent.
+func (p *Provider) removeEgress(ctx context.Context, n model.Node) error {
+	resources, err := p.engine.Find(ctx, map[string]string{"multica.fleet.node": nodeID(n)})
+	if err != nil {
+		return err
+	}
+	for _, r := range resources {
+		if r.Role != egressProxyRole {
+			continue
+		}
+		if !Owns(r.Labels, n.Namespace, p.cfg.FleetID, nodeID(n), egressProxyRole) {
+			return model.ErrForbidden
+		}
+		if err := bounded(ctx, func(c context.Context) error { return p.engine.Remove(c, r.ID) }); err != nil {
+			return err
+		}
+	}
+	return bounded(ctx, func(c context.Context) error { return p.engine.RemoveNetwork(c, p.workspaceNetwork(n)) })
 }
 
 func bounded(ctx context.Context, f func(context.Context) error) error {
@@ -243,10 +345,24 @@ func (p *Provider) Apply(ctx context.Context, n model.Node, action model.Action)
 	}
 	return p.Inspect(ctx, n)
 }
-func NodeHostConfig(spec model.Spec, linuxHostGateway bool) container.HostConfig {
+
+// NodeHostConfig is the single HostConfig builder for every Fleet node. The
+// Claude profile (aurora == nil) is unchanged. The Aurora profile adds the
+// seccomp and AppArmor references, the read-only root filesystem and the fixed
+// writable tmpfs surfaces; mount denial stays with the seccomp profile.
+func NodeHostConfig(spec model.Spec, linuxHostGateway bool, aurora *model.AuroraConfig) container.HostConfig {
 	h := container.HostConfig{Resources: container.Resources{NanoCPUs: int64(spec.CPUs) * 1e9, Memory: spec.MemoryBytes, PidsLimit: &spec.Pids}, CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges:true"}, RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled}}
 	if linuxHostGateway {
 		h.ExtraHosts = []string{"host.docker.internal:host-gateway"}
+	}
+	if aurora != nil {
+		h.ReadonlyRootfs = aurora.ReadonlyRootfs
+		h.SecurityOpt = append(h.SecurityOpt, "seccomp="+aurora.SeccompProfile, "apparmor="+aurora.AppArmorProfile)
+		h.Tmpfs = map[string]string{
+			model.AuroraWorkspaceMount: auroraWorkspaceTmpfs,
+			model.AuroraTmpMount:       auroraTmpTmpfs,
+			model.AuroraRunMount:       auroraRunTmpfs,
+		}
 	}
 	return h
 }

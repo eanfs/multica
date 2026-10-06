@@ -65,11 +65,31 @@ func inspectEnvironment(env []string, maxRuns int, aurora bool) bool {
 				return false
 			}
 		case model.AuroraServerURLEnv:
-			if !aurora || (model.AuroraConfig{ServerURL: value}).Validate() != nil {
+			if !aurora || !model.ValidOrigin(value) {
 				return false
 			}
 		case model.AuroraEnrollmentFileEnv:
 			if !aurora || value != model.AuroraEnrollmentFile {
+				return false
+			}
+		case model.AuroraHTTPProxyEnv:
+			if !aurora || value != model.AuroraEgressProxyEndpoint {
+				return false
+			}
+		case model.AuroraHTTPSProxyEnv:
+			if !aurora || value != model.AuroraEgressProxyEndpoint {
+				return false
+			}
+		case model.AuroraNoProxyEnv:
+			if !aurora || value != model.AuroraNoProxyValue {
+				return false
+			}
+		case model.AuroraAnthropicBaseURLEnv:
+			if !aurora || !model.ValidAnthropicBaseURL(value) {
+				return false
+			}
+		case model.AuroraAnthropicModelEnv:
+			if !aurora || value == "" || strings.ContainsAny(value, " 	") {
 				return false
 			}
 		default:
@@ -82,51 +102,63 @@ func inspectEnvironment(env []string, maxRuns int, aurora bool) bool {
 	if !seen["HOME"] || !seen["FLEET_NODE_MAX_RUNS"] {
 		return false
 	}
-	if aurora && (!seen[model.AuroraManagedEnv] || !seen[model.AuroraServerURLEnv] || !seen[model.AuroraEnrollmentFileEnv]) {
+	if aurora && (!seen[model.AuroraManagedEnv] || !seen[model.AuroraServerURLEnv] || !seen[model.AuroraEnrollmentFileEnv] || !seen[model.AuroraHTTPProxyEnv] || !seen[model.AuroraHTTPSProxyEnv] || !seen[model.AuroraNoProxyEnv]) {
 		return false
 	}
 	return true
 }
-func validateNodeInspection(r container.InspectResponse, n model.Node, networkName string, aurora bool) error {
+
+// validateNodeInspection is the adoption authority. It reconstructs the exact
+// HostConfig and mount set for the configured profile, so any drift between the
+// builder and a live container is rejected. The Claude profile (cfg.Aurora nil)
+// keeps its original two-volume, network-scoped shape.
+func validateNodeInspection(r container.InspectResponse, n model.Node, networkName string, cfg model.Config) error {
 	if r.ContainerJSONBase == nil || r.Config == nil || r.HostConfig == nil || r.NetworkSettings == nil {
 		return model.ErrForbidden
 	}
 	c, h := r.Config, r.HostConfig
-	want := NodeHostConfig(n.Resources, true)
+	aurora := cfg.Aurora != nil
+	want := NodeHostConfig(n.Resources, true, cfg.Aurora)
 	if c.Image != n.Image || c.User != "10001:10001" || c.Tty || c.OpenStdin || len(c.ExposedPorts) != 0 || !reflect.DeepEqual([]string(c.Entrypoint), []string{"/usr/local/bin/fleet-node"}) || !reflect.DeepEqual([]string(c.Cmd), []string{"run"}) {
 		return model.ErrForbidden
 	}
 	if !inspectEnvironment(c.Env, n.Resources.MaxRuns, aurora) {
 		return model.ErrForbidden
 	}
-	if h.ReadonlyRootfs != want.ReadonlyRootfs || h.NanoCPUs != want.NanoCPUs || h.Memory != want.Memory || h.PidsLimit == nil || *h.PidsLimit != *want.PidsLimit || h.Privileged || h.PidMode != "" || len(h.Binds) != 0 || len(h.Devices) != 0 || len(h.DeviceRequests) != 0 || len(h.VolumesFrom) != 0 || len(h.PortBindings) != 0 || h.PublishAllPorts || h.NetworkMode != container.NetworkMode(networkName) || h.RestartPolicy.Name != container.RestartPolicyDisabled || len(h.CapAdd) != 0 || !reflect.DeepEqual(h.CapDrop, want.CapDrop) || !reflect.DeepEqual(h.SecurityOpt, want.SecurityOpt) || !reflect.DeepEqual(h.ExtraHosts, want.ExtraHosts) {
+	if h.ReadonlyRootfs != want.ReadonlyRootfs || h.NanoCPUs != want.NanoCPUs || h.Memory != want.Memory || h.PidsLimit == nil || *h.PidsLimit != *want.PidsLimit || h.Privileged || h.PidMode != "" || len(h.Binds) != 0 || len(h.Devices) != 0 || len(h.DeviceRequests) != 0 || len(h.VolumesFrom) != 0 || len(h.PortBindings) != 0 || h.PublishAllPorts || h.NetworkMode != container.NetworkMode(networkName) || h.RestartPolicy.Name != container.RestartPolicyDisabled || len(h.CapAdd) != 0 || !reflect.DeepEqual(h.CapDrop, want.CapDrop) || !reflect.DeepEqual(h.SecurityOpt, want.SecurityOpt) || !reflect.DeepEqual(h.ExtraHosts, want.ExtraHosts) || !reflect.DeepEqual(h.Tmpfs, want.Tmpfs) {
 		return model.ErrForbidden
 	}
-	if len(r.NetworkSettings.Networks) != 1 || r.NetworkSettings.Networks[networkName] == nil || len(r.Mounts) != 2 {
+	if len(r.NetworkSettings.Networks) != 1 || r.NetworkSettings.Networks[networkName] == nil {
 		return model.ErrForbidden
 	}
-	data, secrets := false, false
-	for _, m := range r.Mounts {
-		if m.Type != mount.TypeVolume {
+	expected := []container.MountPoint{
+		{Type: mount.TypeVolume, Name: n.DataVolume, Destination: model.DataMount, RW: true},
+		{Type: mount.TypeVolume, Name: n.SecretsVolume, Destination: model.AuroraEnrollmentDir, RW: false},
+	}
+	for _, m := range providerSecretMounts(cfg.Aurora) {
+		expected = append(expected, container.MountPoint{Type: mount.TypeBind, Source: m.Source, Destination: m.Target, RW: false})
+	}
+	if len(r.Mounts) != len(expected) {
+		return model.ErrForbidden
+	}
+	for _, wantMount := range expected {
+		matched := false
+		for _, m := range r.Mounts {
+			if m.Type != wantMount.Type || m.Destination != wantMount.Destination || m.RW != wantMount.RW {
+				continue
+			}
+			if wantMount.Type == mount.TypeBind {
+				matched = m.Source == wantMount.Source
+			} else {
+				matched = m.Name == wantMount.Name
+			}
+			if matched {
+				break
+			}
+		}
+		if !matched {
 			return model.ErrForbidden
 		}
-		switch m.Destination {
-		case model.DataMount:
-			if m.Name != n.DataVolume || !m.RW {
-				return model.ErrForbidden
-			}
-			data = true
-		case "/secrets":
-			if m.Name != n.SecretsVolume || m.RW {
-				return model.ErrForbidden
-			}
-			secrets = true
-		default:
-			return model.ErrForbidden
-		}
-	}
-	if !data || !secrets {
-		return model.ErrForbidden
 	}
 	return nil
 }
@@ -135,7 +167,11 @@ func (p *Provider) validSDKSnapshot(n model.Node, i Inspection) error {
 		if i.sdk == nil {
 			return model.ErrForbidden
 		}
-		return validateNodeInspection(*i.sdk, n, p.networkName(), p.cfg.Aurora != nil)
+		network := p.networkName()
+		if p.cfg.Aurora != nil {
+			network = p.workspaceNetwork(n).Name
+		}
+		return validateNodeInspection(*i.sdk, n, network, p.cfg)
 	}
 	return nil
 }

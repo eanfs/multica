@@ -4,12 +4,34 @@
   "image": "<approved-node-image>@sha256:<approved-digest>",
   "api_url": "http://host.docker.internal:<allocated-api-port>",
   "specs": {
-    "local-small": {
+    "sandbox": {
       "cpus": 2,
       "memory_bytes": 4294967296,
       "pids": 256,
       "max_runs": 1
     }
   },
-  "max_nodes": 2
+  "max_nodes": 2,
+  "aurora": {
+    "server_url": "https://multica.example.com",
+    "proxy_image": "ghcr.io/eanfs/multica-aurora-egress@sha256:<64 lowercase hex>",
+    "seccomp_profile": "/etc/multica/aurora/seccomp.json",
+    "apparmor_profile": "multica-aurora-sandbox",
+    "egress_hosts": [
+      "api.anthropic.com:443",
+      "ark.cn-beijing.volces.com:443",
+      "api.openai.com:443",
+      "openspeech.bytedance.com:443"
+    ],
+    "anthropic_base_url": "",
+    "anthropic_model": "",
+    "provider_secret_files": {
+      "anthropic-api-key": "/etc/multica/aurora/anthropic-api-key",
+      "ark-api-key": "/etc/multica/aurora/ark-api-key",
+      "openai-api-key": "/etc/multica/aurora/openai-api-key",
+      "volc-asr-api-key": "/etc/multica/aurora/volc-asr-api-key"
+    },
+    "readonly_rootfs": true,
+    "uplink_network": "aurora-egress-uplink"
+  }
 }

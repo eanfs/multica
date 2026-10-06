@@ -17,7 +17,7 @@ func TestInspectAdoptionPreservesExactSnapshotAndIsolation(t *testing.T) {
 	for _, kind := range []string{"valid", "image", "resources", "ports", "network", "extra-network", "secret-writable", "wrong-data", "user", "host-pid", "privileged", "caps", "restart", "env"} {
 		t.Run(kind, func(t *testing.T) {
 			n := fixtureNode()
-			h := NodeHostConfig(n.Resources, true)
+			h := NodeHostConfig(n.Resources, true, nil)
 			h.NetworkMode = "node-net"
 			r := container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "cid", HostConfig: &h}, Config: &container.Config{Image: n.Image, User: "10001:10001", Env: []string{"HOME=/data/home", "FLEET_NODE_MAX_RUNS=1"}, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"run"}}, NetworkSettings: &container.NetworkSettings{Networks: map[string]*network.EndpointSettings{"node-net": {}}}, Mounts: []container.MountPoint{{Type: mount.TypeVolume, Name: n.DataVolume, Destination: model.DataMount, RW: true}, {Type: mount.TypeVolume, Name: n.SecretsVolume, Destination: "/secrets", RW: false}}}
 			switch kind {
@@ -48,7 +48,7 @@ func TestInspectAdoptionPreservesExactSnapshotAndIsolation(t *testing.T) {
 			case "env":
 				r.Config.Env = append(r.Config.Env, "PGPASSWORD=credential")
 			}
-			err := validateNodeInspection(r, n, "node-net", false)
+			err := validateNodeInspection(r, n, "node-net", fixtureConfig())
 			if kind == "valid" {
 				if err != nil {
 					t.Fatal(err)

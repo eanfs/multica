@@ -30,6 +30,9 @@ type Resource struct {
 	deletion       *deletionContext
 	ID, Name, Role string
 	Labels         map[string]string
+	// Internal marks a workspace network that has no route off the host except
+	// through the egress sidecar.
+	Internal bool
 }
 type Inspection struct {
 	ID, State, StartedAt string
@@ -41,6 +44,8 @@ type Engine interface {
 	Find(context.Context, map[string]string) ([]Resource, error)
 	Inspect(context.Context, string) (Inspection, error)
 	EnsureNetwork(context.Context, Resource) error
+	ConnectNetwork(context.Context, string, string, []string) error
+	RemoveNetwork(context.Context, Resource) error
 	EnsureVolume(context.Context, Resource) error
 	Create(context.Context, *container.Config, *container.HostConfig, string, string) (string, error)
 	InstallBootstrap(context.Context, []Resource, []byte) error
@@ -188,7 +193,21 @@ func (e *sdkEngine) EnsureNetwork(ctx context.Context, r Resource) error {
 	if e.client == nil {
 		return model.ErrUnavailable
 	}
-	if r.Role != "network" || r.Name == "" || !Owns(r.Labels, e.cfg.Namespace, e.cfg.FleetID, "namespace", "network") {
+	if r.Name == "" {
+		return model.ErrForbidden
+	}
+	switch r.Role {
+	case "network":
+		if !Owns(r.Labels, e.cfg.Namespace, e.cfg.FleetID, "namespace", "network") {
+			return model.ErrForbidden
+		}
+	case "workspace-network":
+		// A workspace network is only ever an Aurora-internal bridge owned by
+		// exactly one node.
+		if !r.Internal || !Owns(r.Labels, e.cfg.Namespace, e.cfg.FleetID, r.Labels["multica.fleet.node"], "workspace-network") {
+			return model.ErrForbidden
+		}
+	default:
 		return model.ErrForbidden
 	}
 	check := func() error {
@@ -196,7 +215,7 @@ func (e *sdkEngine) EnsureNetwork(ctx context.Context, r Resource) error {
 		if err != nil {
 			return err
 		}
-		if n.Name != r.Name || n.ID == "" || n.Driver != "bridge" || !sameLabels(n.Labels, r.Labels) {
+		if n.Name != r.Name || n.ID == "" || n.Driver != "bridge" || n.Internal != r.Internal || !sameLabels(n.Labels, r.Labels) {
 			return model.ErrForbidden
 		}
 		return nil
@@ -208,7 +227,7 @@ func (e *sdkEngine) EnsureNetwork(ctx context.Context, r Resource) error {
 	if !errdefs.IsNotFound(err) {
 		return err
 	}
-	_, createErr := e.client.NetworkCreate(ctx, r.Name, network.CreateOptions{Driver: "bridge", Labels: r.Labels})
+	_, createErr := e.client.NetworkCreate(ctx, r.Name, network.CreateOptions{Driver: "bridge", Labels: r.Labels, Internal: r.Internal})
 	if err = check(); err == nil {
 		return nil
 	}
@@ -217,6 +236,44 @@ func (e *sdkEngine) EnsureNetwork(ctx context.Context, r Resource) error {
 	}
 	return err
 }
+
+// ConnectNetwork attaches one owned container to one owned workspace network
+// under the supplied aliases. It never renames or re-creates either resource.
+func (e *sdkEngine) ConnectNetwork(ctx context.Context, networkName, containerID string, aliases []string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if e.client == nil {
+		return model.ErrUnavailable
+	}
+	if networkName == "" || containerID == "" {
+		return model.ErrInvalidRequest
+	}
+	return e.client.NetworkConnect(ctx, networkName, containerID, &network.EndpointSettings{Aliases: aliases})
+}
+
+// RemoveNetwork removes one owned network. A missing network is already clean.
+func (e *sdkEngine) RemoveNetwork(ctx context.Context, r Resource) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if e.client == nil {
+		return model.ErrUnavailable
+	}
+	if r.Name == "" {
+		return model.ErrForbidden
+	}
+	n, err := e.client.NetworkInspect(ctx, r.Name, network.InspectOptions{})
+	if errdefs.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if n.Name != r.Name || n.ID == "" || !sameLabels(n.Labels, r.Labels) {
+		return model.ErrForbidden
+	}
+	return e.client.NetworkRemove(ctx, r.Name)
+}
+
 func (e *sdkEngine) EnsureVolume(ctx context.Context, r Resource) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
