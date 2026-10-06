@@ -88,7 +88,7 @@ configuration, not a credential:
 - `server_url` — the container-reachable Multica API origin the managed daemon enrolls against.
 - `proxy_image` — the digest-pinned egress sidecar image and the sandbox's only egress path.
 - `seccomp_profile` — the absolute host path of the deployed seccomp profile. The Fleet reads and validates it and inlines it into the node's `HostConfig`; the host path never reaches the Docker API.
-- `apparmor_profile` — the loaded AppArmor profile name. Loading the profile is an operator step.
+- `apparmor_profile` — the loaded AppArmor profile name, or empty for the operator-acknowledged no-AppArmor posture. A non-empty name is enforced: at startup the Fleet refuses to run unless the Docker daemon itself reports AppArmor support, and the node carries exactly `apparmor=<name>`. Empty sends no `apparmor=` option at all and the Fleet logs `aurora apparmor: disabled (operator-acknowledged)` once.
 - `egress_hosts` — exact `host:443` entries added to the sidecar's allowlist.
 - `egress_pins` — optional map from an already-allowed provider hostname (bare, lowercase, no port) to one or more public IPv4/IPv6 addresses the sidecar dials instead of resolving DNS.
 - `anthropic_base_url` and `anthropic_model` — optional managed Claude endpoint override; the base URL may carry an optional path prefix such as `/api/plan`, and empty keeps the provider default.
@@ -122,7 +122,7 @@ A managed node starts from the fixed `fleet-node run` entrypoint, which
 `/secrets/aurora-enrollment`; SQL stores only its hash, and the Fleet holds the
 raw secret in a process-local handoff. The sandbox runs as non-root
 (`10001:10001`) on a read-only root filesystem with `cap_drop: ALL`,
-`no-new-privileges`, seccomp and AppArmor, and joins only its workspace-internal
+`no-new-privileges`, seccomp and, when configured, AppArmor, and joins only its workspace-internal
 network. Provider credentials appear only as read-only binds at the fixed
 `/run/secrets/*` paths and never in the container environment.
 

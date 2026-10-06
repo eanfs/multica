@@ -34,6 +34,29 @@ func TestLoadConfigAuroraProfile(t *testing.T) {
 	}
 }
 
+// TestLoadConfigAuroraEmptyAppArmorAccepted proves an empty apparmor_profile is
+// the operator's explicit no-AppArmor posture, while a non-conservative name is
+// still refused by Validate.
+func TestLoadConfigAuroraEmptyAppArmorAccepted(t *testing.T) {
+	cfg, err := loadTestConfig(t, strings.Replace(auroraConfig, "multica-aurora-sandbox", "", 1))
+	if err != nil {
+		t.Fatalf("empty apparmor_profile rejected: %v", err)
+	}
+	if cfg.Aurora == nil || cfg.Aurora.AppArmorProfile != "" {
+		t.Fatalf("apparmor_profile = %+v, want empty", cfg.Aurora)
+	}
+	if err := cfg.Aurora.Validate(); err != nil {
+		t.Fatalf("explicit empty apparmor_profile must validate: %v", err)
+	}
+	for _, name := range []string{"bad profile", "-leading-dash", "a/b", "a\tb", strings.Repeat("a", 129)} {
+		profile := *cfg.Aurora
+		profile.AppArmorProfile = name
+		if err := profile.Validate(); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("apparmor_profile %q accepted: %v", name, err)
+		}
+	}
+}
+
 // TestLoadConfigAuroraAnthropicBaseURL proves the managed Claude endpoint accepts
 // the real ARK Agent Plan prefix for a full config load while a bare origin still
 // works, and that the Validate error names the optional path prefix.
@@ -73,7 +96,8 @@ func TestLoadConfigRejectsUnsafeAuroraProfile(t *testing.T) {
 		"uppercase proxy digest":      strings.Replace(auroraConfig, "a123456789abcdef", "A123456789ABCDEF", 1),
 		"relative seccomp":            strings.Replace(auroraConfig, "/etc/multica/aurora/seccomp.json", "seccomp.json", 1),
 		"dirty seccomp":               strings.Replace(auroraConfig, "/etc/multica/aurora/seccomp.json", "/etc/multica/aurora/../seccomp.json", 1),
-		"empty apparmor":              strings.Replace(auroraConfig, "multica-aurora-sandbox", "", 1),
+		"unsafe apparmor":             strings.Replace(auroraConfig, "multica-aurora-sandbox", "../escape", 1),
+		"space in apparmor":           strings.Replace(auroraConfig, "multica-aurora-sandbox", "bad profile", 1),
 		"wildcard egress":             strings.Replace(auroraConfig, "api.example.com:443", "*.example.com:443", 1),
 		"non-443 egress":              strings.Replace(auroraConfig, "api.example.com:443", "api.example.com:8443", 1),
 		"egress without port":         strings.Replace(auroraConfig, "api.example.com:443", "api.example.com", 1),

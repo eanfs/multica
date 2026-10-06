@@ -59,6 +59,91 @@ func TestInspectAdoptionPreservesExactSnapshotAndIsolation(t *testing.T) {
 		})
 	}
 }
+
+// TestInspectAuroraAppArmorAdoption pins the adoption authority's apparmor
+// reconstruction in both directions: it must rebuild exactly what the provider
+// builds. With an empty configured profile a live node must carry no apparmor=
+// option and one that does is rejected; with a configured profile the exact
+// apparmor=<name> entry is required and a missing or different one is rejected.
+func TestInspectAuroraAppArmorAdoption(t *testing.T) {
+	cfg := auroraConfigWithSeccomp(t)
+	n := fixtureNode()
+	seccomp, err := resolveAuroraSeccomp(cfg.Aurora)
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(aurora *model.AuroraConfig, mutate func(*container.InspectResponse)) container.InspectResponse {
+		h := NodeHostConfig(n.Resources, true, aurora, seccomp)
+		h.NetworkMode = container.NetworkMode("aurora-net")
+		c := &container.Config{
+			Image: n.Image,
+			User:  "10001:10001",
+			Env: []string{
+				"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+				"HOME=" + model.NodeHome,
+				"FLEET_NODE_MAX_RUNS=1",
+				model.AuroraManagedEnv + "=1",
+				model.AuroraServerURLEnv + "=" + aurora.ServerURL,
+				model.AuroraEnrollmentFileEnv + "=" + model.AuroraEnrollmentFile,
+				model.AuroraHTTPProxyEnv + "=" + model.AuroraEgressProxyEndpoint,
+				model.AuroraHTTPSProxyEnv + "=" + model.AuroraEgressProxyEndpoint,
+				model.AuroraNoProxyEnv + "=" + model.AuroraNoProxyValue,
+				model.AuroraClaudePathEnv + "=" + model.AuroraClaudePath,
+				model.AuroraAnthropicBaseURLEnv + "=" + aurora.AnthropicBaseURL,
+				model.AuroraAnthropicModelEnv + "=" + aurora.AnthropicModel,
+			},
+			Entrypoint: []string{"/usr/local/bin/fleet-node"},
+			Cmd:        []string{"run"},
+		}
+		r := container.InspectResponse{
+			ContainerJSONBase: &container.ContainerJSONBase{ID: "cid", HostConfig: &h},
+			Config:            c,
+			NetworkSettings:   &container.NetworkSettings{Networks: map[string]*network.EndpointSettings{"aurora-net": {}}},
+			Mounts: []container.MountPoint{
+				{Type: mount.TypeVolume, Name: n.DataVolume, Destination: model.DataMount, RW: true},
+				{Type: mount.TypeVolume, Name: n.SecretsVolume, Destination: model.AuroraEnrollmentDir, RW: false},
+				{Type: mount.TypeBind, Source: aurora.ProviderSecretFiles["anthropic-api-key"], Destination: model.AuroraAnthropicAPIKeyTarget, RW: false},
+			},
+		}
+		if mutate != nil {
+			mutate(&r)
+		}
+		return r
+	}
+
+	// Configured profile: the provider-constructed HostConfig is admitted; a
+	// missing or different apparmor name is refused.
+	if err := validateNodeInspection(build(cfg.Aurora, nil), n, "aurora-net", cfg); err != nil {
+		t.Fatalf("configured apparmor profile rejected: %v", err)
+	}
+	missing := []string{"no-new-privileges:true", "seccomp=" + seccomp}
+	for _, securityOpt := range [][]string{missing, {"apparmor=other"}} {
+		bad := build(cfg.Aurora, func(r *container.InspectResponse) { r.HostConfig.SecurityOpt = securityOpt })
+		if err := validateNodeInspection(bad, n, "aurora-net", cfg); err == nil {
+			t.Fatalf("configured profile accepted SecurityOpt %v", securityOpt)
+		}
+	}
+
+	// Empty profile: only the no-apparmor HostConfig is admitted; any apparmor=
+	// option is drift and must be rejected.
+	empty := *cfg.Aurora
+	empty.AppArmorProfile = ""
+	emptyCfg := cfg
+	emptyCfg.Aurora = &empty
+	noAppArmor := build(&empty, func(r *container.InspectResponse) {
+		r.HostConfig.SecurityOpt = []string{"no-new-privileges:true", "seccomp=" + seccomp}
+	})
+	if err := validateNodeInspection(noAppArmor, n, "aurora-net", emptyCfg); err != nil {
+		t.Fatalf("empty profile rejected a no-option container: %v", err)
+	}
+	inert := build(&empty, func(r *container.InspectResponse) {
+		r.HostConfig.SecurityOpt = []string{"no-new-privileges:true", "seccomp=" + seccomp, "apparmor=stale"}
+	})
+	if err := validateNodeInspection(inert, n, "aurora-net", emptyCfg); err == nil {
+		t.Fatal("empty profile admitted an inert apparmor= option")
+	}
+}
+
 func TestInspectInvalidSQLDaemonUUIDIsUnknown(t *testing.T) {
 	n := fixtureNode()
 	n.DaemonID = "not-a-uuid"

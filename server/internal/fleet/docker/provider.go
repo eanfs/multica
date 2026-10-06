@@ -384,10 +384,12 @@ func (p *Provider) Apply(ctx context.Context, n model.Node, action model.Action)
 
 // NodeHostConfig is the single HostConfig builder for every Fleet node. The
 // Claude profile (aurora == nil) is unchanged. The Aurora profile adds the
-// AppArmor reference, the inline seccomp profile, the read-only root filesystem
-// and the fixed writable tmpfs surfaces; mount denial stays with the seccomp
-// profile. seccompJSON is the pre-resolved compact profile — the Docker daemon
-// parses the value after "seccomp=" as JSON, so a path never goes on the wire.
+// inline seccomp profile, the read-only root filesystem, the fixed writable
+// tmpfs surfaces, and the apparmor= reference only when AppArmorProfile is
+// non-empty: an empty profile emits no apparmor option at all. Mount denial
+// stays with the seccomp profile. seccompJSON is the pre-resolved compact
+// profile: the Docker daemon parses the value after "seccomp=" as JSON, so a
+// path never goes on the wire.
 func NodeHostConfig(spec model.Spec, linuxHostGateway bool, aurora *model.AuroraConfig, seccompJSON string) container.HostConfig {
 	h := container.HostConfig{Resources: container.Resources{NanoCPUs: int64(spec.CPUs) * 1e9, Memory: spec.MemoryBytes, PidsLimit: &spec.Pids}, CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges:true"}, RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled}}
 	if linuxHostGateway {
@@ -395,7 +397,14 @@ func NodeHostConfig(spec model.Spec, linuxHostGateway bool, aurora *model.Aurora
 	}
 	if aurora != nil {
 		h.ReadonlyRootfs = aurora.ReadonlyRootfs
-		h.SecurityOpt = append(h.SecurityOpt, "seccomp="+seccompJSON, "apparmor="+aurora.AppArmorProfile)
+		// An empty AppArmorProfile is the operator-acknowledged no-AppArmor
+		// posture, so no apparmor= option is sent at all: an inert option the
+		// daemon silently ignores is worse than none. A configured profile is
+		// added verbatim and the daemon capability is checked at startup.
+		h.SecurityOpt = append(h.SecurityOpt, "seccomp="+seccompJSON)
+		if aurora.AppArmorProfile != "" {
+			h.SecurityOpt = append(h.SecurityOpt, "apparmor="+aurora.AppArmorProfile)
+		}
 		h.Tmpfs = map[string]string{
 			model.AuroraWorkspaceMount: auroraWorkspaceTmpfs,
 			model.AuroraTmpMount:       auroraTmpTmpfs,

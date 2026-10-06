@@ -151,7 +151,10 @@ type AuroraConfig struct {
 	// SeccompProfile is the absolute host path of the deployed seccomp profile.
 	SeccompProfile string `json:"seccomp_profile"`
 	// AppArmorProfile is the loaded AppArmor profile name referenced by the
-	// container. Loading the profile is an operator step.
+	// container. Loading the profile is an operator step. An empty value is the
+	// operator's explicit, acknowledged posture of running this profile without
+	// an AppArmor MAC; the provider then sends no apparmor= SecurityOpt at all.
+	// A non-empty value must be a conservative loaded profile name.
 	AppArmorProfile string `json:"apparmor_profile"`
 	// EgressHosts is the explicit exact host:443 allowlist the sidecar accepts
 	// in addition to the provider hosts compiled into the proxy image.
@@ -196,8 +199,11 @@ func (a AuroraConfig) Validate() error {
 	if !filepath.IsAbs(a.SeccompProfile) || filepath.Clean(a.SeccompProfile) != a.SeccompProfile {
 		return fmt.Errorf("%w: aurora seccomp_profile must be a clean absolute host path", ErrInvalidRequest)
 	}
-	if !profileNamePattern.MatchString(a.AppArmorProfile) {
-		return fmt.Errorf("%w: aurora apparmor_profile must be a loaded profile name", ErrInvalidRequest)
+	// An empty profile is the explicit no-AppArmor posture; a non-empty value must
+	// still be a conservative loaded profile name, so a configured name can never
+	// carry a path, space or other unsafe bytes.
+	if a.AppArmorProfile != "" && !profileNamePattern.MatchString(a.AppArmorProfile) {
+		return fmt.Errorf("%w: aurora apparmor_profile must be empty or a loaded profile name", ErrInvalidRequest)
 	}
 	for _, host := range a.EgressHosts {
 		if !validEgressHost(host) {

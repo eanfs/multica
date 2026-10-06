@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -124,6 +125,47 @@ func probeReady(ctx context.Context, base string, c *http.Client) error {
 	return nil
 }
 
+// appArmorProbeFunc reports whether the Docker daemon advertises AppArmor
+// support. It is a seam so the startup preflight is testable without a daemon.
+type appArmorProbeFunc func(context.Context) (bool, error)
+
+// apparmorPreflightError names the configured profile and the missing daemon
+// capability. It carries no secret and is safe to print at startup.
+type apparmorPreflightError struct{ profile string }
+
+func (e *apparmorPreflightError) Error() string {
+	return fmt.Sprintf("aurora apparmor: profile %q is configured but the Docker daemon does not report AppArmor support; refusing to start", e.profile)
+}
+
+// checkAuroraAppArmor is the startup posture gate. A nil Aurora profile is the
+// default Claude node. An empty AppArmorProfile is the operator-acknowledged
+// no-AppArmor posture and is logged once. A non-empty profile must be backed by
+// the daemon's own reported AppArmor support, because Docker silently accepts
+// and ignores apparmor=<name> when the daemon has none; otherwise startup fails
+// closed instead of sending an inert option.
+func checkAuroraAppArmor(ctx context.Context, cfg model.Config, probe appArmorProbeFunc, logf func(string, ...any)) error {
+	if cfg.Aurora == nil {
+		return nil
+	}
+	if cfg.Aurora.AppArmorProfile == "" {
+		if logf != nil {
+			logf("aurora apparmor: disabled (operator-acknowledged)")
+		}
+		return nil
+	}
+	if probe == nil {
+		return model.ErrUnavailable
+	}
+	supported, err := probe(ctx)
+	if err != nil {
+		return fmt.Errorf("aurora apparmor: profile %q is configured but the Docker daemon capability could not be read: %w", cfg.Aurora.AppArmorProfile, err)
+	}
+	if !supported {
+		return &apparmorPreflightError{profile: cfg.Aurora.AppArmorProfile}
+	}
+	return nil
+}
+
 // reviewClient is the process composition boundary; the transport is injectable without sockets.
 func reviewClient(cfg model.Config, key []byte, c *http.Client) *cloudruntime.Client {
 	return cloudruntime.NewClient(cloudruntime.Config{BaseURL: cfg.APIURL, ServiceSecret: key, Timeout: 5 * time.Second, HTTPClient: c})
@@ -173,6 +215,14 @@ func run(ctx context.Context) error {
 		return model.ErrUnavailable
 	}
 	defer engine.Close()
+	// AppArmor posture is decided from the daemon, never from a host path or a
+	// loaded profile name: a configured profile on a daemon without AppArmor
+	// support refuses startup instead of silently provisioning an inert option.
+	if e = checkAuroraAppArmor(ctx, cfg, func(c context.Context) (bool, error) {
+		return fleetdocker.AppArmorSupported(c, engine)
+	}, log.Printf); e != nil {
+		return e
+	}
 	provider := fleetdocker.New(fleetdocker.NewEngine(engine), cfg)
 	service := fleet.NewService(repo, cfg, provider)
 	worker := fleet.NewReconciler(repo, provider, cfg)
@@ -213,7 +263,12 @@ func main() {
 		e = run(ctx)
 	}
 	if e != nil {
-		fmt.Fprintln(os.Stderr, "fleet unavailable")
+		var apparmorErr *apparmorPreflightError
+		if errors.As(e, &apparmorErr) {
+			fmt.Fprintln(os.Stderr, apparmorErr.Error())
+		} else {
+			fmt.Fprintln(os.Stderr, "fleet unavailable")
+		}
 		os.Exit(1)
 	}
 }

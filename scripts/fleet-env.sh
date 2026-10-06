@@ -39,12 +39,15 @@ try{
 // Aurora profile fields. The uplink network is the owned fleet-nodes network
 // and is written below; every credential stays a host file path, never a value.
 const aurora=input.aurora;need(aurora&&typeof aurora==='object'&&!Array.isArray(aurora));
+// An empty apparmor_profile is the operator's explicit no-AppArmor posture;
+// a non-empty value must be a conservative loaded profile name and is refused
+// unless the Fleet preflight confirms the daemon reports AppArmor support.
 const auroraKeys=['server_url','proxy_image','seccomp_profile','apparmor_profile','egress_hosts','egress_pins','anthropic_base_url','anthropic_model','claude_env','provider_secret_files'];
 need(Object.keys(aurora).length===auroraKeys.length&&auroraKeys.every(k=>Object.hasOwn(aurora,k)));
 const serverOrigin=new URL(aurora.server_url);need(['http:','https:'].includes(serverOrigin.protocol)&&serverOrigin.hostname&&!serverOrigin.username&&!serverOrigin.password&&!serverOrigin.search&&!serverOrigin.hash&&serverOrigin.pathname==='/');
 need(/^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$/.test(aurora.proxy_image));
 need(typeof aurora.seccomp_profile==='string'&&path.isAbsolute(aurora.seccomp_profile)&&path.normalize(aurora.seccomp_profile)===aurora.seccomp_profile&&!/[\x00-\x20\x7f-\x9f]/.test(aurora.seccomp_profile));
-need(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(aurora.apparmor_profile));
+need(aurora.apparmor_profile===''||/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(aurora.apparmor_profile));
 need(Array.isArray(aurora.egress_hosts)&&aurora.egress_hosts.every(h=>typeof h==='string'&&/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?:443$/.test(h)));
 // Operator pins: a bare lowercase DNS host already in the compiled or configured
 // allowlist, mapped to 1..8 public bare IP addresses. A pin narrows DNS for one

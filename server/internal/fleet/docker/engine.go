@@ -151,6 +151,35 @@ func (l *helperLifecycles) forget(id string) { l.mu.Lock(); defer l.mu.Unlock();
 func NewEngine(c *client.Client) Engine {
 	return &sdkEngine{client: c, helpers: &helperLifecycles{now: time.Now, seen: map[string]helperLifecycle{}}}
 }
+
+// AppArmorSupported reports whether the Docker daemon itself advertises AppArmor
+// support through its info endpoint. This is the daemon-authoritative capability
+// probe the startup preflight uses instead of trusting a host path or a loaded
+// profile name, because Docker 25 silently accepts and ignores apparmor=<name>
+// when the daemon has no AppArmor.
+func AppArmorSupported(ctx context.Context, c *client.Client) (bool, error) {
+	if c == nil {
+		return false, model.ErrUnavailable
+	}
+	info, err := c.Info(ctx)
+	if err != nil {
+		return false, err
+	}
+	return appArmorInSecurityOptions(info.SecurityOptions), nil
+}
+
+// appArmorInSecurityOptions reports whether one docker info security-options list
+// names AppArmor. docker info reports entries such as "name=apparmor" or
+// "name=selinux", so this is a substring match: a daemon without AppArmor
+// reports "name=selinux" or similar and must not be mistaken for support.
+func appArmorInSecurityOptions(options []string) bool {
+	for _, option := range options {
+		if strings.Contains(strings.ToLower(option), "apparmor") {
+			return true
+		}
+	}
+	return false
+}
 func (e *sdkEngine) Find(ctx context.Context, labels map[string]string) ([]Resource, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()

@@ -16,7 +16,7 @@
     "server_url": "https://multica.example.com",
     "proxy_image": "ghcr.io/eanfs/multica-aurora-egress@sha256:<64 lowercase hex>",
     "seccomp_profile": "/etc/multica/aurora/seccomp.json",
-    "apparmor_profile": "multica-aurora-sandbox",
+    "apparmor_profile": "",
     "egress_hosts": [
       "api.anthropic.com:443",
       "ark.cn-beijing.volces.com:443",

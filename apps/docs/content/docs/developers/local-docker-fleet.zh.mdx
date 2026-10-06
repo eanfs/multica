@@ -80,7 +80,7 @@ Fleet 配置的 `aurora` 块用于选择受管沙箱 profile（见 `fleet-config
 - `server_url` — 受管守护进程注册所针对的、容器可达的 Multica API origin。
 - `proxy_image` — 以摘要固定的出口 sidecar 镜像，也是沙箱唯一的出网路径。
 - `seccomp_profile` — 已部署 seccomp profile 的宿主机绝对路径。Fleet 读取并校验它，然后内联进节点的 `HostConfig`；宿主机路径不会进入 Docker API。
-- `apparmor_profile` — 已加载的 AppArmor profile 名称。加载 profile 是 operator 步骤。
+- `apparmor_profile` — 已加载的 AppArmor profile 名称；为空表示 operator 明确确认不使用 AppArmor MAC。非空时强制执行：启动时若 Docker daemon 未报告 AppArmor 支持，Fleet 拒绝启动，节点恰好携带 `apparmor=<name>`。为空时不再发送任何 `apparmor=` 选项，Fleet 启动时记录一次 `aurora apparmor: disabled (operator-acknowledged)`；仅在 daemon 报告 AppArmor 的主机上填写名称。
 - `egress_hosts` — 追加到 sidecar 允许列表的精确 `host:443` 条目。
 - `egress_pins` — 可选映射：把已在允许列表中的供应商主机名（裸小写、不带端口）映射到一个或多个公网 IPv4/IPv6 地址，sidecar 直接拨号这些地址而不做 DNS 解析。
 - `anthropic_base_url` 和 `anthropic_model` — 可选的受管 Claude 端点覆盖；base URL 可带可选路径前缀（如 `/api/plan`），为空时保留供应商默认值。
@@ -104,7 +104,7 @@ API key、auth token、token、secret 或 password 的键都会在配置加载�
 DNS：其主机必须已编译进代理镜像或列在 `egress_hosts` 中，因此 pin 永远不会新增
 主机；`https`/443、禁止 IP 字面量、公网地址与服务端 origin 规则都不变。
 
-受管节点以固定的 `fleet-node run` entrypoint 启动，并 `exec` 为 `multica daemon start --managed`。它的一次性注册密钥（`mse_`）写入节点只读 secrets 卷的 `/secrets/aurora-enrollment`；SQL 只存哈希，Fleet 只在进程内交接表中持有明文。沙箱以非 root（`10001:10001`）运行在只读根文件系统上，使用 `cap_drop: ALL`、`no-new-privileges`、seccomp 和 AppArmor，并且只加入自己的工作区内网络。供应商凭据只以只读 bind 出现在固定的 `/run/secrets/*` 路径，绝不进入容器环境。
+受管节点以固定的 `fleet-node run` entrypoint 启动，并 `exec` 为 `multica daemon start --managed`。它的一次性注册密钥（`mse_`）写入节点只读 secrets 卷的 `/secrets/aurora-enrollment`；SQL 只存哈希，Fleet 只在进程内交接表中持有明文。沙箱以非 root（`10001:10001`）运行在只读根文件系统上，使用 `cap_drop: ALL`、`no-new-privileges`、seccomp，以及在配置时使用的 AppArmor，并且只加入自己的工作区内网络。供应商凭据只以只读 bind 出现在固定的 `/run/secrets/*` 路径，绝不进入容器环境。
 
 经过审查的 MCP broker 是 Aurora 任务唯一的执行面。守护进程会暂存任务输入，把 mode-`0400` 的 context 和任务 token 写到任务 workdir 下，并把 broker 注入为唯一的 `mcpServers` 条目。模型可以调用的工具另行以带限定的 `mcp__aurora__<tool>` 标识符放进 `--allowedTools`。context、输入、token 或 skill policy 缺失时，任务在启动前失败并退款。
 
