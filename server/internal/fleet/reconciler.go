@@ -492,6 +492,7 @@ type bootstrapHandle interface {
 	Snapshot() store.RecoverySnapshot
 	Check(context.Context) (model.Node, error)
 	Mint(context.Context) (string, int64, error)
+	Mark(context.Context) error
 	Confirm(context.Context, model.Observation) error
 	Fail(context.Context, string) error
 }
@@ -509,6 +510,9 @@ func (c sqlBootstrap) Check(ctx context.Context) (model.Node, error) {
 }
 func (c sqlBootstrap) Mint(ctx context.Context) (string, int64, error) {
 	return c.repo.MintBootstrapToken(ctx, c.claim)
+}
+func (c sqlBootstrap) Mark(ctx context.Context) error {
+	return c.repo.MarkBootstrapMinted(ctx, c.claim)
 }
 func (c sqlBootstrap) Confirm(ctx context.Context, o model.Observation) error {
 	return c.repo.ConfirmBootstrap(ctx, c.claim, o)
@@ -555,6 +559,12 @@ func (r *Reconciler) initialize(ctx context.Context, s store.RecoverySnapshot, c
 		// secret fails the bootstrap the normal way (no guess, no retry timer).
 		if _, e = claim.Check(c); e != nil {
 			return nil
+		}
+		// Aurora has no Fleet node token to mint, but ConfirmBootstrap's SQL/lease
+		// fence requires the operation to be marked before Ensure. Marking writes no
+		// credential row and keeps the same claim/generation/lease authority.
+		if e = claim.Mark(c); e != nil {
+			return fail(e)
 		}
 		b, e = r.auroraBootstrap(c, n)
 		if e != nil {

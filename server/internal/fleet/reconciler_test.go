@@ -489,12 +489,12 @@ func TestRecoveryConcurrentTickAndRunCancel(t *testing.T) {
 }
 
 type fakeBootstrap struct {
-	repo                    *workerRepo
-	snapshot                store.RecoverySnapshot
-	deadline                time.Time
-	checks, mints, confirms int
-	denyCheck               int
-	expireOnMint            bool
+	repo                           *workerRepo
+	snapshot                       store.RecoverySnapshot
+	deadline                       time.Time
+	checks, mints, marks, confirms int
+	denyCheck                      int
+	expireOnMint                   bool
 }
 
 func (c *fakeBootstrap) Context(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -517,6 +517,14 @@ func (c *fakeBootstrap) Mint(ctx context.Context) (string, int64, error) {
 		return "", 0, ctx.Err()
 	}
 	return "owned-fake-token", 1, nil
+}
+func (c *fakeBootstrap) Mark(ctx context.Context) error {
+	c.marks++
+	c.repo.events = append(c.repo.events, "mark")
+	if ctx.Err() != nil || !sameWorkerBinding(c.snapshot, c.repo.snap) {
+		return model.ErrConflict
+	}
+	return nil
 }
 func (c *fakeBootstrap) Confirm(ctx context.Context, o model.Observation) error {
 	if ctx.Err() != nil || !sameWorkerBinding(c.snapshot, c.repo.snap) {
@@ -1260,14 +1268,18 @@ func TestRecoveryAuroraBootstrap(t *testing.T) {
 			return token, id == f.snap.Node.ID
 		})
 		p.ensureCheck = func(_ context.Context, n model.Node, b model.Bootstrap) {
+			// The mark must precede Ensure so ConfirmBootstrap's minted fence passes.
+			if c.marks != 1 {
+				t.Fatal("Aurora Ensure ran before the bootstrap mark")
+			}
 			if b.EnrollmentToken != token || b.NodeToken != "" || b.APIKey != "" || b.BaseURL != "" || b.Model != "" || b.DaemonID != n.DaemonID || b.ServerURL != "http://aurora.invalid" {
 				t.Fatal("wrong Aurora bootstrap")
 			}
 		}
 		_ = r.Tick(context.Background())
 		waitInitialization(t, r)
-		if takes != 1 || c.mints != 0 || !reflect.DeepEqual(p.actions, []string{"ensure"}) {
-			t.Fatalf("takes=%d mints=%d actions=%v", takes, c.mints, p.actions)
+		if takes != 1 || c.mints != 0 || c.marks != 1 || !reflect.DeepEqual(p.actions, []string{"ensure"}) {
+			t.Fatalf("takes=%d mints=%d marks=%d actions=%v", takes, c.mints, c.marks, p.actions)
 		}
 		for _, event := range f.events {
 			if event == "profile" || event == "mint" {

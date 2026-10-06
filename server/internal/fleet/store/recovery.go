@@ -385,6 +385,32 @@ func (s *Store) MintBootstrapToken(ctx context.Context, c BootstrapClaim) (strin
 	return token, generation, nil
 }
 
+// MarkBootstrapMinted records that the live bootstrap winner has started
+// provisioning without minting a Fleet node token. Aurora nodes authenticate
+// with their one-time enrollment secret, so there is no credential to write,
+// but ConfirmBootstrap's SQL/lease fence still requires the operation to be
+// marked. Reusing FleetMarkBootstrapMinted keeps the same claim, generation and
+// lease authority: it writes no fleet_node_credentials row and returns
+// ErrConflict when the operation was already marked.
+func (s *Store) MarkBootstrapMinted(ctx context.Context, c BootstrapClaim) error {
+	ctx, leaseCancel := c.Context(ctx)
+	defer leaseCancel()
+	ctx, cancel := context.WithTimeout(ctx, databaseTimeout)
+	defer cancel()
+	return s.WithTx(ctx, func(q *db.Queries) error {
+		snap, e := s.currentBootstrap(ctx, q, c)
+		if e != nil {
+			return e
+		}
+		n, op := snap.Node, snap.Operation
+		if op.BootstrapMinted {
+			return model.ErrConflict
+		}
+		count, e := q.FleetMarkBootstrapMinted(ctx, db.FleetMarkBootstrapMintedParams{Namespace: s.namespace, OwnerID: n.OwnerID, NodeID: n.ID, OperationID: op.ID, Generation: op.Generation, ClaimedAt: timestamp(c.claimedAt)})
+		return affectedOne(count, e)
+	})
+}
+
 func bootstrapObservation(snap RecoverySnapshot, o model.Observation) (model.Node, error) {
 	n := snap.Node
 	if !snap.Operation.BootstrapMinted || o.ContainerID == "" || o.Offline || o.Status == "missing" || o.ObservedAt.Before(snap.Operation.BootstrapClaimedAt) {
