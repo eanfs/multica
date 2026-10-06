@@ -112,6 +112,48 @@ func providerSecretMounts(a *model.AuroraConfig) []mount.Mount {
 	return out
 }
 
+// defaultImagePATH is the OCI default environment every image carries. It is the
+// only image-owned key the sidecar adoption check tolerates.
+const defaultImagePATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// egressEnvMatches accepts the exact owned proxy variables plus the image's
+// default PATH, and rejects every other key or value. A credential, enrollment
+// or provider variable can therefore never be adopted from a drifted sidecar.
+func egressEnvMatches(actual, want []string) bool {
+	owned := map[string]string{}
+	for _, entry := range want {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			return false
+		}
+		owned[key] = value
+	}
+	seen := map[string]bool{}
+	for _, entry := range actual {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || seen[key] {
+			return false
+		}
+		seen[key] = true
+		if wantValue, isOwned := owned[key]; isOwned {
+			if value != wantValue {
+				return false
+			}
+			continue
+		}
+		if key == "PATH" && value == defaultImagePATH {
+			continue
+		}
+		return false
+	}
+	for key := range owned {
+		if !seen[key] {
+			return false
+		}
+	}
+	return true
+}
+
 // validateEgressSidecar checks an inspected sidecar against the immutable
 // policy: the proxy image, the fixed user, the uplink-only network and no
 // credential or enrollment mount.
@@ -127,7 +169,10 @@ func validateEgressSidecar(cfg model.Config, n model.Node, proxyName string, i c
 	if c.Image != want.Image || c.User != want.User || !sameLabels(c.Labels, want.Labels) || c.Tty || c.OpenStdin || len(c.ExposedPorts) != 0 {
 		return model.ErrForbidden
 	}
-	if !reflect.DeepEqual(c.Env, want.Env) {
+	// The image's default PATH is merged into the container env by the daemon;
+	// the two owned proxy variables must match exactly and no other key is
+	// adopted, so a credential or enrollment variable is still drift.
+	if !egressEnvMatches(c.Env, want.Env) {
 		return model.ErrForbidden
 	}
 	if h.NetworkMode != wantHost.NetworkMode || !h.ReadonlyRootfs || h.Privileged || h.PidMode != "" || len(h.Binds) != 0 || len(h.Devices) != 0 || len(h.DeviceRequests) != 0 || len(h.VolumesFrom) != 0 || len(h.PortBindings) != 0 || h.PublishAllPorts || h.RestartPolicy.Name != container.RestartPolicyDisabled || len(h.CapAdd) != 0 || !reflect.DeepEqual(h.CapDrop, wantHost.CapDrop) || !reflect.DeepEqual(h.SecurityOpt, wantHost.SecurityOpt) || !reflect.DeepEqual(h.Tmpfs, wantHost.Tmpfs) || h.NanoCPUs != wantHost.NanoCPUs || h.Memory != wantHost.Memory || h.PidsLimit == nil || *h.PidsLimit != *wantHost.PidsLimit || len(i.Mounts) != 0 {

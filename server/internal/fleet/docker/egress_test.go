@@ -81,6 +81,32 @@ func TestEgressSidecarPolicy(t *testing.T) {
 	}
 }
 
+// TestEgressEnvMatchesToleratesImagePATH pins the real-engine defect Task 7
+// found: the daemon merges every image's default PATH into the container env, so
+// an exact env comparison rejected every real egress sidecar. The owned proxy
+// variables remain exact and every other key is still drift.
+func TestEgressEnvMatchesToleratesImagePATH(t *testing.T) {
+	owned := []string{"MULTICA_EGRESS_SERVER_ORIGIN=https://multica.test", "MULTICA_EGRESS_ALLOWED_HOSTS="}
+	basePATH := "PATH=" + defaultImagePATH
+	cases := []struct {
+		name   string
+		actual []string
+		want   bool
+	}{
+		{"owned only", owned, true},
+		{"owned plus image path", append(append([]string{}, owned...), basePATH), true},
+		{"changed owned value", []string{"MULTICA_EGRESS_SERVER_ORIGIN=https://evil.test", "MULTICA_EGRESS_ALLOWED_HOSTS="}, false},
+		{"extra credential", append(append([]string{}, owned...), "ARK_API_KEY=secret"), false},
+		{"missing owned", []string{basePATH}, false},
+		{"duplicate key", append(append([]string{}, owned...), basePATH, basePATH), false},
+	}
+	for _, tc := range cases {
+		if got := egressEnvMatches(tc.actual, owned); got != tc.want {
+			t.Fatalf("%s: egressEnvMatches = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestAuroraProviderSecretMountsAreReadOnly(t *testing.T) {
 	cfg := auroraConfig()
 	cfg.Aurora.ProviderSecretFiles = map[string]string{
