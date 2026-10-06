@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"errors"
+	guuid "github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -160,5 +161,48 @@ func TestServiceDiagnoseRechecksOfflineVolume(t *testing.T) {
 	_, e := NewService(store.New(pool, ns), model.Config{Namespace: ns}, p).Diagnose(context.Background(), mustUUID(t, f.UserID), ref)
 	if !errors.Is(e, model.ErrConflict) {
 		t.Fatalf("replaced volume proof accepted: %v", e)
+	}
+}
+
+// An Aurora re-arm reuses the stable idempotency key but carries a fresh
+// single-use enrollment secret. The handoff table is a delivery channel, not an
+// idempotency record: the replay must overwrite it so the reconciler can take
+// the fresh secret instead of the already-consumed one.
+func TestServiceProvisionAuroraReplayOverwritesHandoff(t *testing.T) {
+	pool, f := testutil.NewFleetFixture(t)
+	ns := "service-aurora-replay-" + f.UserID
+	f.Cleanup(t, "DELETE FROM fleet_node_operations WHERE namespace=$1", ns)
+	f.Cleanup(t, "DELETE FROM fleet_nodes WHERE namespace=$1", ns)
+	cfg := model.Config{
+		Namespace: ns,
+		Image:     "aurora-test-image",
+		Specs:     map[string]model.Spec{"sandbox": {CPUs: 2, MemoryBytes: 4294967296, Pids: 256, MaxRuns: 1}},
+		Aurora:    &model.AuroraConfig{ServerURL: "http://api.test"},
+	}
+	svc := NewService(store.New(pool, ns, store.WithProvisioningConfig(cfg), store.WithMaxNodes(2)), cfg, nil)
+	owner := mustUUID(t, f.UserID)
+	nodeID := mustUUID(t, guuid.NewString())
+	req := model.AuroraNodeRequest{
+		WorkspaceID:     mustUUID(t, f.WorkspaceID),
+		RuntimeID:       mustUUID(t, guuid.NewString()),
+		DaemonID:        guuid.NewString(),
+		ImageDigest:     "aurora-test-image",
+		Name:            "aurora-handoff",
+		Spec:            "sandbox",
+		IdempotencyKey:  "aurora-handoff-key",
+		EnrollmentToken: "mse_" + strings.Repeat("a", 40),
+	}
+	if _, _, err := svc.ProvisionAuroraNode(context.Background(), owner, nodeID, req); err != nil {
+		t.Fatalf("first provision: %v", err)
+	}
+	fresh := "mse_" + strings.Repeat("b", 40)
+	replay := req
+	replay.EnrollmentToken = fresh
+	if _, _, err := svc.ProvisionAuroraNode(context.Background(), owner, nodeID, replay); err != nil {
+		t.Fatalf("replayed provision: %v", err)
+	}
+	got, ok := svc.TakeAuroraEnrollment(nodeID)
+	if !ok || got != fresh {
+		t.Fatalf("handoff = %q ok=%v, want the fresh re-arm secret", got, ok)
 	}
 }

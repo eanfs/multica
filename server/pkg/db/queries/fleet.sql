@@ -274,6 +274,32 @@ RETURNING *;
 INSERT INTO fleet_node_operations (namespace, owner_id, node_id, action, idempotency_key, request_hash)
 VALUES (@namespace, @owner_id, @node_id, 'create', @idempotency_key, @request_hash) RETURNING *;
 
+-- name: FleetResetAuroraNode :one
+-- Re-arm the same Aurora node identity after its create failed or it was
+-- revoked. Volumes, daemon id, image, owner and workspace/runtime dimensions are
+-- durable identity and must survive; only the control generation and the
+-- fresh-bootstrap state change. The old observation may carry a bootstrap
+-- success receipt bound to the prior generation, so it is cleared.
+UPDATE fleet_nodes n SET generation= @next_generation,desired='running',status='creating',
+ container_id='',start_epoch='',ready=false,maintenance=false,revoked=false,
+ error_code='',error_message='',observation='{}'::jsonb,updated_at=now()
+WHERE n.namespace= @namespace AND n.owner_id= @owner_id AND n.id= @node_id AND n.generation= @generation
+ AND (n.revoked OR EXISTS (SELECT 1 FROM fleet_node_operations o
+  WHERE o.namespace=n.namespace AND o.owner_id=n.owner_id AND o.node_id=n.id AND o.id= @operation_id
+   AND (o.phase='failed' OR o.non_retryable)))
+RETURNING n.*;
+
+-- name: FleetResetAuroraCreateOperation :one
+-- Make the original create operation claimable again at the reset generation.
+-- The idempotency key and request hash are untouched: this is the same create
+-- intent, not a second one.
+UPDATE fleet_node_operations o SET generation= @next_generation,phase='queued',
+ bootstrap_minted=false,non_retryable=false,bootstrap_claimed_at=NULL,attempts=0,
+ next_attempt_at=NULL,error_code='',error_message='',updated_at=now()
+WHERE o.namespace= @namespace AND o.owner_id= @owner_id AND o.node_id= @node_id AND o.id= @operation_id
+ AND o.generation= @generation AND o.action='create'
+RETURNING o.*;
+
 -- name: FleetUnfinishedOperations :one
 SELECT count(*) FROM fleet_node_operations WHERE namespace = @namespace AND owner_id = @owner_id AND node_id = @node_id
  AND phase NOT IN ('completed','failed');

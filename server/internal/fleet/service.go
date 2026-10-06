@@ -68,16 +68,15 @@ func (s *Service) ProvisionAuroraNode(ctx context.Context, ownerID, nodeID pgtyp
 	if !model.ValidEnrollmentToken(req.EnrollmentToken) {
 		return model.Node{}, model.Operation{}, model.ErrInvalidRequest
 	}
-	node, op, replayed, err := s.repo.CreateAuroraIntent(ctx, ownerID, nodeID, req)
+	node, op, _, err := s.repo.CreateAuroraIntent(ctx, ownerID, nodeID, req)
 	if err != nil {
 		return model.Node{}, model.Operation{}, err
 	}
-	// Only a newly admitted intent registers the secret. A replay's original
-	// secret is either still in the handoff or already consumed; re-registering
-	// would leave a second copy of a live secret in memory.
-	if !replayed {
-		s.auroraEnrollment.Store(util.UUIDToString(nodeID), req.EnrollmentToken)
-	}
+	// The handoff is a delivery channel, not an idempotency record. Aurora
+	// re-arms a node with a fresh single-use secret under the same stable
+	// idempotency key, so every call carrying a validated secret must (over)write
+	// the entry, including a replay whose previous secret was consumed or expired.
+	s.auroraEnrollment.Store(util.UUIDToString(nodeID), req.EnrollmentToken)
 	return node, op, nil
 }
 

@@ -50,6 +50,56 @@ func (s *Store) validAurora(nodeID pgtype.UUID, req model.AuroraNodeRequest) boo
 	return model.ValidateCreate(model.CreateRequest{Name: req.Name, Spec: req.Spec}, s.provisioning) == nil
 }
 
+// auroraBootstrapDead reports whether the persisted create intent cannot make
+// progress. A failed/non-retryable operation or a revoked node is dead state;
+// a healthy in-flight or completed bootstrap is not.
+func auroraBootstrapDead(node model.Node, op model.Operation) bool {
+	return node.Revoked || op.Phase == "failed" || op.NonRetryable
+}
+
+// resetAuroraIntent re-arms the same node identity for a fresh bootstrap. It
+// advances the control generation and clears the failed/revoked state, leaving
+// volumes, daemon id, image, owner and workspace/runtime untouched, and rewinds
+// the original create operation onto the new generation so it is claimable
+// again. The idempotency key and request hash stay unchanged: this is still one
+// create intent, never a second node or operation.
+func (s *Store) resetAuroraIntent(ctx context.Context, q *db.Queries, owner, nodeID pgtype.UUID, node model.Node, op model.Operation) (model.Node, model.Operation, error) {
+	next := node.Generation + 1
+	row, err := q.FleetResetAuroraNode(ctx, db.FleetResetAuroraNodeParams{
+		NextGeneration: next,
+		Namespace:      s.namespace,
+		OwnerID:        owner,
+		NodeID:         nodeID,
+		Generation:     node.Generation,
+		OperationID:    op.ID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.Node{}, model.Operation{}, model.ErrConflict
+	}
+	if err != nil {
+		return model.Node{}, model.Operation{}, err
+	}
+	resetNode, err := nodeFromRow(row)
+	if err != nil {
+		return model.Node{}, model.Operation{}, err
+	}
+	opRow, err := q.FleetResetAuroraCreateOperation(ctx, db.FleetResetAuroraCreateOperationParams{
+		NextGeneration: next,
+		Namespace:      s.namespace,
+		OwnerID:        owner,
+		NodeID:         nodeID,
+		OperationID:    op.ID,
+		Generation:     op.Generation,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.Node{}, model.Operation{}, model.ErrConflict
+	}
+	if err != nil {
+		return model.Node{}, model.Operation{}, err
+	}
+	return resetNode, operationFromRow(opRow), nil
+}
+
 func (s *Store) lookupAuroraIntent(ctx context.Context, q *db.Queries, owner, nodeID pgtype.UUID, req model.AuroraNodeRequest, fingerprint string) (model.Node, model.Operation, bool, error) {
 	existing, err := q.GetFleetIntentByKey(ctx, db.GetFleetIntentByKeyParams{Namespace: s.namespace, OwnerID: owner, IdempotencyKey: req.IdempotencyKey})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -70,14 +120,23 @@ func (s *Store) lookupAuroraIntent(ctx context.Context, q *db.Queries, owner, no
 	if err != nil {
 		return model.Node{}, model.Operation{}, false, err
 	}
-	return node, operationFromRow(existing), true, nil
+	op := operationFromRow(existing)
+	if !auroraBootstrapDead(node, op) {
+		return node, op, true, nil
+	}
+	node, op, err = s.resetAuroraIntent(ctx, q, owner, nodeID, node, op)
+	if err != nil {
+		return model.Node{}, model.Operation{}, false, err
+	}
+	return node, op, true, nil
 }
 
 // CreateAuroraIntent is the single Aurora workspace-node admission point. The
 // caller owns the node and daemon UUIDs; Fleet validates owner/namespace/image/
 // spec, then commits the node and create operation atomically under the owner
-// lock. A matching replay returns the original node/operation even after quota
-// or configuration changes.
+// lock. A healthy matching replay returns the original node/operation even
+// after quota or configuration changes; a replay of a failed/revoked create
+// resets that same identity for a fresh bootstrap.
 func (s *Store) CreateAuroraIntent(ctx context.Context, owner, nodeID pgtype.UUID, req model.AuroraNodeRequest) (model.Node, model.Operation, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, databaseTimeout)
 	defer cancel()

@@ -8,7 +8,9 @@ import (
 	"time"
 
 	guuid "github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/fleet/model"
+	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/internal/util"
 )
 
@@ -80,4 +82,153 @@ func TestFleetAuroraBootstrapConfirm(t *testing.T) {
 	if err != nil || !current.BootstrapMinted {
 		t.Fatalf("confirmed operation = %+v err=%v", current, err)
 	}
+}
+
+// auroraRebootstrapRequest is the one-node, one-key Aurora intent the re-arm
+// regressions replay; only the enrollment secret differs on replay.
+func auroraRebootstrapRequest(t *testing.T, f *testutil.Fixture, key string) model.AuroraNodeRequest {
+	t.Helper()
+	return model.AuroraNodeRequest{
+		WorkspaceID:     uuid(t, f.WorkspaceID),
+		RuntimeID:       uuid(t, guuid.NewString()),
+		DaemonID:        guuid.NewString(),
+		ImageDigest:     "aurora-test-image",
+		Name:            "aurora-rebootstrap",
+		Spec:            "sandbox",
+		IdempotencyKey:  key,
+		EnrollmentToken: "mse_" + strings.Repeat("a", 40),
+	}
+}
+
+// requireAuroraRebootstrapReset asserts the replay reset the same node identity
+// for a fresh bootstrap: durable identity is preserved, state is fresh, the
+// generation advanced, and the original create operation is claimable again.
+func requireAuroraRebootstrapReset(t *testing.T, f *testutil.Fixture, ns string, before model.Node, beforeOp model.Operation, after model.Node, afterOp model.Operation) {
+	t.Helper()
+	if after.ID != before.ID || after.OwnerID != before.OwnerID || after.DaemonID != before.DaemonID || after.Image != before.Image || after.DataVolume != before.DataVolume || after.SecretsVolume != before.SecretsVolume {
+		t.Fatalf("reset changed durable identity: before=%+v after=%+v", before, after)
+	}
+	if after.Revoked || after.Maintenance || after.Desired != "running" || after.Status != "creating" || after.ContainerID != "" || after.Ready {
+		t.Fatalf("reset did not restore fresh-bootstrap node state: %+v", after)
+	}
+	if after.Generation != before.Generation+1 {
+		t.Fatalf("reset generation = %d, want %d", after.Generation, before.Generation+1)
+	}
+	if afterOp.ID != beforeOp.ID || afterOp.Generation != after.Generation || afterOp.Phase != "queued" || afterOp.BootstrapMinted || afterOp.NonRetryable || !afterOp.BootstrapClaimedAt.IsZero() || afterOp.Attempts != 0 {
+		t.Fatalf("reset did not make the create operation claimable: %+v", afterOp)
+	}
+	if n := f.Count(t, "SELECT count(*) FROM fleet_nodes WHERE namespace=$1 AND owner_id=$2 AND id=$3", ns, f.UserID, util.UUIDToString(before.ID)); n != 1 {
+		t.Fatalf("reset created a second node row: %d", n)
+	}
+	if n := f.Count(t, "SELECT count(*) FROM fleet_node_operations WHERE namespace=$1 AND owner_id=$2 AND idempotency_key=$3", ns, f.UserID, beforeOp.IdempotencyKey); n != 1 {
+		t.Fatalf("reset created a second create operation: %d", n)
+	}
+}
+
+// confirmAuroraRebootstrap drives the reset generation through the real claim,
+// mark, and confirm fence, proving the node is a live bootstrap again.
+func confirmAuroraRebootstrap(t *testing.T, s *Store, ns string, owner, nodeID pgtype.UUID, node model.Node, op model.Operation) {
+	t.Helper()
+	ctx := context.Background()
+	ref := model.OperationRef{Namespace: ns, NodeID: node.ID, OperationID: op.ID, Generation: op.Generation, Action: model.Create}
+	claim, err := s.ClaimBootstrap(ctx, owner, ref)
+	if err != nil {
+		t.Fatalf("re-bootstrap claim: %v", err)
+	}
+	if err = s.MarkBootstrapMinted(ctx, claim); err != nil {
+		t.Fatalf("re-bootstrap mark: %v", err)
+	}
+	obs := model.Observation{ContainerID: "aurora-rearm-cid", Status: "running", DaemonID: node.DaemonID, StartEpoch: time.Now().UTC().Format(time.RFC3339Nano), ObservedAt: time.Now().UTC(), Ready: true, ReportStatsKnown: true}
+	if err = s.ConfirmBootstrap(ctx, claim, obs); err != nil {
+		t.Fatalf("re-bootstrap confirm: %v", err)
+	}
+	got, err := s.GetAuroraNode(ctx, owner, nodeID)
+	if err != nil || got.ContainerID != obs.ContainerID || !got.Ready || got.Revoked {
+		t.Fatalf("re-bootstrapped node = %+v err=%v", got, err)
+	}
+}
+
+// TestFleetAuroraReplayResetsFailedBootstrap covers the failure re-arm: after the
+// live bootstrap attempt failed and revoked the node (non_retryable create), the
+// same key and node UUID with a fresh secret must reset the same identity and let
+// the pipeline run again.
+func TestFleetAuroraReplayResetsFailedBootstrap(t *testing.T) {
+	s, f, ns := auroraStoreFixture(t, 2)
+	ctx := context.Background()
+	owner := uuid(t, f.UserID)
+	nodeID := uuid(t, guuid.NewString())
+	req := auroraRebootstrapRequest(t, f, "aurora-rebootstrap-failed")
+	node, op, replayed, err := s.CreateAuroraIntent(ctx, owner, nodeID, req)
+	if err != nil || replayed {
+		t.Fatalf("create node=%+v replayed=%v err=%v", node, replayed, err)
+	}
+	ref := model.OperationRef{Namespace: ns, NodeID: node.ID, OperationID: op.ID, Generation: op.Generation, Action: model.Create}
+	claim, err := s.ClaimBootstrap(ctx, owner, ref)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err = s.MarkBootstrapMinted(ctx, claim); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	if err = s.FailBootstrap(ctx, claim, "unavailable"); err != nil {
+		t.Fatalf("fail: %v", err)
+	}
+	dead, err := s.GetAuroraNode(ctx, owner, nodeID)
+	if err != nil || !dead.Revoked {
+		t.Fatalf("dead node = %+v err=%v", dead, err)
+	}
+	deadOp, err := s.GetOperation(ctx, owner, op.ID)
+	if err != nil || !deadOp.NonRetryable {
+		t.Fatalf("dead operation = %+v err=%v", deadOp, err)
+	}
+
+	rotated := req
+	rotated.EnrollmentToken = "mse_" + strings.Repeat("b", 40)
+	after, afterOp, replayed, err := s.CreateAuroraIntent(ctx, owner, nodeID, rotated)
+	if err != nil || !replayed {
+		t.Fatalf("replay after=%+v replayed=%v err=%v", after, replayed, err)
+	}
+	requireAuroraRebootstrapReset(t, f, ns, dead, deadOp, after, afterOp)
+	confirmAuroraRebootstrap(t, s, ns, owner, nodeID, after, afterOp)
+}
+
+// TestFleetAuroraReplayResetsReapedNode covers the reaper re-arm: Fleet tombstoned
+// the node (revoked, terminated) while the create operation stayed retryable, and
+// the next PUT must reset that same node instead of returning dead state.
+func TestFleetAuroraReplayResetsReapedNode(t *testing.T) {
+	s, f, ns := auroraStoreFixture(t, 2)
+	ctx := context.Background()
+	owner := uuid(t, f.UserID)
+	nodeID := uuid(t, guuid.NewString())
+	req := auroraRebootstrapRequest(t, f, "aurora-rebootstrap-reaped")
+	node, op, replayed, err := s.CreateAuroraIntent(ctx, owner, nodeID, req)
+	if err != nil || replayed {
+		t.Fatalf("create node=%+v replayed=%v err=%v", node, replayed, err)
+	}
+	// The Aurora reaper issues a Fleet delete, and Fleet completes the tombstone.
+	if err = s.DeleteAuroraIntent(ctx, owner, nodeID); err != nil {
+		t.Fatalf("delete intent: %v", err)
+	}
+	var deleteOpText string
+	f.QueryRow(t, "SELECT id::text FROM fleet_node_operations WHERE namespace=$1 AND owner_id=$2 AND node_id=$3 AND action='delete'", ns, f.UserID, util.UUIDToString(nodeID)).Scan(&deleteOpText)
+	if err = s.FinishDelete(ctx, uuid(t, deleteOpText), node.Generation+1); err != nil {
+		t.Fatalf("finish delete: %v", err)
+	}
+	dead, err := s.GetAuroraNode(ctx, owner, nodeID)
+	if err != nil || !dead.Revoked || dead.Desired != "terminated" || dead.Status != "terminated" {
+		t.Fatalf("reaped node = %+v err=%v", dead, err)
+	}
+	deadOp, err := s.GetOperation(ctx, owner, op.ID)
+	if err != nil || deadOp.NonRetryable {
+		t.Fatalf("reaped create operation = %+v err=%v", deadOp, err)
+	}
+
+	rotated := req
+	rotated.EnrollmentToken = "mse_" + strings.Repeat("b", 40)
+	after, afterOp, replayed, err := s.CreateAuroraIntent(ctx, owner, nodeID, rotated)
+	if err != nil || !replayed {
+		t.Fatalf("replay after=%+v replayed=%v err=%v", after, replayed, err)
+	}
+	requireAuroraRebootstrapReset(t, f, ns, dead, deadOp, after, afterOp)
+	confirmAuroraRebootstrap(t, s, ns, owner, nodeID, after, afterOp)
 }

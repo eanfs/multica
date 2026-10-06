@@ -1308,6 +1308,134 @@ func (q *Queries) FleetRecoveryClock(ctx context.Context) (pgtype.Timestamptz, e
 	return sql_now, err
 }
 
+const fleetResetAuroraCreateOperation = `-- name: FleetResetAuroraCreateOperation :one
+UPDATE fleet_node_operations o SET generation= $1,phase='queued',
+ bootstrap_minted=false,non_retryable=false,bootstrap_claimed_at=NULL,attempts=0,
+ next_attempt_at=NULL,error_code='',error_message='',updated_at=now()
+WHERE o.namespace= $2 AND o.owner_id= $3 AND o.node_id= $4 AND o.id= $5
+ AND o.generation= $6 AND o.action='create'
+RETURNING o.id, o.namespace, o.owner_id, o.created_at, o.updated_at, o.node_id, o.action, o.idempotency_key, o.request_hash, o.phase, o.prior_desired, o.generation, o.approved, o.attempts, o.error_code, o.error_message, o.bootstrap_claimed_at, o.bootstrap_minted, o.non_retryable, o.next_attempt_at, o.action_claimed_at, o.action_start_epoch
+`
+
+type FleetResetAuroraCreateOperationParams struct {
+	NextGeneration int64       `json:"next_generation"`
+	Namespace      string      `json:"namespace"`
+	OwnerID        pgtype.UUID `json:"owner_id"`
+	NodeID         pgtype.UUID `json:"node_id"`
+	OperationID    pgtype.UUID `json:"operation_id"`
+	Generation     int64       `json:"generation"`
+}
+
+// Make the original create operation claimable again at the reset generation.
+// The idempotency key and request hash are untouched: this is the same create
+// intent, not a second one.
+func (q *Queries) FleetResetAuroraCreateOperation(ctx context.Context, arg FleetResetAuroraCreateOperationParams) (FleetNodeOperation, error) {
+	row := q.db.QueryRow(ctx, fleetResetAuroraCreateOperation,
+		arg.NextGeneration,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.NodeID,
+		arg.OperationID,
+		arg.Generation,
+	)
+	var i FleetNodeOperation
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.NodeID,
+		&i.Action,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.Phase,
+		&i.PriorDesired,
+		&i.Generation,
+		&i.Approved,
+		&i.Attempts,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+		&i.BootstrapClaimedAt,
+		&i.BootstrapMinted,
+		&i.NonRetryable,
+		&i.NextAttemptAt,
+		&i.ActionClaimedAt,
+		&i.ActionStartEpoch,
+	)
+	return i, err
+}
+
+const fleetResetAuroraNode = `-- name: FleetResetAuroraNode :one
+UPDATE fleet_nodes n SET generation= $1,desired='running',status='creating',
+ container_id='',start_epoch='',ready=false,maintenance=false,revoked=false,
+ error_code='',error_message='',observation='{}'::jsonb,updated_at=now()
+WHERE n.namespace= $2 AND n.owner_id= $3 AND n.id= $4 AND n.generation= $5
+ AND (n.revoked OR EXISTS (SELECT 1 FROM fleet_node_operations o
+  WHERE o.namespace=n.namespace AND o.owner_id=n.owner_id AND o.node_id=n.id AND o.id= $6
+   AND (o.phase='failed' OR o.non_retryable)))
+RETURNING n.id, n.namespace, n.owner_id, n.created_at, n.updated_at, n.container_id, n.daemon_id, n.name, n.spec, n.image, n.profile_ref, n.start_epoch, n.data_volume, n.secrets_volume, n.desired, n.status, n.generation, n.ready, n.health_at, n.active_runs, n.pending_reports, n.failed_reports, n.maintenance, n.revoked, n.error_code, n.error_message, n.spec_config, n.observation, n.workspace_id, n.runtime_id
+`
+
+type FleetResetAuroraNodeParams struct {
+	NextGeneration int64       `json:"next_generation"`
+	Namespace      string      `json:"namespace"`
+	OwnerID        pgtype.UUID `json:"owner_id"`
+	NodeID         pgtype.UUID `json:"node_id"`
+	Generation     int64       `json:"generation"`
+	OperationID    pgtype.UUID `json:"operation_id"`
+}
+
+// Re-arm the same Aurora node identity after its create failed or it was
+// revoked. Volumes, daemon id, image, owner and workspace/runtime dimensions are
+// durable identity and must survive; only the control generation and the
+// fresh-bootstrap state change. The old observation may carry a bootstrap
+// success receipt bound to the prior generation, so it is cleared.
+func (q *Queries) FleetResetAuroraNode(ctx context.Context, arg FleetResetAuroraNodeParams) (FleetNode, error) {
+	row := q.db.QueryRow(ctx, fleetResetAuroraNode,
+		arg.NextGeneration,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.NodeID,
+		arg.Generation,
+		arg.OperationID,
+	)
+	var i FleetNode
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ContainerID,
+		&i.DaemonID,
+		&i.Name,
+		&i.Spec,
+		&i.Image,
+		&i.ProfileRef,
+		&i.StartEpoch,
+		&i.DataVolume,
+		&i.SecretsVolume,
+		&i.Desired,
+		&i.Status,
+		&i.Generation,
+		&i.Ready,
+		&i.HealthAt,
+		&i.ActiveRuns,
+		&i.PendingReports,
+		&i.FailedReports,
+		&i.Maintenance,
+		&i.Revoked,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+		&i.SpecConfig,
+		&i.Observation,
+		&i.WorkspaceID,
+		&i.RuntimeID,
+	)
+	return i, err
+}
+
 const fleetRestoreMaintenance = `-- name: FleetRestoreMaintenance :execrows
 UPDATE fleet_nodes SET desired = $1,maintenance=false,ready=false,updated_at=now()
 WHERE namespace = $2 AND owner_id = $3 AND id = $4 AND generation = $5 AND maintenance
