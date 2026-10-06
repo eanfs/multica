@@ -22,6 +22,9 @@ COPY --from=claude /opt/claude/ /usr/local/
 COPY --from=builder /out/ /usr/local/bin/
 # Future image builds verify shared-library ABI and the package's actual entrypoint.
 RUN ldd /usr/local/bin/node && /usr/local/bin/node --version && /usr/local/bin/claude --version
+# Fixed layout owned by the node UID so a fresh named volume mounted at /data or
+# /secrets is initialised writable for the non-root node and bootstrap helper.
+RUN install -d -o 10001 -g 10001 -m 0700 /data /data/home /data/workspaces /secrets
 USER 10001:10001
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/data/home
 ENTRYPOINT ["/usr/local/bin/fleet-node","run"]
