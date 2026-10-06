@@ -159,6 +159,21 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"workspace":                          workspaceDelete,
 	"workspace_invitation":               workspaceDelete,
 	"workspace_share_link":               workspaceDelete,
+
+	// Fleet control-plane rows are deployment- or owner-scoped, not
+	// workspace-owned: the namespace fence, credential profiles, node token
+	// hashes and node operations carry no workspace_id and outlive any single
+	// workspace.
+	"fleet_credential_profiles": workspaceDeleteKeep,
+	"fleet_namespace_fences":    workspaceDeleteKeep,
+	"fleet_node_credentials":    workspaceDeleteKeep,
+	"fleet_node_operations":     workspaceDeleteKeep,
+	// An Aurora Fleet node carries the workspace_id/runtime_id dimensions, so
+	// the workspace teardown must decide its fate. The Fleet control plane owns
+	// the node's Docker container and volumes, which an API transaction cannot
+	// clean up; the row keeps its attribution and is handed to the Fleet
+	// lifecycle reconciler instead of being deleted (or kept) here.
+	"fleet_nodes": workspaceDeleteSettle,
 }
 
 func TestWorkspaceDeletionManifestCoversPublicSchema(t *testing.T) {
