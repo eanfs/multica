@@ -617,7 +617,7 @@ HEALTHCHECK --interval=5s --timeout=5s CMD ["fleet-node","health"]
 
 **Interfaces:** `fleet.NewReconciler(repo *store.Store,p model.Provider,cfg model.Config) *Reconciler`；`Reconciler.Tick(ctx) error`、`Run(ctx) error`；`Store.ListRecoverable(ctx) ([]model.Operation,error)`、`Store.RecordObservation(ctx context.Context,nodeID pgtype.UUID,generation int64,observation model.Observation) error`、`FinishDelete(ctx,operationID,generation) error`。main 组装 DB/Schema check、Provider、Service/Reconciler；仅 readyz 检测，不自行跑 migrate。
 
-- [ ] **Step 1:** fake Provider 的 Action log 测试：重复 Tick 不重复 Ensure、unapproved delete 从不调用 Delete、delete after crash 恢复同 op、unknown Docker 不擦 SQL、健康 Ready 只在正确 epoch。纯 guard：
+- [x] **Step 1:** fake Provider 的 Action log 测试：重复 Tick 不重复 Ensure、unapproved delete 从不调用 Delete、delete after crash 恢复同 op、unknown Docker 不擦 SQL、健康 Ready 只在正确 epoch。纯 guard：
 
 ```go
 func TestOperationRequiresApproval(t *testing.T) {
@@ -629,8 +629,8 @@ func TestOperationRequiresApproval(t *testing.T) {
 ```
 
 `CanApplyOperation(model.Operation) bool` 在 reconciler.go 定义：create/start 不要求 maintenance approval，stop/reboot/delete 必须 approved 且代次匹配。
-- [ ] **Step 2:** `go test ./internal/fleet ./internal/fleet/store ./cmd/fleet -run 'TestOperation|TestRecovery|TestFleetMain' -count=1`；预期组合/恢复规则 FAIL。
-- [ ] **Step 3:** operation CAS 领取 → tx 外 Engine 动作 → 短 tx 记录结果。容器健康过期30秒，失败仍保存 error/barrier。默认周期5s、重试5次、初始化5min；永久配置/归属错误停止重试，显式 retry 复用原 op。先 revoke/准入关闭，再删除 resources，再 SQL tombstone/offline Runtime；不删除 Agent/Issue。startup reconcile namespace-owned资源，foreign标签拒绝，Docker/DB故障 failclosed，新Docker动作只有DB已记录授权才开始。
+- [x] **Step 2:** `go test ./internal/fleet ./internal/fleet/store ./cmd/fleet -run 'TestOperation|TestRecovery|TestFleetMain' -count=1`；预期组合/恢复规则 FAIL。
+- [x] **Step 3:** operation CAS 领取 → tx 外 Engine 动作 → 短 tx 记录结果。容器健康过期30秒，失败仍保存 error/barrier。默认周期5s、重试5次、初始化5min；永久配置/归属错误停止重试，显式 retry 复用原 op。先 revoke/准入关闭，再删除 resources，再 SQL tombstone/offline Runtime；不删除 Agent/Issue。startup reconcile namespace-owned资源，foreign标签拒绝，Docker/DB故障 failclosed，新Docker动作只有DB已记录授权才开始。
 
 ```go
 func CanApplyOperation(op model.Operation) bool {
@@ -644,8 +644,8 @@ func CanApplyOperation(op model.Operation) bool {
 ```
 
 main 信号取消 Run，停止接受新管理操作，不意外删除节点。Fleet 启动不建新数据库/迁移/volume；pool budget 与默认 API pool一起控制。固定诊断/review HTTP 不得在 tx 内调用；恢复检查使用已有 Task7 Maintainer协议。
-- [ ] **Step 4:** tests PASS，`go test -race ./internal/fleet/... ./internal/fleetguard/... -count=1`；构建 `go build ./cmd/fleet ./cmd/fleet-node`。核对 HTTP 仅 loopback映射，服务密钥不进 logs，sqlite dependency不存在。
-- [ ] **Step 5:** 提交 `feat(fleet): reconcile durable Docker node operations`。
+- [x] **Step 4:** tests PASS，`go test -race ./internal/fleet/... ./internal/fleetguard/... -count=1`；构建 `go build ./cmd/fleet ./cmd/fleet-node`。核对 HTTP 仅 loopback映射，服务密钥不进 logs，sqlite dependency不存在。
+- [x] **Step 5:** 提交 `feat(fleet): reconcile durable Docker node operations`。
 
 
 **异常身份不重建：** create仅在没有已确认container身份时Ensure；若已记录containerID的容器被外部删除，标记实例丢失，不创建替代容器。Create失败撤销Token，只清理由该op新建且归属明确的卷，不删已有卷。Worker使用自己的context，浏览器断开不取消已接受意图。服务secret只在API/Fleet，不进node；NodeToken不进入模型env/argv/prompt，保留既有每任务mat_配置路径。
@@ -673,7 +673,7 @@ export interface CreateDockerNodeRequest {name?:string;spec:string}
 
 API方法 `getCloudRuntimeCapabilities():Promise<CloudRuntimeCapabilities>`；`createCloudRuntimeNode(data:CreateCloudRuntimeNodeRequest|CreateDockerNodeRequest,idempotencyKey?:string):Promise<CloudRuntimeNode>`；`startCloudRuntimeNode(instanceId:string,key:string)`、stop/reboot同签名，返回Promise<CloudRuntimeNode>；delete保留Promise<void>、增加可选key。`cloudRuntimeCapabilityOptions(wsId:string)` 及 `useStartCloudRuntimeNode(wsId:string)`、stop/reboot同模式。旧EC2 request保留，不新增内部shim。
 
-- [ ] **Step 1:** DOM-free tests首行node环境；错误能力/响应：
+- [x] **Step 1:** DOM-free tests首行node环境；错误能力/响应：
 
 ```ts
 it("unknown provider disables operations", () => {
@@ -686,8 +686,8 @@ it("unknown provider disables operations", () => {
 ```
 
 另测hosted有效字段不变、malformedcreate显式失败、retry同key、不同意图不同key、不发servicekey。
-- [ ] **Step 2:** `pnpm --filter @multica/core test -- api/client.test.ts api/schemas.test.ts runtimes/cloud-runtime-capabilities.test.ts runtimes/cloud-runtime.test.ts`；预期schema/method缺失FAIL。
-- [ ] **Step 3:** zod校验numericlimits/optionaldiagnostics，unknownprovider清空operations；criticalcreate/action解析EMPTY_NODE须throw，list安全emptyfallback。实现：
+- [x] **Step 2:** `pnpm --filter @multica/core test -- api/client.test.ts api/schemas.test.ts runtimes/cloud-runtime-capabilities.test.ts runtimes/cloud-runtime.test.ts`；预期schema/method缺失FAIL。
+- [x] **Step 3:** zod校验numericlimits/optionaldiagnostics，unknownprovider清空operations；criticalcreate/action解析EMPTY_NODE须throw，list安全emptyfallback。实现：
 
 ```ts
 export const EMPTY_CLOUD_RUNTIME_CAPABILITIES: CloudRuntimeCapabilities = {
@@ -699,8 +699,8 @@ export function supportsNodeAction(caps:CloudRuntimeCapabilities,action:NodeActi
 ```
 
 Lifecycle body `{instance_id}`，Mutation onSettled invalidate节点/Runtimequery，无optimisticremove；account节点key accountscope，wsId只给Runtime投影失效。core无process.env/storage/UI；Node新增provider/ready/op/error为optionaldefaults。schema边界生成受管metadata类型，不cast。
-- [ ] **Step 4:** 定向tests PASS、`pnpm --filter @multica/core typecheck`；valid hosted旧tests继续PASS，malformedcreation转显式失败。
-- [ ] **Step 5:** scoped commit `feat(fleet): add compatible client capabilities and node actions`。
+- [x] **Step 4:** 定向tests PASS、`pnpm --filter @multica/core typecheck`；valid hosted旧tests继续PASS，malformedcreation转显式失败。
+- [x] **Step 5:** scoped commit `feat(fleet): add compatible client capabilities and node actions`。
 
 ### Task 12: Web/Desktop 共享节点 UI
 
@@ -713,7 +713,7 @@ Lifecycle body `{instance_id}`，Mutation onSettled invalidate节点/Runtimequer
 
 **Interfaces — Consumes:** Task11 caps/node/hooks。**Produces:** `CloudNodeActions({node,capabilities,wsId,onDeleted})`，props类型CloudRuntimeNode/CloudRuntimeCapabilities/string/()=>void；消费 Task 11 产出的 core `getManagedFleetNodeID(runtime:AgentRuntime):string|null`，不在本任务创建 core helper。平台只注入navigation/plumbing。
 
-- [ ] **Step 1:** QueryClient/i18n沿用views测试setup、API mock在core/api；namedregression：
+- [x] **Step 1:** QueryClient/i18n沿用views测试setup、API mock在core/api；namedregression：
 
 ```tsx
 it("requires confirmation before deletion", async () => {
@@ -726,8 +726,8 @@ it("requires confirmation before deletion", async () => {
 ```
 
 testNode和testCaps在本文件顶部用Task4完整DTO/Task11capsschemaparse声明；testCaps为docker、local-small规格、全部5actions、persistenttrue/diskquotafalse。再测busy错误不remove/navigate、managedordinarydelete不开直接删除接口。
-- [ ] **Step 2:** `pnpm --filter @multica/views test -- runtimes/components/cloud-runtime-dialog.test.tsx runtimes/components/cloud-node-actions.test.tsx runtimes/components/delete-runtime-dialog.test.tsx`；预期component/wiring缺失FAIL。
-- [ ] **Step 3:** Docker仅名称/spec，Cloud旧字段保留；servercaps驱动两平台：
+- [x] **Step 2:** `pnpm --filter @multica/views test -- runtimes/components/cloud-runtime-dialog.test.tsx runtimes/components/cloud-node-actions.test.tsx runtimes/components/delete-runtime-dialog.test.tsx`；预期component/wiring缺失FAIL。
+- [x] **Step 3:** Docker仅名称/spec，Cloud旧字段保留；servercaps驱动两平台：
 
 ```tsx
 const caps = useQuery(cloudRuntimeCapabilityOptions(wsId));
@@ -736,8 +736,8 @@ const showCloudEntry = cloudRuntimeEnabled || local;
 ```
 
 action英文Create node/Start node/Stop node/Restart node/Delete node，中译遵循节点/运行时/智能体。delete确认卷/会话/目录不可恢复；busy/unknown/profilemissing给恢复指引，不声称key已认证。sameintentkey局部draft持有直到成功，重复按钮pending禁用。受管普通delete/restart导节点管理，后端仍拒绝绕过。长名/hover/accessibility用已有primitives，无newstore/mobile改动。
-- [ ] **Step 4:** tests、views typecheck、Web/Desktop窄typecheck PASS；react-best-practices审查多TSX，5种翻译key一致，views不mock框架routing。
-- [ ] **Step 5:** scoped commit `feat(fleet): manage Docker nodes in shared runtime views`。
+- [x] **Step 4:** tests、views typecheck、Web/Desktop窄typecheck PASS；react-best-practices审查多TSX，5种翻译key一致，views不mock框架routing。
+- [x] **Step 5:** scoped commit `feat(fleet): manage Docker nodes in shared runtime views`。
 
 ### Task 13: 当前 checkout 可选 Fleet 环境组件
 
@@ -750,7 +750,7 @@ action英文Create node/Start node/Stop node/Restart node/Delete node，中译�
 
 **Interfaces — Consumes:** Task7维护API、Task10readyz/cmd。**Produces:** `fleet-env.sh prepare|up|status|quiesce|down|destroy`，dev-env传绝对repo/env/registryID/namespace/port。prepare 用 URL parser 仅将 Fleet DB URL 的 host/port 替换为已验证的共享 PG Docker 网络内部 alias/port，dbname/凭证/query options 不变，API URL 不变；privatefiles600。quiesce全部nodes屏障，busy/unknown在关API前中止；destroy失败保留DB/registry用于恢复。
 
-- [ ] **Step 1:** existingdev-envfakePATHpattern写hermetic测试，stubdocker/http只记动作；assertdefault仍api/web，fleet可选，URL保留当前DBname，busy不shutdownAPI，资源失败不dropDB。实际testURL：
+- [x] **Step 1:** existingdev-envfakePATHpattern写hermetic测试，stubdocker/http只记动作；assertdefault仍api/web，fleet可选，URL保留当前DBname，busy不shutdownAPI，资源失败不dropDB。实际testURL：
 
 ```sh
 export DATABASE_URL='postgres://test:test@localhost:15432/worktree_test'
@@ -758,8 +758,8 @@ bash scripts/fleet-env.test.sh
 ```
 
 测试完整privateprofile/image/owner/namespace在TempDir；不能引入production认证bypass。
-- [ ] **Step 2:** `bash scripts/fleet-env.test.sh`、`bash scripts/dev-env.test.sh`；unknowncomponent/cleanup次序FAIL，无真实Engine。
-- [ ] **Step 3:** migrate_database先于API/Fleet；Compose仅fleet、無DB服务/DB卷，登记实际allocatedport。合法片段：
+- [x] **Step 2:** `bash scripts/fleet-env.test.sh`、`bash scripts/dev-env.test.sh`；unknowncomponent/cleanup次序FAIL，无真实Engine。
+- [x] **Step 3:** migrate_database先于API/Fleet；Compose仅fleet、無DB服务/DB卷，登记实际allocatedport。合法片段：
 
 ```yaml
 services:
@@ -788,8 +788,8 @@ networks:
 ```
 
 node restart=no、Fleetpool有界。node API 连通检查兼容 Desktop/Linux gateway，Fleet DB 仅走验证过的共享 PG internal network；不自动扩大 API 公网监听。down先quiesce再停止，volumes保留；destroy确认、labels+SQLowner验证、先清Docker后DB/registry，故障中止，禁止globalprune。namespace/FleetID registry持久化，同checkout重启不变、不同worktree隔离；同步AGENTS新流程而非事故历史。
-- [ ] **Step 4:** hermetictests、`bash -n scripts/fleet-env.sh scripts/dev-env.sh` PASS；授权Docker时 `make up C=api,web,fleet`、`make status`、down再up验证DB/卷恢复。未授权准确报告未运行。
-- [ ] **Step 5:** scoped commit `feat(dev): add optional managed Docker Fleet environment`。
+- [ ] **Step 4:** hermetictests、`bash -n scripts/fleet-env.sh scripts/dev-env.sh` PASS；授权Docker时 `make up C=api,web,fleet`、`make status`、down再up验证DB/卷恢复。未授权准确报告未运行。**（部分完成：hermetic 与 `bash -n` 通过；`make up`/`make status` 已实测；`down`/`up`/`destroy` 仍待单独拥有的可销毁环境。）**
+- [x] **Step 5:** scoped commit `feat(dev): add optional managed Docker Fleet environment`。
 
 ### Task 14: opt-in Docker/fake Claude 与浏览器全链路
 
@@ -800,7 +800,7 @@ node restart=no、Fleetpool有界。node API 连通检查兼容 Desktop/Linux ga
 
 **Interfaces — Consumes:** Task9假镜像、Task10service、Task13managedenv。**Produces:** `RoundTripFakeNode(ctx context.Context,t *testing.T) error`（本任务integration测试同包），真实Engine+testutil自有fixture+原taskHTTP链路，不执行用户CLI。TestApiClient新 `createFleetNode(spec:string,name:string):Promise<CloudRuntimeNode>`、`listFleetNodes():Promise<CloudRuntimeNode[]>`、`deleteFleetNode(instanceId:string):Promise<void>`、`createFleetAgent(runtimeId:string,name:string):Promise<{id:string}>`、`createFleetChat(agentId:string):Promise<{id:string}>`、`sendFleetChat(sessionId:string,content:string):Promise<{task_id:string}>`；privateauthedFetch+schema+现有workspaceheader，不旁路auth。公开getter `getFleetWorkspaceSlug():string`，已有workspaceSlug为private。
 
-- [ ] **Step 1:** tag/envgate必须先于Engine/executable/accountlookup：
+- [x] **Step 1:** tag/envgate必须先于Engine/executable/accountlookup：
 
 ```go
 //go:build dockerintegration
@@ -815,8 +815,8 @@ func TestDockerNodeRoundTrip(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2:** 不设gate时SKIP且无socket访问；授权后 `make env-exec ARGS='-- bash -c "cd server && MULTICA_RUN_DOCKER_INTEGRATION=1 go test -tags=dockerintegration ./internal/fleet/integration -run TestDockerNodeRoundTrip -count=1 -v"'`，最初protocol/helper未实现FAIL；skip不算green。
-- [ ] **Step 3:** fakeClaude实现--version/currentstream-json、marker回复和可控block。RoundTripFakeNode具体sequence：APIcreate→注册/ready→POST /api/agents绑定Runtime→POST /api/chat/sessions→POST消息→pollcompleted/messages→stop/start原身份/卷→Fleet重启→维护批准边界crash→delete/tokeninvalid。报告pending用fakeHTTP控制，channels/poll等状态不用sleep猜测。GoDB细节用testutil；browser业务资源由TestApiClient setup/cleanup。实现getter：
+- [x] **Step 2:** 不设gate时SKIP且无socket访问；授权后 `make env-exec ARGS='-- bash -c "cd server && MULTICA_RUN_DOCKER_INTEGRATION=1 go test -tags=dockerintegration ./internal/fleet/integration -run TestDockerNodeRoundTrip -count=1 -v"'`，最初protocol/helper未实现FAIL；skip不算green。
+- [x] **Step 3:** fakeClaude实现--version/currentstream-json、marker回复和可控block。RoundTripFakeNode具体sequence：APIcreate→注册/ready→POST /api/agents绑定Runtime→POST /api/chat/sessions→POST消息→pollcompleted/messages→stop/start原身份/卷→Fleet重启→维护批准边界crash→delete/tokeninvalid。报告pending用fakeHTTP控制，channels/poll等状态不用sleep猜测。GoDB细节用testutil；browser业务资源由TestApiClient setup/cleanup。实现getter：
 
 ```ts
 getFleetWorkspaceSlug():string {
@@ -841,8 +841,8 @@ test("Docker node becomes ready", async ({page,apiClient}) => {
 ```
 
 本Task在fixtures基于现有login/workspace登录逻辑暴露apiClient。另case从节点ClaudeRuntimeID建Agent/session，经浏览器输入发送固定prompt，观察fake回复/执行日志，APIpoll不能替代UI结果验证。cover跨owner403、busy停止拒绝、unknown能力入口隐藏、delete确认及卷清理。所有资源通过typedschema读，节点metadata不cast。
-- [ ] **Step 4:** 授权后GoDockertests与 `make env-exec ARGS='-- pnpm exec playwright test e2e/cloud-runtime.spec.ts --project=fleet-docker'` PASS；保留截图/trace/脱敏IDs。只清本testlabels+SQLowner资源，无prune；未授权报告未运行。
-- [ ] **Step 5:** scoped commit `test(fleet): verify Docker execution and recovery end to end`。
+- [x] **Step 4:** 授权后GoDockertests与 `make env-exec ARGS='-- pnpm exec playwright test e2e/cloud-runtime.spec.ts --project=fleet-docker'` PASS；保留截图/trace/脱敏IDs。只清本testlabels+SQLowner资源，无prune；未授权报告未运行。**（2026-10-06 本地验收：Go round trip PASS 46.4s；浏览器 fleet-docker 6/6 PASS 1.2m。）**
+- [x] **Step 5:** scoped commit `test(fleet): verify Docker execution and recovery end to end`。
 
 ### Task 15: 文档、回归与交付门
 
@@ -853,8 +853,8 @@ test("Docker node becomes ready", async ({page,apiClient}) => {
 
 **Interfaces — Consumes:** 每任务的配置/操作/测试契约。**Produces:** 用户能独立配置privateprofiles、create/绑定/执行/维护/恢复的说明和验收记录。
 
-- [ ] **Step 1:** 新文档linkcheck先FAIL；新增defaulttests无真实executablelookup，参照已有 [CLI清单](<../../../scripts/agent-cli-command-names.txt>)（Claude已在清单，无需新增其他Agent）；Task14defaultgate禁止socket。
-- [ ] **Step 2:** 说明版本锁、owner/privateprofile、gatewaydiagnostic、卷永久删除、queued/deferred取消、failedreport恢复、socket风险，不保证volumequota/物理wipe/生产强隔离。最小命令：
+- [x] **Step 1:** 新文档linkcheck先FAIL；新增defaulttests无真实executablelookup，参照已有 [CLI清单](<../../../scripts/agent-cli-command-names.txt>)（Claude已在清单，无需新增其他Agent）；Task14defaultgate禁止socket。
+- [x] **Step 2:** 说明版本锁、owner/privateprofile、gatewaydiagnostic、卷永久删除、queued/deferred取消、failedreport恢复、socket风险，不保证volumequota/物理wipe/生产强隔离。最小命令：
 
 ```sh
 make up C=api,web,fleet
@@ -863,7 +863,7 @@ make down
 ```
 
 真实smoke是可选且额外授权：若新增 `server/pkg/agent/claude_fleet_integration_test.go`，名称锁定 `TestClaudeFleetRealAgentSmoke`，首动作现有 `requireRealAgentSmoke(t)`，后才读取显式容器testprofile/HTTP业务sequence，不查用户home/OAuth/本机CLI。真实账户不作default依赖。
-- [ ] **Step 3:** 实施阶段完整回归：
+- [ ] **Step 3:** 实施阶段完整回归：**（已跑：`make sqlc` 无 diff、Go 定向/包测试、`pnpm typecheck`/`lint`/`test`、两个 hermetic 脚本、`git diff --check`；未跑 `make test`/`make check`：需要自有 managed env 的 `DATABASE_URL`。）**
 
 ```sh
 make sqlc
@@ -883,8 +883,39 @@ git diff --check
 ```
 
 “no tests to run”不是成功；参照 [已有gate](<../../../server/pkg/agent/real_agent_smoke_integration_test.go>)。
-- [ ] **Step 4:** Spec验收11项对应证据，noFK/concurrentindex、secretmarker扫描、sameDB/noSQLite、labels/namespace/owner、no cachedclaimpermit、API/Fleetcrash、Web/Desktop/5locale、再生成sqlc无新diff。未跑项写原因/命令，不声称全通过。
-- [ ] **Step 5:** scoped commit `docs(fleet): document local Docker runtime setup and recovery`；交付actualURL/commit/test证据、跳过真实smoke/剩余风险，不宣称Mobile/生产强隔离。
+- [ ] **Step 4:** Spec验收11项对应证据，noFK/concurrentindex、secretmarker扫描、sameDB/noSQLite、labels/namespace/owner、no cachedclaimpermit、API/Fleetcrash、Web/Desktop/5locale、再生成sqlc无新diff。未跑项写原因/命令，不声称全通过。**（11 项矩阵见《本地验收记录（2026-10-06）》；未跑项已列明。）**
+- [x] **Step 5:** scoped commit `docs(fleet): document local Docker runtime setup and recovery`；交付actualURL/commit/test证据、跳过真实smoke/剩余风险，不宣称Mobile/生产强隔离。
+
+## 本地验收记录（2026-10-06）
+
+**环境（本 checkout 独立注册项，未触碰借用中的 DB396 与 manual preview）：** managed env `multica-22`（自建 DB `multica_multica_22`）、API `http://localhost:18102`、web `http://localhost:13022`、Fleet 控制面 `127.0.0.1:19022`（仅 loopback）、本地 registry `127.0.0.1:5000`。
+镜像（本地构建并以 digest 固定）：节点 `localhost:5000/multica-node@sha256:0942cd8f…`；Fleet `localhost:5000/multica-fleet@sha256:a268cac5…`（对应提交 `52ac15d4a`）。
+
+**已执行（授权后）：**
+
+| 项目 | 命令 | 结果 |
+| --- | --- | --- |
+| Go 端到端 | `MULTICA_RUN_DOCKER_INTEGRATION=1 go test -tags=dockerintegration ./internal/fleet/integration -run TestDockerNodeRoundTrip -count=1` | **PASS 46.4s**：API create → daemon 注册/ready → 绑定 Runtime → chat → 真实 fake 回复 → stop/start 身份与卷保持 → Fleet 重启 → 崩溃边界同 key 重放 → 取消排队 → delete → 凭证撤销 → Runtime 离线 |
+| 浏览器全链路 | `MULTICA_RUN_DOCKER_INTEGRATION=1 pnpm exec playwright test e2e/cloud-runtime.spec.ts --project=fleet-docker` | **6 passed（1.2m）**：UI 内 fake 回复、跨 owner 403、busy-stop 409 且同 intent key 重试、未知能力隐藏入口、确认后删除运行中节点 |
+| Docker 包单测 | `go test ./internal/fleet/docker/... -count=1` | ok 32s，含新增 `TestDeleteStopsIdleRunningNodeBeforeRemoval`、`TestDeleteRefusesRunningNodeWithoutOnlineProof` |
+| 环境脚本 | `bash scripts/fleet-env.test.sh`、`bash scripts/dev-env.test.sh` | 31 个命名用例 PASS / 0 FAIL / 0 SKIP；EXIT=0 |
+| 前端 | `pnpm typecheck`、`pnpm lint`、`pnpm test` | EXIT=0；views 6135、desktop 666、web 239 等全部通过 |
+| 生成物与格式 | `make sqlc`、`git diff --check` | 再生成无 diff；clean |
+
+**验收中发现并修复的真实缺陷（均已提交）：**
+
+1. `f7101beba`：`InsertFleetNode` 从未写入 data/secrets 卷名 → 经 API 创建的节点必然 `configuration` 失败（单测因 fixture 直接给卷名而漏检）；改为按节点 UUID 派生持久化，并让 owner 列表隐藏 terminated 墓碑。
+2. `b404bcf5d`：bootstrap 安装器 helper 为只读根文件系统，而 `runHelper` 使用 `CopyToContainer` → 真实 Engine 报 `container rootfs is marked read-only`，bootstrap 在真实 Docker 上从未成功；现仅安装器根可写、其余加固不变，恢复路径与测试 fixture 同步对齐。
+3. `3c93a8c9b`：两个节点镜像未预置 `/data`、`/data/home`、`/data/workspaces`、`/secrets`（10001 属主）→ 新建卷为 root 所有，非 root 节点与 helper 无法写入。
+4. `52ac15d4a`：已批准的删除遇到空闲运行中节点会永久停在 `queued/error_code=unknown`（批准路径接受在线健康，执行路径只接受 stopped/missing）；现按自身在线证明先停机，再走离线证明并按 `container → secrets → data` 清理；证明不可读时拒绝且不变更。
+5. 测试修正（`32560b554` 等）：fake 回复断言原先匹配用户自己的消息（恒真）、runtime 未按 workspace 过滤、crash-boundary stop 未等待完成即删除、UI 断言未打开 Cloud Runtime 面板、异步删除未等待完成。
+
+**仍未执行 / 阻塞（不得声称已通过）：**
+
+- Task 13 物理聚合的 `down`/`up`/`destroy`：operator 的整命名空间 quiesce/destroy 证明会因 terminated 墓碑的 completion 收据不在其 manifest 中而拒绝；需要单独拥有、可销毁的环境（`up`/`status` 已实测通过）。
+- `make test` / `make check`：需要自有 managed env 的 `DATABASE_URL`；本次只跑了定向 Go 测试与前端全量。
+- 真实 agent/provider 烟测：未实现（`server/pkg/agent/claude_fleet_integration_test.go` 不存在）且未授权（`MULTICA_RUN_REAL_AGENT_SMOKE=1` 门未开启）。
+- 已发布镜像、SBOM/Trivy/签名与 AWS 部署：不在 Task 13–15 范围；本地验收使用的是本地构建并 digest 固定的镜像。
 
 ## Spec Coverage 自审表
 
