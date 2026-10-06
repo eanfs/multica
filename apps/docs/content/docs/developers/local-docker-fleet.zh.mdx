@@ -129,13 +129,13 @@ Docker 集成是**可选开启**的。Go 集成检查使用 `dockerintegration` 
 
 浏览器 `fleet-docker` Playwright 项目只在同一个 `MULTICA_RUN_DOCKER_INTEGRATION=1` 门下启用，绝不属于默认 suite。
 
-真实智能体烟测是独立的，需要 `MULTICA_RUN_REAL_AGENT_SMOKE=1` 和具名的 `agentintegration` 测试 `TestClaudeFleetRealAgentSmoke`：
+真实智能体烟测是独立的，需要 `MULTICA_RUN_REAL_AGENT_SMOKE=1` 和具名的 `agentintegration` 测试 `TestAuroraSandboxRealProviderSmoke`：
 
 ```sh
-(cd server && MULTICA_RUN_REAL_AGENT_SMOKE=1 go test -tags=agentintegration ./pkg/agent -run '^TestClaudeFleetRealAgentSmoke$' -count=1 -v)
+(cd server && MULTICA_RUN_REAL_AGENT_SMOKE=1 go test -tags=agentintegration ./pkg/agent -run '^TestAuroraSandboxRealProviderSmoke$' -count=1 -v)
 ```
 
-该具名测试不在本次改动范围内。在它被新增并单独授权之前，其缺失或“no tests to run”都属于 setup pending，绝不是通过。
+该测试已实现（`server/pkg/agent/aurora_sandbox_smoke_test.go`），但尚未获授权运行：未设置门变量时它会跳过，当前也没有供应商凭据或凭据文件，因此只记为 skipped，绝不记为通过。
 
 被跳过的测试或"no tests to run"**不是**通过，缺失环境属于 setup pending（待配置），而不是失败的测试。只有在显式授权并具备确切的具名环境时，才运行这些可选门和真实模型检查。
 

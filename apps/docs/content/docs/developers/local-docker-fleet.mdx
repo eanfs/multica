@@ -150,13 +150,13 @@ Docker-backed integration is **opt-in**. The Go integration checks use the `dock
 
 The browser `fleet-docker` Playwright project is enabled only under the same `MULTICA_RUN_DOCKER_INTEGRATION=1` gate and is never part of the default suite.
 
-Real agent smoke is separate and requires `MULTICA_RUN_REAL_AGENT_SMOKE=1` with the named `agentintegration` test `TestClaudeFleetRealAgentSmoke`:
+Real agent smoke is separate and requires `MULTICA_RUN_REAL_AGENT_SMOKE=1` with the named `agentintegration` test `TestAuroraSandboxRealProviderSmoke`:
 
 ```sh
-(cd server && MULTICA_RUN_REAL_AGENT_SMOKE=1 go test -tags=agentintegration ./pkg/agent -run '^TestClaudeFleetRealAgentSmoke$' -count=1 -v)
+(cd server && MULTICA_RUN_REAL_AGENT_SMOKE=1 go test -tags=agentintegration ./pkg/agent -run '^TestAuroraSandboxRealProviderSmoke$' -count=1 -v)
 ```
 
-The named test is not implemented in this change. Until it is added and separately authorized, its absence or "no tests to run" is setup pending, never a pass.
+The test is implemented (`server/pkg/agent/aurora_sandbox_smoke_test.go`) but has not been authorized to run. With the gate unset it skips, and no provider credentials or credential file are configured, so it is recorded as skipped, never passed.
 
 A skipped test or "no tests to run" is **not** a pass, and a missing environment is setup pending, not a failing test. Run the gated integration and real-model checks only with explicit authorization and the exact named environment.
 

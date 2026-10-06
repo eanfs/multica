@@ -10,7 +10,7 @@
 - Tasks 1–8 已实施，并各自经过两阶段审查（ledger：`.superpowers/sdd/2026-10-06-aurora-cloud-runtime-integration/progress.md`）。
 - 本地 Docker Fleet（`server/internal/fleet` + `server/cmd/fleet`）是本仓库唯一的 Docker 控制面；`server/internal/aurorafleet` 与 `server/cmd/aurora-fleet` 已删除。
 - P0 的 `aurora_runtime_unavailable` 503 在**已配置**的本地 Fleet 上修复；真正未配置的部署仍返回 503。
-- 真实 dockerd 上已证明 Aurora 节点能启动、出网走 egress sidecar、生命周期可重放（Task 7 real-engine 子测试）。
+- 真实 dockerd 上 Aurora 节点能启动、出网走 egress sidecar、生命周期可重放的**行为**已通过 Task 7 real-engine 子测试；实际命令、子测试耗时与 dockerd 版本见「Task 7 Step 3 真实 dockerd 证据」。但 Task 7 report/ledger 没有记录本次运行解析出的镜像 **digest**，也没有记录的受管 API URL，所以这一通过不是 Step 3 的完整证据：**镜像身份与受管 API URL 未经核验（unverified）**，不得据此声称发布镜像已在真实引擎上验证。
 - **仍未运行**：API `generation→asset→settlement` 往返与浏览器 Aurora spec（需要 fake-capable 的双契约节点镜像与已配置 Aurora 的受管 API/Fleet）；真实 provider/Claude 烟测（未授权）。两者都按 SKIP 记录，不声称通过。
 
 ## 环境
@@ -49,7 +49,7 @@
 
 配置齐备时，`SandboxManager.Ensure` 在 per-workspace advisory lock 内签发一次性 `mse_`、写 `aurora_sandbox_node`（`state='starting'`），经 `FleetProvisioner`（生产实现是 `cloudruntime.Client` 调 Fleet 的 `PUT|GET|DELETE /internal/v1/workspace-nodes/{nodeID}`）落 Fleet 节点，并写入 `backend_node_id`。Fleet 不可达/被拒绝/密钥交接缺失仍返回 503，且节点被标记 failed，不留 live enrollment。
 
-证据：`internal/fleet/integration` 的 `TestAuroraRoundTrip` 的 Docker gated 子测试在真实 dockerd 上通过；`internal/handler` 与 `cmd/server` 的 unit 覆盖 201/503 两条路径。API 往返本体的 SKIP 见下文。
+证据：`internal/fleet/integration` 的 `TestAuroraRoundTrip` 的 Docker gated 子测试在真实 dockerd 上通过（命令、耗时、host/dockerd 版本见「Task 7 Step 3 真实 dockerd 证据」；镜像 digest 与 URL 未记录，故不是 Step 3 完整证据）；`internal/handler` 与 `cmd/server` 的 unit 覆盖 201/503 两条路径。API 往返本体的 SKIP 见下文。
 
 ## Fleet `aurora` profile 字段
 
@@ -91,6 +91,26 @@ Fleet 配置的 `aurora` 块（管理员持有的公开配置，见 `fleet-confi
 
 Aurora 节点不再把宿主机路径塞进 `HostConfig.SecurityOpt`（SDK 会把该值原样发给 dockerd，dockerd 按 inline JSON 解析，导致 `Decoding seccomp profile failed: invalid character '/'`，容器创建后无法启动）。Task 7 的 D2 修复：Fleet 读取并校验宿主机上的 seccomp 文件，在任何 Docker 变更之前把内容作为 compact JSON 内联进 `SecurityOpt`；`validateNodeInspection` 校验同一份内联 profile。修复前 `RealEngineNodeStarts` 在 `Start` 失败，修复后在真实 dockerd 上 `State.Running` 且 `State.Error` 为空。普通 Claude profile 的 `HostConfig` 字节不变。
 
+## Task 7 Step 3 真实 dockerd 证据
+
+来源：`.superpowers/sdd/2026-10-06-aurora-cloud-runtime-integration/task-7-report.md`（fix round 2 的「What actually ran」）。以下是报告逐字记录的实际运行：
+
+| 项 | 值（来自 Task 7 report） |
+| --- | --- |
+| 命令 | `make env-exec ARGS='-- bash -c "cd server && MULTICA_RUN_DOCKER_INTEGRATION=1 go test -tags=dockerintegration ./internal/fleet/integration -run TestAuroraRoundTrip -count=1 -v"'` |
+| 通过子测试（耗时） | `RealEngineEnsureCrashReplay`（1.00s）、`RealEngineConnectNetworkIsIdempotent`（0.40s）、`RealEngineNodeStarts`（1.06s）、`RealEngineStopStartIdentity`（4.17s）、`RealEngineMaintenanceBoundary`（4.09s）、`RealEngineLiveEgress`（0.70s）、`RealBrokerAllowedTools`（0.18s） |
+| 总耗时 | `--- PASS: TestAuroraRoundTrip (11.59s)`；包结果 `ok … 13.069s` |
+| 主机 / dockerd | macOS darwin/arm64，Docker Desktop engine **29.8.0/aarch64** |
+| egress 崩溃重放 | `MULTICA_RUN_DOCKER_INTEGRATION=1 go test -tags=dockerintegration ./internal/fleet/docker -run TestAuroraRoundTripEgressReplay -count=1 -v` → `--- PASS (0.41s)` |
+| 运行中使用的 URL | egress 探针走固定 `http://egress:3128`；允许 origin 返回 200，未列出的 `http://example.com/` 返回 403（allowed origin 是测试进程内 `httptest` 动态 URL，报告未记录字面值） |
+| 镜像身份 | 节点 fixture 为本地构建的 `multica-aurora-it-node:local`（`FROM alpine:3.20`，未推送）；egress fixture 为 `multica-aurora-egress-fixture:arm64`。真实引擎测试在运行时经 `resolveImageDigestRef` 把 tag 解析成 `<ref>@sha256:<imageID>` 再做镜像检查。 |
+
+**Step 3 缺口（unverified，不记为通过）**：Task 7 report 与 ledger 都没有记录 `resolveImageDigestRef` 解析出的 sha256：
+
+- 因此这次真实引擎运行**无法按 digest 复核**它到底跑了哪个镜像层；报告只留下本地 tag。
+- 受管 API URL 同样不存在：`ApiGenerationRoundTrip` 与 `AuroraLifecycleRoundTrip` 是具名 SKIP（需要 `MULTICA_AURORA_FAKE_PIPELINE_IMAGE`），real-engine 子测试在进程内自建 namespace，不访问受管 API/Fleet。
+- 结论：Step 3 的「命令 / 耗时 / host-dockerd 版本」有证据；「URL / digest」**未记录、未核验**。本记录不声称 Step 3 已完整满足。
+
 ## Task 9 回归门（实际命令与结果）
 
 | 命令 | 结果 |
@@ -103,6 +123,8 @@ Aurora 节点不再把宿主机路径塞进 `HostConfig.SecurityOpt`（SDK 会�
 | `bash scripts/dev-env.test.sh` | PASS：3 个具名用例 + registry 行为验证。 |
 | `git diff --check` | PASS：exit 0。 |
 | `make test` | 见下方「make test 结果」。 |
+
+> Task 9 fix round 在 `workspace_delete.sql` 增加了说明 Fleet 交接顺序的注释，因此 `make sqlc` 只更新了 `server/pkg/db/generated/workspace_delete.sql.go` 中同一段注释；重复运行不再产生 diff（幂等）。
 
 ### make test 结果
 
