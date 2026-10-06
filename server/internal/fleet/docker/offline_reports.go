@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"io"
+	"log"
 	"reflect"
 	"strings"
 	"time"
@@ -460,7 +461,7 @@ func (e *sdkEngine) recoveryVolumes(ctx context.Context, r Resource, n model.Nod
 	return validateVolume(v, p.volume(n, "secrets"))
 }
 func (e *sdkEngine) validateRecoveryHelper(ctx context.Context, actual container.InspectResponse, r Resource, n model.Node, daemonNow time.Time) error {
-	if actual.ContainerJSONBase == nil || actual.ID != r.ID || actual.Config == nil || actual.State == nil || !reflect.DeepEqual(actual.Config.Labels, labels(n.Namespace, e.cfg.FleetID, nodeID(n), r.Role)) {
+	if actual.ContainerJSONBase == nil || actual.ID != r.ID || actual.Config == nil || actual.State == nil || !sameLabels(actual.Config.Labels, labels(n.Namespace, e.cfg.FleetID, nodeID(n), r.Role)) {
 		return model.ErrForbidden
 	}
 	created, err := time.Parse(time.RFC3339Nano, actual.Created)
@@ -565,9 +566,12 @@ func (e *sdkEngine) runHelper(ctx context.Context, c *container.Config, h *conta
 	}
 	id = actual.ID
 	defer func() {
-		if err := e.cleanupHelper(cleanupCtx, id, c, h); err != nil {
-			raw = nil
-			retErr = model.ErrUnknownHealth
+		if cerr := e.cleanupHelper(cleanupCtx, id, c, h); cerr != nil {
+			// Cleanup never overwrites the primary result: a successful helper run
+			// stays successful and a failed run keeps its own error. The leftover
+			// stays observable by id and removable through the label-scoped
+			// Find/recovery paths, so log it rather than swallow it.
+			log.Printf("fleet helper cleanup failed: container=%s err=%v", id, cerr)
 		}
 	}()
 	if archive != nil {
@@ -647,7 +651,7 @@ func (e *sdkEngine) cleanupHelper(ctx context.Context, id string, c *container.C
 	if err != nil {
 		return err
 	}
-	if r.ContainerJSONBase == nil || r.ID != id || r.Config == nil || !reflect.DeepEqual(r.Config.Labels, c.Labels) {
+	if r.ContainerJSONBase == nil || r.ID != id || r.Config == nil || !sameLabels(r.Config.Labels, c.Labels) {
 		return model.ErrForbidden
 	}
 	if err = validateHelper(r, c, h); err != nil {

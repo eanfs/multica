@@ -260,7 +260,15 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 		if s.crashStage == "cleanup" {
 			s.crashCleanup = true
 		}
-		raw, _ := json.Marshal(map[string]any{"StatusCode": s.exit})
+		exit := s.exit
+		if s.accumulateBootstrap {
+			// The accumulation fixtures model a bootstrap helper whose primary
+			// work fails and whose cleanup also cannot remove it. Only the
+			// primary failure keeps the run's error now that a cleanup failure
+			// no longer overwrites the primary result.
+			exit = 1
+		}
+		raw, _ := json.Marshal(map[string]any{"StatusCode": exit})
 		return response(200, string(raw)), nil
 	case r.Method == "GET" && path == "/containers/helper/logs":
 		if r.URL.Query().Get("stdout") != "1" || r.URL.Query().Get("stderr") != "1" {
@@ -469,7 +477,7 @@ func TestOfflineDeleteAccumulatedBootstrapHelpersProgressInBoundedBatches(t *tes
 			s.archive, _ = bootstrapTar(n, fixtureConfig(), b)
 			for i := 0; i < count; i++ {
 				if _, err := p.Ensure(context.Background(), n, b); err == nil {
-					t.Fatal("cleanup failure unexpectedly succeeded")
+					t.Fatal("failed bootstrap unexpectedly succeeded")
 				}
 			}
 			if len(s.leftovers) != count || !s.copied || s.helperCreates != count {
@@ -530,7 +538,7 @@ func TestOfflineMixedBatchPreservesBadHelpersWithoutStarvingNeighbors(t *testing
 			s.archive, _ = bootstrapTar(n, fixtureConfig(), b)
 			for i := 0; i < 10; i++ {
 				if _, err := p.Ensure(context.Background(), n, b); err == nil {
-					t.Fatal("expected cleanup failure")
+					t.Fatal("expected a failed bootstrap")
 				}
 			}
 			if len(s.leftovers) != 10 {
@@ -1018,12 +1026,23 @@ func TestOfflineHelperTimeoutCleansOnlyOwnResources(t *testing.T) {
 		t.Fatalf("timeout cleanup err=%v known=%v removed=%v", e, o.ReportStatsKnown, s.removed)
 	}
 }
+
+// TestOfflineHelperForeignCleanupNeverDeletesOrProves pins the reworked cleanup
+// contract: a cleanup-time label mismatch never removes the container or touches
+// a volume. The successful report is now preserved because ownership was already
+// validated before the helper started; labels are immutable after create, so the
+// observed mismatch models a foreign container or an injected image label. The
+// tolerant ownership refusal itself is covered directly by
+// TestCleanupHelperStillRejectsForeignFleetLabels.
 func TestOfflineHelperForeignCleanupNeverDeletesOrProves(t *testing.T) {
 	s := &offlineHTTP{cleanupForeign: true}
 	p := offlineProvider(t, s)
 	o, e := p.Diagnose(context.Background(), fixtureNode(), fixtureRef())
-	if e == nil || o.ReportStatsKnown || s.removed || s.volumeDeletes != 0 {
-		t.Fatal("foreign helper cleanup granted proof or removed resource")
+	if e != nil || !o.ReportStatsKnown {
+		t.Fatalf("cleanup failure discarded a successful primary report e=%v report=%+v", e, o)
+	}
+	if s.removed || s.volumeDeletes != 0 {
+		t.Fatal("foreign helper cleanup removed a resource")
 	}
 }
 func TestOfflineHelperUncertainCreateInspectsAndCleansOwn(t *testing.T) {
