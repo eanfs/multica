@@ -93,7 +93,7 @@ func TestInspectInheritedEnvironmentIsFixedAndCredentialFree(t *testing.T) {
 		{"helper-empty", nil, 0, true}, {"helper-inherited", []string{path, home}, 0, true}, {"node-inherited", []string{max, path, home}, 1, true}, {"node-fixed", []string{home, max}, 1, true}, {"credentials", []string{home, "ANTHROPIC_API_KEY=private"}, 0, false}, {"duplicate-path", []string{path, path}, 0, false}, {"duplicate-home", []string{home, home}, 0, false}, {"bare", []string{"PATH"}, 0, false}, {"wrong-path", []string{"PATH=/host/bin"}, 0, false}, {"wrong-home", []string{"HOME=/root"}, 0, false}, {"version", []string{"NODE_VERSION=22"}, 0, false}, {"proxy", []string{"HTTP_PROXY=http://host.invalid"}, 0, false}, {"helper-maxruns", []string{max}, 0, false}, {"missing-max", []string{home, path}, 1, false}, {"override-max", []string{home, "FLEET_NODE_MAX_RUNS=2"}, 1, false}, {"duplicate-max", []string{home, max, max}, 1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := inspectEnvironment(tc.env, tc.maxRuns, false); got != tc.want {
+			if got := inspectEnvironment(tc.env, tc.maxRuns, nil); got != tc.want {
 				t.Fatalf("fixed environment got=%v want=%v", got, tc.want)
 			}
 		})

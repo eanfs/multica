@@ -141,10 +141,10 @@ func TestClaudeProfileEnvUnchanged(t *testing.T) {
 	if got := p.nodeEnv(n); !reflect.DeepEqual(got, []string{"HOME=" + model.NodeHome, "FLEET_NODE_MAX_RUNS=1"}) {
 		t.Fatalf("claude env changed: %v", got)
 	}
-	if inspectEnvironment([]string{"HTTP_PROXY=" + model.AuroraEgressProxyEndpoint}, 0, false) {
+	if inspectEnvironment([]string{"HTTP_PROXY=" + model.AuroraEgressProxyEndpoint}, 0, nil) {
 		t.Fatal("claude profile accepted a proxy variable")
 	}
-	if inspectEnvironment([]string{"MULTICA_MANAGED=1"}, 0, false) {
+	if inspectEnvironment([]string{"MULTICA_MANAGED=1"}, 0, nil) {
 		t.Fatal("claude profile accepted managed env")
 	}
 	// Build a valid Claude snapshot exactly as the builder does and adopt it.

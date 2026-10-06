@@ -39,7 +39,7 @@ func decodeReports(raw []byte) (reportStats, error) {
 }
 
 // Image defaults are inspected against one fixed whitelist, never administrator or caller env.
-func inspectEnvironment(env []string, maxRuns int, aurora bool) bool {
+func inspectEnvironment(env []string, maxRuns int, aurora *model.AuroraConfig) bool {
 	seen := map[string]bool{}
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
@@ -61,35 +61,42 @@ func inspectEnvironment(env []string, maxRuns int, aurora bool) bool {
 				return false
 			}
 		case model.AuroraManagedEnv:
-			if !aurora || value != "1" {
+			if aurora == nil || value != "1" {
 				return false
 			}
 		case model.AuroraServerURLEnv:
-			if !aurora || !model.ValidOrigin(value) {
+			// Compare against the configured origin exactly. A node built for a
+			// different server url would enroll and call back to the wrong API,
+			// so structural validity alone must not adopt it.
+			if aurora == nil || value != aurora.ServerURL {
 				return false
 			}
 		case model.AuroraEnrollmentFileEnv:
-			if !aurora || value != model.AuroraEnrollmentFile {
+			if aurora == nil || value != model.AuroraEnrollmentFile {
 				return false
 			}
 		case model.AuroraHTTPProxyEnv:
-			if !aurora || value != model.AuroraEgressProxyEndpoint {
+			if aurora == nil || value != model.AuroraEgressProxyEndpoint {
 				return false
 			}
 		case model.AuroraHTTPSProxyEnv:
-			if !aurora || value != model.AuroraEgressProxyEndpoint {
+			if aurora == nil || value != model.AuroraEgressProxyEndpoint {
 				return false
 			}
 		case model.AuroraNoProxyEnv:
-			if !aurora || value != model.AuroraNoProxyValue {
+			if aurora == nil || value != model.AuroraNoProxyValue {
 				return false
 			}
 		case model.AuroraAnthropicBaseURLEnv:
-			if !aurora || !model.ValidAnthropicBaseURL(value) {
+			// The operator-configured endpoint override is adoption-relevant:
+			// a container built for a different endpoint keeps talking to the
+			// old provider, so only an exact match of a configured value is
+			// acceptable. When the config carries none, the variable is drift.
+			if aurora == nil || aurora.AnthropicBaseURL == "" || value != aurora.AnthropicBaseURL {
 				return false
 			}
 		case model.AuroraAnthropicModelEnv:
-			if !aurora || value == "" || strings.ContainsAny(value, " 	") {
+			if aurora == nil || aurora.AnthropicModel == "" || value != aurora.AnthropicModel {
 				return false
 			}
 		default:
@@ -102,8 +109,19 @@ func inspectEnvironment(env []string, maxRuns int, aurora bool) bool {
 	if !seen["HOME"] || !seen["FLEET_NODE_MAX_RUNS"] {
 		return false
 	}
-	if aurora && (!seen[model.AuroraManagedEnv] || !seen[model.AuroraServerURLEnv] || !seen[model.AuroraEnrollmentFileEnv] || !seen[model.AuroraHTTPProxyEnv] || !seen[model.AuroraHTTPSProxyEnv] || !seen[model.AuroraNoProxyEnv]) {
+	if aurora != nil && (!seen[model.AuroraManagedEnv] || !seen[model.AuroraServerURLEnv] || !seen[model.AuroraEnrollmentFileEnv] || !seen[model.AuroraHTTPProxyEnv] || !seen[model.AuroraHTTPSProxyEnv] || !seen[model.AuroraNoProxyEnv]) {
 		return false
+	}
+	if aurora != nil {
+		// A configured endpoint override must actually be present: adopting a
+		// container without it would silently fall back to the provider default
+		// the operator overrode.
+		if aurora.AnthropicBaseURL != "" && !seen[model.AuroraAnthropicBaseURLEnv] {
+			return false
+		}
+		if aurora.AnthropicModel != "" && !seen[model.AuroraAnthropicModelEnv] {
+			return false
+		}
 	}
 	return true
 }
@@ -117,7 +135,6 @@ func validateNodeInspection(r container.InspectResponse, n model.Node, networkNa
 		return model.ErrForbidden
 	}
 	c, h := r.Config, r.HostConfig
-	aurora := cfg.Aurora != nil
 	// The adoption authority recomputes the exact inline seccomp profile from the
 	// configured operator file. An unreadable or malformed profile fails the
 	// inspection closed rather than admitting a container built from a weaker one.
@@ -129,7 +146,7 @@ func validateNodeInspection(r container.InspectResponse, n model.Node, networkNa
 	if c.Image != n.Image || c.User != "10001:10001" || c.Tty || c.OpenStdin || len(c.ExposedPorts) != 0 || !reflect.DeepEqual([]string(c.Entrypoint), []string{"/usr/local/bin/fleet-node"}) || !reflect.DeepEqual([]string(c.Cmd), []string{"run"}) {
 		return model.ErrForbidden
 	}
-	if !inspectEnvironment(c.Env, n.Resources.MaxRuns, aurora) {
+	if !inspectEnvironment(c.Env, n.Resources.MaxRuns, cfg.Aurora) {
 		return model.ErrForbidden
 	}
 	if h.ReadonlyRootfs != want.ReadonlyRootfs || h.NanoCPUs != want.NanoCPUs || h.Memory != want.Memory || h.PidsLimit == nil || *h.PidsLimit != *want.PidsLimit || h.Privileged || h.PidMode != "" || len(h.Binds) != 0 || len(h.Devices) != 0 || len(h.DeviceRequests) != 0 || len(h.VolumesFrom) != 0 || len(h.PortBindings) != 0 || h.PublishAllPorts || h.NetworkMode != container.NetworkMode(networkName) || h.RestartPolicy.Name != container.RestartPolicyDisabled || len(h.CapAdd) != 0 || !reflect.DeepEqual(h.CapDrop, want.CapDrop) || !reflect.DeepEqual(h.SecurityOpt, want.SecurityOpt) || !reflect.DeepEqual(h.ExtraHosts, want.ExtraHosts) || !reflect.DeepEqual(h.Tmpfs, want.Tmpfs) {

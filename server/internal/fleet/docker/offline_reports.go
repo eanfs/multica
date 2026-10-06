@@ -610,7 +610,7 @@ func sameLabels(a, b map[string]string) bool {
 	return true
 }
 func validateHelper(actual container.InspectResponse, c *container.Config, h *container.HostConfig) error {
-	if actual.Config == nil || actual.HostConfig == nil || actual.NetworkSettings == nil || actual.Config.Image != c.Image || actual.Config.User != c.User || actual.Config.Tty || actual.Config.OpenStdin || len(actual.Config.ExposedPorts) != 0 || !actual.Config.NetworkDisabled || !inspectEnvironment(actual.Config.Env, 0, false) || !reflect.DeepEqual(actual.Config.Entrypoint, c.Entrypoint) || !reflect.DeepEqual(actual.Config.Cmd, c.Cmd) {
+	if actual.Config == nil || actual.HostConfig == nil || actual.NetworkSettings == nil || actual.Config.Image != c.Image || actual.Config.User != c.User || actual.Config.Tty || actual.Config.OpenStdin || len(actual.Config.ExposedPorts) != 0 || !actual.Config.NetworkDisabled || !inspectEnvironment(actual.Config.Env, 0, nil) || !reflect.DeepEqual(actual.Config.Entrypoint, c.Entrypoint) || !reflect.DeepEqual(actual.Config.Cmd, c.Cmd) {
 		return model.ErrForbidden
 	}
 	if actual.NetworkSettings != nil {

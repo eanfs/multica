@@ -224,22 +224,98 @@ func TestInspectAuroraEnvironment(t *testing.T) {
 	managed := []string{"MULTICA_MANAGED=1", "MULTICA_SERVER_URL=http://api.internal:8080", "MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE=" + model.AuroraEnrollmentFile}
 	proxy := []string{"HTTP_PROXY=" + model.AuroraEgressProxyEndpoint, "HTTPS_PROXY=" + model.AuroraEgressProxyEndpoint, "NO_PROXY=" + model.AuroraNoProxyValue}
 	full := append(append(append(append([]string{}, base...), managed...), proxy...), "ANTHROPIC_BASE_URL=https://ark.example.com", "ANTHROPIC_MODEL=ark-model")
-	if !inspectEnvironment(full, 1, true) {
+	if !inspectEnvironment(full, 1, auroraConfig().Aurora) {
 		t.Fatal("valid aurora environment rejected")
 	}
-	if inspectEnvironment(full, 1, false) {
+	if inspectEnvironment(full, 1, nil) {
 		t.Fatal("aurora environment accepted without the profile")
 	}
-	if inspectEnvironment(base, 1, true) {
+	if inspectEnvironment(base, 1, auroraConfig().Aurora) {
 		t.Fatal("missing managed enrollment environment accepted")
 	}
 	noProxy := append(append([]string{}, base...), managed...)
-	if inspectEnvironment(noProxy, 1, true) {
+	if inspectEnvironment(noProxy, 1, auroraConfig().Aurora) {
 		t.Fatal("missing egress proxy environment accepted")
 	}
 	credentialed := append(append([]string{}, base...), "MULTICA_MANAGED=1", "MULTICA_SERVER_URL=http://user:pass@api.internal:8080", "MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE="+model.AuroraEnrollmentFile)
 	credentialed = append(credentialed, proxy...)
-	if inspectEnvironment(credentialed, 1, true) {
+	if inspectEnvironment(credentialed, 1, auroraConfig().Aurora) {
 		t.Fatal("credentialed server url accepted")
+	}
+}
+
+// TestInspectAuroraEnvironmentRejectsConfigDrift pins the adoption authority's
+// config-derived environment comparison: the values nodeEnv builds from
+// cfg.Aurora must match the live container exactly, and an ANTHROPIC_* variable
+// the config does not carry is rejected rather than structurally accepted.
+func TestInspectAuroraEnvironmentRejectsConfigDrift(t *testing.T) {
+	cfg := auroraConfig()
+	canonical := []string{
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"HOME=" + model.NodeHome,
+		"FLEET_NODE_MAX_RUNS=1",
+		model.AuroraManagedEnv + "=1",
+		model.AuroraServerURLEnv + "=" + cfg.Aurora.ServerURL,
+		model.AuroraEnrollmentFileEnv + "=" + model.AuroraEnrollmentFile,
+		model.AuroraHTTPProxyEnv + "=" + model.AuroraEgressProxyEndpoint,
+		model.AuroraHTTPSProxyEnv + "=" + model.AuroraEgressProxyEndpoint,
+		model.AuroraNoProxyEnv + "=" + model.AuroraNoProxyValue,
+		model.AuroraAnthropicBaseURLEnv + "=" + cfg.Aurora.AnthropicBaseURL,
+		model.AuroraAnthropicModelEnv + "=" + cfg.Aurora.AnthropicModel,
+	}
+	withValue := func(key, value string) []string {
+		out := append([]string(nil), canonical...)
+		for i, entry := range out {
+			if strings.HasPrefix(entry, key+"=") {
+				out[i] = key + "=" + value
+				return out
+			}
+		}
+		return append(out, key+"="+value)
+	}
+	without := func(keys ...string) []string {
+		drop := map[string]bool{}
+		for _, k := range keys {
+			drop[k] = true
+		}
+		out := make([]string, 0, len(canonical))
+		for _, entry := range canonical {
+			k, _, _ := strings.Cut(entry, "=")
+			if !drop[k] {
+				out = append(out, entry)
+			}
+		}
+		return out
+	}
+
+	if !inspectEnvironment(canonical, 1, cfg.Aurora) {
+		t.Fatal("canonical aurora environment rejected")
+	}
+	if inspectEnvironment(withValue(model.AuroraServerURLEnv, "http://other.internal:9090"), 1, cfg.Aurora) {
+		t.Fatal("adopted a node built for a different server url")
+	}
+	if inspectEnvironment(withValue(model.AuroraAnthropicBaseURLEnv, "https://other.example.com"), 1, cfg.Aurora) {
+		t.Fatal("adopted a node built for a different anthropic base url")
+	}
+	if inspectEnvironment(withValue(model.AuroraAnthropicModelEnv, "other-model"), 1, cfg.Aurora) {
+		t.Fatal("adopted a node built for a different anthropic model")
+	}
+	if inspectEnvironment(without(model.AuroraAnthropicBaseURLEnv), 1, cfg.Aurora) {
+		t.Fatal("adopted a node missing its configured anthropic base url")
+	}
+	if inspectEnvironment(without(model.AuroraAnthropicModelEnv), 1, cfg.Aurora) {
+		t.Fatal("adopted a node missing its configured anthropic model")
+	}
+
+	// A deployment that carries no override must reject ANTHROPIC_* entirely,
+	// and must likewise accept a node that has neither variable.
+	noOverride := *cfg.Aurora
+	noOverride.AnthropicBaseURL = ""
+	noOverride.AnthropicModel = ""
+	if inspectEnvironment(canonical, 1, &noOverride) {
+		t.Fatal("ANTHROPIC_* accepted when the config carries none")
+	}
+	if !inspectEnvironment(without(model.AuroraAnthropicBaseURLEnv, model.AuroraAnthropicModelEnv), 1, &noOverride) {
+		t.Fatal("override-free config rejected a node without anthropic variables")
 	}
 }
