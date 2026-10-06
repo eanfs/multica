@@ -127,6 +127,14 @@ func (p *Provider) Ensure(ctx context.Context, n model.Node, b model.Bootstrap) 
 	if e := p.validBootstrap(n, b); e != nil {
 		return model.Observation{}, e
 	}
+	// Read and validate the operator-owned seccomp profile before any Docker
+	// resource is built. The Docker SDK sends SecurityOpt verbatim, so the daemon
+	// receives the inline JSON, never the host path; a bad profile fails closed
+	// here with nothing created.
+	seccompJSON, e := resolveAuroraSeccomp(p.cfg.Aurora)
+	if e != nil {
+		return model.Observation{}, e
+	}
 	network := Resource{Name: p.networkName(), Role: "network", Labels: labels(n.Namespace, p.cfg.FleetID, "namespace", "network")}
 	if e = bounded(ctx, func(c context.Context) error { return p.engine.EnsureNetwork(c, network) }); e != nil {
 		return model.Observation{}, safeError(e)
@@ -159,7 +167,7 @@ func (p *Provider) Ensure(ctx context.Context, n model.Node, b model.Bootstrap) 
 			return model.Observation{}, safeError(e)
 		}
 	}
-	h := NodeHostConfig(n.Resources, true, p.cfg.Aurora)
+	h := NodeHostConfig(n.Resources, true, p.cfg.Aurora, seccompJSON)
 	h.NetworkMode = container.NetworkMode(workspace.Name)
 	h.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: n.DataVolume, Target: model.DataMount}, {Type: mount.TypeVolume, Source: n.SecretsVolume, Target: model.AuroraEnrollmentDir, ReadOnly: true}}
 	h.Mounts = append(h.Mounts, providerSecretMounts(p.cfg.Aurora)...)
@@ -370,16 +378,18 @@ func (p *Provider) Apply(ctx context.Context, n model.Node, action model.Action)
 
 // NodeHostConfig is the single HostConfig builder for every Fleet node. The
 // Claude profile (aurora == nil) is unchanged. The Aurora profile adds the
-// seccomp and AppArmor references, the read-only root filesystem and the fixed
-// writable tmpfs surfaces; mount denial stays with the seccomp profile.
-func NodeHostConfig(spec model.Spec, linuxHostGateway bool, aurora *model.AuroraConfig) container.HostConfig {
+// AppArmor reference, the inline seccomp profile, the read-only root filesystem
+// and the fixed writable tmpfs surfaces; mount denial stays with the seccomp
+// profile. seccompJSON is the pre-resolved compact profile — the Docker daemon
+// parses the value after "seccomp=" as JSON, so a path never goes on the wire.
+func NodeHostConfig(spec model.Spec, linuxHostGateway bool, aurora *model.AuroraConfig, seccompJSON string) container.HostConfig {
 	h := container.HostConfig{Resources: container.Resources{NanoCPUs: int64(spec.CPUs) * 1e9, Memory: spec.MemoryBytes, PidsLimit: &spec.Pids}, CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges:true"}, RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled}}
 	if linuxHostGateway {
 		h.ExtraHosts = []string{"host.docker.internal:host-gateway"}
 	}
 	if aurora != nil {
 		h.ReadonlyRootfs = aurora.ReadonlyRootfs
-		h.SecurityOpt = append(h.SecurityOpt, "seccomp="+aurora.SeccompProfile, "apparmor="+aurora.AppArmorProfile)
+		h.SecurityOpt = append(h.SecurityOpt, "seccomp="+seccompJSON, "apparmor="+aurora.AppArmorProfile)
 		h.Tmpfs = map[string]string{
 			model.AuroraWorkspaceMount: auroraWorkspaceTmpfs,
 			model.AuroraTmpMount:       auroraTmpTmpfs,

@@ -118,7 +118,14 @@ func validateNodeInspection(r container.InspectResponse, n model.Node, networkNa
 	}
 	c, h := r.Config, r.HostConfig
 	aurora := cfg.Aurora != nil
-	want := NodeHostConfig(n.Resources, true, cfg.Aurora)
+	// The adoption authority recomputes the exact inline seccomp profile from the
+	// configured operator file. An unreadable or malformed profile fails the
+	// inspection closed rather than admitting a container built from a weaker one.
+	seccompJSON, err := resolveAuroraSeccomp(cfg.Aurora)
+	if err != nil {
+		return model.ErrForbidden
+	}
+	want := NodeHostConfig(n.Resources, true, cfg.Aurora, seccompJSON)
 	if c.Image != n.Image || c.User != "10001:10001" || c.Tty || c.OpenStdin || len(c.ExposedPorts) != 0 || !reflect.DeepEqual([]string(c.Entrypoint), []string{"/usr/local/bin/fleet-node"}) || !reflect.DeepEqual([]string(c.Cmd), []string{"run"}) {
 		return model.ErrForbidden
 	}

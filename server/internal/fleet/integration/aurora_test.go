@@ -26,6 +26,8 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/fleet/docker"
 	"github.com/multica-ai/multica/server/internal/fleet/model"
 )
@@ -55,6 +57,11 @@ func TestAuroraRoundTrip(t *testing.T) {
 	})
 	t.Run("RealEngineConnectNetworkIsIdempotent", func(t *testing.T) {
 		testConnectNetworkIdempotentRealEngine(ctx, t)
+	})
+	// The D2 regression: a real dockerd creates AND starts the Aurora node built
+	// by Provider.Ensure with the seccomp profile inlined as JSON.
+	t.Run("RealEngineNodeStarts", func(t *testing.T) {
+		testEnsureNodeStartsRealEngine(ctx, t)
 	})
 	// The crash-replay of ensureEgress over a running sidecar is proven in the
 	// docker package (TestAuroraRoundTripEgressReplay), where the unexported
@@ -323,6 +330,69 @@ func testConnectNetworkIdempotentRealEngine(ctx context.Context, t *testing.T) {
 	}
 	if err := env.engine.ConnectNetwork(ctx, wsName+"-missing", created.ID, []string{"egress"}); err == nil {
 		t.Fatal("ConnectNetwork on a missing network unexpectedly succeeded")
+	}
+}
+
+// testEnsureNodeStartsRealEngine drives the real Provider.Ensure for the Aurora
+// profile and proves a real dockerd creates AND starts the node container. Before
+// the D2 fix the SDK put the operator file path after "seccomp=", dockerd parsed
+// it as JSON and Start failed with "Decoding seccomp profile failed", so this
+// assertion is the regression for the real node-admission path. A second Ensure
+// also proves the adoption inspection accepts the inlined profile.
+func testEnsureNodeStartsRealEngine(ctx context.Context, t *testing.T) {
+	env := newAuroraEngineEnv(ctx, t)
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	node := model.Node{
+		ID:            pgtype.UUID{Bytes: uuid.New(), Valid: true},
+		OwnerID:       pgtype.UUID{Bytes: uuid.New(), Valid: true},
+		Namespace:     env.namespace,
+		DaemonID:      uuid.NewString(),
+		Name:          "aurora-it-node-" + suffix,
+		Spec:          "sandbox",
+		Image:         env.cfg.Image,
+		DataVolume:    "aurora-it-data-" + suffix,
+		SecretsVolume: "aurora-it-secrets-" + suffix,
+		Desired:       "running",
+		Status:        "pending",
+		Generation:    1,
+		Resources:     env.cfg.Specs["sandbox"],
+	}
+	bootstrap := model.Bootstrap{
+		EnrollmentToken: "mse_" + strings.Repeat("a", 40),
+		ServerURL:       env.cfg.Aurora.ServerURL,
+		DaemonID:        node.DaemonID,
+	}
+
+	p := docker.New(env.engine, env.cfg)
+	obs, err := p.Ensure(ctx, node, bootstrap)
+	if err != nil {
+		t.Fatalf("real-engine Aurora Ensure: %v", err)
+	}
+	if obs.ContainerID == "" {
+		t.Fatal("real-engine Aurora Ensure returned no container id")
+	}
+	info, err := env.cli.ContainerInspect(ctx, obs.ContainerID)
+	if err != nil {
+		t.Fatalf("inspect started node: %v", err)
+	}
+	if info.State == nil || !info.State.Running || info.State.Error != "" {
+		t.Fatalf("node container did not start: state=%+v", info.State)
+	}
+	// The wire form must be inline JSON, never the operator file path.
+	inline := ""
+	for _, opt := range info.HostConfig.SecurityOpt {
+		if strings.HasPrefix(opt, "seccomp=") {
+			inline = strings.TrimPrefix(opt, "seccomp=")
+		}
+	}
+	if !strings.HasPrefix(inline, "{") || strings.Contains(inline, env.cfg.Aurora.SeccompProfile) {
+		t.Fatalf("seccomp security opt = %q, want inline JSON carrying no host path", inline)
+	}
+	// Adoption: the inspection authority recomputes the inlined profile from the
+	// operator file, so a replay over the real container must be admitted.
+	if _, err := p.Ensure(ctx, node, bootstrap); err != nil {
+		t.Fatalf("replayed Ensure over the running node: %v", err)
 	}
 }
 

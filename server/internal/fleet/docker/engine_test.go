@@ -413,7 +413,7 @@ func TestEngineCreateWireAndNegotiation(t *testing.T) {
 		create = true
 		return response(201, "{\"Id\":\"created\"}"), nil
 	}, true)
-	h := NodeHostConfig(fixtureNode().Resources, true, nil)
+	h := NodeHostConfig(fixtureNode().Resources, true, nil, "")
 	h.NetworkMode = "node-net"
 	id, err := e.Create(context.Background(), &container.Config{User: "10001:10001", Image: "snapshot"}, &h, "node-net", "fixed-node")
 	if err != nil || id != "created" || !create || !ping {

@@ -14,11 +14,11 @@ import (
 func TestAuroraNodeHostConfigRestricted(t *testing.T) {
 	spec := model.Spec{CPUs: 2, MemoryBytes: 4 << 30, Pids: 256, MaxRuns: 1}
 	aurora := auroraConfig().Aurora
-	h := NodeHostConfig(spec, true, aurora)
+	h := NodeHostConfig(spec, true, aurora, testSeccompProfileJSON)
 	if !h.ReadonlyRootfs || h.Privileged || h.PidMode != "" || len(h.PortBindings) != 0 || h.PublishAllPorts || h.NetworkMode == "host" {
 		t.Fatalf("unsafe aurora isolation: %+v", h)
 	}
-	if !reflect.DeepEqual(h.SecurityOpt, []string{"no-new-privileges:true", "seccomp=" + aurora.SeccompProfile, "apparmor=" + aurora.AppArmorProfile}) {
+	if !reflect.DeepEqual(h.SecurityOpt, []string{"no-new-privileges:true", "seccomp=" + testSeccompProfileJSON, "apparmor=" + aurora.AppArmorProfile}) {
 		t.Fatalf("security opt = %v", h.SecurityOpt)
 	}
 	wantTmpfs := map[string]string{
@@ -37,7 +37,7 @@ func TestAuroraNodeHostConfigRestricted(t *testing.T) {
 		}
 	}
 	// The Claude profile must be byte-for-byte identical to the pre-Aurora builder.
-	claude := NodeHostConfig(spec, true, nil)
+	claude := NodeHostConfig(spec, true, nil, "")
 	if claude.ReadonlyRootfs || len(claude.Tmpfs) != 0 || !reflect.DeepEqual(claude.SecurityOpt, []string{"no-new-privileges:true"}) {
 		t.Fatalf("claude hostconfig changed: %+v", claude)
 	}
@@ -148,7 +148,7 @@ func TestClaudeProfileEnvUnchanged(t *testing.T) {
 		t.Fatal("claude profile accepted managed env")
 	}
 	// Build a valid Claude snapshot exactly as the builder does and adopt it.
-	h := NodeHostConfig(n.Resources, true, nil)
+	h := NodeHostConfig(n.Resources, true, nil, "")
 	h.NetworkMode = "node-net"
 	r := container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "cid", HostConfig: &h}, Config: &container.Config{Image: n.Image, User: "10001:10001", Env: []string{"HOME=/data/home", "FLEET_NODE_MAX_RUNS=1"}, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"run"}}, NetworkSettings: &container.NetworkSettings{Networks: map[string]*network.EndpointSettings{"node-net": {}}}, Mounts: []container.MountPoint{{Type: mount.TypeVolume, Name: n.DataVolume, Destination: model.DataMount, RW: true}, {Type: mount.TypeVolume, Name: n.SecretsVolume, Destination: "/secrets", RW: false}}}
 	if err := validateNodeInspection(r, n, "node-net", fixtureConfig()); err != nil {

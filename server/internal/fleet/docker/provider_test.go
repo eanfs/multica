@@ -241,7 +241,7 @@ func TestProviderEnsureTimeoutAfterCreateAdoptsWithoutDuplicate(t *testing.T) {
 }
 
 func TestNodeHostConfigIsRestricted(t *testing.T) {
-	h := NodeHostConfig(model.Spec{CPUs: 2, MemoryBytes: 4 << 30, Pids: 256, MaxRuns: 1}, true, nil)
+	h := NodeHostConfig(model.Spec{CPUs: 2, MemoryBytes: 4 << 30, Pids: 256, MaxRuns: 1}, true, nil, "")
 	if h.Privileged || h.NetworkMode == "host" || h.PidMode == "host" || len(h.PortBindings) != 0 || h.PublishAllPorts {
 		t.Fatal("unsafe isolation")
 	}
@@ -254,7 +254,7 @@ func TestNodeHostConfigIsRestricted(t *testing.T) {
 	if !reflect.DeepEqual(h.ExtraHosts, []string{"host.docker.internal:host-gateway"}) {
 		t.Fatal("Linux gateway missing")
 	}
-	if len(NodeHostConfig(model.Spec{}, false, nil).ExtraHosts) != 0 {
+	if len(NodeHostConfig(model.Spec{}, false, nil, "").ExtraHosts) != 0 {
 		t.Fatal("unrequested gateway")
 	}
 }

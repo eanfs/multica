@@ -3,6 +3,8 @@ package docker
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,6 +16,25 @@ import (
 
 // auroraEnrollmentToken is a well-formed server-issued enrollment secret.
 const auroraEnrollmentToken = "mse_0123456789abcdef0123456789abcdef01234567"
+
+// testSeccompProfileJSON is a minimal well-formed operator seccomp profile. The
+// unit tests inline its exact bytes into HostConfig.SecurityOpt and write it to
+// a temp file when a test drives Provider.Ensure, which reads the profile.
+const testSeccompProfileJSON = `{"defaultAction":"SCMP_ACT_ALLOW","architectures":["SCMP_ARCH_AARCH64","SCMP_ARCH_X86_64"],"syscalls":[]}`
+
+// auroraConfigWithSeccomp returns the Aurora unit config with a real, valid
+// seccomp profile. Tests that call Provider.Ensure need the profile to exist
+// because Ensure now reads and inlines it.
+func auroraConfigWithSeccomp(t *testing.T) model.Config {
+	t.Helper()
+	cfg := auroraConfig()
+	path := filepath.Join(t.TempDir(), "seccomp.json")
+	if err := os.WriteFile(path, []byte(testSeccompProfileJSON), 0o600); err != nil {
+		t.Fatalf("write seccomp profile: %v", err)
+	}
+	cfg.Aurora.SeccompProfile = path
+	return cfg
+}
 
 func auroraConfig() model.Config {
 	cfg := fixtureConfig()
@@ -49,7 +70,7 @@ func auroraBootstrap(n model.Node) model.Bootstrap {
 // internal workspace network, one credential-free egress sidecar on the uplink
 // network, and a sandbox node that only joins the workspace network.
 func TestProviderEnsureAuroraProfile(t *testing.T) {
-	cfg := auroraConfig()
+	cfg := auroraConfigWithSeccomp(t)
 	n := auroraNode()
 	base := New(fakeCalls{}, cfg)
 	nodeName := base.containerName(n)
@@ -133,7 +154,7 @@ func TestProviderEnsureAuroraProfile(t *testing.T) {
 	if !reflect.DeepEqual(node.cfg.Env, wantEnv) {
 		t.Fatalf("node env = %v", node.cfg.Env)
 	}
-	if node.host.NetworkMode != container.NetworkMode(workspace) || !node.host.ReadonlyRootfs || !reflect.DeepEqual(node.host.SecurityOpt, []string{"no-new-privileges:true", "seccomp=" + cfg.Aurora.SeccompProfile, "apparmor=" + cfg.Aurora.AppArmorProfile}) {
+	if node.host.NetworkMode != container.NetworkMode(workspace) || !node.host.ReadonlyRootfs || !reflect.DeepEqual(node.host.SecurityOpt, []string{"no-new-privileges:true", "seccomp=" + testSeccompProfileJSON, "apparmor=" + cfg.Aurora.AppArmorProfile}) {
 		t.Fatalf("node host = %+v", node.host)
 	}
 	if len(node.host.Mounts) != 3 || node.host.Mounts[2].Type != "bind" || !node.host.Mounts[2].ReadOnly || node.host.Mounts[2].Target != model.AuroraAnthropicAPIKeyTarget {
