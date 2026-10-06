@@ -22,6 +22,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/storage"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/taskfailure"
 )
 
 func TestListAuroraSkills(t *testing.T) {
@@ -2854,4 +2855,376 @@ func TestCreateGenerationFleetFailureReturns503WithoutReserveOrEnqueue(t *testin
 	if got := dbfx.Count(t, "SELECT count(*) FROM credit_ledger WHERE user_id = $1 AND kind = $2", testUserID, aurora.LedgerKindDeduction); got != beforeDeductions {
 		t.Fatalf("reservation ledger rows = %d, want %d unchanged", got, beforeDeductions)
 	}
+}
+
+// recordingFleetProvisioner is a provider-neutral aurora.FleetProvisioner for
+// handler tests. It records the ensure request and answers with a configured
+// node or error, so a test can drive the real SandboxManager end to end without
+// an HTTP Fleet.
+type recordingFleetProvisioner struct {
+	mu    sync.Mutex
+	calls int
+	node  aurora.FleetNode
+	err   error
+	last  aurora.FleetEnsureRequest
+}
+
+func (p *recordingFleetProvisioner) EnsureWorkspaceNode(_ context.Context, _ string, req aurora.FleetEnsureRequest) (aurora.FleetNode, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	p.last = req
+	if p.err != nil {
+		return aurora.FleetNode{}, p.err
+	}
+	node := p.node
+	if node.ID == "" {
+		node = aurora.FleetNode{ID: "fleet-" + req.NodeID, State: "launching", BackendID: "container-" + req.NodeID}
+	}
+	return node, nil
+}
+
+func (p *recordingFleetProvisioner) DeleteWorkspaceNode(context.Context, string, string) error {
+	return nil
+}
+
+func (p *recordingFleetProvisioner) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+// blockingFailProvisioner is the failing FleetProvisioner the concurrent
+// admission regression drives. It holds its first EnsureWorkspaceNode open
+// until the test releases it, so the winner's node stays starting without a
+// Fleet backend id while the other callers race the same row, then it fails.
+type blockingFailProvisioner struct {
+	once    sync.Once
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingFailProvisioner) EnsureWorkspaceNode(context.Context, string, aurora.FleetEnsureRequest) (aurora.FleetNode, error) {
+	p.once.Do(func() { close(p.started) })
+	<-p.release
+	return aurora.FleetNode{}, errors.New("fleet unavailable")
+}
+
+func (p *blockingFailProvisioner) DeleteWorkspaceNode(context.Context, string, string) error {
+	return nil
+}
+
+// resetAuroraSandboxState clears the shared workspace's managed runtime and
+// sandbox node before a test that drives the real SandboxManager, so its
+// provisioning starts from the same empty state a first request sees.
+func resetAuroraSandboxState(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	dbfx.Exec(t, "DELETE FROM aurora_sandbox_node WHERE workspace_id = $1", testWorkspaceID)
+	dbfx.Exec(t, "DELETE FROM agent_runtime WHERE workspace_id = $1 AND provider = 'aurora_managed'", testWorkspaceID)
+	t.Cleanup(func() {
+		testPool.Exec(ctx, "DELETE FROM aurora_sandbox_node WHERE workspace_id = $1", testWorkspaceID)
+	})
+}
+
+// TestCreateAuroraGenerationOnLocalFleet is the P0 acceptance path: with the
+// sandbox manager wired to a working Fleet, POST /api/aurora/generations seeds
+// the managed runtime, provisions the workspace node, and persists the Fleet
+// backend id the node must later enroll against.
+func TestCreateAuroraGenerationOnLocalFleet(t *testing.T) {
+	creditTestReset(t)
+	cleanupAuroraSystemAgents(t)
+	resetAuroraSandboxState(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	if err := testHandler.Credit.Grant(ctx, user, ws, 1_000_000_000, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
+	prov := &recordingFleetProvisioner{node: aurora.FleetNode{ID: "backend-node-local", State: "launching", BackendID: "container-local"}}
+	withSandboxManager(t, aurora.NewSandboxManager(testHandler.Queries, testPool, prov, auroraEnrollmentImageDigest, nil))
+
+	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
+		"skillId": "xhs-image",
+		"prompt":  "local fleet acceptance",
+	})
+	out := testutil.Decode[struct {
+		Generation struct {
+			ID string `json:"id"`
+		} `json:"generation"`
+	}](t, testHandler.CreateAuroraGeneration, req, http.StatusCreated)
+	if prov.callCount() != 1 {
+		t.Fatalf("provisioner ensure calls = %d, want 1", prov.callCount())
+	}
+
+	var backend pgtype.Text
+	if err := testPool.QueryRow(ctx,
+		"SELECT backend_node_id FROM aurora_sandbox_node WHERE workspace_id = $1", ws,
+	).Scan(&backend); err != nil {
+		t.Fatalf("load sandbox node backend id: %v", err)
+	}
+	if !backend.Valid || backend.String != "backend-node-local" {
+		t.Fatalf("persisted backend_node_id = %+v, want backend-node-local", backend)
+	}
+
+	var taskID pgtype.UUID
+	if err := testPool.QueryRow(ctx, "SELECT task_id FROM aurora_generation WHERE id = $1", out.Generation.ID).Scan(&taskID); err != nil {
+		t.Fatalf("load generation task: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), "DELETE FROM agent_task_queue WHERE id = $1", taskID)
+		testPool.Exec(context.Background(), "DELETE FROM aurora_generation WHERE id = $1", out.Generation.ID)
+	})
+}
+
+// TestCreateAuroraGenerationFleetFailureIs503 is the P0 failure half: a Fleet
+// that rejects the ensure answers the stable runtime-unavailable 503, leaves no
+// generation row or credit reservation, and records the node failed with no
+// backend id so the next request re-provisions instead of adopting it.
+func TestCreateAuroraGenerationFleetFailureIs503(t *testing.T) {
+	creditTestReset(t)
+	cleanupAuroraSystemAgents(t)
+	resetAuroraSandboxState(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	if err := testHandler.Credit.Grant(ctx, user, ws, 1_000_000_000, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
+	beforeGenerations := dbfx.Count(t, "SELECT count(*) FROM aurora_generation WHERE workspace_id = $1", testWorkspaceID)
+	beforeDeductions := dbfx.Count(t, "SELECT count(*) FROM credit_ledger WHERE user_id = $1 AND kind = $2", testUserID, aurora.LedgerKindDeduction)
+
+	prov := &recordingFleetProvisioner{err: errors.New("fleet unavailable")}
+	withSandboxManager(t, aurora.NewSandboxManager(testHandler.Queries, testPool, prov, auroraEnrollmentImageDigest, nil))
+
+	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
+		"skillId": "xhs-image",
+		"prompt":  "fleet failure acceptance",
+	})
+	body := testutil.Decode[struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}](t, testHandler.CreateAuroraGeneration, req, http.StatusServiceUnavailable)
+	if body.Code != "aurora_runtime_unavailable" {
+		t.Fatalf("error code = %q, want aurora_runtime_unavailable", body.Code)
+	}
+
+	var state string
+	var backend pgtype.Text
+	if err := testPool.QueryRow(ctx,
+		"SELECT state, backend_node_id FROM aurora_sandbox_node WHERE workspace_id = $1", ws,
+	).Scan(&state, &backend); err != nil {
+		t.Fatalf("load sandbox node: %v", err)
+	}
+	if state != "failed" {
+		t.Fatalf("sandbox node state = %q, want failed", state)
+	}
+	if backend.Valid {
+		t.Fatalf("failed sandbox node kept backend_node_id %q", backend.String)
+	}
+
+	if got := dbfx.Count(t, "SELECT count(*) FROM aurora_generation WHERE workspace_id = $1", testWorkspaceID); got != beforeGenerations {
+		t.Fatalf("generation rows = %d, want %d unchanged", got, beforeGenerations)
+	}
+	if got := dbfx.Count(t, "SELECT count(*) FROM credit_ledger WHERE user_id = $1 AND kind = $2", testUserID, aurora.LedgerKindDeduction); got != beforeDeductions {
+		t.Fatalf("reservation ledger rows = %d, want %d unchanged", got, beforeDeductions)
+	}
+}
+
+// TestCreateAuroraGenerationConcurrentFleetFailureIs503 is the concurrent
+// regression for the false-201 bug: while one caller's Fleet ensure is held
+// open (its node starting with a live enrollment but no backend id), every other
+// concurrent caller must fail closed with the runtime-unavailable 503 rather
+// than adopt the unconfirmed row. No caller may create a generation or reserve
+// credits, and the winner's later failure must not surface as success either.
+func TestCreateAuroraGenerationConcurrentFleetFailureIs503(t *testing.T) {
+	creditTestReset(t)
+	cleanupAuroraSystemAgents(t)
+	resetAuroraSandboxState(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	if err := testHandler.Credit.Grant(ctx, user, ws, 1_000_000_000, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
+	const prompt = "concurrent fleet failure"
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), "DELETE FROM agent_task_queue WHERE id IN (SELECT task_id FROM aurora_generation WHERE workspace_id = $1 AND prompt = $2)", testWorkspaceID, prompt)
+		testPool.Exec(context.Background(), "DELETE FROM aurora_generation WHERE workspace_id = $1 AND prompt = $2", testWorkspaceID, prompt)
+	})
+
+	beforeGenerations := dbfx.Count(t, "SELECT count(*) FROM aurora_generation WHERE workspace_id = $1", testWorkspaceID)
+	beforeDeductions := dbfx.Count(t, "SELECT count(*) FROM credit_ledger WHERE user_id = $1 AND kind = $2", testUserID, aurora.LedgerKindDeduction)
+
+	prov := &blockingFailProvisioner{started: make(chan struct{}), release: make(chan struct{})}
+	withSandboxManager(t, aurora.NewSandboxManager(testHandler.Queries, testPool, prov, auroraEnrollmentImageDigest, nil))
+
+	const workers = 6
+	type result struct {
+		status int
+		code   string
+	}
+	done := make(chan result, workers)
+	start := make(chan struct{})
+	for i := 0; i < workers; i++ {
+		go func() {
+			<-start
+			req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]string{
+				"skillId": "xhs-image",
+				"prompt":  prompt,
+			})
+			rec := httptest.NewRecorder()
+			testHandler.CreateAuroraGeneration(rec, req)
+			var body struct {
+				Code string `json:"code"`
+			}
+			_ = json.Unmarshal(rec.Body.Bytes(), &body)
+			done <- result{status: rec.Code, code: body.Code}
+		}()
+	}
+	close(start)
+
+	// Hold the winner's Fleet call open so its node stays starting with no
+	// backend id. Wait for every other caller to decide against that exact row
+	// before releasing the winner, so the assertion covers the real race and not
+	// a scheduling accident.
+	select {
+	case <-prov.started:
+	case <-time.After(15 * time.Second):
+		t.Fatal("no Fleet provision call started")
+	}
+	results := make([]result, 0, workers)
+	for i := 0; i < workers-1; i++ {
+		select {
+		case r := <-done:
+			results = append(results, r)
+		case <-time.After(20 * time.Second):
+			t.Fatalf("only %d/%d callers finished while the provision was held open", i, workers-1)
+		}
+	}
+	close(prov.release)
+	select {
+	case r := <-done:
+		results = append(results, r)
+	case <-time.After(15 * time.Second):
+		t.Fatal("winner did not finish after the Fleet call was released")
+	}
+
+	for i, r := range results {
+		if r.status != http.StatusServiceUnavailable || r.code != "aurora_runtime_unavailable" {
+			t.Fatalf("caller %d = %d %q, want 503 aurora_runtime_unavailable", i, r.status, r.code)
+		}
+	}
+	if got := dbfx.Count(t, "SELECT count(*) FROM aurora_generation WHERE workspace_id = $1", testWorkspaceID); got != beforeGenerations {
+		t.Fatalf("generation rows = %d, want %d unchanged", got, beforeGenerations)
+	}
+	if got := dbfx.Count(t, "SELECT count(*) FROM credit_ledger WHERE user_id = $1 AND kind = $2", testUserID, aurora.LedgerKindDeduction); got != beforeDeductions {
+		t.Fatalf("reservation ledger rows = %d, want %d unchanged", got, beforeDeductions)
+	}
+}
+
+// auroraClaimFixture drives one real Aurora generation through the handler and
+// returns its claimed (dispatched) task, runtime, and generation id for
+// claim-time tests.
+func auroraClaimFixture(t *testing.T) (db.AgentTaskQueue, db.AgentRuntime, string) {
+	t.Helper()
+	creditTestReset(t)
+	cleanupAuroraSystemAgents(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+	if err := testHandler.Credit.Grant(ctx, user, ws, 1_000_000_000, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	out := testutil.Decode[struct {
+		Generation struct {
+			ID string `json:"id"`
+		} `json:"generation"`
+	}](t, testHandler.CreateAuroraGeneration, newRequest(http.MethodPost, "/api/aurora/generations", map[string]any{
+		"skillId": "text-image",
+		"prompt":  "claim generation lookup regression",
+	}), http.StatusCreated)
+	generationID := out.Generation.ID
+
+	var taskID pgtype.UUID
+	if err := testPool.QueryRow(ctx, `SELECT task_id FROM aurora_generation WHERE id = $1`, generationID).Scan(&taskID); err != nil {
+		t.Fatalf("load generation task id: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
+		testPool.Exec(context.Background(), `DELETE FROM aurora_generation WHERE id = $1`, generationID)
+	})
+	// The real claim flow marks the task dispatched before assembling the
+	// response; mirror that so the failure path can settle it.
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status = 'dispatched', dispatched_at = now() WHERE id = $1`, taskID)
+	task, err := testHandler.Queries.GetAgentTask(ctx, taskID)
+	if err != nil {
+		t.Fatalf("load task: %v", err)
+	}
+	runtime, err := testHandler.Queries.GetAgentRuntime(ctx, task.RuntimeID)
+	if err != nil {
+		t.Fatalf("load runtime: %v", err)
+	}
+	return task, runtime, generationID
+}
+
+// TestClaimAuroraTaskGenerationLookupSettlesOrRetries is the Important-4
+// regression: a permanently missing generation row is terminal for the claim so
+// the task settles through the normal failure path, while a real database error
+// on the same lookup stays retryable.
+func TestClaimAuroraTaskGenerationLookupSettlesOrRetries(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+
+	t.Run("missing row settles terminal", func(t *testing.T) {
+		task, runtime, generationID := auroraClaimFixture(t)
+		dbfx.Exec(t, `DELETE FROM aurora_generation WHERE id = $1`, generationID)
+
+		req := newRequest(http.MethodPost, "/api/claim", nil)
+		_, _, _, _, _, failure := testHandler.buildClaimedTaskResponse(req, &task, runtime, uuidToString(task.RuntimeID), testWorkspaceID)
+		if failure == nil || !failure.settled {
+			t.Fatalf("failure = %+v, want a settled terminal failure", failure)
+		}
+		if failure.outcome != "error_aurora_generation_missing" || failure.status != http.StatusConflict {
+			t.Fatalf("failure = %+v, want error_aurora_generation_missing/409", failure)
+		}
+		var status, reason string
+		dbfx.QueryRow(t, `SELECT status, failure_reason FROM agent_task_queue WHERE id = $1`, task.ID).Scan(&status, &reason)
+		if status != "failed" {
+			t.Fatalf("task status = %q, want failed", status)
+		}
+		if reason != taskfailure.ReasonInvalidTaskIdentity.String() {
+			t.Fatalf("failure_reason = %q, want %q", reason, taskfailure.ReasonInvalidTaskIdentity)
+		}
+	})
+
+	t.Run("database error stays retryable", func(t *testing.T) {
+		task, runtime, _ := auroraClaimFixture(t)
+		broken := *testHandler
+		broken.Queries = db.New(failQueryDBTX{
+			DBTX:   testPool,
+			failOn: "FROM aurora_generation",
+			err:    errors.New("simulated transient read failure"),
+		})
+		req := newRequest(http.MethodPost, "/api/claim", nil)
+		_, _, _, _, _, failure := broken.buildClaimedTaskResponse(req, &task, runtime, uuidToString(task.RuntimeID), testWorkspaceID)
+		if failure == nil || failure.settled {
+			t.Fatalf("failure = %+v, want an unsettled retryable failure", failure)
+		}
+		if failure.outcome != "error_aurora_generation" || failure.status != http.StatusInternalServerError {
+			t.Fatalf("failure = %+v, want error_aurora_generation/500", failure)
+		}
+		var status string
+		dbfx.QueryRow(t, `SELECT status FROM agent_task_queue WHERE id = $1`, task.ID).Scan(&status)
+		if status == "failed" {
+			t.Fatalf("task status = %q, want it preserved for redelivery", status)
+		}
+	})
 }
