@@ -160,6 +160,15 @@ test("rejects a Dockerfile that rebuilds a different esbuild version", async () 
   await assert.rejects(() => verify({ root }), /esbuild/);
 });
 
+test("rejects a Dockerfile without the Fleet node entrypoint", async () => {
+  const text = readText(DOCKERFILE).replace(
+    'ENTRYPOINT ["/usr/local/bin/fleet-node", "run"]',
+    'ENTRYPOINT ["/usr/local/bin/multica"]',
+  );
+  const root = writeFixture({ [DOCKERFILE]: text });
+  await assert.rejects(() => verify({ root }), /Fleet node contract/);
+});
+
 // ---------------------------------------------------------------------------
 // Workflow supply-chain policy (--workflow mode). Each case mutates the
 // committed workflow and proves the policy rejects the drift. The committed

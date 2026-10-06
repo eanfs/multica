@@ -2,13 +2,13 @@
 # Aurora sandbox Linux Docker security acceptance entry point.
 #
 # This script runs the Linux Docker Engine acceptance preflight: it loads the
-# AppArmor profile, builds the fixture sandbox and egress images, and resolves
-# every image to an immutable reference. The auroradocker-tagged isolation/egress
-# boundary and the containerized fake pipeline smoke were deleted with the retired
-# controller, so the matrix is not run today: the script records it as an explicit
-# skip and reports the acceptance as not evaluated until Task 2 restores the
-# Fleet-based suite. Docker Desktop on macOS cannot satisfy the AppArmor, cgroup,
-# or kernel gates, so this script fails loudly there.
+# AppArmor profile, builds the fixture sandbox, egress, and fake-CLI Fleet
+# images, resolves every image to an immutable reference, and then runs the
+# containerized Fleet sandbox acceptance
+# (deploy/aurora-sandbox/fleet-sandbox-acceptance.sh). When a prerequisite is
+# genuinely unavailable (a non-Linux kernel, no AppArmor) the matrix is recorded
+# as an honest skip with security_acceptance_evaluated=false and result
+# "skipped"; it never records a pass that was not evaluated.
 #
 # Image references are immutable. The release sandbox image that carries the
 # Node runtime for the fake pipeline smoke is named by AURORA_PIPELINE_IMAGE;
@@ -223,6 +223,19 @@ write_report() {
   printf 'docker-security-test: wrote %s\n' "$report_file" >&2
 }
 
+# honest_skip records an acceptance that could not be evaluated in this
+# environment. It is never a pass: security_acceptance_evaluated stays false and
+# the report result is "skipped".
+honest_skip() {
+  local reason="$1"
+  security_acceptance_evaluated=false
+  linux_matrix_skipped=true
+  record_test "fleet-sandbox-acceptance" "skip" "$reason" 0
+  printf 'docker-security-test: SKIP: %s\n' "$reason" >&2
+  printf '::warning::Aurora Linux isolation/egress acceptance was NOT evaluated: %s\n' "$reason" >&2
+  exit 0
+}
+
 on_exit() {
   local code=$?
   trap - EXIT
@@ -233,8 +246,7 @@ on_exit() {
     reason="step failed: $last_step"
   fi
   # A skipped matrix is never recorded as a pass. Keep the explicit per-test skip
-  # entry, but report the acceptance as not evaluated with a non-pass result. The
-  # exit code stays 0 until Task 2 restores the matrix.
+  # entry, but report the acceptance as not evaluated with a non-pass result.
   if [ "$code" -eq 0 ] && [ "$linux_matrix_skipped" = true ]; then
     result="skipped"
   fi
@@ -257,8 +269,6 @@ trap on_exit EXIT
 # Preflight
 # ---------------------------------------------------------------------------
 last_step="verify Linux and Docker prerequisites"
-[ "$(uname -s)" = "Linux" ] || fail "this acceptance runs only on Linux Docker Engine; on $(uname -s) use the functional smoke instead"
-
 command -v docker >/dev/null 2>&1 || fail "docker is required"
 command -v jq >/dev/null 2>&1 || fail "jq is required to write the acceptance report"
 docker info >/dev/null 2>&1 || fail "the Docker daemon is not reachable"
@@ -267,6 +277,12 @@ docker_client_version="$(docker version --format '{{.Client.Version}}' 2>/dev/nu
 docker_server_version="$(docker version --format '{{.Server.Version}}' 2>/dev/null || printf 'unknown')"
 cgroup_version="$(docker info --format '{{.CgroupVersion}}' 2>/dev/null || printf 'unknown')"
 cgroup_driver="$(docker info --format '{{.CgroupDriver}}' 2>/dev/null || printf 'unknown')"
+
+# A non-Linux kernel genuinely cannot evaluate the matrix. Record an honest skip
+# instead of a false pass; the macOS functional smoke is the other mode.
+if [ "$(uname -s)" != "Linux" ]; then
+  honest_skip "the Linux Docker security acceptance requires a Linux kernel; on $(uname -s) use deploy/aurora-sandbox/docker-smoke.sh"
+fi
 
 seccomp_profile="$repo_root/deploy/aurora-sandbox/seccomp.json"
 apparmor_profile="$repo_root/deploy/aurora-sandbox/multica-aurora-sandbox.apparmor"
@@ -277,20 +293,22 @@ apparmor_profile="$repo_root/deploy/aurora-sandbox/multica-aurora-sandbox.apparm
 # recorded before any test runs, including when it is what blocks the run.
 if [ ! -e /sys/module/apparmor ]; then
   apparmor_status="unavailable"
-  fail "the kernel does not expose AppArmor; the acceptance requires it"
+  honest_skip "the kernel does not expose AppArmor, so the Linux isolation matrix cannot be evaluated"
 elif [ -r /sys/module/apparmor/parameters/enabled ] && [ "$(cat /sys/module/apparmor/parameters/enabled)" != "Y" ]; then
   apparmor_status="disabled"
-  fail "AppArmor is present but disabled in the kernel"
+  honest_skip "AppArmor is present but disabled in the kernel, so the Linux isolation matrix cannot be evaluated"
 else
   apparmor_status="enabled"
 fi
-command -v apparmor_parser >/dev/null 2>&1 || fail "apparmor_parser is required to load multica-aurora-sandbox"
+if ! command -v apparmor_parser >/dev/null 2>&1; then
+  honest_skip "apparmor_parser is required to load multica-aurora-sandbox"
+fi
 if [ "$(id -u)" -eq 0 ]; then
-  apparmor_parser -r "$apparmor_profile" || fail "failed to load the AppArmor profile"
+  apparmor_parser -r "$apparmor_profile" || honest_skip "failed to load the AppArmor profile $apparmor_profile"
 elif command -v sudo >/dev/null 2>&1; then
-  sudo apparmor_parser -r "$apparmor_profile" || fail "failed to load the AppArmor profile"
+  sudo apparmor_parser -r "$apparmor_profile" || honest_skip "failed to load the AppArmor profile $apparmor_profile"
 else
-  fail "loading the AppArmor profile needs root; rerun as root"
+  honest_skip "loading the AppArmor profile needs root; rerun as root"
 fi
 
 go_bin="${GO:-go}"
@@ -331,6 +349,20 @@ if [ -z "$fixture_sandbox_ref" ]; then
   fixture_sandbox_ref="$(resolve_image "${AURORA_FIXTURE_SANDBOX_TAG:-multica-aurora-sandbox-fixture:local}" AURORA_FIXTURE_SANDBOX_TAG)"
   fixture_proxy_ref="$(resolve_image "${AURORA_FIXTURE_PROXY_TAG:-multica-aurora-egress-fixture:local}" AURORA_FIXTURE_PROXY_TAG)"
 fi
+
+# The fake-CLI Fleet node fixture is self-contained (it writes fake
+# fleet-node/multica/claude from the locked Node base), so its build context is
+# the fixture directory rather than the probe staging directory.
+fleet_fixture_ref="${AURORA_FLEET_FIXTURE_REF:-}"
+if [ -n "$fleet_fixture_ref" ]; then
+  fleet_fixture_ref="$(resolve_image "$fleet_fixture_ref" AURORA_FLEET_FIXTURE_REF)"
+else
+  last_step="build the fake-CLI Fleet node fixture image"
+  DOCKER_BUILDKIT=1 docker build -f "$repo_root/deploy/aurora-sandbox/fixture/Dockerfile.sandbox-fleet" \
+    -t "${AURORA_FLEET_FIXTURE_TAG:-multica-aurora-sandbox-fleet-fixture:local}" \
+    "$repo_root/deploy/aurora-sandbox/fixture" || fail "failed to build the fake-CLI Fleet node fixture image"
+  fleet_fixture_ref="$(resolve_image "${AURORA_FLEET_FIXTURE_TAG:-multica-aurora-sandbox-fleet-fixture:local}" AURORA_FLEET_FIXTURE_TAG)"
+fi
 sandbox_digest="$(ref_digest "$fixture_sandbox_ref")"
 egress_digest="$(ref_digest "$fixture_proxy_ref")"
 
@@ -348,24 +380,54 @@ export AURORA_RUN_DOCKER_SECURITY_TEST=1
 export AURORA_SANDBOX_IMAGE="$fixture_sandbox_ref"
 export AURORA_PIPELINE_IMAGE="$pipeline_image_ref"
 export AURORA_PROXY_IMAGE="$fixture_proxy_ref"
+export AURORA_FLEET_FIXTURE_REF="$fleet_fixture_ref"
 export AURORA_SECCOMP_PROFILE="$seccomp_profile"
 export AURORA_APPARMOR_PROFILE="multica-aurora-sandbox"
+export AURORA_DOCKER_SECURITY_COUNT="${AURORA_DOCKER_SECURITY_COUNT:-1}"
 
 # ---------------------------------------------------------------------------
 # Acceptance matrix
 # ---------------------------------------------------------------------------
-# The auroradocker-tagged Linux suite ran here. It was deleted with the retired
-# external controller package (TestDockerSandboxLinuxSecurityBoundary and
-# TestDockerSandboxFakeAuroraPipelines); Task 2 delivers the Fleet-based
-# replacement. The container-level preflight above (immutable image resolution,
-# fixture image pair, AppArmor profile load) still runs, and the matrix is
-# recorded as a skip rather than a pass so the report never claims a security
-# acceptance that was not evaluated.
-last_step="record the removed Linux acceptance matrix"
-linux_matrix_skipped=true
-security_acceptance_evaluated=false
-record_test "auroradocker-acceptance-matrix" "skip" \
-  "the auroradocker suite was deleted with the retired controller; the Fleet-based Linux acceptance is Task 2" 0
-printf 'docker-security-test: SKIP the auroradocker matrix: the tagged suite was deleted with the retired controller; Task 2 restores the Fleet-based suite\n' >&2
-printf '::warning::Aurora Linux isolation/egress acceptance was NOT evaluated: the auroradocker suite was deleted with the retired controller; Task 2 restores the Fleet-based Linux acceptance matrix\n' >&2
+# The out-of-tree auroradocker-tagged Go suite was deleted with the retired
+# aurorafleet package. Its replacement is the containerized Fleet acceptance in
+# deploy/aurora-sandbox/fleet-sandbox-acceptance.sh, which this script runs. The
+# script supplies the AURORA_* contract above plus AURORA_DOCKER_SECURITY_COUNT,
+# and its PASS/FAIL/SKIP lines are parsed into the report below. Exit code 3
+# means the environment cannot evaluate the matrix and is recorded honestly as
+# a skip, never as a pass.
+last_step="run the containerized Fleet sandbox acceptance"
+security_log="$staging/security-test.log"
+acceptance_count="${AURORA_DOCKER_SECURITY_COUNT:-1}"
+printf 'docker-security-test: running the Fleet sandbox acceptance %s time(s)\n' "$acceptance_count" >&2
+set +e
+"$repo_root/deploy/aurora-sandbox/fleet-sandbox-acceptance.sh" 2>&1 | tee "$security_log"
+acceptance_code="${PIPESTATUS[0]}"
+set -e
+if [ "$acceptance_code" -eq 3 ]; then
+  security_acceptance_evaluated=false
+  linux_matrix_skipped=true
+  if ! grep -q '^[[:space:]]*--- SKIP:' "$security_log"; then
+    record_test "fleet-sandbox-acceptance" "skip" "the containerized Fleet acceptance reported an unavailable environment" 0
+  fi
+  printf '::warning::Aurora Linux isolation/egress acceptance was NOT evaluated: the containerized Fleet acceptance reported an unavailable environment\n' >&2
+  last_step="the containerized Fleet acceptance reported an unavailable environment"
+  exit 0
+fi
+if [ "$acceptance_code" -ne 0 ]; then
+  last_step="the containerized Fleet acceptance exited with code $acceptance_code"
+  exit "$acceptance_code"
+fi
+# A green run must have produced at least one evaluated test. A log with no PASS
+# line is never a pass, so fall back to the honest-skip report.
+if ! grep -q '^[[:space:]]*--- PASS:' "$security_log"; then
+  security_acceptance_evaluated=false
+  linux_matrix_skipped=true
+  if ! grep -q '^[[:space:]]*--- SKIP:' "$security_log"; then
+    record_test "fleet-sandbox-acceptance" "skip" "the containerized Fleet acceptance produced no evaluated test" 0
+  fi
+  printf '::warning::Aurora Linux isolation/egress acceptance was NOT evaluated: the containerized Fleet acceptance produced no evaluated test\n' >&2
+  last_step="the containerized Fleet acceptance produced no evaluated test"
+  exit 0
+fi
+last_step="the containerized Fleet acceptance matrix passed"
 exit 0

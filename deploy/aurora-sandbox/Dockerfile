@@ -5,8 +5,13 @@
 #   - holds no provider credential, enrollment token, daemon token, Git metadata,
 #     package-manager cache, or build secret;
 #   - contains no skills installer, npm/pnpm/npx/corepack, Git, curl, wget, or SSH.
-# The four provider credentials are host files the fleet mounts read-only at
-# /run/secrets/*; nothing here bakes a value in.
+# One artifact satisfies two fixed contracts:
+#   - the Aurora sandbox runtime under /opt/aurora;
+#   - the Fleet node contract: /usr/local/bin/fleet-node plus /usr/local/bin/multica,
+#     ENTRYPOINT fleet-node run, HEALTHCHECK fleet-node health, and the fixed
+#     /data + /secrets layout owned by 10001:10001. The Fleet mounts a fresh data
+#     volume at /data and its read-only secrets volume at /secrets, so nothing
+#     here bakes an enrollment secret or provider credential in.
 #
 # Build inputs arrive through Bake named contexts: `server` (Go module),
 # `reporoot` (root pnpm workspace), and `scripts` (lock verifiers). The
@@ -25,6 +30,13 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH SOURCE_DATE_EPOCH=$SOURCE_DATE_E
       go build -trimpath -buildvcs=false \
       -ldflags="-s -w -buildid=" \
       -o /out/multica ./cmd/multica
+# The same image is a Fleet node: fleet-node owns the node contract (fixed
+# entrypoint, layout and health) and execs the managed daemon above. Building it
+# here keeps both contracts on one digest-pinned artifact.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH \
+      go build -trimpath -buildvcs=false \
+      -ldflags="-s -w -buildid=" \
+      -o /out/fleet-node ./cmd/fleet-node
 # Focused Go tests for the managed secret boundary that this image enforces.
 RUN go test ./internal/daemon \
       -run 'TestManagedSecret|TestProviderSecretMount' -count=1
@@ -165,15 +177,21 @@ RUN set -eux; \
 
 # Runtime payload, all root-owned and non-writable by the sandbox user.
 COPY --from=gobuilder --chown=0:0 /out/multica /usr/local/bin/multica
+# fleet-node is the fixed node entrypoint; it execs the managed daemon above.
+COPY --from=gobuilder --chown=0:0 /out/fleet-node /usr/local/bin/fleet-node
 # The pnpm workspace layout is preserved so the broker node_modules symlinks
 # keep resolving; the runtime tree lives under /opt/aurora/runtime/deploy/.
 COPY --from=nodedeps --chown=0:0 /src /opt/aurora/runtime
 COPY --from=vendor --chown=0:0 /opt/aurora/vendor /opt/aurora/vendor
 COPY --from=vendor --chown=0:0 /opt/aurora/vendor-tree.sha256 /opt/aurora/vendor-tree.sha256
 
+# The fixed Fleet node layout. Docker seeds a fresh named volume from its
+# mountpoint, so /data and /secrets arrive writable by the non-root node without
+# any runtime chown.
 RUN set -eux; \
     groupadd --gid 10001 aurora; \
-    useradd --uid 10001 --gid 10001 --home-dir /workspace --shell /usr/sbin/nologin aurora; \
+    useradd --uid 10001 --gid 10001 --home-dir /data/home --shell /usr/sbin/nologin aurora; \
+    install -d -o 10001 -g 10001 -m 0700 /data /data/home /data/workspaces /secrets; \
     rm -f /opt/aurora/runtime/package.json /opt/aurora/runtime/pnpm-lock.yaml \
           /opt/aurora/runtime/pnpm-workspace.yaml /opt/aurora/runtime/.npmrc; \
     rm -rf \
@@ -182,8 +200,8 @@ RUN set -eux; \
       /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/pnpm /usr/local/bin/pnpx \
       /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn-* \
       /root/.cache /root/.npm /root/.local/share/pnpm /root/.cache/node/corepack; \
-    chown -R 0:0 /opt/aurora /usr/local/bin/multica; \
-    chmod -R go-w /opt/aurora /usr/local/bin/multica; \
+    chown -R 0:0 /opt/aurora /usr/local/bin/multica /usr/local/bin/fleet-node; \
+    chmod -R go-w /opt/aurora /usr/local/bin/multica /usr/local/bin/fleet-node; \
     find /opt/aurora -type d -exec chmod 0555 {} +; \
     find /opt/aurora -type f ! -perm /111 -exec chmod 0444 {} +; \
     find /opt/aurora -type f -perm /111 -exec chmod 0555 {} +
@@ -197,12 +215,17 @@ RUN set -eux; \
 # scripts/verify-aurora-sandbox-image.sh proves this exact resolution from the
 # image's own environment as the sandbox user.
 ENV MULTICA_CLAUDE_PATH=/opt/aurora/runtime/node_modules/.bin/claude
+# HOME and the working directory follow the fixed Fleet node layout; the Fleet
+# also passes HOME explicitly, so both contracts agree.
+ENV HOME=/data/home
 
 USER 10001:10001
-WORKDIR /workspace
-# Fixed managed entrypoint. The fleet cannot override the command.
-ENTRYPOINT ["/usr/local/bin/multica", "daemon", "start", "--managed", "--foreground", "--managed-enrollment-token-file=/run/secrets/aurora-enrollment"]
+WORKDIR /data/workspaces
+# Fixed Fleet node entrypoint. It validates the read-only /secrets enrollment
+# file and execs the managed daemon; neither a client nor the fleet overrides it.
+ENTRYPOINT ["/usr/local/bin/fleet-node", "run"]
 CMD []
-# Non-shell health check: the same binary probes its own managed health endpoint.
+# Non-shell health check: fleet-node reads the node layout and probes the
+# daemon's own managed health endpoint.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-  CMD ["/usr/local/bin/multica", "daemon", "managed-healthcheck", "--url=http://127.0.0.1:19514/health", "--max-age=90s"]
+  CMD ["/usr/local/bin/fleet-node", "health"]

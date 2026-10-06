@@ -1,0 +1,54 @@
+# Fleet node fixture image for the Linux Docker security acceptance.
+#
+# This is deliberately not the release image. The release image installs the
+# platform-native Claude Code binary, HyperFrames, FFmpeg and Chromium; this
+# fixture carries only the fixed Fleet node contract (entrypoint, layout, user
+# and health) plus fake agent/CLI executables, so the acceptance can exercise
+# the node shape quickly and with no real Claude install.
+#
+# The base is the same digest-pinned Node runtime the release image uses.
+ARG NODE_IMAGE=node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+FROM ${NODE_IMAGE} AS sandbox-fleet
+
+RUN set -eux; \
+    groupadd --gid 10001 aurora; \
+    useradd --uid 10001 --gid 10001 --home-dir /data/home --shell /usr/sbin/nologin aurora; \
+    install -d -o 10001 -g 10001 -m 0700 /data /data/home /data/workspaces /secrets
+
+# The fake Fleet node CLI mirrors the fixed subcommands of cmd/fleet-node. It
+# never contacts a control plane, so the contract test stays hermetic.
+RUN cat > /usr/local/bin/fleet-node <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  run) while :; do sleep 3600; done ;;
+  health) printf '{"daemon_id":"00000000-0000-4000-8000-000000000000","ready":true,"runtime_count":1,"active_runs":0,"agents":["claude"]}\n'; exit 0 ;;
+  bootstrap) test -d /data && test -d /secrets ;;
+  report-stats) printf '{"known":true,"pending":0,"failed":0}\n' ;;
+  *) printf 'fleet-node command failed\n' >&2; exit 1 ;;
+esac
+EOF
+
+# Fake managed daemon and agent CLI. The fixture must not need the real Claude
+# install, but it keeps the same absolute MULTICA_CLAUDE_PATH resolution.
+RUN cat > /usr/local/bin/multica <<'EOF'
+#!/bin/sh
+printf 'multica fixture daemon\n'
+EOF
+RUN cat > /usr/local/bin/claude <<'EOF'
+#!/bin/sh
+printf 'claude fixture 0.0.0\n'
+EOF
+
+RUN set -eux; \
+    chmod 0555 /usr/local/bin/fleet-node /usr/local/bin/multica /usr/local/bin/claude; \
+    chown -R 0:0 /usr/local/bin/fleet-node /usr/local/bin/multica /usr/local/bin/claude
+
+ENV HOME=/data/home
+ENV MULTICA_CLAUDE_PATH=/usr/local/bin/claude
+
+USER 10001:10001
+WORKDIR /data/workspaces
+ENTRYPOINT ["/usr/local/bin/fleet-node", "run"]
+CMD []
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD ["/usr/local/bin/fleet-node", "health"]

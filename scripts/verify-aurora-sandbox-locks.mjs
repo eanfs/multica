@@ -512,6 +512,26 @@ function checkEsbuildRebuild(state, versions, errors) {
   }
 }
 
+// The sandbox image is also the Fleet node image: the same Dockerfile must
+// build and ship the fixed fleet-node entrypoint and the /data + /secrets
+// layout. scripts/verify-aurora-sandbox-image.sh proves it on the built image;
+// this keeps the static lock gate from drifting first.
+function checkFleetNodeContract(state, errors) {
+  const text = typeof state.dockerfile === "string" ? state.dockerfile : null;
+  if (text === null) return;
+  const required = [
+    [text.includes("./cmd/fleet-node"), "build ./cmd/fleet-node"],
+    [text.includes("/out/fleet-node"), "write the fleet-node binary"],
+    [text.includes("COPY --from=gobuilder") && text.includes("/out/fleet-node /usr/local/bin/fleet-node"), "ship fleet-node at /usr/local/bin/fleet-node"],
+    [text.includes("install -d") && text.includes("/data /data/home /data/workspaces /secrets"), "create the fixed /data + /secrets layout"],
+    [text.includes('ENTRYPOINT ["/usr/local/bin/fleet-node", "run"]'), "fix ENTRYPOINT to fleet-node run"],
+    [/HEALTHCHECK[\s\S]*?CMD \["\/usr\/local\/bin\/fleet-node", "health"\]/.test(text), "fix HEALTHCHECK to fleet-node health"],
+  ];
+  for (const [ok, label] of required) {
+    if (!ok) errors.push("Dockerfile sandbox must " + label + " for the Fleet node contract");
+  }
+}
+
 export function validate(state) {
   const errors = [];
   const versions = state.versions.value;
@@ -749,6 +769,7 @@ export function validate(state) {
     checkDockerfile("egress", state.dockerfileEgress, versions, state, errors);
   }
   checkEsbuildRebuild(state, versions, errors);
+  checkFleetNodeContract(state, errors);
 
   return errors;
 }

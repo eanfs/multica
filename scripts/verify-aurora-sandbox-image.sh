@@ -150,13 +150,12 @@ check_no_exported_secrets() {
 sandbox_id="$(resolve_image "$sandbox_image")"
 sandbox="multica-aurora-sandbox-verify"
 docker tag "$sandbox_id" "$sandbox" >/dev/null
-check_image_identity "sandbox" "$sandbox" '["/usr/local/bin/multica","daemon","start","--managed","--foreground","--managed-enrollment-token-file=/run/secrets/aurora-enrollment"]'
+check_image_identity "sandbox" "$sandbox" '["/usr/local/bin/fleet-node","run"]'
 
 healthcheck="$(docker image inspect --format '{{json .Config.Healthcheck}}' "$sandbox")"
 case "$healthcheck" in
-  *managed-healthcheck*--url=http://127.0.0.1:19514/health*--max-age=90s*) ;;
-  *managed-healthcheck*--max-age=90s*--url=http://127.0.0.1:19514/health*) ;;
-  *) fail "sandbox image health check is $healthcheck, want the fixed non-shell managed-healthcheck command" ;;
+  *fleet-node*health*) ;;
+  *) fail "sandbox image health check is $healthcheck, want the fixed non-shell fleet-node health command" ;;
 esac
 volumes="$(docker image inspect --format '{{json .Config.Volumes}}' "$sandbox")"
 case "$volumes" in
@@ -209,7 +208,7 @@ set -eu
 fail() { echo "INSPECT_FAIL: $*"; exit 1; }
 
 missing=""
-for b in /usr/local/bin/multica /usr/local/bin/node /usr/bin/ffmpeg /usr/bin/ffprobe \
+for b in /usr/local/bin/multica /usr/local/bin/fleet-node /usr/local/bin/node /usr/bin/ffmpeg /usr/bin/ffprobe \
          /usr/bin/chromium /usr/bin/convert /usr/bin/pdftoppm /usr/bin/pdfinfo \
          /usr/bin/unzip /usr/bin/tini; do
   [ -x "$b" ] || missing="$missing $b"
@@ -237,6 +236,35 @@ claude_version="$(printf '%s\n' "$claude_version" | head -n1)"
 echo "CLAUDE $claude_version"
 [ -x /usr/local/bin/multica ] || fail "missing multica daemon"
 echo "CLIS ok"
+
+# The fixed Fleet node layout: /data, /data/home, /data/workspaces and /secrets
+# exist and are owned by the non-root node, so a fresh named volume mounted there
+# is writable by UID 10001 and the read-only secrets volume is readable by it.
+for d in /data /data/home /data/workspaces /secrets; do
+  [ -d "$d" ] || fail "missing fixed Fleet layout directory $d"
+  owner="$(stat -c '%u:%g' "$d")"
+  [ "$owner" = "10001:10001" ] || fail "Fleet layout directory $d is owned by $owner, want 10001:10001"
+done
+echo "LAYOUT ok"
+
+# fleet-node is runnable and fails closed on an empty command; a missing or
+# mistyped binary must not be able to masquerade as a healthy node.
+set +e
+fleet_out="$(/usr/local/bin/fleet-node 2>&1)"
+fleet_rc=$?
+set -e
+[ "$fleet_rc" -ne 0 ] || fail "fleet-node accepted an empty command"
+case "$fleet_out" in
+  *"fleet-node command failed"*) ;;
+  *) fail "fleet-node did not report its fixed rejection: $fleet_out" ;;
+esac
+echo "FLEET_NODE ok"
+
+# No fixed enrollment secret is baked in: the Fleet installs the one-time mse_
+# secret into the mounted secrets volume at runtime.
+baked="$(find / -xdev -name 'aurora-enrollment' -print -quit 2>/dev/null || true)"
+[ -z "$baked" ] || fail "image bakes a fixed enrollment secret: $baked"
+echo "NO_BAKED_ENROLLMENT ok"
 
 forbidden=""
 for b in npm npx pnpm pnpx corepack yarn git curl wget ssh scp sftp \
