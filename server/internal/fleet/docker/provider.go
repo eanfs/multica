@@ -259,13 +259,28 @@ func (p *Provider) ensureEgress(ctx context.Context, n model.Node, workspace Res
 			return err
 		}
 	}
-	return bounded(ctx, func(c context.Context) error {
+	// The node's HTTP(S)_PROXY points at the fixed "egress" alias, and a created
+	// sidecar is not running because restart is disabled. Start it before the
+	// node is admitted; an already-running sidecar is left untouched.
+	if i.State != "running" {
+		if err := bounded(ctx, func(c context.Context) error { return p.engine.Start(c, i.ID) }); err != nil {
+			return err
+		}
+	}
+	// A crash between this attach and the node create replays ensureEgress on the
+	// adopted sidecar, so a duplicate attach is success rather than a permanent
+	// wedge. Any other engine failure still fails closed.
+	if err := bounded(ctx, func(c context.Context) error {
 		return p.engine.ConnectNetwork(c, workspace.Name, i.ID, []string{model.AuroraEgressAlias})
-	})
+	}); err != nil && !isAlreadyConnected(err) {
+		return err
+	}
+	return nil
 }
 
-// removeEgress removes one node's egress sidecar and then the workspace-internal
-// network. Both removals are idempotent.
+// removeEgress removes one node's egress sidecar. It is idempotent and refuses a
+// container that does not carry this node's ownership labels. The per-node
+// workspace network is removed separately, after the volumes.
 func (p *Provider) removeEgress(ctx context.Context, n model.Node) error {
 	resources, err := p.engine.Find(ctx, map[string]string{"multica.fleet.node": nodeID(n)})
 	if err != nil {
@@ -282,6 +297,13 @@ func (p *Provider) removeEgress(ctx context.Context, n model.Node) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// removeWorkspaceNetwork removes the per-node internal workspace network. The
+// Engine validates the network's ownership labels, so a foreign network is never
+// removed. A missing network is already clean.
+func (p *Provider) removeWorkspaceNetwork(ctx context.Context, n model.Node) error {
 	return bounded(ctx, func(c context.Context) error { return p.engine.RemoveNetwork(c, p.workspaceNetwork(n)) })
 }
 

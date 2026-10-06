@@ -153,12 +153,20 @@ func (p *Provider) Delete(ctx context.Context, n model.Node, ref model.Operation
 			return safeError(e)
 		}
 	}
-	// Data is last: a crash or uncertain earlier deletion always leaves data for fresh proof/retry.
+	// Volumes follow the sidecar; data still precedes the per-node network so a
+	// crash or uncertain earlier deletion leaves data for fresh proof/retry.
 	for _, r := range []Resource{p.volume(n, "secrets"), p.volume(n, "data")} {
 		if r.Role == "data" {
 			r.deletion = &deletionContext{node: n, ref: ref}
 		}
 		if e = bounded(ctx, func(c context.Context) error { return p.engine.RemoveVolume(c, r) }); e != nil {
+			return safeError(e)
+		}
+	}
+	// The workspace network is removed last; the Engine validates its ownership
+	// labels so a foreign network is never removed.
+	if p.cfg.Aurora != nil {
+		if e = p.removeWorkspaceNetwork(ctx, n); e != nil {
 			return safeError(e)
 		}
 	}

@@ -239,6 +239,10 @@ func (e *sdkEngine) EnsureNetwork(ctx context.Context, r Resource) error {
 
 // ConnectNetwork attaches one owned container to one owned workspace network
 // under the supplied aliases. It never renames or re-creates either resource.
+// The call is idempotent: an attachment already present is success, and a
+// duplicate-endpoint response from Docker is treated the same way, because a
+// crash between an attach and the node create replays this step. Any other
+// failure is returned.
 func (e *sdkEngine) ConnectNetwork(ctx context.Context, networkName, containerID string, aliases []string) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -248,7 +252,31 @@ func (e *sdkEngine) ConnectNetwork(ctx context.Context, networkName, containerID
 	if networkName == "" || containerID == "" {
 		return model.ErrInvalidRequest
 	}
-	return e.client.NetworkConnect(ctx, networkName, containerID, &network.EndpointSettings{Aliases: aliases})
+	n, err := e.client.NetworkInspect(ctx, networkName, network.InspectOptions{})
+	if err == nil {
+		if _, attached := n.Containers[containerID]; attached {
+			return nil
+		}
+	} else if !errdefs.IsNotFound(err) {
+		return err
+	}
+	if err = e.client.NetworkConnect(ctx, networkName, containerID, &network.EndpointSettings{Aliases: aliases}); err != nil {
+		if isAlreadyConnected(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// isAlreadyConnected reports Docker's duplicate network-endpoint response, which
+// is success for an idempotent attach and never for any other error.
+func isAlreadyConnected(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "already exists in network") || strings.Contains(message, "already connected")
 }
 
 // RemoveNetwork removes one owned network. A missing network is already clean.
