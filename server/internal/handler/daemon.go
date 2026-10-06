@@ -3525,10 +3525,22 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 			// the daemon writes it into the broker context and never falls
 			// back to the task id. The row is keyed by this task, and the
 			// enqueue path writes task_id just after the task becomes
-			// claimable, so a miss is preserved for redelivery (the next claim
-			// resolves it) rather than settled as an impossible task.
+			// claimable, so a transient lookup failure is preserved for
+			// redelivery. A permanent no-rows, though, can never resolve: the
+			// task settles through the normal failure path (which refunds the
+			// reservation) instead of being redelivered forever.
 			if resp.Agent != nil && strings.HasPrefix(resp.Agent.SystemKey, "aurora:") {
 				generation, genErr := h.Queries.GetAuroraGenerationByTaskID(r.Context(), task.ID)
+				if errors.Is(genErr, pgx.ErrNoRows) {
+					slog.Error("quick-create claim: aurora generation row missing; settling task",
+						"task_id", uuidToString(task.ID), "agent_id", uuidToString(task.AgentID))
+					return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount, h.failClaimedTaskBeforeLaunch(
+						r.Context(), task,
+						"This generation's task is missing its generation record and cannot run.",
+						taskfailure.ReasonInvalidTaskIdentity,
+						"error_aurora_generation_missing", http.StatusConflict, "aurora generation row is missing",
+					)
+				}
 				if genErr != nil {
 					slog.Warn("quick-create claim: aurora generation lookup failed; preserving task for redelivery",
 						"task_id", uuidToString(task.ID), "error", genErr)
