@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Aurora sandbox Linux Docker security acceptance entry point.
 #
-# This script builds the fixture sandbox and egress images, loads the AppArmor
-# profile, and runs the auroradocker-tagged acceptance tests on a Linux Docker
-# Engine host: the isolation/egress boundary plus Task 3's containerized fake
-# pipeline smoke (fake providers, real HyperFrames/FFmpeg/Chromium). Docker
-# Desktop on macOS cannot satisfy the AppArmor, cgroup, or kernel gates, so this
-# script fails loudly there.
+# This script runs the Linux Docker Engine acceptance preflight: it loads the
+# AppArmor profile, builds the fixture sandbox and egress images, and resolves
+# every image to an immutable reference. The auroradocker-tagged isolation/egress
+# boundary and the containerized fake pipeline smoke were deleted with the retired
+# controller, so the matrix is not run today: the script records it as an explicit
+# skip and reports the acceptance as not evaluated until Task 2 restores the
+# Fleet-based suite. Docker Desktop on macOS cannot satisfy the AppArmor, cgroup,
+# or kernel gates, so this script fails loudly there.
 #
 # Image references are immutable. The release sandbox image that carries the
 # Node runtime for the fake pipeline smoke is named by AURORA_PIPELINE_IMAGE;
@@ -44,6 +46,7 @@ fail() {
 # ---------------------------------------------------------------------------
 acceptance_mode="linux-security-acceptance"
 security_acceptance_evaluated=true
+linux_matrix_skipped=false
 report_dir="${AURORA_ACCEPTANCE_REPORT_DIR:-$repo_root/.scratch/aurora-sandbox-acceptance}"
 mkdir -p "$report_dir"
 report_file="$report_dir/linux-acceptance.json"
@@ -229,6 +232,12 @@ on_exit() {
   else
     reason="step failed: $last_step"
   fi
+  # A skipped matrix is never recorded as a pass. Keep the explicit per-test skip
+  # entry, but report the acceptance as not evaluated with a non-pass result. The
+  # exit code stays 0 until Task 2 restores the matrix.
+  if [ "$code" -eq 0 ] && [ "$linux_matrix_skipped" = true ]; then
+    result="skipped"
+  fi
   if [ -n "$security_log" ] && [ -f "$security_log" ]; then
     parse_security_tests "$security_log"
   fi
@@ -353,7 +362,10 @@ export AURORA_APPARMOR_PROFILE="multica-aurora-sandbox"
 # recorded as a skip rather than a pass so the report never claims a security
 # acceptance that was not evaluated.
 last_step="record the removed Linux acceptance matrix"
+linux_matrix_skipped=true
+security_acceptance_evaluated=false
 record_test "auroradocker-acceptance-matrix" "skip" \
   "the auroradocker suite was deleted with the retired controller; the Fleet-based Linux acceptance is Task 2" 0
 printf 'docker-security-test: SKIP the auroradocker matrix: the tagged suite was deleted with the retired controller; Task 2 restores the Fleet-based suite\n' >&2
+printf '::warning::Aurora Linux isolation/egress acceptance was NOT evaluated: the auroradocker suite was deleted with the retired controller; Task 2 restores the Fleet-based Linux acceptance matrix\n' >&2
 exit 0

@@ -22,8 +22,10 @@ on:
       - "scripts/verify-aurora-sandbox-locks.test.mjs"
       - "server/cmd/aurora-egress-proxy/**"
       - "server/cmd/aurora-sandbox-probe/**"
+      - "server/internal/aurora/**"
       - "server/internal/daemon/**"
       - "server/internal/daemonws/**"
+      - "server/internal/fleet/**"
       - "server/pkg/agent/**"
   push:
     branches: [main]
@@ -39,8 +41,10 @@ on:
       - "scripts/verify-aurora-sandbox-locks.test.mjs"
       - "server/cmd/aurora-egress-proxy/**"
       - "server/cmd/aurora-sandbox-probe/**"
+      - "server/internal/aurora/**"
       - "server/internal/daemon/**"
       - "server/internal/daemonws/**"
+      - "server/internal/fleet/**"
       - "server/pkg/agent/**"
   workflow_dispatch:
     inputs:
