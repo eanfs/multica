@@ -349,10 +349,12 @@ func RoundTripFakeNode(ctx context.Context, t *testing.T) error {
 	if daemonID == "" {
 		return fmt.Errorf("node %s has no registered daemon id", ready.ID)
 	}
+	// The daemon syncs every workspace its owner can reach, so the runtime must be
+	// resolved inside the workspace the API requests are scoped to.
 	var runtimeID string
-	fixture.QueryRow(t, "SELECT id FROM agent_runtime WHERE daemon_id = $1", daemonID).Scan(&runtimeID)
+	fixture.QueryRow(t, "SELECT id FROM agent_runtime WHERE daemon_id = $1 AND workspace_id = $2", daemonID, env.workspaceID).Scan(&runtimeID)
 	if runtimeID == "" {
-		return fmt.Errorf("daemon %s registered no runtime", daemonID)
+		return fmt.Errorf("daemon %s registered no runtime in workspace %s", daemonID, env.workspaceID)
 	}
 
 	var agent struct {
@@ -387,7 +389,9 @@ func RoundTripFakeNode(ctx context.Context, t *testing.T) error {
 	if sent.TaskID == "" {
 		return fmt.Errorf("API send chat message returned no task id")
 	}
-	if err := api.awaitChatReply(ctx, session.ID, marker, 5*time.Minute); err != nil {
+	// The user's own message contains `marker`, so matching it would be a
+	// vacuous assertion. Only the fake CLI result proves the task executed.
+	if err := api.awaitChatReply(ctx, session.ID, "fake Claude completed", 5*time.Minute); err != nil {
 		return fmt.Errorf("poll completed messages: %w", err)
 	}
 
@@ -462,6 +466,17 @@ func RoundTripFakeNode(ctx context.Context, t *testing.T) error {
 	}
 	if err := assertIdentityPreserved(createdInfo, postCrashInfo); err != nil {
 		return fmt.Errorf("crash-boundary identity/volumes: %w", err)
+	}
+	// The stop barrier stays up until the reconciler records completion; deleting
+	// during that window is refused as a conflict by design.
+	if _, err := api.awaitNode(ctx, ready.ID, func(n roundTripNode) bool { return n.Status == "stopped" }, 3*time.Minute); err != nil {
+		return fmt.Errorf("await crash-boundary stopped: %w", err)
+	}
+
+	// Deletion refuses queued or deferred runs by design, so cancel any
+	// follow-up chat work the completed turn left behind before deleting.
+	if err := api.call(ctx, http.MethodDelete, "/api/chat/sessions/"+session.ID+"/queued-tasks", "", nil, nil); err != nil {
+		return fmt.Errorf("API clear queued chat tasks: %w", err)
 	}
 
 	// Delete the owned node and prove the node token/credentials were revoked and

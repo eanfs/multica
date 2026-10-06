@@ -48,14 +48,48 @@ async function createFleetNode(client: TestApiClient, name: string) {
   return node;
 }
 
-test.afterEach(async () => {
+/** Stop every still-running owned node so a later delete can be executed. */
+async function stopOwnedNodes(client: TestApiClient, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  for (const id of ids) {
+    await client.stopFleetNode(id).catch(() => {
+      /* already stopped, gone, or not stoppable from its current state */
+    });
+  }
+  const deadline = Date.now() + 90000;
+  while (Date.now() < deadline) {
+    const nodes = await client.listFleetNodes().catch(() => []);
+    const pending = ids.filter((id) =>
+      nodes.some((node) => node.id === id && node.status !== "stopped" && node.status !== "terminated"),
+    );
+    if (pending.length === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+}
+
+test.afterEach(async ({}, testInfo) => {
+  // Deleting a running node stops it first, which can take longer than the
+  // default hook budget; the wait below still fails closed on a bounded clock.
+  testInfo.setTimeout(180000);
   const client = api;
   api = null;
   if (!client) return;
-  for (const nodeId of createdNodeIds.splice(0)) {
+  const owned = createdNodeIds.splice(0);
+  // Deletion requires a stopped container, so stop first and wait for the
+  // lifecycle to settle; a node may already be gone and each step is idempotent.
+  await stopOwnedNodes(client, owned);
+  for (const nodeId of owned) {
     await client.deleteFleetNode(nodeId).catch(() => {
       /* the test may already have deleted it; cleanup stays idempotent */
     });
+  }
+  // Deletion is asynchronous and the per-owner limit is small: wait until this
+  // test's nodes leave the owner list before the next test creates its own.
+  const deadline = Date.now() + 120000;
+  while (owned.length > 0 && Date.now() < deadline) {
+    const nodes = await client.listFleetNodes().catch(() => []);
+    if (owned.every((id) => !nodes.some((node) => node.id === id))) break;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
   }
   await client.cleanup();
 });
@@ -68,7 +102,11 @@ test("Docker node becomes ready and appears on the runtimes page", async ({ page
   await waitForNodeReady(client, node.id);
   await loginFleetBrowser(page, client);
   await page.goto("/" + client.getFleetWorkspaceSlug() + "/runtimes", { waitUntil: "domcontentloaded" });
-  await expect(page.getByText("E2E Docker node", { exact: true })).toBeVisible({ timeout: 60000 });
+  // Managed nodes live in the Cloud Runtime panel, not in the runtime list.
+  await page.getByRole("button", { name: "Cloud Runtime" }).click();
+  await expect(page.getByRole("article", { name: "E2E Docker node" })).toBeVisible({
+    timeout: NODE_READY_TIMEOUT_MS,
+  });
 });
 
 test("a browser chat on the node's Claude runtime shows the fake reply", async ({ page }) => {
@@ -97,9 +135,9 @@ test("a browser chat on the node's Claude runtime shows the fake reply", async (
 
   // The fake Claude fixture writes the final result into the assistant turn;
   // this asserts the rendered browser reply, not an API poll.
-  await expect(page.getByText(FAKE_CLAUDE_REPLY, { exact: false })).toBeVisible({
-    timeout: NODE_READY_TIMEOUT_MS,
-  });
+  await expect(
+    page.getByTestId("virtuoso-item-list").getByText(FAKE_CLAUDE_REPLY, { exact: false }),
+  ).toBeVisible({ timeout: NODE_READY_TIMEOUT_MS });
 });
 
 test("another owner cannot address the node", async () => {
@@ -107,6 +145,7 @@ test("another owner cannot address the node", async () => {
   const client = await createTestApi();
   api = client;
   const node = await createFleetNode(client, "E2E Owned node");
+  await waitForNodeReady(client, node.id);
 
   const other = new TestApiClient();
   const suffix = Date.now().toString(36);
@@ -190,6 +229,8 @@ test("deleting a node requires confirmation and removes its owned volumes", asyn
   api = client;
   const node = await createFleetNode(client, "E2E Delete node");
   await waitForNodeReady(client, node.id);
+  // Deletion accepts only a stopped container, so stop it before the UI flow.
+  await stopOwnedNodes(client, [node.id]);
 
   const deleteKeys: string[] = [];
   await page.route("**/api/cloud-runtime/nodes", async (route) => {
