@@ -315,6 +315,8 @@ destroy 要求有效 fence generation/key、再次受控 Delete、原 ref→abse
 
 ## 15. 后续步骤
 
+**2026-10-06 范围修订（用户确认）：** 本地 Docker Cloud Runtime 成为唯一 Docker 控制面，Fleet 节点运行 Aurora sandbox 运行时（MCP broker / egress / artifact staging），`server/internal/aurorafleet` + `cmd/aurora-fleet` 退役，`apps/aurora` 直接消费 cloud runtime 的能力与执行状态。§13.6 中「Aurora 已有 managed sandbox/auth/fleet 包不替代此本地 Claude-only Fleet」的边界由 [Aurora ↔ 本地 Docker Cloud Runtime 对接实现计划](<../plans/2026-10-06-aurora-cloud-runtime-integration.md>) 取代；该计划 Task 1（Fleet Aurora 执行 profile，`Config.Aurora` / `Bootstrap.EnrollmentToken` / profile 选择的 installer / managed `fleet-node run`）已提交 `cd759da6e`，其余 Task 2–9 按该计划顺序实施。Aurora 目前尚未跑在 Fleet 上。
+
 本文描述已授权实施的目标能力，不是已实现功能。保持现有 15 项实施计划，先实现 fake Provider、Store、配置分离和屏障，再接 Docker 镜像与共享界面。SQL 查询变更须重新生成 sqlc。
 
 实现时同步更新开发环境与仓库约束说明，遵守数据保护和包边界；本次准备不修改这些工具，不启动 Docker、不读取真实私密配置、不执行 Claude；后续开发授权不等于环境建立、Docker 或模型账户执行授权。
