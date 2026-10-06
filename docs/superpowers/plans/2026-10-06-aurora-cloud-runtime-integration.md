@@ -15,6 +15,34 @@
 - 最终验收记录：[2026-09-28 Aurora Sandbox Final Verification and Acceptance Record](2026-09-28-aurora-sandbox-acceptance-record.md)（`mse_/mdt_`、加固参数、镜像 digest、gated smoke 的既有事实来源）。
 - 领域设计：[Aurora 内容创作应用设计](../specs/2026-09-11-aurora-content-creation-app-design.md) §4 执行层、§10 安全。
 
+## P0：优先修复 `aurora_runtime_unavailable`（2026-10-06 用户指定）
+
+**现象**：任何 `POST /api/aurora/generations` 返回 `503 {"code":"aurora_runtime_unavailable","error":"aurora runtime unavailable"}`。
+
+**两条返回路径**（均在 `server/internal/handler/aurora.go`）：
+
+1. `ensureWorkspaceSandbox` 在 `h.SandboxManager == nil` 时直接返回（`aurora.go:445-447`）。这是本地/自托管默认值：`newWorkspaceSandboxManager`（`server/cmd/server/main.go:999-1016`）只有在 `AURORA_FLEET_URL`、`AURORA_FLEET_CONTROL_TOKEN_FILE`、`AURORA_SANDBOX_IMAGE` 三者同时存在时才构造 manager。本 checkout 的 `.env.worktree` 未设置任何 `AURORA_*`，因此 `SandboxManager` 为 nil。
+2. `SandboxManager.Ensure` 失败（`aurora.go:448-450`），例如 `aurorafleet` 不可达、节点 arm 或 profile 失败。
+
+**根因**：Aurora 的沙箱控制面只认外部 `aurorafleet`（`AURORA_FLEET_URL` + `PUT /internal/v1/workspace-nodes/{id}`），而本仓库真正维护的 Docker 控制面是 `server/internal/fleet`。两者从未对接，所以"本机有 Docker、仓库有 Fleet 代码"仍然得到 503。这不是配置遗漏，是缺失的对接。
+
+**修复定义：P0 = Task 3 + Task 4**
+
+- Task 3：Fleet 新增 `PUT|GET|DELETE /internal/v1/workspace-nodes/{nodeID}`，按 owner/namespace 受控创建/查询/删除节点，并把一次性 `mse_` 注册密钥交给协调器。
+- Task 4：Aurora 新增 `FleetProvisioner`，生产实现经 `cloudruntime.Client` 调用 Task 3 路由；`main.go` 在 `MULTICA_LOCAL_FLEET_URL` + `MULTICA_LOCAL_FLEET_SECRET_FILE` + `AURORA_SANDBOX_IMAGE` 齐备时启用，缺一保持今日 fail-closed 语义。
+
+**验收标准（可判定，且不掩盖 503）**
+
+1. 未配置任何运行时时**仍然返回 503**，不排队、不预留积分——这是既有契约（`server/internal/handler/aurora_test.go:2717`、`2769` 已有断言），不得改成静默成功或占位 runtime。
+2. 配置本地 Fleet 后，`POST /api/aurora/generations` 返回 **201**；`aurora_sandbox_node.state='starting'` 且 `backend_node_id` 写为 Fleet node UUID；响应中不再出现 `aurora_runtime_unavailable`。
+3. `Ensure` 失败（Fleet 不可达、被拒绝、密钥交接缺失）仍返回 503，且节点被 `FailAuroraSandboxNode` 标记，不留下 live enrollment、不残留 barrier。
+4. 新增 canonical 回归：`TestCreateAuroraGenerationOnLocalFleet`（fake provisioner → 201）与 `TestCreateAuroraGenerationFleetFailureIs503`（fake 失败 → 503 + failed 行）；既有 nil-manager 503 断言保持不变。
+5. P0 可独立验收：节点创建/查询/删除 + 注册密钥交接 + 协调器消费，默认测试不需要 Docker（`make env-exec` 提供 `DATABASE_URL`）。
+
+**边界（必须诚实标注）**：P0 只让运行时可获得、503 消失。节点真正变为 `ready` 并执行 skill 仍依赖 Task 2（镜像同时满足两份契约）与 Task 6（MCP broker 注入）；P0 交付时**不得声称生成已经能跑完**。
+
+**执行顺序调整**：先 **Task 3 → Task 4（P0）**，再 Task 2 → Task 5 → Task 6 → Task 7 → Task 8 → Task 9。Task 3 不依赖 Task 2。
+
 ## Global Constraints
 
 - **已确认决策（2026-10-06，用户批准）**：`server/internal/fleet` 成为唯一 Docker 控制面；`server/internal/aurorafleet` + `server/cmd/aurora-fleet` 退役；fleet 托管节点运行 Aurora sandbox 运行时；Aurora 的 `SandboxManager/SandboxReaper` 驱动 fleet；`apps/aurora` 增加 Runtime/节点与执行状态视图（复用 `packages/views/runtimes` 的展示语义，不复制 `apps/web`/`apps/desktop` 整页）。
@@ -257,7 +285,7 @@ export function auroraRuntimeOptions(wsId: string): QueryOptions;
 
 ### Task 3: Fleet workspace-node provision API 与注册密钥交接
 
-**Dependencies:** Tasks 1–2。**Deliverable:** Fleet 能按 Aurora 的 `PUT|GET|DELETE /internal/v1/workspace-nodes/{nodeID}` 契约受控创建/查询/删除节点，并把一次性注册密钥交给协调器；数据库记录节点身份但不存密钥明文。
+**Dependencies:** Task 1（P0 优先级最高；Task 2 镜像只影响节点就绪与真实执行，不阻塞本任务）。**Deliverable:** Fleet 能按 Aurora 的 `PUT|GET|DELETE /internal/v1/workspace-nodes/{nodeID}` 契约受控创建/查询/删除节点，并把一次性注册密钥交给协调器；数据库记录节点身份但不存密钥明文。
 
 **Files:** Create `server/internal/fleet/store/aurora.go`、`aurora_test.go`、`server/internal/fleet/http_aurora.go`、`http_aurora_test.go`；Modify `server/pkg/db/queries/fleet.sql` + `make sqlc` 生成物、`server/migrations/583_fleet_nodes_aurora_dimensions.{up,down}.sql`、`584_fleet_nodes_workspace_index.{up,down}.sql`、`server/cmd/migrate/main.go`、`server/internal/fleet/{service.go,http.go,internal_dto.go,reconciler.go,scheduler.go,service_test.go,http_test.go,reconciler_test.go}`、`server/internal/cloudruntime/{client.go,fleet_internal.go,client_test.go}`。
 
@@ -398,7 +426,7 @@ export function auroraRuntimeOptions(wsId: string): QueryOptions;
 
 ## 执行交接
 
-按 Task 2 → 9 顺序执行 red→green→review；Task 1 已提交（`cd759da6e`），并在下表中登记已完成项。
+先做 P0（Task 3 → Task 4），再按 Task 2 → Task 5 → Task 6 → Task 7 → Task 8 → Task 9 执行 red→green→review；Task 1 已提交（`cd759da6e`），并在下表中登记已完成项。
 
 1. **Subagent-Driven（推荐）**：每 task 一个 fresh subagent + 两阶段审查。
 2. **Inline Execution**：当前会话按批实施，在 M1/M2/M3 门暂停审查。
@@ -409,6 +437,7 @@ export function auroraRuntimeOptions(wsId: string): QueryOptions;
 
 | 任务 | 状态 | 证据 |
 | --- | --- | --- |
+| **P0 修复 `aurora_runtime_unavailable`（Task 3 + Task 4）** | 未开始 | 当前 `.env.worktree` 无 `AURORA_*` → `SandboxManager` nil → 必然 503；先于其它任务实施 |
 | Task 1 Fleet Aurora 执行 profile | 已提交 | `cd759da6e`；`go test ./internal/fleet/model ./internal/fleet/docker ./cmd/fleet-node -count=1` 全绿 |
 | Task 2 镜像双契约 | 未开始 | 需 Docker/registry 授权 |
 | Task 3 provision API 与密钥交接 | 未开始 | 需 managed environment `DATABASE_URL` |
