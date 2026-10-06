@@ -8870,18 +8870,35 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// narrowed surface. Non-Aurora tasks leave auroraSandbox nil, so this keeps
 	// the default autonomous surface and a zero MaxTurns for them.
 	if auroraSandbox != nil {
+		// The reviewed allowlist is the whole point of the narrowed surface: an
+		// empty one would silently fall back to Claude's own defaults, so fail
+		// the task instead of launching it.
+		if len(auroraSandbox.allowed) == 0 {
+			return TaskResult{}, errors.New("aurora task has no reviewed tool allowlist")
+		}
 		execOpts.MaxTurns = auroraMaxTurns
 		execOpts.PermissionMode = auroraSandbox.permissionMode
 		execOpts.DisallowedTools = auroraSandbox.disallowed
+		execOpts.AllowedTools = auroraSandbox.allowed
 		// Aurora tasks never inherit agent-, task-, or plugin-supplied MCP
-		// configuration: generic MCP configuration is denied, and the reviewed
-		// broker config is injected by the managed sandbox path. An empty strict
-		// config keeps Claude from falling back to host-local MCP servers.
-		execOpts.McpConfig = json.RawMessage(`{"mcpServers":{}}`)
+		// configuration: the reviewed broker is written into the workdir and
+		// injected as the only MCP server, and --strict-mcp-config (added for
+		// any managed config) keeps host-local MCP servers out. Any failure to
+		// resolve that context fails the task through the normal refund path
+		// rather than launching a wider surface.
+		brokerContext, contextErr := d.writeAuroraBrokerContext(task, *env)
+		if contextErr != nil {
+			return TaskResult{}, contextErr
+		}
+		brokerConfig, configErr := auroraBrokerMcpConfig(brokerContext)
+		if configErr != nil {
+			return TaskResult{}, configErr
+		}
+		execOpts.McpConfig = brokerConfig
 		taskLog.Info("aurora sandbox policy applied",
 			"max_turns", execOpts.MaxTurns,
 			"permission_mode", execOpts.PermissionMode,
-			"allowed_tools", auroraSandbox.allowed,
+			"allowed_tools", execOpts.AllowedTools,
 			"disallowed_tools", execOpts.DisallowedTools,
 		)
 	}

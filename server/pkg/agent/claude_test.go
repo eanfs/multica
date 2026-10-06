@@ -349,6 +349,28 @@ func TestBuildClaudeArgsUsesStrictMCPForManagedConfig(t *testing.T) {
 	}
 }
 
+// A narrowed system agent is allowed exactly the reviewed tools, comma-joined
+// into a single --allowedTools value; the flag stays absent (and ordinary
+// tasks byte-identical) when no allowlist is set.
+func TestBuildClaudeArgsAllowsReviewedTools(t *testing.T) {
+	t.Parallel()
+
+	args := buildClaudeArgs(ExecOptions{
+		AllowedTools: []string{"aurora.seedream_generate", "aurora.write_text_artifact"},
+	}, slog.Default())
+
+	idx := slices.Index(args, "--allowedTools")
+	if idx < 0 || idx+1 >= len(args) {
+		t.Fatalf("expected --allowedTools in args: %v", args)
+	}
+	joined := args[idx+1]
+	for _, want := range []string{"aurora.seedream_generate", "aurora.write_text_artifact"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected %q in --allowedTools %q", want, joined)
+		}
+	}
+}
+
 // A narrowed surface turns off bypass and appends the host-touching tools to
 // the built-in deny list, comma-joined into a single --disallowedTools value.
 // TestBuildClaudeArgsInheritsMCPByDefault above locks the additive default:

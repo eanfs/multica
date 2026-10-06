@@ -1108,6 +1108,11 @@ func buildClaudeArgs(opts ExecOptions, logger *slog.Logger) []string {
 		// clarification belongs in an issue comment instead.
 		"--disallowedTools", strings.Join(claudeDisallowedTools(opts.DisallowedTools), ","),
 	}
+	// A narrowed system agent is allowed exactly the reviewed tools; the flag is
+	// omitted otherwise so ordinary tasks keep Claude's own allow behavior.
+	if len(opts.AllowedTools) > 0 {
+		args = append(args, "--allowedTools", strings.Join(opts.AllowedTools, ","))
+	}
 	if hasManagedMcpConfig(opts.McpConfig) {
 		// A saved agent-level config is authoritative, including an explicitly
 		// empty object. With no managed config, omit strict mode so Claude can

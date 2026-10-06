@@ -151,6 +151,13 @@ type ExecOptions struct {
 	// agent's own toolset. Honoured by the claude backend today; other backends
 	// add their provider's equivalent deny flag as they are onboarded.
 	DisallowedTools []string
+	// AllowedTools is the reviewed allowlist a narrowed system agent may call,
+	// passed through Claude Code's --allowedTools (comma-joined). Empty leaves
+	// the provider's own allow behavior unchanged, so ordinary user agents are
+	// byte-identical. A sandboxed system agent sets exactly the MCP tools its
+	// trusted skill policy requires; the daemon never widens it from a prompt
+	// or an agent-supplied payload. Honoured by the claude backend today.
+	AllowedTools []string
 }
 
 // runContext derives the execution context for an agent subprocess from the
