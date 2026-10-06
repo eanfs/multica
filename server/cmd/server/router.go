@@ -2062,6 +2062,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			r.Get("/api/aurora/generations", h.ListAuroraGenerations)
 			r.Get("/api/aurora/generations/{id}", h.GetAuroraGeneration)
 
+			// The workspace's managed execution node and runtime binding. A
+			// read-only projection: it never locks the node or calls the Fleet,
+			// and it exposes no enrollment secret, image digest or raw failure
+			// reason. Lifecycle actions stay on the runtime management surface.
+			r.Get("/api/aurora/runtime", h.GetAuroraRuntime)
+
 			// Aurora content library. Assets belong to a generation but are
 			// addressable on their own: the library screen lists the whole
 			// workspace's output, and the download redirects to a signed

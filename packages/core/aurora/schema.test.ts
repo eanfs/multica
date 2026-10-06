@@ -4,8 +4,10 @@ import {
   auroraAssetSchema,
   auroraBalanceSchema,
   auroraCheckoutResponseSchema,
+  auroraExecutionTargetSchema,
   auroraGenerationDetailSchema,
   auroraGenerationSchema,
+  auroraRuntimeNodeSchema,
   auroraSkillsSchema,
   auroraSubscriptionSchema,
   auroraTopupsSchema,
@@ -196,6 +198,42 @@ describe("auroraTopupsSchema", () => {
 
     expect(res.topups[0]?.id).toBe("t5");
     expect(res.topups[0]?.credits).toBe(5000);
+  });
+});
+
+describe("auroraExecutionTargetSchema", () => {
+  it("defaults a missing node, runtime and state to the unconfigured projection", () => {
+    // The runtime screen is reachable before any node exists, so an empty body
+    // must still describe a target rather than fail the parse.
+    const res = auroraExecutionTargetSchema.parse({});
+
+    expect(res.workspaceId).toBe("");
+    expect(res.node).toBeNull();
+    expect(res.runtimeId).toBeNull();
+    expect(res.state).toBe("unconfigured");
+  });
+
+  it("keeps an unknown state parseable for the parser to normalize", () => {
+    // The schema stays lenient (z.string), like every other server enum here, so
+    // a state from a newer server still parses; parseAuroraRuntime in ./api maps
+    // it to unconfigured. Rejecting it here would degrade the whole target.
+    expect(
+      auroraExecutionTargetSchema.parse({ state: "future-state" }).state,
+    ).toBe("future-state");
+  });
+
+  it("reads a node that omits its optional provider fields", () => {
+    const res = auroraRuntimeNodeSchema.parse({
+      id: "node-1",
+      status: "online",
+      ready: true,
+      createdAt: "2026-10-06T00:00:00Z",
+    });
+
+    expect(res.provider).toBe("");
+    expect(res.errorCode).toBeUndefined();
+    expect(res.operationId).toBeUndefined();
+    expect(res.createdAt).toBe("2026-10-06T00:00:00Z");
   });
 });
 

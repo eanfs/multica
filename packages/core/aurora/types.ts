@@ -82,6 +82,44 @@ export function isAuroraGenerationTerminal(status: string | undefined): boolean 
 }
 
 /**
+ * The high-level execution state of a workspace.
+ *
+ * The server derives it from the workspace's managed sandbox node
+ * (`aurora_sandbox_node`): no node is `unconfigured`, a starting node is
+ * `provisioning`, an online or draining node is `online`, and a node whose
+ * fleet ensure call failed is `failed`. A stopped node reads as
+ * `unconfigured` because the next generation re-provisions it rather than
+ * leaving it dead.
+ */
+export type AuroraRuntimeState =
+  | "unconfigured"
+  | "provisioning"
+  | "online"
+  | "failed";
+
+/**
+ * Maps a wire state onto the view's four-state vocabulary.
+ *
+ * The schema keeps the wire value a plain string so a state from a newer
+ * server still parses; an unrecognized one collapses to `unconfigured`, which
+ * is the documented safe default (it offers provisioning guidance rather than
+ * claiming a node is ready).
+ */
+export function normalizeAuroraRuntimeState(
+  state: string | undefined,
+): AuroraRuntimeState {
+  switch (state) {
+    case "provisioning":
+    case "online":
+    case "failed":
+    case "unconfigured":
+      return state;
+    default:
+      return "unconfigured";
+  }
+}
+
+/**
  * Body of `POST /api/aurora/billing/checkout`.
  *
  * The return URLs are the client's to build: it knows its own origin and the

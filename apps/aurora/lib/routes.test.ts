@@ -13,10 +13,11 @@ import {
 const workspace = (slug: string) => ({ slug }) as Workspace;
 
 describe("auroraRoutes", () => {
-  it("builds this app's three destinations under the workspace slug", () => {
+  it("builds this app's four destinations under the workspace slug", () => {
     const routes = auroraRoutes("acme");
     expect(routes.skills()).toBe("/acme/skills");
     expect(routes.works()).toBe("/acme/works");
+    expect(routes.runtime()).toBe("/acme/runtimes");
     expect(routes.billing()).toBe("/acme/billing");
   });
 

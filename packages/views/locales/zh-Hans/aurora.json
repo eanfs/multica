@@ -146,6 +146,21 @@
       "unavailable": "该实例未开通支付。"
     }
   },
+  "runtime": {
+    "title": "执行",
+    "status": {
+      "unconfigured": "未配置",
+      "provisioning": "准备中",
+      "online": "在线",
+      "failed": "失败"
+    },
+    "recovery": {
+      "unconfigured": "此工作区还没有执行节点。发起一次生成即可完成配置。",
+      "failed": "执行节点启动失败。发起一次生成可重试；如果持续失败，请联系管理员检查 Fleet 运行环境。"
+    },
+    "generations_title": "进行中的生成",
+    "generations_empty": "当前没有正在进行的生成。"
+  },
   "workspace": {
     "unavailable_title": "工作区不可用",
     "unavailable_description": "它可能已被删除，或你没有访问权限。",

@@ -1,7 +1,12 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import type { ParseResult } from "../api/schema";
-import { auroraGenerationDetailOptions, auroraKeys, auroraWalletKeys } from "./queries";
+import {
+  auroraGenerationDetailOptions,
+  auroraKeys,
+  auroraRuntimeOptions,
+  auroraWalletKeys,
+} from "./queries";
 import { AURORA_GENERATION_POLL_MS } from "./types";
 
 /**
@@ -60,10 +65,20 @@ describe("auroraGenerationDetailOptions", () => {
   });
 });
 
+describe("auroraRuntimeOptions", () => {
+  it("keys the target by workspace and stays disabled without one", () => {
+    const options = auroraRuntimeOptions("ws-1");
+
+    expect(options.queryKey).toEqual(auroraKeys.runtime("ws-1"));
+    expect(auroraRuntimeOptions("").enabled).toBe(false);
+  });
+});
+
 describe("auroraKeys", () => {
   it("scopes the workspace's data by workspace id", () => {
     expect(auroraKeys.skills("ws-1")).toEqual(["aurora", "ws-1", "skills"]);
     expect(auroraKeys.assets("ws-1")).toEqual(["aurora", "ws-1", "assets"]);
+    expect(auroraKeys.runtime("ws-1")).toEqual(["aurora", "ws-1", "runtime"]);
     expect(auroraKeys.generation("ws-1", "gen-1")).toEqual([
       "aurora",
       "ws-1",

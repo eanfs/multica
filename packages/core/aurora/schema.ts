@@ -1,5 +1,8 @@
 import { z } from "zod";
-import type { AuroraSkillAttachmentRule } from "./types";
+import type {
+  AuroraRuntimeState,
+  AuroraSkillAttachmentRule,
+} from "./types";
 
 /**
  * Wire schemas for the Aurora API (`server/internal/handler/aurora.go`,
@@ -118,6 +121,48 @@ export type AuroraGenerationDetail = z.infer<
 export const auroraAssetsSchema = z.object({
   assets: z.array(auroraAssetSchema),
 });
+
+/**
+ * The workspace's managed execution node as `GET /api/aurora/runtime` reports
+ * it. `id` is the fleet node identity, `status` the node lifecycle state, and
+ * `ready` its readiness. `provider` and the optional `errorCode` /
+ * `operationId` are deliberately lenient: an older server may omit them, and a
+ * public error code is the only failure detail the endpoint ever returns — the
+ * raw failure reason stays server-side so no internal path or credential reaches
+ * the client.
+ */
+export const auroraRuntimeNodeSchema = z.object({
+  id: z.string().default(""),
+  status: z.string().default(""),
+  ready: z.boolean().default(false),
+  provider: z.string().default(""),
+  errorCode: z.string().optional(),
+  operationId: z.string().optional(),
+  createdAt: z.string().default(""),
+});
+export type AuroraRuntimeNode = z.infer<typeof auroraRuntimeNodeSchema>;
+
+/**
+ * The workspace's execution target.
+ *
+ * `state` stays a plain string so a newer server's state still parses;
+ * `parseAuroraRuntime` (./api) normalizes it into `AuroraRuntimeState`, which
+ * is why the exported `AuroraExecutionTarget` narrows the field after the fact.
+ */
+export const auroraExecutionTargetSchema = z.object({
+  workspaceId: z.string().default(""),
+  node: auroraRuntimeNodeSchema.nullable().default(null),
+  runtimeId: z.string().nullable().default(null),
+  state: z.string().default("unconfigured"),
+});
+
+type AuroraExecutionTargetWire = z.infer<typeof auroraExecutionTargetSchema>;
+
+/** The parsed target the runtime view renders. */
+export interface AuroraExecutionTarget
+  extends Omit<AuroraExecutionTargetWire, "state"> {
+  state: AuroraRuntimeState;
+}
 
 /** GET /api/aurora/billing/balance — the caller's wallet, in micro-credits. */
 export const auroraBalanceSchema = z.object({

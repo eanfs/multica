@@ -146,6 +146,21 @@
       "unavailable": "Les paiements ne sont pas disponibles sur cette instance."
     }
   },
+  "runtime": {
+    "title": "Exécution",
+    "status": {
+      "unconfigured": "Non configuré",
+      "provisioning": "Préparation",
+      "online": "En ligne",
+      "failed": "Échec"
+    },
+    "recovery": {
+      "unconfigured": "Cet espace de travail n'a pas de nœud d'exécution actif. Lancez une génération pour en provisionner un.",
+      "failed": "Le nœud d'exécution n'a pas pu démarrer. Lancez une génération pour réessayer ; si l'échec persiste, demandez à un administrateur de vérifier l'environnement Fleet."
+    },
+    "generations_title": "Générations en cours",
+    "generations_empty": "Aucune génération en cours."
+  },
   "workspace": {
     "unavailable_title": "Cet espace de travail n'est pas disponible",
     "unavailable_description": "Il a peut-être été supprimé, ou vous n'y avez pas accès.",
