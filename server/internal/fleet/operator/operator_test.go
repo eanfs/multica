@@ -16,6 +16,16 @@ import (
 	"github.com/multica-ai/multica/server/internal/fleet/store"
 )
 
+// TestMain supplies the HOME-free private invocation this package's
+// private-input tests require. The operator child never receives HOME (the
+// design forbids ambient credential discovery), so the package normalizes its
+// own environment rather than failing when a developer shell exports HOME.
+// Tests that need to prove the denial still set HOME explicitly with t.Setenv.
+func TestMain(m *testing.M) {
+	os.Unsetenv("HOME")
+	os.Exit(m.Run())
+}
+
 type fakeRepo struct {
 	fence           store.NamespaceFence
 	nodes           []model.Node
