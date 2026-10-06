@@ -238,16 +238,30 @@ func (r *SandboxReaper) stopNode(ctx context.Context, node db.AuroraSandboxNode,
 	return nil
 }
 
-// deleteFleetNode removes the node from the fleet. A node that never reached
-// the fleet, or one the fleet no longer knows, needs no removal.
+// deleteFleetNode removes the node from the fleet. It delegates to the shared
+// workspace-node delete so the reaper and the workspace-teardown handoff enqueue
+// exactly the same destroy intent.
 func (r *SandboxReaper) deleteFleetNode(ctx context.Context, node db.AuroraSandboxNode) error {
+	return deleteFleetWorkspaceNode(ctx, r.queries, r.fleet, node)
+}
+
+// deleteFleetWorkspaceNode enqueues one Fleet destroy intent for a managed
+// sandbox node. The Fleet reconciler then removes the node's container and its
+// data/secrets volumes and revokes the node credential, so deleting the
+// aurora_sandbox_node row without this call strands every one of them. It is the
+// shared body of the reaper's per-node teardown and the workspace-teardown
+// handoff, and it deliberately performs no local write of its own.
+//
+// A node that never reached the fleet, or one the fleet no longer knows, needs
+// no removal.
+func deleteFleetWorkspaceNode(ctx context.Context, queries *db.Queries, fleet FleetProvisioner, node db.AuroraSandboxNode) error {
 	if !node.BackendNodeID.Valid || node.BackendNodeID.String == "" {
 		return nil
 	}
 	// The Fleet route scopes every intent by owner, so the delete must carry the
 	// owner of the node's aurora_managed runtime row. A foreign owner is a
 	// silent 204 on the Fleet side, which would leak the container.
-	managed, err := r.queries.GetAuroraManagedRuntime(ctx, db.GetAuroraManagedRuntimeParams{
+	managed, err := queries.GetAuroraManagedRuntime(ctx, db.GetAuroraManagedRuntimeParams{
 		WorkspaceID: node.WorkspaceID,
 		Provider:    managedRuntimeProvider,
 	})
@@ -264,7 +278,7 @@ func (r *SandboxReaper) deleteFleetNode(ctx context.Context, node db.AuroraSandb
 	// controlled node label. Sending the fleet's backend name here would fail
 	// the route's UUID check and leave the node un-reapable.
 	nodeID := util.UUIDToString(node.ID)
-	if err := r.fleet.DeleteWorkspaceNode(ctx, util.UUIDToString(managed.OwnerID), nodeID); err != nil {
+	if err := fleet.DeleteWorkspaceNode(ctx, util.UUIDToString(managed.OwnerID), nodeID); err != nil {
 		if errors.Is(err, ErrNodeNotFound) {
 			return nil
 		}

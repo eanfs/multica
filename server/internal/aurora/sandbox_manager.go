@@ -16,11 +16,16 @@ import (
 )
 
 // WorkspaceSandboxManager provisions or confirms the workspace's managed
-// sandbox before a generation reserves credits. The handler depends on this
-// interface, so a test can watch and fail the fleet step independently of the
-// concrete client.
+// sandbox before a generation reserves credits, and hands that sandbox to the
+// Fleet lifecycle before workspace teardown deletes its row. The handler depends
+// on this interface, so a test can watch and fail the fleet step independently
+// of the concrete client.
 type WorkspaceSandboxManager interface {
 	Ensure(ctx context.Context, workspaceID, runtimeID pgtype.UUID) (db.AuroraSandboxNode, error)
+	// HandoffWorkspaceToFleet enqueues the Fleet destroy intent for the
+	// workspace's sandbox node so its container and volumes are removed. It must
+	// run before the aurora_sandbox_node rows are deleted (see DeleteWorkspace).
+	HandoffWorkspaceToFleet(ctx context.Context, workspaceID pgtype.UUID) error
 }
 
 // SandboxManager is the production WorkspaceSandboxManager. It owns the
@@ -111,6 +116,29 @@ func (m *SandboxManager) Ensure(ctx context.Context, workspaceID, runtimeID pgty
 		return db.AuroraSandboxNode{}, fmt.Errorf("record sandbox backend node: %w", err)
 	}
 	return scrubEnrollment(updated), nil
+}
+
+// HandoffWorkspaceToFleet enqueues the Fleet destroy intent for the workspace's
+// managed sandbox node. Workspace teardown calls it before deleting the
+// workspace's aurora_sandbox_node rows: the row is the reaper's only index into
+// the node, so a row deleted first strands the node's container plus its
+// data/secrets volumes with no later path that can see them.
+//
+// The intent is exactly the one the reaper records through the shared
+// deleteFleetWorkspaceNode seam, so the Fleet reconciler removes the container
+// and volumes and revokes the node credential. A workspace that never
+// provisioned a sandbox, or whose node never reached the Fleet, is a no-op; a
+// node that did reach the Fleet must be handed off, so a Fleet failure is
+// returned to the caller rather than swallowed.
+func (m *SandboxManager) HandoffWorkspaceToFleet(ctx context.Context, workspaceID pgtype.UUID) error {
+	node, err := m.queries.GetAuroraSandboxNodeByWorkspace(ctx, workspaceID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("load sandbox node for Fleet handoff: %w", err)
+	}
+	return deleteFleetWorkspaceNode(ctx, m.queries, m.fleet, node)
 }
 
 // arm decides whether the existing node already satisfies the request and, when

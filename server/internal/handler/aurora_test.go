@@ -2638,10 +2638,12 @@ func TestNewHandlerLeavesPaymentsNilWithoutStripeSecrets(t *testing.T) {
 // the ensure, and offers an onEnsure hook so an ordering assertion runs at the
 // exact moment the ensure happens.
 type fakeSandboxManager struct {
-	mu       sync.Mutex
-	calls    int
-	err      error
-	onEnsure func()
+	mu         sync.Mutex
+	calls      int
+	err        error
+	onEnsure   func()
+	handoffs   []string
+	handoffErr error
 }
 
 func (f *fakeSandboxManager) Ensure(_ context.Context, workspaceID, runtimeID pgtype.UUID) (db.AuroraSandboxNode, error) {
@@ -2657,6 +2659,21 @@ func (f *fakeSandboxManager) Ensure(_ context.Context, workspaceID, runtimeID pg
 		return db.AuroraSandboxNode{}, err
 	}
 	return db.AuroraSandboxNode{WorkspaceID: workspaceID, RuntimeID: runtimeID, State: "starting"}, nil
+}
+
+// HandoffWorkspaceToFleet records the workspace teardown handoff so a test can
+// assert the teardown reached the Fleet seam before deleting the node row.
+func (f *fakeSandboxManager) HandoffWorkspaceToFleet(_ context.Context, workspaceID pgtype.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.handoffs = append(f.handoffs, uuidToString(workspaceID))
+	return f.handoffErr
+}
+
+func (f *fakeSandboxManager) handoffCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.handoffs)
 }
 
 func (f *fakeSandboxManager) callCount() int {

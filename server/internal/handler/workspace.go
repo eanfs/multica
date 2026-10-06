@@ -1067,6 +1067,19 @@ func lockWorkspaceTaskOwners(ctx context.Context, qtx *db.Queries, workspaceID p
 	return nil
 }
 
+// handOffWorkspaceSandboxNodes hands the workspace's managed sandbox to the
+// Fleet lifecycle before the teardown deletes its aurora_sandbox_node row.
+// The row is the reaper's only handle on the node's Docker container and its
+// data/secrets volumes, so a nil manager (Fleet unconfigured) is the only safe
+// no-op: with a configured manager a handoff failure fails the teardown closed
+// rather than orphaning the resources.
+func (h *Handler) handOffWorkspaceSandboxNodes(ctx context.Context, workspaceID pgtype.UUID) error {
+	if h.SandboxManager == nil {
+		return nil
+	}
+	return h.SandboxManager.HandoffWorkspaceToFleet(ctx, workspaceID)
+}
+
 func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 	workspaceID := workspaceIDFromURL(r, "id")
 
@@ -1222,6 +1235,18 @@ func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 			// data statement and the separate whole-workspace task delete.
 			name: "delete tasks",
 			run:  func() error { return deleteWorkspaceTasks(ctx, qtx, requester.WorkspaceID) },
+		},
+		{
+			// The Fleet control plane owns the sandbox node's Docker container and
+			// its data/secrets volumes, and the aurora_sandbox_node row is the
+			// reaper's only index into them. Hand the node to the Fleet lifecycle
+			// before the leaf step deletes that row, or the deleted workspace
+			// strands a live container and both volumes with no later path that
+			// can see them. A node that never reached the Fleet, or a workspace
+			// with no sandbox, is a no-op; a configured manager fails the teardown
+			// closed rather than dropping the handoff.
+			name: "hand off sandbox nodes to fleet",
+			run:  func() error { return h.handOffWorkspaceSandboxNodes(ctx, requester.WorkspaceID) },
 		},
 		{
 			name: "delete leaf data",
