@@ -11,8 +11,8 @@ This skill runs in a managed sandbox with no shell and no Multica CLI. The only 
 
 ## Steps
 
-1. When a document is supplied, call the brokered MCP tool `mcp__aurora__aurora.read_document` (broker method `aurora.read_document`) with the staged document as `attachment_id` and read the returned text.
-2. Write the copy yourself from the run `prompt` and any document text, then call `mcp__aurora__aurora.write_text_artifact` (broker method `aurora.write_text_artifact`) with the copy as `content` and a `.md` or `.txt` `name`.
+1. When a document is supplied, call the brokered MCP tool `mcp__aurora__aurora_read_document` (broker method `aurora.read_document`) with the staged document as `attachment_id` and read the returned text.
+2. Write the copy yourself from the run `prompt` and any document text, then call `mcp__aurora__aurora_write_text_artifact` (broker method `aurora.write_text_artifact`) with the copy as `content` and a `.md` or `.txt` `name`.
 
 ## Required outputs
 

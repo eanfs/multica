@@ -171,7 +171,7 @@ func TestAuroraBrokerMcpConfigShape(t *testing.T) {
 		VolcASRKeyFile: auroraBrokerVolcASRKeyFile,
 	}
 
-	raw, err := auroraBrokerMcpConfig(bc)
+	raw, err := auroraBrokerMcpConfig(bc, nil)
 	if err != nil {
 		t.Fatalf("auroraBrokerMcpConfig: %v", err)
 	}
@@ -215,6 +215,77 @@ func TestAuroraBrokerMcpConfigShape(t *testing.T) {
 	}
 }
 
+// TestAuroraBrokerProxyEnv pins the one reviewed env addition: the Fleet node's
+// egress-proxy variables plus NODE_USE_ENV_PROXY. Without them Node's fetch
+// dials directly, the sandbox has no route out, and both the server-origin
+// provider-run call and the ARK provider call fail with "fetch failed" (the
+// live task-24 failure).
+func TestAuroraBrokerProxyEnv(t *testing.T) {
+	t.Parallel()
+
+	if got := auroraBrokerProxyEnvFrom(func(string) (string, bool) { return "", false }); got != nil {
+		t.Errorf("no proxy env = %v, want nil", got)
+	}
+	if got := auroraBrokerProxyEnvFrom(func(string) (string, bool) { return "   ", true }); got != nil {
+		t.Errorf("blank proxy env = %v, want nil", got)
+	}
+
+	lookup := func(name string) (string, bool) {
+		switch name {
+		case "HTTP_PROXY":
+			return "http://egress:3128", true
+		case "NO_PROXY":
+			return "egress,127.0.0.1,localhost", true
+		}
+		return "", false
+	}
+	want := map[string]string{
+		"HTTP_PROXY":         "http://egress:3128",
+		"NO_PROXY":           "egress,127.0.0.1,localhost",
+		"NODE_USE_ENV_PROXY": "1",
+	}
+	if got := auroraBrokerProxyEnvFrom(lookup); !reflect.DeepEqual(got, want) {
+		t.Errorf("proxy env = %v, want %v", got, want)
+	}
+
+	bc := auroraBrokerContext{
+		SkillID:        auroraBrokerTestSkill,
+		ServerOrigin:   "http://host.docker.internal:18102",
+		TaskID:         auroraBrokerTestTaskID,
+		GenerationID:   auroraBrokerTestGeneration,
+		WorkspaceID:    auroraBrokerTestWorkspaceID,
+		Prompt:         "a poster about clouds",
+		InputRoot:      auroraSandboxInputRoot,
+		OutputRoot:     auroraSandboxOutputRoot,
+		ContextPath:    "/data/workspaces/abc/workdir/.multica/aurora-broker/task-context.json",
+		TaskTokenPath:  "/data/workspaces/abc/workdir/.multica/aurora-broker/task-token",
+		ArkKeyFile:     auroraBrokerArkKeyFile,
+		OpenAIKeyFile:  auroraBrokerOpenAIKeyFile,
+		VolcASRKeyFile: auroraBrokerVolcASRKeyFile,
+	}
+	raw, err := auroraBrokerMcpConfig(bc, want)
+	if err != nil {
+		t.Fatalf("auroraBrokerMcpConfig: %v", err)
+	}
+	var cfg struct {
+		McpServers map[string]struct {
+			Env map[string]string `json:"env"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal broker config: %v", err)
+	}
+	env := cfg.McpServers[auroraBrokerServerName].Env
+	for name, value := range want {
+		if env[name] != value {
+			t.Errorf("broker env %s = %q, want %q", name, env[name], value)
+		}
+	}
+	if env["ARK_API_KEY_FILE"] != auroraBrokerArkKeyFile {
+		t.Errorf("proxy env merge dropped the fixed env: %v", env)
+	}
+}
+
 // TestAuroraBrokerMcpConfigFailsClosed proves a broker config is never built
 // from a partially-known context: every field the broker launch needs is
 // required, so the caller must fail the task instead of launching a wider
@@ -255,7 +326,7 @@ func TestAuroraBrokerMcpConfigFailsClosed(t *testing.T) {
 			t.Parallel()
 			bc := full
 			tc.mutate(&bc)
-			if _, err := auroraBrokerMcpConfig(bc); err == nil {
+			if _, err := auroraBrokerMcpConfig(bc, nil); err == nil {
 				t.Fatalf("auroraBrokerMcpConfig(%s) succeeded, want fail-closed error", tc.name)
 			}
 		})

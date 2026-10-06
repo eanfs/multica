@@ -10,7 +10,7 @@ This skill runs in a managed sandbox with no shell and no Multica CLI. The only 
 
 ## Steps
 
-1. Call the brokered MCP tool `mcp__aurora__aurora.seedance_generate` (broker method `aurora.seedance_generate`) with `prompt`.
+1. Call the brokered MCP tool `mcp__aurora__aurora_seedance_generate` (broker method `aurora.seedance_generate`) with `prompt`.
 
 ## Required outputs
 

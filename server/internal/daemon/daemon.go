@@ -8902,7 +8902,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		if contextErr != nil {
 			return TaskResult{}, contextErr
 		}
-		brokerConfig, configErr := auroraBrokerMcpConfig(brokerContext)
+		brokerConfig, configErr := auroraBrokerMcpConfig(brokerContext, auroraBrokerProxyEnv())
 		if configErr != nil {
 			return TaskResult{}, configErr
 		}

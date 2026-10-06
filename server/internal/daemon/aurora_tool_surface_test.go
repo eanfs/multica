@@ -237,8 +237,10 @@ func TestAuroraSurfaceDeniesGeneralPurposeTools(t *testing.T) {
 }
 
 // TestAuroraSurfaceUsesClaudeMCPIdentifiers pins the exact identifier list for
-// a multi-tool skill: Claude Code addresses MCP tools as mcp__<server>__<tool>,
-// so the broker's dotted methods travel under the "aurora" server segment.
+// a multi-tool skill: Claude Code addresses MCP tools as mcp__<server>__<tool>
+// with each segment sanitized (every character outside [A-Za-z0-9_-] becomes
+// "_"), so the broker's dotted methods travel as aurora_<verb> under the
+// "aurora" server segment.
 func TestAuroraSurfaceUsesClaudeMCPIdentifiers(t *testing.T) {
 	t.Parallel()
 
@@ -247,8 +249,8 @@ func TestAuroraSurfaceUsesClaudeMCPIdentifiers(t *testing.T) {
 		t.Fatalf("auroraToolSurface: %v", err)
 	}
 	want := []string{
-		"mcp__aurora__aurora.volc_asr_transcribe",
-		"mcp__aurora__aurora.render_video_captions",
+		"mcp__aurora__aurora_volc_asr_transcribe",
+		"mcp__aurora__aurora_render_video_captions",
 	}
 	if !slices.Equal(surface.allowed, want) {
 		t.Fatalf("surface allowed = %v, want %v", surface.allowed, want)
@@ -257,6 +259,45 @@ func TestAuroraSurfaceUsesClaudeMCPIdentifiers(t *testing.T) {
 		if !strings.HasPrefix(allowed, "mcp__aurora__") {
 			t.Fatalf("allowed tool %q is not a Claude MCP identifier", allowed)
 		}
+		// Claude Code replaces every character outside [A-Za-z0-9_-] with "_"
+		// when it qualifies an MCP tool, so a dotted method name in an allowlist
+		// can never match. Pin the sanitized shape here: a regression that
+		// reintroduces the dot reproduces the live permission-denied blocker.
+		if strings.Contains(allowed, ".") {
+			t.Fatalf("allowed tool %q carries an unsanitized dot; Claude Code registers it with \"_\"", allowed)
+		}
+	}
+}
+
+// TestAuroraBrokerMCPToolNameMirrorsClaudeSanitizer pins auroraBrokerMCPNameSegment
+// against the exact rule the pinned Claude Code 2.1.282 applies: every
+// character outside [A-Za-z0-9_-] is replaced with "_", for both the server
+// segment and the tool segment. The dotted broker methods are the only reason
+// the rule matters today, but the mapping is total.
+func TestAuroraBrokerMCPToolNameMirrorsClaudeSanitizer(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		method string
+		want   string
+	}{
+		{"aurora.seedream_generate", "mcp__aurora__aurora_seedream_generate"},
+		{"aurora.volc_asr_transcribe", "mcp__aurora__aurora_volc_asr_transcribe"},
+		{"already_safe-name", "mcp__aurora__already_safe-name"},
+		{"aurora.weird/name:x y", "mcp__aurora__aurora_weird_name_x_y"},
+	} {
+		if got := auroraBrokerMCPToolName(tc.method); got != tc.want {
+			t.Errorf("auroraBrokerMCPToolName(%q) = %q, want %q", tc.method, got, tc.want)
+		}
+	}
+	if got := auroraBrokerMCPNameSegment("aurora.seedream_generate"); got != "aurora_seedream_generate" {
+		t.Errorf("auroraBrokerMCPNameSegment dot rewrite = %q, want %q", got, "aurora_seedream_generate")
+	}
+	// The CLI also sanitizes the server segment; a segment with any other
+	// character must be rewritten here or the allowlist and the registered
+	// identifier would diverge for a renamed server.
+	if got := auroraBrokerMCPNameSegment("a.b/c"); got != "a_b_c" {
+		t.Errorf("auroraBrokerMCPNameSegment(\"a.b/c\") = %q, want %q", got, "a_b_c")
 	}
 }
 

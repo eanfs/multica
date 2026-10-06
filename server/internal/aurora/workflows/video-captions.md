@@ -11,8 +11,8 @@ This skill runs in a managed sandbox with no shell and no Multica CLI. The only 
 
 ## Steps
 
-1. Call the brokered MCP tool `mcp__aurora__aurora.volc_asr_transcribe` (broker method `aurora.volc_asr_transcribe`) with the staged video as `attachment_id`. It returns the transcript `text`.
-2. Build caption `cues` from that transcript text, then call `mcp__aurora__aurora.render_video_captions` (broker method `aurora.render_video_captions`) with the same video `attachment_id`, `cues`, and an optional `output_name`.
+1. Call the brokered MCP tool `mcp__aurora__aurora_volc_asr_transcribe` (broker method `aurora.volc_asr_transcribe`) with the staged video as `attachment_id`. It returns the transcript `text`.
+2. Build caption `cues` from that transcript text, then call `mcp__aurora__aurora_render_video_captions` (broker method `aurora.render_video_captions`) with the same video `attachment_id`, `cues`, and an optional `output_name`.
 
 ## Required outputs
 

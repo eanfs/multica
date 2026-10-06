@@ -2273,7 +2273,7 @@ func TestBuildAuroraPromptSelectsBrokerTool(t *testing.T) {
 	out := BuildPrompt(task, "claude")
 
 	for _, want := range []string{
-		"mcp__aurora__aurora.seedream_generate",
+		"mcp__aurora__aurora_seedream_generate",
 		"Skill: `poster`",
 		"橘猫窗台晒太阳",
 		"11111111-1111-4111-8111-111111111111",
@@ -2311,8 +2311,8 @@ func TestBuildAuroraPromptNamesEveryRequiredTool(t *testing.T) {
 
 	out := BuildPrompt(Task{Agent: &AgentData{SystemKey: "aurora:video-captions"}}, "claude")
 	for _, want := range []string{
-		"mcp__aurora__aurora.volc_asr_transcribe",
-		"mcp__aurora__aurora.render_video_captions",
+		"mcp__aurora__aurora_volc_asr_transcribe",
+		"mcp__aurora__aurora_render_video_captions",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("video-captions prompt missing %q\n---\n%s", want, out)

@@ -55,8 +55,9 @@ const (
 	auroraBrokerContextVersion = 1
 
 	// auroraBrokerServerName is the mcpServers key the daemon injects. Claude
-	// Code qualifies every MCP tool as mcp__<server>__<tool>, so the reviewed
-	// allowlist in ExecOptions.AllowedTools must use this exact server segment.
+	// Code qualifies every MCP tool as mcp__<server>__<tool> with each segment
+	// sanitized by auroraBrokerMCPNameSegment, so the reviewed allowlist in
+	// ExecOptions.AllowedTools must use that sanitized identifier.
 	auroraBrokerServerName = "aurora"
 )
 
@@ -115,14 +116,42 @@ type auroraBrokerAttachment struct {
 	SizeBytes    int64  `json:"size_bytes"`
 }
 
+// auroraBrokerMCPNameSegment reproduces Claude Code's MCP name sanitization
+// exactly as the pinned CLI (2.1.282, the version the sandbox image installs)
+// implements it: every character outside [A-Za-z0-9_-] is replaced with "_".
+// The CLI qualifies an MCP tool as mcp__<sanitized(server)>__<sanitized(tool)>
+// and matches --allowedTools against that sanitized identifier. The broker's
+// reviewed methods are namespaced "aurora.<verb>", so the dot in each method
+// becomes "_" in the identifier the model is told to call and in the allowlist;
+// the CLI still forwards the broker's original "aurora.<verb>" name downstream
+// (proven against a scratch server), so server.mjs keeps registering the dotted
+// names and policy.mjs keeps keying on them.
+func auroraBrokerMCPNameSegment(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
 // auroraBrokerMCPToolName maps a broker tool method to the identifier Claude
-// Code accepts in --allowedTools. The Claude CLI names MCP tools
-// mcp__<server>__<tool>: its tool-name validator is
-// ^mcp__[\w-]+(?:__(?:[\w.-]+|\*))?$ (Claude Code 2.1.282), the second
-// segment allows the broker's dotted method names, and the server segment is
-// the mcpServers key above.
+// Code accepts in --allowedTools. The CLI's tool-name validator is
+// ^mcp__[\w-]+(?:__(?:[\w.-]+|\*))?$ (Claude Code 2.1.282), but validation
+// is not qualification: the name actually registered and matched is the
+// sanitized mcp__<server>__<tool> form, so every method segment must pass
+// through auroraBrokerMCPNameSegment before it reaches a prompt or a
+// permission list.
 func auroraBrokerMCPToolName(method string) string {
-	return "mcp__" + auroraBrokerServerName + "__" + method
+	return "mcp__" + auroraBrokerMCPNameSegment(auroraBrokerServerName) + "__" + auroraBrokerMCPNameSegment(method)
 }
 
 // auroraBrokerInputRootPath is the root the daemon stages inputs in and names
@@ -177,10 +206,69 @@ func auroraBrokerImportPath(taskID string) string {
 	return "/api/agent/tasks/" + taskID + "/aurora-artifacts/import"
 }
 
+// auroraBrokerProxyEnvVars are the egress-proxy variables the Fleet node gives
+// the sandbox so every process reaches the server and the provider origins. The
+// broker must get them too: the sandbox has no direct route out, so Node's
+// fetch without the proxy fails with EAI_AGAIN and the broker never reaches the
+// server-origin importer/provider-run endpoints or the ARK provider. They are
+// the node's own reviewed egress wiring, not a new capability, and they carry
+// no credential.
+var auroraBrokerProxyEnvVars = []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"}
+
+// auroraBrokerProxyEnvFrom returns the broker's proxy environment. It is empty
+// when the node has no proxy configured (the broker then uses direct fetch),
+// and otherwise adds NODE_USE_ENV_PROXY=1: Node 22's global fetch ignores the
+// standard proxy variables until that flag is set, and the flag is what makes
+// the provider HTTPS path CONNECT through the egress sidecar. The server-origin
+// HTTP path is handled by the broker's own absolute-form fetch.
+func auroraBrokerProxyEnvFrom(lookup func(string) (string, bool)) map[string]string {
+	env := map[string]string{}
+	for _, name := range auroraBrokerProxyEnvVars {
+		if value, ok := lookup(name); ok && strings.TrimSpace(value) != "" {
+			env[name] = value
+		}
+	}
+	if len(env) == 0 {
+		return nil
+	}
+	env["NODE_USE_ENV_PROXY"] = "1"
+	return env
+}
+
+// auroraBrokerProxyEnv reads the proxy environment from the daemon's own
+// process environment, which is the Fleet node's container environment.
+func auroraBrokerProxyEnv() map[string]string {
+	return auroraBrokerProxyEnvFrom(os.LookupEnv)
+}
+
+// auroraBrokerEnv is the broker's exact environment: the compiled broker
+// contract plus the node's egress-proxy variables. It never copies the daemon
+// environment wholesale, so HOME, PATH, provider credentials, and every other
+// host variable stay outside the child's view.
+func auroraBrokerEnv(bc auroraBrokerContext, proxyEnv map[string]string) map[string]string {
+	env := map[string]string{
+		"AURORA_SERVER_ORIGIN":        bc.ServerOrigin,
+		"AURORA_TASK_CONTEXT_FILE":    bc.ContextPath,
+		"AURORA_INPUT_ROOT":           bc.InputRoot,
+		"AURORA_OUTPUT_ROOT":          bc.OutputRoot,
+		"AURORA_ARTIFACT_IMPORT_PATH": auroraBrokerImportPath(bc.TaskID),
+		"ARK_API_KEY_FILE":            bc.ArkKeyFile,
+		"OPENAI_API_KEY_FILE":         bc.OpenAIKeyFile,
+		"VOLC_ASR_API_KEY_FILE":       bc.VolcASRKeyFile,
+		"AURORA_TASK_TOKEN_FILE":      bc.TaskTokenPath,
+	}
+	for name, value := range proxyEnv {
+		env[name] = value
+	}
+	return env
+}
+
 // auroraBrokerMcpConfig builds the fixed Claude MCP config for the reviewed
 // broker. It fails closed on any missing input: a partially-resolved context
 // must fail the task, never launch with an unknown command, root, or secret.
-func auroraBrokerMcpConfig(bc auroraBrokerContext) (json.RawMessage, error) {
+// proxyEnv is the node's reviewed egress-proxy environment (may be nil); it is
+// merged into the otherwise-fixed env allowlist.
+func auroraBrokerMcpConfig(bc auroraBrokerContext, proxyEnv map[string]string) (json.RawMessage, error) {
 	required := []struct {
 		name  string
 		value string
@@ -208,18 +296,9 @@ func auroraBrokerMcpConfig(bc auroraBrokerContext) (json.RawMessage, error) {
 			Args:    []string{auroraBrokerEntrypoint},
 			// Exactly the compiled broker env allowlist. Adding any other key
 			// (HOME, PATH, provider credentials) would widen the child's view
-			// beyond the reviewed surface.
-			Env: map[string]string{
-				"AURORA_SERVER_ORIGIN":        bc.ServerOrigin,
-				"AURORA_TASK_CONTEXT_FILE":    bc.ContextPath,
-				"AURORA_INPUT_ROOT":           bc.InputRoot,
-				"AURORA_OUTPUT_ROOT":          bc.OutputRoot,
-				"AURORA_ARTIFACT_IMPORT_PATH": auroraBrokerImportPath(bc.TaskID),
-				"ARK_API_KEY_FILE":            bc.ArkKeyFile,
-				"OPENAI_API_KEY_FILE":         bc.OpenAIKeyFile,
-				"VOLC_ASR_API_KEY_FILE":       bc.VolcASRKeyFile,
-				"AURORA_TASK_TOKEN_FILE":      bc.TaskTokenPath,
-			},
+			// beyond the reviewed surface; the egress-proxy names are the one
+			// reviewed addition (see auroraBrokerProxyEnv).
+			Env: auroraBrokerEnv(bc, proxyEnv),
 		},
 	}}
 	raw, err := json.Marshal(cfg)

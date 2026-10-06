@@ -1,5 +1,6 @@
 // Bounded provider transport and process execution.
 
+import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { redactString, sanitizeError } from './policy.mjs';
 
@@ -25,6 +26,65 @@ export function createProviderFetch({ fetchImpl = globalThis.fetch, allowedOrigi
       throw new Error('provider redirect is not allowed');
     }
     return response;
+  };
+}
+
+// createHttpProxyFetch forwards plain HTTP through the egress sidecar in
+// absolute-form. Node's global fetch ignores HTTP_PROXY unless NODE_USE_ENV_PROXY
+// is set, and that agent tunnels every scheme through CONNECT -- but the sidecar
+// only authorizes the configured server origin as an absolute-form forward
+// request (CONNECT to it is refused because the origin scheme is http and the
+// CONNECT path is https/443 only). The broker's server-origin clients
+// (provider-run, artifact importer) use this fetch; provider HTTPS traffic keeps
+// using the global fetch, which CONNECT-tunnels correctly.
+//
+// A target on NO_PROXY, or any non-HTTP target, falls through to fetchImpl.
+export function createHttpProxyFetch({ proxyUrl, noProxy = '', fetchImpl = globalThis.fetch } = {}) {
+  if (typeof proxyUrl !== 'string' || proxyUrl.trim() === '') return fetchImpl;
+  const proxy = new URL(proxyUrl);
+  const bypass = String(noProxy)
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry !== '');
+  const isBypassed = (hostname) =>
+    bypass.some((entry) => entry === '*' || hostname === entry || hostname.endsWith('.' + entry));
+  return async function httpProxyFetch(url, init = {}) {
+    const raw = typeof url === 'string' ? url : url && url.url;
+    let target;
+    try {
+      target = new URL(raw);
+    } catch {
+      return fetchImpl(url, init);
+    }
+    if (target.protocol !== 'http:' || isBypassed(target.hostname)) return fetchImpl(url, init);
+    const headers = new Headers(init.headers || {});
+    // Host is derived from the target, never from the caller, so a caller
+    // cannot retarget the forward request.
+    headers.set('host', target.host);
+    const body = init.body === undefined || init.body === null ? undefined : init.body;
+    const method = init.method || 'GET';
+    return await new Promise((resolve, reject) => {
+      const request = http.request(
+        {
+          host: proxy.hostname,
+          port: proxy.port || 80,
+          method,
+          path: target.href,
+          headers: Object.fromEntries(headers.entries()),
+          signal: init.signal,
+        },
+        (response) => {
+          const chunks = [];
+          response.on('data', (chunk) => chunks.push(chunk));
+          response.on('end', () => {
+            resolve(new Response(Buffer.concat(chunks), { status: response.statusCode, headers: response.headers }));
+          });
+        },
+      );
+      request.on('error', (error) => reject(error));
+      if (body !== undefined) request.write(body);
+      request.end();
+    });
   };
 }
 

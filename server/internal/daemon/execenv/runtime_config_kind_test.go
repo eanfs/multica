@@ -143,7 +143,8 @@ func TestBuildMetaSkillContentSlimKindMatrix(t *testing.T) {
 	issueKinds := map[taskKind]bool{kindIssue: true}
 	checks := []sectionCheck{
 		{"# Multica Agent Runtime", allKinds},
-		{"## Background Task Safety", allKinds},
+		// Every paragraph names a `multica`/`gh` command; Aurora has neither.
+		{"## Background Task Safety", nonAuroraKinds},
 		{"## Agent Identity", allKinds},
 		{"## Available Commands", allKinds},
 		{"## Issue Body Formatting", allKinds},
@@ -412,6 +413,7 @@ func TestBuildMetaSkillContentAuroraUsesBrokerWorkflow(t *testing.T) {
 	for _, want := range []string{
 		"## Available Commands",
 		"no shell and no `multica` CLI",
+		"managed Aurora creation agent",
 		"This is a managed Aurora generation run.",
 		"The broker writes the artifact and its manifest",
 	} {
@@ -420,11 +422,20 @@ func TestBuildMetaSkillContentAuroraUsesBrokerWorkflow(t *testing.T) {
 		}
 	}
 
+	// The header and Background Task Safety used to name the Multica CLI
+	// unconditionally, contradicting the Aurora sections that say no such CLI
+	// exists. Ban every command name those two emitted, not just the
+	// quick-create guardrail.
 	for _, banned := range []string{
 		"Run exactly one `multica issue create --output json` invocation",
 		"quick-create assistant",
 		"## Important: Always Use the",
 		"multica issue comment add",
+		"Use the `multica` CLI to interact with the platform",
+		"multica issue wakeup create",
+		"multica daemon status",
+		"gh pr checks",
+		"## Background Task Safety",
 	} {
 		if strings.Contains(out, banned) {
 			t.Errorf("Aurora brief must not carry %q\n---\n%s", banned, out)

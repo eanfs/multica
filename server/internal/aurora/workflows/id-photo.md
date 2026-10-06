@@ -11,7 +11,7 @@ This skill runs in a managed sandbox with no shell and no Multica CLI. The only 
 
 ## Steps
 
-1. Call the brokered MCP tool `mcp__aurora__aurora.id_photo` (broker method `aurora.id_photo`) with the staged image as `attachment_id` and the run `prompt`.
+1. Call the brokered MCP tool `mcp__aurora__aurora_id_photo` (broker method `aurora.id_photo`) with the staged image as `attachment_id` and an optional `output_name`.
 
 ## Required outputs
 

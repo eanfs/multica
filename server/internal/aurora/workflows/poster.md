@@ -11,7 +11,7 @@ This skill runs in a managed sandbox with no shell and no Multica CLI. The only 
 
 ## Steps
 
-1. Call the brokered MCP tool `mcp__aurora__aurora.seedream_generate` (broker method `aurora.seedream_generate`) with `prompt` and any reference images in `attachment_ids`.
+1. Call the brokered MCP tool `mcp__aurora__aurora_seedream_generate` (broker method `aurora.seedream_generate`) with `prompt` and any reference images in `attachment_ids`.
 
 ## Required outputs
 

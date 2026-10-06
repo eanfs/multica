@@ -11,8 +11,8 @@ This skill runs in a managed sandbox with no shell and no Multica CLI. The only 
 
 ## Steps
 
-1. When `attachment_ids` is empty, call the brokered MCP tool `mcp__aurora__aurora.openai_image` (broker method `aurora.openai_image`) with `prompt`.
-2. When `attachment_ids` is not empty, call `mcp__aurora__aurora.openai_image` with `prompt` and `attachment_ids`.
+1. When `attachment_ids` is empty, call the brokered MCP tool `mcp__aurora__aurora_openai_image` (broker method `aurora.openai_image`) with `prompt`.
+2. When `attachment_ids` is not empty, call `mcp__aurora__aurora_openai_image` with `prompt` and `attachment_ids`.
 
 ## Required outputs
 

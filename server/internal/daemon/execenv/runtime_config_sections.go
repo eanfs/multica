@@ -40,8 +40,15 @@ import (
 // below.
 
 // writeHeader emits the brief's leading title and one-line elevator pitch.
-func writeHeader(b *strings.Builder) {
+// Aurora is the one kind with no Multica CLI at all (see writeWorkflowAurora),
+// so the generic "use the `multica` CLI" line would contradict its own workflow
+// and recruit a call its runtime cannot make. Aurora gets its own header.
+func writeHeader(b *strings.Builder, kind taskKind) {
 	b.WriteString("# Multica Agent Runtime\n\n")
+	if kind == kindAurora {
+		b.WriteString("You are a managed Aurora creation agent running one generation in the Multica platform. There is no shell and no `multica` CLI in this runtime; the brokered Aurora MCP tool named in the per-turn user message is your only way to act.\n\n")
+		return
+	}
 	b.WriteString("You are a coding agent in the Multica platform. Use the `multica` CLI to interact with the platform.\n\n")
 }
 
@@ -97,6 +104,11 @@ func writeHeader(b *strings.Builder) {
 // CI-watching, and the handoff paragraph is review-locked verbatim
 // (URL/logs/stop triple, general cleanup handle) — do not reword it without
 // a fresh review decision.
+//
+// Task-kind gating: every paragraph names a `multica`/`gh` command, and
+// Aurora is the one sandbox with no shell and no Multica CLI. The caller skips
+// this section for kindAurora; the Aurora workflow's own stop rule ("call the
+// brokered tool once, then stop") is the replacement.
 func writeBackgroundTaskSafetySlim(b *strings.Builder) {
 	b.WriteString("## Background Task Safety\n\n")
 	b.WriteString("Multica marks the task terminal the moment your top-level turn exits — any run-owned work still active is orphaned, its result lost, and the final comment you meant to post never sends. There is no background-completion wakeup, whatever a tool response promises; an issue wakeup (`multica issue wakeup create`) is different — the platform stores it and starts a new run later. Never background-and-yield: collect required results inside foreground tool calls that block to completion, run unobservable work synchronously, and never end a turn \"standing by\" for something to finish — that message becomes your final output.\n\n")
@@ -1075,10 +1087,11 @@ func writeOutput(b *strings.Builder, kind taskKind, ctx TaskContextForEnv) {
 //	Mentions              |    ✓    |   ✓    |     —     |      —       |  —
 //	Attachments           |    ✓    |   ✓    |     —     |      —       |  —
 //
-// Always-on rows — Header, Background Task Safety, Agent Identity,
-// Requesting User, Workspace Context, Connected Apps,
-// Workflow, Always Use CLI, Output — are shared by every kind and emitted
-// unconditionally (or gated by their own data preconditions).
+// Shared rows — Header, Agent Identity, Requesting User, Workspace Context,
+// Connected Apps, Workflow, Output — are emitted for every kind (or gated by
+// their own data preconditions). Background Task Safety and Always Use CLI are
+// additionally skipped for kindAurora, which has no shell and no `multica` CLI:
+// naming one would recruit a call its runtime cannot make.
 func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	var b strings.Builder
 	kind := classifyTask(ctx)
@@ -1088,8 +1101,12 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	// emitting them into this file broke prompt-cache prefix stability on
 	// every resume; they now travel in the per-turn user message
 	// (daemon.BuildPrompt) instead. See MUL-5377.
-	writeHeader(&b)
-	writeBackgroundTaskSafetySlim(&b)
+	writeHeader(&b, kind)
+	// Background Task Safety names `multica`/`gh` commands throughout; the
+	// Aurora sandbox has neither, so the section is skipped for kindAurora.
+	if kind != kindAurora {
+		writeBackgroundTaskSafetySlim(&b)
+	}
 	writeAgentIdentity(&b, ctx)
 	writeRequestingUser(&b, ctx)
 	writeWorkspaceContext(&b, ctx)

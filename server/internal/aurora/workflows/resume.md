@@ -11,8 +11,8 @@ This skill runs in a managed sandbox with no shell and no Multica CLI. The only 
 
 ## Steps
 
-1. When a document is supplied, call the brokered MCP tool `mcp__aurora__aurora.read_document` (broker method `aurora.read_document`) with the staged document as `attachment_id` and read the returned text.
-2. Build the resume `sections` object yourself (name, title, summary, contact, skills, experience, education), then call `mcp__aurora__aurora.render_resume` (broker method `aurora.render_resume`) with `sections` and an optional `output_name`.
+1. When a document is supplied, call the brokered MCP tool `mcp__aurora__aurora_read_document` (broker method `aurora.read_document`) with the staged document as `attachment_id` and read the returned text.
+2. Build the resume `sections` object yourself (name, title, summary, contact, skills, experience, education), then call `mcp__aurora__aurora_render_resume` (broker method `aurora.render_resume`) with `sections` and an optional `output_name`.
 
 ## Required outputs
 
