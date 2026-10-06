@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -16,6 +17,10 @@ type Service struct {
 	repo     *store.Store
 	cfg      model.Config
 	provider model.Provider
+	// auroraEnrollment is the process-local, one-time handoff from the Aurora
+	// provision route to the Reconciler. Secrets are keyed by node UUID, never
+	// persisted, and deleted on read; a Fleet restart drops them by design.
+	auroraEnrollment sync.Map
 }
 
 func NewService(repo *store.Store, cfg model.Config, provider model.Provider) *Service {
@@ -50,6 +55,59 @@ func (s *Service) Create(ctx context.Context, ownerID pgtype.UUID, req model.Cre
 		return model.Node{}, model.Operation{}, false, err
 	}
 	return s.repo.CreateIntentForProfile(ctx, ownerID, req, profile)
+}
+
+// ProvisionAuroraNode admits one Aurora workspace node and registers its
+// single-use enrollment secret in the process-local handoff table. An invalid
+// secret fails closed before any row is admitted; the secret itself is never
+// persisted and is deleted the moment the Reconciler takes it.
+func (s *Service) ProvisionAuroraNode(ctx context.Context, ownerID, nodeID pgtype.UUID, req model.AuroraNodeRequest) (model.Node, model.Operation, error) {
+	if s.repo == nil {
+		return model.Node{}, model.Operation{}, model.ErrUnavailable
+	}
+	if !model.ValidEnrollmentToken(req.EnrollmentToken) {
+		return model.Node{}, model.Operation{}, model.ErrInvalidRequest
+	}
+	node, op, replayed, err := s.repo.CreateAuroraIntent(ctx, ownerID, nodeID, req)
+	if err != nil {
+		return model.Node{}, model.Operation{}, err
+	}
+	// Only a newly admitted intent registers the secret. A replay's original
+	// secret is either still in the handoff or already consumed; re-registering
+	// would leave a second copy of a live secret in memory.
+	if !replayed {
+		s.auroraEnrollment.Store(util.UUIDToString(nodeID), req.EnrollmentToken)
+	}
+	return node, op, nil
+}
+
+// TakeAuroraEnrollment atomically consumes the one-time enrollment secret for
+// one node. Missing means the Reconciler must fail the bootstrap the normal way;
+// it never guesses success, mints a node token, or retries on a timer.
+func (s *Service) TakeAuroraEnrollment(nodeID pgtype.UUID) (string, bool) {
+	value, ok := s.auroraEnrollment.LoadAndDelete(util.UUIDToString(nodeID))
+	if !ok {
+		return "", false
+	}
+	token, ok := value.(string)
+	return token, ok
+}
+
+// GetAuroraNode returns one owner- and namespace-scoped Aurora node.
+func (s *Service) GetAuroraNode(ctx context.Context, ownerID, nodeID pgtype.UUID) (model.Node, error) {
+	if s.repo == nil {
+		return model.Node{}, model.ErrUnavailable
+	}
+	return s.repo.GetAuroraNode(ctx, ownerID, nodeID)
+}
+
+// DeleteAuroraNode records an approved destroy intent for the Reconciler; a
+// missing or already-terminating node is success so Aurora cleanup is idempotent.
+func (s *Service) DeleteAuroraNode(ctx context.Context, ownerID, nodeID pgtype.UUID) error {
+	if s.repo == nil {
+		return model.ErrUnavailable
+	}
+	return s.repo.DeleteAuroraIntent(ctx, ownerID, nodeID)
 }
 
 // Status returns the controller-persisted actual snapshot, not the desired state or a provider secret.

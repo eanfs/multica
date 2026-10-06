@@ -177,6 +177,9 @@ func run(ctx context.Context) error {
 	service := fleet.NewService(repo, cfg, provider)
 	worker := fleet.NewReconciler(repo, provider, cfg)
 	worker.SetReviewer(reviewer)
+	// The Aurora profile's one-time enrollment secret moves from the provision
+	// route to the reconciler in memory only, never through SQL or a DTO.
+	worker.SetAuroraEnrollment(service.TakeAuroraEnrollment)
 	handler := service.Handler(key)
 	server := &http.Server{Addr: addr, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 40 * time.Second, IdleTimeout: 30 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if ctx.Err() != nil {

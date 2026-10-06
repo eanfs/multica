@@ -334,6 +334,7 @@ func (s *Service) Handler(secret []byte) http.Handler {
 	router.Post("/api/v1/nodes/stop", accept(model.Stop))
 	router.Post("/api/v1/nodes/reboot", accept(model.Reboot))
 	router.Delete("/api/v1/nodes", accept(model.Delete))
+	s.registerAuroraRoutes(router)
 	router.Handle("/*", http.NotFoundHandler())
 	return router
 }

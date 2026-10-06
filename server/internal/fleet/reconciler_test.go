@@ -1244,3 +1244,45 @@ func TestRecoveryIdleMissingDisablesReadyWithoutReplacement(t *testing.T) {
 		t.Fatal("missing identity remained Ready or was replaced")
 	}
 }
+
+// TestRecoveryAuroraBootstrap pins the managed-sandbox bootstrap: the Aurora
+// profile consumes exactly one process-local enrollment secret, reads no
+// credential profile, mints no Fleet node token, and fails the normal way when
+// the secret is missing instead of guessing or retrying on a timer.
+func TestRecoveryAuroraBootstrap(t *testing.T) {
+	t.Run("takes-one-time-secret", func(t *testing.T) {
+		f, p, r, c := bootstrapFixture(t)
+		r.cfg.Aurora = &model.AuroraConfig{ServerURL: "http://aurora.invalid"}
+		token := "mse_" + strings.Repeat("a", 40)
+		takes := 0
+		r.SetAuroraEnrollment(func(id pgtype.UUID) (string, bool) {
+			takes++
+			return token, id == f.snap.Node.ID
+		})
+		p.ensureCheck = func(_ context.Context, n model.Node, b model.Bootstrap) {
+			if b.EnrollmentToken != token || b.NodeToken != "" || b.APIKey != "" || b.BaseURL != "" || b.Model != "" || b.DaemonID != n.DaemonID || b.ServerURL != "http://aurora.invalid" {
+				t.Fatal("wrong Aurora bootstrap")
+			}
+		}
+		_ = r.Tick(context.Background())
+		waitInitialization(t, r)
+		if takes != 1 || c.mints != 0 || !reflect.DeepEqual(p.actions, []string{"ensure"}) {
+			t.Fatalf("takes=%d mints=%d actions=%v", takes, c.mints, p.actions)
+		}
+		for _, event := range f.events {
+			if event == "profile" || event == "mint" {
+				t.Fatalf("Aurora bootstrap used the Claude profile path: %v", f.events)
+			}
+		}
+	})
+	t.Run("missing-secret-fails-closed", func(t *testing.T) {
+		f, p, r, c := bootstrapFixture(t)
+		r.cfg.Aurora = &model.AuroraConfig{ServerURL: "http://aurora.invalid"}
+		r.SetAuroraEnrollment(func(pgtype.UUID) (string, bool) { return "", false })
+		_ = r.Tick(context.Background())
+		waitInitialization(t, r)
+		if c.mints != 0 || len(p.actions) != 0 || !f.snap.Node.Revoked || !f.snap.Operation.NonRetryable {
+			t.Fatalf("missing secret did not fail closed: actions=%v revoked=%v nonretry=%v", p.actions, f.snap.Node.Revoked, f.snap.Operation.NonRetryable)
+		}
+	})
+}

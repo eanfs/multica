@@ -31,6 +31,8 @@ SELECT n.id,
  n.error_message,
  n.spec_config,
  n.observation,
+ n.workspace_id,
+ n.runtime_id,
  o.id,
  o.namespace,
  o.owner_id,
@@ -258,6 +260,14 @@ SELECT n.id, @namespace, @owner_id, @name, @spec, @image, @profile_ref, @spec_co
        'multica-fleet-' || n.id::text || '-data',
        'multica-fleet-' || n.id::text || '-secrets'
 FROM new_node n
+RETURNING *;
+
+-- name: InsertFleetAuroraNode :one
+-- Aurora owns the node and daemon UUIDs. Persist them verbatim with the
+-- workspace/runtime dimensions and the administrator's approved image, so the
+-- SSOT identity is never a generated default and no enrollment secret is written.
+INSERT INTO fleet_nodes (id, daemon_id, namespace, owner_id, workspace_id, runtime_id, name, spec, image, profile_ref, spec_config, data_volume, secrets_volume)
+VALUES (@node_id, @daemon_id, @namespace, @owner_id, @workspace_id, @runtime_id, @name, @spec, @image, '', @spec_config, @data_volume, @secrets_volume)
 RETURNING *;
 
 -- name: InsertFleetCreateOperation :one
