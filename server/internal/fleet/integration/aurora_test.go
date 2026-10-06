@@ -701,14 +701,31 @@ func testRealBrokerAllowedTools(ctx context.Context, t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("broker tools = %v, want %v (stderr: %s)", got, want, stderr.String())
 	}
-	// The daemon emits --allowedTools identifiers as mcp__aurora__<tool>. Prove
-	// they are exactly this broker's tool names under Claude's validator.
+	// The daemon emits --allowedTools identifiers as mcp__aurora__<tool>. Claude
+	// Code qualifies each segment with vn(e) = e with every character outside
+	// [A-Za-z0-9_-] replaced by "_", so a dotted broker method (aurora.<verb>)
+	// reaches the CLI as mcp__aurora__aurora_<verb>. Prove the sanitized form is
+	// exactly this broker's tool name under Claude's validator.
 	for _, tool := range want {
-		identifier := "mcp__aurora__" + tool
+		identifier := "mcp__aurora__" + sanitizeMCPNameSegment(tool)
 		if !claudeMCPToolName.MatchString(identifier) {
 			t.Fatalf("identifier %q is not a valid Claude MCP tool name", identifier)
 		}
 	}
+}
+
+// sanitizeMCPNameSegment mirrors Claude Code's MCP name qualification for one
+// segment. It is duplicated here rather than shared with the daemon package
+// because this package must not import daemon internals.
+func sanitizeMCPNameSegment(segment string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			return r
+		default:
+			return '_'
+		}
+	}, segment)
 }
 
 // --- helpers ----------------------------------------------------------------
