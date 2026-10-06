@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -48,7 +49,7 @@ func TestEgressSidecarPolicy(t *testing.T) {
 	n := auroraNode()
 	proxyName := New(fakeCalls{}, cfg).egressName(n)
 	workspace := New(fakeCalls{}, cfg).workspaceNetwork(n).Name
-	args, err := EgressProxyArgs(cfg, proxyName, workspace)
+	args, err := EgressProxyArgs(cfg, proxyName, workspace, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,12 +68,20 @@ func TestEgressSidecarPolicy(t *testing.T) {
 	}
 	// The Engine-level spec encodes the same policy: uplink only, no mounts and
 	// no provider credential.
-	spec, host, err := egressProxySpec(cfg, n, proxyName)
+	spec, host, err := egressProxySpec(cfg, n, proxyName, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if host.NetworkMode != container.NetworkMode(cfg.Aurora.UplinkNetwork) || !host.ReadonlyRootfs || len(host.Mounts) != 0 {
 		t.Fatalf("sidecar host = %+v", host)
+	}
+	// The sidecar dials the configured server origin, so on Linux it needs the
+	// same host-gateway mapping the node carries; the argv builder mirrors it.
+	if !reflect.DeepEqual(host.ExtraHosts, []string{"host.docker.internal:host-gateway"}) {
+		t.Fatalf("sidecar host gateway = %v, want the node's Linux mapping", host.ExtraHosts)
+	}
+	if !strings.Contains(joined, "--add-host host.docker.internal:host-gateway") {
+		t.Fatalf("sidecar argv missing host gateway: %v", args)
 	}
 	for _, entry := range spec.Env {
 		if strings.Contains(entry, "API_KEY") || strings.Contains(entry, "ENROLLMENT") {
@@ -168,7 +177,7 @@ func TestEgressSidecarCarriesConfiguredPins(t *testing.T) {
 	n := auroraNode()
 	proxyName := New(fakeCalls{}, cfg).egressName(n)
 	want := egressPinsEn + "=api.anthropic.com=160.79.104.10;ark.cn-beijing.volces.com=180.184.47.154"
-	spec, _, err := egressProxySpec(cfg, n, proxyName)
+	spec, _, err := egressProxySpec(cfg, n, proxyName, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +191,7 @@ func TestEgressSidecarCarriesConfiguredPins(t *testing.T) {
 		t.Fatalf("sidecar env = %v, want %q", spec.Env, want)
 	}
 	workspace := New(fakeCalls{}, cfg).workspaceNetwork(n).Name
-	args, err := EgressProxyArgs(cfg, proxyName, workspace)
+	args, err := EgressProxyArgs(cfg, proxyName, workspace, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,5 +225,96 @@ func TestEgressEnvMatchesOwnsPins(t *testing.T) {
 		if got := egressEnvMatches(tc.actual, owned); got != tc.want {
 			t.Fatalf("%s: egressEnvMatches = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestEgressSidecarHostGateway pins the Linux egress fix in the spec and the
+// argv builder: the sidecar carries the same host-gateway mapping the node
+// carries, and emits none when the flag is off, mirroring NodeHostConfig.
+func TestEgressSidecarHostGateway(t *testing.T) {
+	cfg := auroraConfig()
+	n := auroraNode()
+	proxyName := New(fakeCalls{}, cfg).egressName(n)
+	workspace := New(fakeCalls{}, cfg).workspaceNetwork(n).Name
+	want := []string{"host.docker.internal:host-gateway"}
+
+	_, host, err := egressProxySpec(cfg, n, proxyName, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(host.ExtraHosts, want) {
+		t.Fatalf("requested sidecar ExtraHosts = %v, want %v", host.ExtraHosts, want)
+	}
+	args, err := EgressProxyArgs(cfg, proxyName, workspace, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hostGatewayArgs(args); !reflect.DeepEqual(got, []string{"--add-host", want[0]}) {
+		t.Fatalf("sidecar argv host gateway = %v, want %v", got, want)
+	}
+
+	_, off, err := egressProxySpec(cfg, n, proxyName, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(off.ExtraHosts) != 0 {
+		t.Fatalf("unrequested sidecar gateway = %v", off.ExtraHosts)
+	}
+	offArgs, err := EgressProxyArgs(cfg, proxyName, workspace, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hostGatewayArgs(offArgs); len(got) != 0 {
+		t.Fatalf("argv emitted an unrequested gateway: %v", got)
+	}
+}
+
+// hostGatewayArgs returns the --add-host pairs in an argv, if any.
+func hostGatewayArgs(args []string) []string {
+	var out []string
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--add-host" {
+			out = append(out, args[i], args[i+1])
+		}
+	}
+	return out
+}
+
+// TestValidateEgressSidecarHostGateway pins the adoption authority exactly:
+// a sidecar carrying the node's host-gateway mapping is adopted, while one
+// missing it, carrying a different target, or carrying an extra mapping is
+// rejected.
+func TestValidateEgressSidecarHostGateway(t *testing.T) {
+	cfg := auroraConfig()
+	n := auroraNode()
+	proxyName := New(fakeCalls{}, cfg).egressName(n)
+	want, wantHost, err := egressProxySpec(cfg, n, proxyName, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := func() container.InspectResponse {
+		host := wantHost
+		return container.InspectResponse{
+			ContainerJSONBase: &container.ContainerJSONBase{ID: "egress-id", HostConfig: &host},
+			Config:            &container.Config{Image: want.Image, User: want.User, Labels: want.Labels, Env: append([]string(nil), want.Env...)},
+		}
+	}
+	if err := validateEgressSidecar(cfg, n, proxyName, base()); err != nil {
+		t.Fatalf("exact host gateway rejected: %v", err)
+	}
+	missing := base()
+	missing.HostConfig.ExtraHosts = nil
+	if err := validateEgressSidecar(cfg, n, proxyName, missing); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("sidecar missing host gateway accepted: %v", err)
+	}
+	wrong := base()
+	wrong.HostConfig.ExtraHosts = []string{"host.docker.internal:1.2.3.4"}
+	if err := validateEgressSidecar(cfg, n, proxyName, wrong); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("sidecar with a different mapping accepted: %v", err)
+	}
+	extra := base()
+	extra.HostConfig.ExtraHosts = []string{"host.docker.internal:host-gateway", "other:1.2.3.4"}
+	if err := validateEgressSidecar(cfg, n, proxyName, extra); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("sidecar with an extra mapping accepted: %v", err)
 	}
 }

@@ -34,7 +34,9 @@ const (
 // node's egress sidecar. It mirrors the retired aurorafleet policy exactly; the
 // Fleet builds the same specification through the Engine seam. workspaceNetwork
 // is the per-node network the sidecar is subsequently attached to.
-func EgressProxyArgs(cfg model.Config, proxyName, workspaceNetwork string) ([]string, error) {
+// linuxHostGateway mirrors NodeHostConfig: on Linux the sidecar needs the same
+// host.docker.internal mapping as the node to dial the configured server origin.
+func EgressProxyArgs(cfg model.Config, proxyName, workspaceNetwork string, linuxHostGateway bool) ([]string, error) {
 	a := cfg.Aurora
 	if a == nil || proxyName == "" || workspaceNetwork == "" {
 		return nil, model.ErrInvalidRequest
@@ -42,7 +44,7 @@ func EgressProxyArgs(cfg model.Config, proxyName, workspaceNetwork string) ([]st
 	if err := a.Validate(); err != nil {
 		return nil, err
 	}
-	return []string{
+	args := []string{
 		"run", "--detach",
 		"--pull", "never",
 		"--name", proxyName,
@@ -55,12 +57,17 @@ func EgressProxyArgs(cfg model.Config, proxyName, workspaceNetwork string) ([]st
 		"--cpus", "0.25",
 		"--tmpfs", model.AuroraTmpMount + ":" + egressTmpfs,
 		"--network", a.UplinkNetwork,
-		"-e", egressServerOriginEn + "=" + a.ServerURL,
-		"-e", egressAllowedHostsEn + "=" + strings.Join(a.EgressHosts, ","),
-		"-e", egressPinsEn + "=" + a.EgressPinsEnv(),
+	}
+	for _, host := range hostGatewayExtraHosts(linuxHostGateway) {
+		args = append(args, "--add-host", host)
+	}
+	return append(args,
+		"-e", egressServerOriginEn+"="+a.ServerURL,
+		"-e", egressAllowedHostsEn+"="+strings.Join(a.EgressHosts, ","),
+		"-e", egressPinsEn+"="+a.EgressPinsEnv(),
 		// The image is final so nothing can follow it as a command.
 		a.ProxyImage,
-	}, nil
+	), nil
 }
 
 // EgressNetworkConnectArgs returns the documented docker CLI argv that attaches
@@ -71,7 +78,9 @@ func EgressNetworkConnectArgs(proxyName, network string) []string {
 
 // egressProxySpec builds the Engine-level sidecar specification. It carries no
 // mounts and no credential: only the exact server origin and allowlist.
-func egressProxySpec(cfg model.Config, n model.Node, proxyName string) (*container.Config, container.HostConfig, error) {
+// linuxHostGateway mirrors NodeHostConfig so the sidecar resolves
+// host.docker.internal on Linux exactly as the node does.
+func egressProxySpec(cfg model.Config, n model.Node, proxyName string, linuxHostGateway bool) (*container.Config, container.HostConfig, error) {
 	a := cfg.Aurora
 	if a == nil || proxyName == "" {
 		return nil, container.HostConfig{}, model.ErrInvalidRequest
@@ -96,6 +105,7 @@ func egressProxySpec(cfg model.Config, n model.Node, proxyName string) (*contain
 			SecurityOpt:    []string{"no-new-privileges:true"},
 			RestartPolicy:  container.RestartPolicy{Name: container.RestartPolicyDisabled},
 			Resources:      container.Resources{NanoCPUs: 250000000, Memory: 256 << 20, PidsLimit: &pids},
+			ExtraHosts:     hostGatewayExtraHosts(linuxHostGateway),
 			Tmpfs:          map[string]string{model.AuroraTmpMount: egressTmpfs},
 		}, nil
 }
@@ -158,13 +168,13 @@ func egressEnvMatches(actual, want []string) bool {
 }
 
 // validateEgressSidecar checks an inspected sidecar against the immutable
-// policy: the proxy image, the fixed user, the uplink-only network and no
-// credential or enrollment mount.
+// policy: the proxy image, the fixed user, the uplink-only network, the exact
+// host-gateway mapping and no credential or enrollment mount.
 func validateEgressSidecar(cfg model.Config, n model.Node, proxyName string, i container.InspectResponse) error {
 	if i.ContainerJSONBase == nil || i.Config == nil || i.HostConfig == nil || cfg.Aurora == nil || i.ID == "" {
 		return model.ErrForbidden
 	}
-	want, wantHost, err := egressProxySpec(cfg, n, proxyName)
+	want, wantHost, err := egressProxySpec(cfg, n, proxyName, true)
 	if err != nil {
 		return model.ErrForbidden
 	}
@@ -178,7 +188,7 @@ func validateEgressSidecar(cfg model.Config, n model.Node, proxyName string, i c
 	if !egressEnvMatches(c.Env, want.Env) {
 		return model.ErrForbidden
 	}
-	if h.NetworkMode != wantHost.NetworkMode || !h.ReadonlyRootfs || h.Privileged || h.PidMode != "" || len(h.Binds) != 0 || len(h.Devices) != 0 || len(h.DeviceRequests) != 0 || len(h.VolumesFrom) != 0 || len(h.PortBindings) != 0 || h.PublishAllPorts || h.RestartPolicy.Name != container.RestartPolicyDisabled || len(h.CapAdd) != 0 || !reflect.DeepEqual(h.CapDrop, wantHost.CapDrop) || !reflect.DeepEqual(h.SecurityOpt, wantHost.SecurityOpt) || !reflect.DeepEqual(h.Tmpfs, wantHost.Tmpfs) || h.NanoCPUs != wantHost.NanoCPUs || h.Memory != wantHost.Memory || h.PidsLimit == nil || *h.PidsLimit != *wantHost.PidsLimit || len(i.Mounts) != 0 {
+	if h.NetworkMode != wantHost.NetworkMode || !h.ReadonlyRootfs || h.Privileged || h.PidMode != "" || len(h.Binds) != 0 || len(h.Devices) != 0 || len(h.DeviceRequests) != 0 || len(h.VolumesFrom) != 0 || len(h.PortBindings) != 0 || h.PublishAllPorts || h.RestartPolicy.Name != container.RestartPolicyDisabled || len(h.CapAdd) != 0 || !reflect.DeepEqual(h.CapDrop, wantHost.CapDrop) || !reflect.DeepEqual(h.SecurityOpt, wantHost.SecurityOpt) || !reflect.DeepEqual(h.ExtraHosts, wantHost.ExtraHosts) || !reflect.DeepEqual(h.Tmpfs, wantHost.Tmpfs) || h.NanoCPUs != wantHost.NanoCPUs || h.Memory != wantHost.Memory || h.PidsLimit == nil || *h.PidsLimit != *wantHost.PidsLimit || len(i.Mounts) != 0 {
 		return model.ErrForbidden
 	}
 	return nil

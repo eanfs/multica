@@ -247,7 +247,7 @@ func (p *Provider) nodeEnv(n model.Node) []string {
 // so the sandbox can resolve the alias at startup.
 func (p *Provider) ensureEgress(ctx context.Context, n model.Node, workspace Resource) error {
 	proxyName := p.egressName(n)
-	c, h, err := egressProxySpec(p.cfg, n, proxyName)
+	c, h, err := egressProxySpec(p.cfg, n, proxyName, true)
 	if err != nil {
 		return err
 	}
@@ -382,6 +382,18 @@ func (p *Provider) Apply(ctx context.Context, n model.Node, action model.Action)
 	return p.Inspect(ctx, n)
 }
 
+// hostGatewayExtraHosts is the one host-gateway mapping rule shared by every
+// Fleet container that must dial the host: the node and its egress sidecar both
+// need to resolve host.docker.internal, which on Linux Docker Engine only
+// resolves when the container carries the mapping. Docker Desktop resolves it
+// regardless, so the mapping is additive and never widens reachability.
+func hostGatewayExtraHosts(linuxHostGateway bool) []string {
+	if !linuxHostGateway {
+		return nil
+	}
+	return []string{"host.docker.internal:host-gateway"}
+}
+
 // NodeHostConfig is the single HostConfig builder for every Fleet node. The
 // Claude profile (aurora == nil) is unchanged. The Aurora profile adds the
 // inline seccomp profile, the read-only root filesystem, the fixed writable
@@ -392,9 +404,7 @@ func (p *Provider) Apply(ctx context.Context, n model.Node, action model.Action)
 // path never goes on the wire.
 func NodeHostConfig(spec model.Spec, linuxHostGateway bool, aurora *model.AuroraConfig, seccompJSON string) container.HostConfig {
 	h := container.HostConfig{Resources: container.Resources{NanoCPUs: int64(spec.CPUs) * 1e9, Memory: spec.MemoryBytes, PidsLimit: &spec.Pids}, CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges:true"}, RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled}}
-	if linuxHostGateway {
-		h.ExtraHosts = []string{"host.docker.internal:host-gateway"}
-	}
+	h.ExtraHosts = hostGatewayExtraHosts(linuxHostGateway)
 	if aurora != nil {
 		h.ReadonlyRootfs = aurora.ReadonlyRootfs
 		// An empty AppArmorProfile is the operator-acknowledged no-AppArmor
