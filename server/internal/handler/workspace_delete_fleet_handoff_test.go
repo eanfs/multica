@@ -8,25 +8,68 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/testutil"
 )
 
+// txBoundaryProbe records whether the handler's teardown transaction has
+// opened. The handoff must run before h.TxStarter.Begin, and a row probe on its
+// own cannot prove that: the delete inside the transaction is uncommitted, so an
+// independent connection sees the same count=1 both before the delete and after
+// it but before commit. The transaction boundary is the commit-visible signal
+// the ordering assertion needs.
+type txBoundaryProbe struct {
+	mu    sync.Mutex
+	begun bool
+}
+
+func (p *txBoundaryProbe) markBegun() {
+	p.mu.Lock()
+	p.begun = true
+	p.mu.Unlock()
+}
+
+func (p *txBoundaryProbe) hasBegun() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.begun
+}
+
+// probeTxStarter wraps the handler's TxStarter and flags the exact moment the
+// teardown transaction opens.
+type probeTxStarter struct {
+	inner txStarter
+	probe *txBoundaryProbe
+}
+
+func (s probeTxStarter) Begin(ctx context.Context) (pgx.Tx, error) {
+	s.probe.markBegun()
+	return s.inner.Begin(ctx)
+}
+
 // recordingFleetControl is the fake Fleet control plane for the workspace
 // teardown handoff. DeleteWorkspaceNode is the destroy intent the handler must
-// enqueue while the aurora_sandbox_node row is still present, and it samples the
-// row through an independent connection at the moment of the call so the test
-// can prove the handoff happened before the teardown removed the row.
+// enqueue for the workspace's sandbox node, and it samples two things at the
+// moment of the call: whether the node row is still visible through an
+// independent connection, and whether the teardown transaction had already
+// begun. The second is the ordering proof; the first records that the handoff
+// reached a committed, un-deleted row.
 type recordingFleetControl struct {
 	mu      sync.Mutex
 	deleted []string
 	owners  []string
 	err     error
 
+	// txProbe, when set, is sampled so the test can assert the handoff ran
+	// before h.TxStarter.Begin.
+	txProbe *txBoundaryProbe
+
 	// nodeStillPresent is set from the row probe; probeErr records a failed
 	// probe so the assertion can report it rather than silently pass.
 	nodeStillPresent bool
 	probeErr         error
+	txBegunAtHandoff bool
 }
 
 func (f *recordingFleetControl) EnsureWorkspaceNode(context.Context, string, aurora.FleetEnsureRequest) (aurora.FleetNode, error) {
@@ -41,6 +84,9 @@ func (f *recordingFleetControl) DeleteWorkspaceNode(_ context.Context, ownerID, 
 	}
 	f.deleted = append(f.deleted, nodeID)
 	f.owners = append(f.owners, ownerID)
+	if f.txProbe != nil {
+		f.txBegunAtHandoff = f.txProbe.hasBegun()
+	}
 	if testPool != nil {
 		var count int
 		f.probeErr = testPool.QueryRow(context.Background(),
@@ -50,10 +96,10 @@ func (f *recordingFleetControl) DeleteWorkspaceNode(_ context.Context, ownerID, 
 	return nil
 }
 
-func (f *recordingFleetControl) snapshot() (deleted, owners []string, present bool, probeErr error) {
+func (f *recordingFleetControl) snapshot() (deleted, owners []string, present, txBegun bool, probeErr error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]string(nil), f.deleted...), append([]string(nil), f.owners...), f.nodeStillPresent, f.probeErr
+	return append([]string(nil), f.deleted...), append([]string(nil), f.owners...), f.nodeStillPresent, f.txBegunAtHandoff, f.probeErr
 }
 
 // seedTeardownSandbox creates a throwaway workspace owned by the fixture user,
@@ -98,10 +144,18 @@ func deleteWorkspaceOverHTTP(t *testing.T, workspaceID string) *httptest.Respons
 
 // TestDeleteWorkspace_HandsSandboxNodesToFleet is the regression behind the
 // fleet_nodes workspaceDeleteSettle classification: the workspace teardown must
-// hand each of the workspace's live sandbox nodes to the Fleet lifecycle before
-// it deletes the aurora_sandbox_node rows. Deleting the row first would strand
-// the node's container and its data/secrets volumes because the reaper
-// enumerates that row and can never see the node again.
+// hand the workspace's live sandbox node to the Fleet lifecycle before it
+// deletes the aurora_sandbox_node row. Deleting the row first would strand the
+// node's container and its data/secrets volumes because the reaper enumerates
+// that row and can never see the node again.
+//
+// The handoff must also run before h.TxStarter.Begin: the Fleet delete is an
+// HTTP call, and holding the global rollup lock (4246) plus the workspace and
+// chat-session locks across it stalls every workspace's hourly rollup. The test
+// proves that ordering at the transaction boundary rather than by probing the
+// row, because the in-transaction delete is uncommitted and a reordered step
+// still reads count=1 from an independent connection. The row probe is kept as
+// a record that the handoff reached a committed, un-deleted row.
 //
 // The real SandboxManager is driven over the fake Fleet control, so the delete
 // is the production intent path (owner resolved from the workspace's managed
@@ -115,14 +169,16 @@ func TestDeleteWorkspace_HandsSandboxNodesToFleet(t *testing.T) {
 	ctx := context.Background()
 	workspaceID, nodeID, _ := seedTeardownSandbox(t)
 
-	fleet := &recordingFleetControl{}
+	probe := &txBoundaryProbe{}
+	withAuroraTxStarter(t, probeTxStarter{inner: testHandler.TxStarter, probe: probe})
+	fleet := &recordingFleetControl{txProbe: probe}
 	withSandboxManager(t, aurora.NewSandboxManager(testHandler.Queries, testPool, fleet, auroraEnrollmentImageDigest, nil))
 
 	if w := deleteWorkspaceOverHTTP(t, workspaceID); w.Code != http.StatusNoContent {
 		t.Fatalf("DeleteWorkspace = %d, want 204: %s", w.Code, w.Body.String())
 	}
 
-	deleted, owners, present, probeErr := fleet.snapshot()
+	deleted, owners, present, txBegun, probeErr := fleet.snapshot()
 	if probeErr != nil {
 		t.Fatalf("probe node at handoff time: %v", probeErr)
 	}
@@ -131,6 +187,9 @@ func TestDeleteWorkspace_HandsSandboxNodesToFleet(t *testing.T) {
 	}
 	if deleted[0] != nodeID {
 		t.Fatalf("fleet delete address = %q, want the server-issued node UUID %q", deleted[0], nodeID)
+	}
+	if txBegun {
+		t.Error("the Fleet handoff ran after h.TxStarter.Begin; it must run before the teardown transaction opens so no database lock is held across the Fleet HTTP call")
 	}
 	if !present {
 		t.Error("the fleet handoff ran after the aurora_sandbox_node row was gone; the reaper loses the node if the row is deleted first")

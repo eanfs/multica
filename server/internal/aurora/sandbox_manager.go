@@ -24,7 +24,9 @@ type WorkspaceSandboxManager interface {
 	Ensure(ctx context.Context, workspaceID, runtimeID pgtype.UUID) (db.AuroraSandboxNode, error)
 	// HandoffWorkspaceToFleet enqueues the Fleet destroy intent for the
 	// workspace's sandbox node so its container and volumes are removed. It must
-	// run before the aurora_sandbox_node rows are deleted (see DeleteWorkspace).
+	// run before the teardown transaction opens — the node row is read through
+	// the pool and no database lock may be held across the Fleet HTTP call (see
+	// DeleteWorkspace).
 	HandoffWorkspaceToFleet(ctx context.Context, workspaceID pgtype.UUID) error
 }
 
@@ -119,10 +121,11 @@ func (m *SandboxManager) Ensure(ctx context.Context, workspaceID, runtimeID pgty
 }
 
 // HandoffWorkspaceToFleet enqueues the Fleet destroy intent for the workspace's
-// managed sandbox node. Workspace teardown calls it before deleting the
-// workspace's aurora_sandbox_node rows: the row is the reaper's only index into
-// the node, so a row deleted first strands the node's container plus its
-// data/secrets volumes with no later path that can see them.
+// managed sandbox node. Workspace teardown calls it before its transaction
+// opens, so the node row is read through the pool while no database lock is
+// held: the row is the reaper's only index into the node, and a row deleted
+// first strands the node's container plus its data/secrets volumes with no later
+// path that can see them.
 //
 // The intent is exactly the one the reaper records through the shared
 // deleteFleetWorkspaceNode seam, so the Fleet reconciler removes the container
