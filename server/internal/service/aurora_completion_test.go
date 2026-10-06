@@ -102,7 +102,7 @@ func seedAuroraAsset(t *testing.T, pool *pgxpool.Pool, generationID pgtype.UUID,
 
 func TestAuroraCompletionChargesReserved(t *testing.T) {
 	svc, pool, workspaceID, userID, agentID := newAuroraCompletionService(t)
-	genID, taskID := seedAuroraTask(t, pool, workspaceID, userID, agentID, 620_000_000)
+	genID, taskID := seedAuroraTask(t, pool, workspaceID, userID, agentID, 62_000_000)
 	seedAuroraAsset(t, pool, genID, workspaceID)
 
 	svc.settleAuroraOnCompleted(context.Background(), db.AgentTaskQueue{ID: taskID})
@@ -111,8 +111,8 @@ func TestAuroraCompletionChargesReserved(t *testing.T) {
 	if gen.Status != "completed" {
 		t.Fatalf("status = %q, want completed", gen.Status)
 	}
-	if gen.CreditsCharged != 620_000_000 {
-		t.Fatalf("credits_charged = %d, want 620000000", gen.CreditsCharged)
+	if gen.CreditsCharged != 62_000_000 {
+		t.Fatalf("credits_charged = %d, want 62000000", gen.CreditsCharged)
 	}
 	// Completion charges what was already reserved; the wallet must not move.
 	bal, err := svc.Credit.Balance(context.Background(), gen.UserID)
@@ -138,8 +138,8 @@ func TestAuroraCompletionFailureRefunds(t *testing.T) {
 	if err := svc.Credit.Grant(ctx, user, ws, 1_000_000_000, aurora.LedgerKindAdjustment, "settle-failed-seed-"+userID); err != nil {
 		t.Fatalf("Grant: %v", err)
 	}
-	genID, taskID := seedAuroraTask(t, pool, workspaceID, userID, agentID, 620_000_000)
-	if err := svc.Credit.Reserve(ctx, user, ws, 620_000_000, util.UUIDToString(genID)); err != nil {
+	genID, taskID := seedAuroraTask(t, pool, workspaceID, userID, agentID, 62_000_000)
+	if err := svc.Credit.Reserve(ctx, user, ws, 62_000_000, util.UUIDToString(genID)); err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
 
@@ -187,8 +187,8 @@ func TestAuroraCompletionWithoutAssetsFails(t *testing.T) {
 	if err := svc.Credit.Grant(ctx, user, ws, 1_000_000_000, aurora.LedgerKindAdjustment, "settle-noasset-seed-"+userID); err != nil {
 		t.Fatalf("Grant: %v", err)
 	}
-	genID, taskID := seedAuroraTask(t, pool, workspaceID, userID, agentID, 620_000_000)
-	if err := svc.Credit.Reserve(ctx, user, ws, 620_000_000, util.UUIDToString(genID)); err != nil {
+	genID, taskID := seedAuroraTask(t, pool, workspaceID, userID, agentID, 62_000_000)
+	if err := svc.Credit.Reserve(ctx, user, ws, 62_000_000, util.UUIDToString(genID)); err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
 
