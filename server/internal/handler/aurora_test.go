@@ -3175,20 +3175,65 @@ func auroraClaimFixture(t *testing.T) (db.AgentTaskQueue, db.AgentRuntime, strin
 }
 
 // TestClaimAuroraTaskGenerationLookupSettlesOrRetries is the Important-4
-// regression: a permanently missing generation row is terminal for the claim so
-// the task settles through the normal failure path, while a real database error
-// on the same lookup stays retryable.
+// regression. The enqueue path inserts the quick-create task and kicks the
+// daemon BEFORE it writes aurora_generation.task_id, so a daemon woken inside
+// that window legitimately reads no row and must be redelivered. A miss that
+// outlives the link grace is permanent and settles through the normal failure
+// path, while a real database error on the same lookup stays retryable.
 func TestClaimAuroraTaskGenerationLookupSettlesOrRetries(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
 
-	t.Run("missing row settles terminal", func(t *testing.T) {
+	t.Run("unlinked generation requeues then succeeds", func(t *testing.T) {
 		task, runtime, generationID := auroraClaimFixture(t)
-		dbfx.Exec(t, `DELETE FROM aurora_generation WHERE id = $1`, generationID)
+		// The task is claimable before the handler has written task_id onto the
+		// generation row: mirror that window by clearing the back-link.
+		dbfx.Exec(t, `UPDATE aurora_generation SET task_id = NULL WHERE id = $1`, generationID)
 
 		req := newRequest(http.MethodPost, "/api/claim", nil)
 		_, _, _, _, _, failure := testHandler.buildClaimedTaskResponse(req, &task, runtime, uuidToString(task.RuntimeID), testWorkspaceID)
+		if failure == nil || failure.settled {
+			t.Fatalf("failure = %+v, want an unsettled retryable failure inside the link window", failure)
+		}
+		if failure.outcome != "error_aurora_generation_unlinked" || failure.status != http.StatusInternalServerError {
+			t.Fatalf("failure = %+v, want error_aurora_generation_unlinked/500", failure)
+		}
+		var status string
+		dbfx.QueryRow(t, `SELECT status FROM agent_task_queue WHERE id = $1`, task.ID).Scan(&status)
+		if status != "queued" {
+			t.Fatalf("task status = %q, want queued after the retryable requeue", status)
+		}
+
+		// The handler finishes the back-link; the redelivered claim now runs.
+		dbfx.Exec(t, `UPDATE aurora_generation SET task_id = $1 WHERE id = $2`, task.ID, generationID)
+		requeued, err := testHandler.Queries.GetAgentTask(context.Background(), task.ID)
+		if err != nil {
+			t.Fatalf("reload requeued task: %v", err)
+		}
+		resp, _, _, _, _, failure := testHandler.buildClaimedTaskResponse(req, &requeued, runtime, uuidToString(requeued.RuntimeID), testWorkspaceID)
+		if failure != nil {
+			t.Fatalf("second claim failure = %+v, want success once the generation is linked", failure)
+		}
+		if resp.GenerationID != generationID {
+			t.Fatalf("GenerationID = %q, want %q", resp.GenerationID, generationID)
+		}
+	})
+
+	t.Run("missing row settles terminal after the link grace", func(t *testing.T) {
+		task, runtime, generationID := auroraClaimFixture(t)
+		dbfx.Exec(t, `DELETE FROM aurora_generation WHERE id = $1`, generationID)
+		// Age the task past the grace: the enqueue writer has either committed
+		// the back-link or failed, so no-rows can never resolve.
+		dbfx.Exec(t, `UPDATE agent_task_queue SET created_at = now() - make_interval(secs => $2) WHERE id = $1`,
+			task.ID, (auroraGenerationLinkGrace + time.Minute).Seconds())
+		aged, err := testHandler.Queries.GetAgentTask(context.Background(), task.ID)
+		if err != nil {
+			t.Fatalf("reload aged task: %v", err)
+		}
+
+		req := newRequest(http.MethodPost, "/api/claim", nil)
+		_, _, _, _, _, failure := testHandler.buildClaimedTaskResponse(req, &aged, runtime, uuidToString(aged.RuntimeID), testWorkspaceID)
 		if failure == nil || !failure.settled {
 			t.Fatalf("failure = %+v, want a settled terminal failure", failure)
 		}
