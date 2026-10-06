@@ -26,7 +26,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH SOURCE_DATE_EPOCH=$SOURCE_DATE_E
       -ldflags="-s -w -buildid=" \
       -o /out/multica ./cmd/multica
 # Focused Go tests for the managed secret boundary that this image enforces.
-RUN go test ./internal/aurorafleet ./internal/daemon \
+RUN go test ./internal/daemon \
       -run 'TestManagedSecret|TestProviderSecretMount' -count=1
 
 # ---------------------------------------------------------------------------

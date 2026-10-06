@@ -1,8 +1,7 @@
 # Aurora sandbox smoke fixtures
 
 Minimal, redistributable inputs for the containerized fake end-to-end smoke
-(server/internal/aurorafleet/docker_integration_test.go,
-TestDockerSandboxFakeAuroraPipelines). Every fixture is deterministic and
+(deploy/aurora-sandbox/docker-smoke.sh). Every fixture is deterministic and
 contains no person, voice identity, customer data, or third-party/proprietary
 content.
 

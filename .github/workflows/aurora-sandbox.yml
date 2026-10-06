@@ -21,9 +21,7 @@ on:
       - "scripts/verify-aurora-sandbox-locks.mjs"
       - "scripts/verify-aurora-sandbox-locks.test.mjs"
       - "server/cmd/aurora-egress-proxy/**"
-      - "server/cmd/aurora-fleet/**"
       - "server/cmd/aurora-sandbox-probe/**"
-      - "server/internal/aurorafleet/**"
       - "server/internal/daemon/**"
       - "server/internal/daemonws/**"
       - "server/pkg/agent/**"
@@ -40,9 +38,7 @@ on:
       - "scripts/verify-aurora-sandbox-locks.mjs"
       - "scripts/verify-aurora-sandbox-locks.test.mjs"
       - "server/cmd/aurora-egress-proxy/**"
-      - "server/cmd/aurora-fleet/**"
       - "server/cmd/aurora-sandbox-probe/**"
-      - "server/internal/aurorafleet/**"
       - "server/internal/daemon/**"
       - "server/internal/daemonws/**"
       - "server/pkg/agent/**"
@@ -141,7 +137,7 @@ jobs:
 
       - name: Run focused Go secret-boundary tests
         working-directory: server
-        run: go test ./internal/daemon ./internal/aurorafleet -run 'TestManagedSecret|TestProviderSecretMount' -count=1
+        run: go test ./internal/daemon -run 'TestManagedSecret|TestProviderSecretMount' -count=1
 
       - name: Test the managed-agent resolution verifier
         run: bash scripts/verify-aurora-sandbox-managed-agent.test.sh

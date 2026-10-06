@@ -343,21 +343,17 @@ export AURORA_SECCOMP_PROFILE="$seccomp_profile"
 export AURORA_APPARMOR_PROFILE="multica-aurora-sandbox"
 
 # ---------------------------------------------------------------------------
-# Run the acceptance matrix
+# Acceptance matrix
 # ---------------------------------------------------------------------------
-last_step="run the Linux acceptance matrix"
-count="${AURORA_DOCKER_SECURITY_COUNT:-1}"
-security_log="$staging/security-test.log"
-cd "$server_dir"
-# The boundary test runs the scratch probe fixture against the egress fixture;
-# the fake-pipeline smoke runs inside the release sandbox image, which carries
-# the Node/HyperFrames/FFmpeg/Chromium runtime (fake Multica/Ark/OpenAI/ASR
-# endpoints, real binaries).
-set +e
-"$go_bin" test -tags=auroradocker ./internal/aurorafleet \
-  -run '^(TestDockerSandboxLinuxSecurityBoundary|TestDockerSandboxFakeAuroraPipelines)$' \
-  -count="$count" -v "$@" 2>&1 | tee "$security_log"
-test_code=$?
-set -e
-last_step="acceptance matrix exited with code $test_code"
-exit "$test_code"
+# The auroradocker-tagged Linux suite ran here. It was deleted with the retired
+# external controller package (TestDockerSandboxLinuxSecurityBoundary and
+# TestDockerSandboxFakeAuroraPipelines); Task 2 delivers the Fleet-based
+# replacement. The container-level preflight above (immutable image resolution,
+# fixture image pair, AppArmor profile load) still runs, and the matrix is
+# recorded as a skip rather than a pass so the report never claims a security
+# acceptance that was not evaluated.
+last_step="record the removed Linux acceptance matrix"
+record_test "auroradocker-acceptance-matrix" "skip" \
+  "the auroradocker suite was deleted with the retired controller; the Fleet-based Linux acceptance is Task 2" 0
+printf 'docker-security-test: SKIP the auroradocker matrix: the tagged suite was deleted with the retired controller; Task 2 restores the Fleet-based suite\n' >&2
+exit 0
