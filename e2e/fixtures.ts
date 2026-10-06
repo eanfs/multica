@@ -6,6 +6,15 @@
 
 import "./env";
 import pg from "pg";
+import { z } from "zod";
+import type { CloudRuntimeNode } from "@multica/core/runtimes";
+import {
+  ChatSessionSchema,
+  CloudRuntimeNodeListSchema,
+  CloudRuntimeNodeSchema,
+  ManagedFleetRuntimeMetadataSchema,
+  SendChatMessageResponseSchema,
+} from "@multica/core/api/schemas";
 
 // `||` (not `??`) so an empty `NEXT_PUBLIC_API_URL=` in .env still falls
 // back to localhost. dotenv sets unset-vs-empty both as "" — treating them
@@ -17,6 +26,28 @@ interface TestWorkspace {
   id: string;
   name: string;
   slug: string;
+}
+
+/**
+ * Runtime-list row for resolving the managed Claude runtime behind a node.
+ * The repo has no agent-runtime schema, so this stays minimal; the managed
+ * identity inside `metadata` is validated with the repo's
+ * ManagedFleetRuntimeMetadataSchema rather than cast.
+ */
+const FleetRuntimeRowSchema = z
+  .object({
+    id: z.string().min(1),
+    provider: z.string().default(""),
+    status: z.string().default(""),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+  })
+  .loose();
+
+const FleetRuntimeListSchema = z.array(FleetRuntimeRowSchema);
+
+/** One intent, one key: retries of the same intent must reuse the key. */
+export function fleetIdempotencyKey(): string {
+  return `e2e-fleet-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export type TestIssueStatus =
@@ -449,6 +480,180 @@ export class TestApiClient {
       throw new Error("Test API client is not logged in");
     }
     return this.email;
+  }
+
+  // ---------------------------------------------------------------------
+  // Local Docker Fleet nodes. Every call goes through authedFetch so the
+  // bearer token and workspace header stay authoritative; callers never pass
+  // service keys or user ids.
+  // ---------------------------------------------------------------------
+
+  async listFleetNodes(): Promise<CloudRuntimeNode[]> {
+    const res = await this.authedFetch("/api/cloud-runtime/nodes?limit=100");
+    if (!res.ok) {
+      throw new Error(`list fleet nodes failed: ${res.status} ${await res.text()}`);
+    }
+    const parsed = CloudRuntimeNodeListSchema.safeParse(await res.json());
+    if (!parsed.success) {
+      throw new Error(`invalid fleet node list: ${parsed.error.message}`);
+    }
+    return parsed.data;
+  }
+
+  async createFleetNode(
+    spec: string,
+    name: string,
+    idempotencyKey: string = fleetIdempotencyKey(),
+  ): Promise<CloudRuntimeNode> {
+    const res = await this.authedFetch("/api/cloud-runtime/nodes", {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ name, instance_type: spec }),
+    });
+    if (!res.ok) {
+      throw new Error(`create fleet node failed: ${res.status} ${await res.text()}`);
+    }
+    return this.parseFleetNode(await res.json(), "create fleet node");
+  }
+
+  async startFleetNode(
+    instanceId: string,
+    idempotencyKey: string = fleetIdempotencyKey(),
+  ): Promise<CloudRuntimeNode> {
+    return this.fleetNodeAction("/api/cloud-runtime/nodes/start", instanceId, idempotencyKey);
+  }
+
+  async stopFleetNode(
+    instanceId: string,
+    idempotencyKey: string = fleetIdempotencyKey(),
+  ): Promise<CloudRuntimeNode> {
+    return this.fleetNodeAction("/api/cloud-runtime/nodes/stop", instanceId, idempotencyKey);
+  }
+
+  async rebootFleetNode(
+    instanceId: string,
+    idempotencyKey: string = fleetIdempotencyKey(),
+  ): Promise<CloudRuntimeNode> {
+    return this.fleetNodeAction("/api/cloud-runtime/nodes/reboot", instanceId, idempotencyKey);
+  }
+
+  async deleteFleetNode(
+    instanceId: string,
+    idempotencyKey: string = fleetIdempotencyKey(),
+  ): Promise<void> {
+    const res = await this.authedFetch("/api/cloud-runtime/nodes", {
+      method: "DELETE",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ instance_id: instanceId }),
+    });
+    if (!res.ok) {
+      throw new Error(`delete fleet node failed: ${res.status} ${await res.text()}`);
+    }
+  }
+
+  /**
+   * Resolve the managed Claude runtime the node's daemon registered. The node
+   * itself carries no runtime id, so the runtime list is the authoritative
+   * source and the managed metadata is validated, not cast.
+   */
+  async getFleetClaudeRuntimeId(nodeId: string): Promise<string> {
+    const res = await this.authedFetch("/api/runtimes?limit=100");
+    if (!res.ok) {
+      throw new Error(`list runtimes failed: ${res.status} ${await res.text()}`);
+    }
+    const parsed = FleetRuntimeListSchema.safeParse(await res.json());
+    if (!parsed.success) {
+      throw new Error(`invalid runtime list: ${parsed.error.message}`);
+    }
+    const runtime = parsed.data.find((candidate) => {
+      const metadata = ManagedFleetRuntimeMetadataSchema.safeParse(candidate.metadata);
+      return (
+        metadata.success &&
+        metadata.data.fleet_node_id === nodeId &&
+        candidate.provider.toLowerCase() === "claude"
+      );
+    });
+    if (!runtime) {
+      throw new Error(`no managed Claude runtime registered for node ${nodeId}`);
+    }
+    return runtime.id;
+  }
+
+  async createFleetAgent(runtimeId: string, name: string): Promise<{ id: string }> {
+    const res = await this.authedFetch("/api/agents", {
+      method: "POST",
+      body: JSON.stringify({ name, runtime_id: runtimeId }),
+    });
+    if (!res.ok) {
+      throw new Error(`create fleet agent failed: ${res.status} ${await res.text()}`);
+    }
+    const parsed = z.object({ id: z.string().min(1) }).safeParse(await res.json());
+    if (!parsed.success) {
+      throw new Error(`invalid fleet agent response: ${parsed.error.message}`);
+    }
+    return parsed.data;
+  }
+
+  async createFleetChat(agentId: string): Promise<{ id: string }> {
+    const res = await this.authedFetch("/api/chat/sessions", {
+      method: "POST",
+      body: JSON.stringify({ agent_id: agentId }),
+    });
+    if (!res.ok) {
+      throw new Error(`create fleet chat failed: ${res.status} ${await res.text()}`);
+    }
+    const parsed = ChatSessionSchema.safeParse(await res.json());
+    if (!parsed.success) {
+      throw new Error(`invalid fleet chat response: ${parsed.error.message}`);
+    }
+    return { id: parsed.data.id };
+  }
+
+  async sendFleetChat(sessionId: string, content: string): Promise<{ task_id: string }> {
+    const res = await this.authedFetch(`/api/chat/sessions/${sessionId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    });
+    if (!res.ok) {
+      throw new Error(`send fleet chat failed: ${res.status} ${await res.text()}`);
+    }
+    const parsed = SendChatMessageResponseSchema.safeParse(await res.json());
+    if (!parsed.success) {
+      throw new Error(`invalid fleet chat send response: ${parsed.error.message}`);
+    }
+    return { task_id: parsed.data.task_id };
+  }
+
+  /** Slug of the workspace selected by ensureWorkspace, for workspace-scoped URLs. */
+  getFleetWorkspaceSlug(): string {
+    if (!this.workspaceSlug) {
+      throw new Error("Test API client workspace is not initialized");
+    }
+    return this.workspaceSlug;
+  }
+
+  private parseFleetNode(raw: unknown, endpoint: string): CloudRuntimeNode {
+    const parsed = CloudRuntimeNodeSchema.safeParse(raw);
+    if (!parsed.success) {
+      throw new Error(`invalid fleet node from ${endpoint}: ${parsed.error.message}`);
+    }
+    return parsed.data;
+  }
+
+  private async fleetNodeAction(
+    path: string,
+    instanceId: string,
+    idempotencyKey: string,
+  ): Promise<CloudRuntimeNode> {
+    const res = await this.authedFetch(path, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ instance_id: instanceId }),
+    });
+    if (!res.ok) {
+      throw new Error(`fleet node action failed: ${res.status} ${await res.text()}`);
+    }
+    return this.parseFleetNode(await res.json(), path);
   }
 
   private async findWorkspaceBySlug(slug: string) {
