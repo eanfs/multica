@@ -131,11 +131,26 @@ require_blocked() {
   note_fail "$label: expected the operation to be blocked, got $PROBE_JSON"
   return 1
 }
+# A seccomp SCMP_ACT_KILL_PROCESS terminates the process with SIGSYS (31); the
+# Docker Engine API reports a signal-terminated process as 128+signal, so the
+# probe dies with rc 159 and prints no JSON. Only that named rc is a kill: a Go
+# crash exits 2, a missing binary 126/127, SIGSEGV 139, and so on. Accepting any
+# non-zero exit would record a crash as a sandbox kill, so the set is explicit
+# and only overridable deliberately by a Linux host that documents another rc.
+seccomp_kill_rcs="${AURORA_SECCOMP_KILL_RCS:-159}"
+
 require_killed() {
-  local label="$1"; shift
+  local label="$1" rc
+  shift
   probe "$@"
-  if [ -z "$PROBE_JSON" ] && [ "$PROBE_RC" -ne 0 ]; then return 0; fi
-  note_fail "$label: expected the seccomp KILL_PROCESS termination, got rc=$PROBE_RC out=$PROBE_JSON"
+  if [ -n "$PROBE_JSON" ]; then
+    note_fail "$label: expected the seccomp SIGSYS kill, got a result: $PROBE_JSON"
+    return 1
+  fi
+  for rc in $seccomp_kill_rcs; do
+    if [ "$PROBE_RC" = "$rc" ]; then return 0; fi
+  done
+  note_fail "$label: expected the seccomp SIGSYS kill (rc in '$seccomp_kill_rcs'), got rc=$PROBE_RC"
   return 1
 }
 wait_allowed() {
@@ -152,13 +167,37 @@ wait_allowed() {
 }
 
 # ---------------------------------------------------------------------------
-# TestDockerSandboxContainerContract: the fixed Fleet node contract on the
-# release image, both as image metadata and as the exact container the Fleet
-# builds (entrypoint, user, read-only root, capability drop, limits, env).
+# The documented Fleet node contract (read this before trusting a green run).
+#
+# server/internal/fleet/docker/provider.go is the authority for the real node:
+# Ensure() mounts the node data volume at /data and the read-only secrets volume
+# at /secrets, runs the node as 10001:10001 with HOME=/data/home, and
+# NodeHostConfig() sets the CPU, memory and PID limits, CapDrop ALL,
+# no-new-privileges:true and a disabled restart policy. The Go test
+# TestNodeHostConfigIsRestricted (server/internal/fleet/docker/provider_test.go),
+# extended by Task 5, is the authority for provider drift. This acceptance
+# cannot observe a host the Go provider never built.
+#
+# Every container below is labelled by what it proves:
+#   * "release image contract"      - metadata/layout the published image ships.
+#   * "probe fixture configuration" - flags and mounts this script passes to its
+#     own fixture; they prove the fixture matches the documented shape, not that
+#     the real node applies them.
+#   * "isolation behaviour"         - denied operations attempted under the
+#     fixture's AppArmor + seccomp profiles; the real security evidence for the
+#     profiles. AppArmor, seccomp and a read-only rootfs are fixture-only
+#     hardening: NodeHostConfig does not set them yet, so a green matrix proves
+#     the profiles behave, not that the Fleet has wired them.
 # ---------------------------------------------------------------------------
-test_container_contract() {
+
+# ---------------------------------------------------------------------------
+# TestDockerSandboxImageContract: release image metadata and the fixed
+# /data + /secrets layout the published image must ship. No probe flag is
+# asserted here, so nothing in this test is tautological.
+# ---------------------------------------------------------------------------
+test_image_contract() {
   start_test
-  local entry user health volumes cid data_vol out rc
+  local entry user health volumes data_vol out rc
 
   entry="$(docker image inspect --format '{{json .Config.Entrypoint}}' "$release_image" 2>/dev/null)"
   [ "$entry" = '["/usr/local/bin/fleet-node","run"]' ] || note_fail "release image entrypoint is '$entry', want the fixed fleet-node run"
@@ -173,33 +212,10 @@ test_container_contract() {
     *) note_fail "release image declares volumes: $volumes" ;;
   esac
 
-  cid="aurora-acc-contract-$$"
-  docker rm -f "$cid" >/dev/null 2>&1 || true
-  if docker create --name "$cid" --user 10001:10001 --read-only \
-    --cap-drop ALL --security-opt no-new-privileges:true \
-    --pids-limit 256 --memory 4g --cpus 2 \
-    -e HOME=/data/home -e FLEET_NODE_MAX_RUNS=1 \
-    -e MULTICA_MANAGED=1 -e MULTICA_SERVER_URL=http://127.0.0.1:8090 \
-    -e MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE=/secrets/aurora-enrollment \
-    --entrypoint /usr/local/bin/fleet-node "$release_image" run >/dev/null 2>&1; then
-    [ "$(docker inspect --format '{{json .Config.Entrypoint}}' "$cid")" = '["/usr/local/bin/fleet-node"]' ] || note_fail "Fleet node entrypoint override drifted"
-    [ "$(docker inspect --format '{{json .Config.Cmd}}' "$cid")" = '["run"]' ] || note_fail "Fleet node Cmd is not [run]"
-    [ "$(docker inspect --format '{{.Config.User}}' "$cid")" = "10001:10001" ] || note_fail "Fleet node Config.User drifted"
-    [ "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$cid")" = "true" ] || note_fail "Fleet node is not read-only"
-    docker inspect --format '{{json .HostConfig.CapDrop}}' "$cid" | grep -q '"ALL"' || note_fail "Fleet node does not drop ALL capabilities"
-    docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$cid" | grep -q 'no-new-privileges' || note_fail "Fleet node does not set no-new-privileges"
-    [ "$(docker inspect --format '{{.HostConfig.Memory}}' "$cid")" = "4294967296" ] || note_fail "Fleet node memory limit drifted"
-    [ "$(docker inspect --format '{{.HostConfig.NanoCpus}}' "$cid")" = "2000000000" ] || note_fail "Fleet node CPU limit drifted"
-    [ "$(docker inspect --format '{{.HostConfig.PidsLimit}}' "$cid")" = "256" ] || note_fail "Fleet node PIDs limit drifted"
-    docker inspect --format '{{json .Config.Env}}' "$cid" | grep -q 'HOME=/data/home' || note_fail "Fleet node HOME is not /data/home"
-  else
-    note_fail "could not create the Fleet node container from the release image"
-  fi
-  docker rm -f "$cid" >/dev/null 2>&1 || true
-
-  # A fresh named volume mounted at /data is seeded from the image layout and
-  # must be writable by the non-root node; the image must ship no package
-  # managers or download tools, and no baked enrollment secret.
+  # release image contract: a fresh named volume at /data is seeded from the
+  # image layout and writable by the non-root node; the image ships no package
+  # managers or download tools and no baked enrollment secret. Docker, not this
+  # script, populates the volume from /data, so this is a real behavioural probe.
   data_vol="aurora-acc-data-$$"
   docker volume rm "$data_vol" >/dev/null 2>&1 || true
   if docker volume create "$data_vol" >/dev/null 2>&1; then
@@ -228,12 +244,68 @@ LAYOUT
   fi
   docker volume rm "$data_vol" >/dev/null 2>&1 || true
 
-  # The real node binary fails closed on an empty command.
+  # release image contract: the real node binary fails closed on an empty
+  # command, so a misconfigured node never runs as a long-lived no-op.
   out="$(docker run --rm --network none --read-only --user 10001:10001 --tmpfs /tmp \
     --entrypoint /usr/local/bin/fleet-node "$release_image" 2>&1)"
   rc=$?
   [ "$rc" -ne 0 ] || note_fail "fleet-node accepted an empty command"
   printf '%s' "$out" | grep -q 'fleet-node command failed' || note_fail "fleet-node did not fail closed: $out"
+
+  finish_test
+}
+
+# ---------------------------------------------------------------------------
+# TestDockerSandboxProbeFixtureConfig: the probe fixture container is built to
+# the documented Fleet node contract above (entrypoint, user, read-only root,
+# capability drop, limits, env, and the fixed /data + /secrets mounts). These
+# are flag-derived assertions against a container this script creates itself, so
+# they are reported as "probe fixture configuration": they prove the fixture
+# matches the documented shape, not that the real node applies it. The Go
+# provider test is the authority for the real boundary.
+# ---------------------------------------------------------------------------
+test_probe_fixture_config() {
+  start_test
+  local cid data_vol secret_target data_target secret_ro
+
+  printf '# probe fixture configuration: the flags and mounts below mirror server/internal/fleet/docker/provider.go; the Go provider test is the authority for real provider drift\n'
+
+  data_vol="aurora-acc-fleet-data-$$"
+  docker volume rm "$data_vol" >/dev/null 2>&1 || true
+  docker volume create "$data_vol" >/dev/null 2>&1 || note_fail "probe fixture configuration: could not create the /data fixture volume"
+
+  cid="aurora-acc-fixture-$$"
+  docker rm -f "$cid" >/dev/null 2>&1 || true
+  if docker create --name "$cid" --user 10001:10001 --read-only \
+    --cap-drop ALL --security-opt no-new-privileges:true \
+    --pids-limit 256 --memory 4g --cpus 2 \
+    -v "$data_vol:/data" \
+    -v "$secret_dir:/secrets:ro" \
+    -e HOME=/data/home -e FLEET_NODE_MAX_RUNS=1 \
+    -e MULTICA_MANAGED=1 -e MULTICA_SERVER_URL=http://127.0.0.1:8090 \
+    -e MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE=/secrets/aurora-enrollment \
+    --entrypoint /usr/local/bin/fleet-node "$release_image" run >/dev/null 2>&1; then
+    [ "$(docker inspect --format '{{json .Config.Entrypoint}}' "$cid")" = '["/usr/local/bin/fleet-node"]' ] || note_fail "probe fixture configuration: entrypoint override drifted"
+    [ "$(docker inspect --format '{{json .Config.Cmd}}' "$cid")" = '["run"]' ] || note_fail "probe fixture configuration: Cmd is not [run]"
+    [ "$(docker inspect --format '{{.Config.User}}' "$cid")" = "10001:10001" ] || note_fail "probe fixture configuration: Config.User drifted"
+    [ "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$cid")" = "true" ] || note_fail "probe fixture configuration: fixture is not read-only"
+    docker inspect --format '{{json .HostConfig.CapDrop}}' "$cid" | grep -q '"ALL"' || note_fail "probe fixture configuration: fixture does not drop ALL capabilities"
+    docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$cid" | grep -q 'no-new-privileges' || note_fail "probe fixture configuration: fixture does not set no-new-privileges"
+    [ "$(docker inspect --format '{{.HostConfig.Memory}}' "$cid")" = "4294967296" ] || note_fail "probe fixture configuration: fixture memory limit drifted"
+    [ "$(docker inspect --format '{{.HostConfig.NanoCpus}}' "$cid")" = "2000000000" ] || note_fail "probe fixture configuration: fixture CPU limit drifted"
+    [ "$(docker inspect --format '{{.HostConfig.PidsLimit}}' "$cid")" = "256" ] || note_fail "probe fixture configuration: fixture PIDs limit drifted"
+    docker inspect --format '{{json .Config.Env}}' "$cid" | grep -q 'HOME=/data/home' || note_fail "probe fixture configuration: fixture HOME is not /data/home"
+    secret_target="$(docker inspect --format '{{json .HostConfig.Mounts}}' "$cid" | jq -r '.[] | select(.Target=="/secrets") | .Target' 2>/dev/null)"
+    [ "$secret_target" = "/secrets" ] || note_fail "probe fixture configuration: the secrets volume is not mounted at the fixed /secrets target"
+    secret_ro="$(docker inspect --format '{{json .HostConfig.Mounts}}' "$cid" | jq -r '.[] | select(.Target=="/secrets") | .ReadOnly' 2>/dev/null)"
+    [ "$secret_ro" = "true" ] || note_fail "probe fixture configuration: /secrets is not mounted read-only"
+    data_target="$(docker inspect --format '{{json .HostConfig.Mounts}}' "$cid" | jq -r '.[] | select(.Target=="/data") | .Target' 2>/dev/null)"
+    [ "$data_target" = "/data" ] || note_fail "probe fixture configuration: the data volume is not mounted at the fixed /data target"
+  else
+    note_fail "probe fixture configuration: could not create the Fleet node fixture container"
+  fi
+  docker rm -f "$cid" >/dev/null 2>&1 || true
+  docker volume rm "$data_vol" >/dev/null 2>&1 || true
 
   finish_test
 }
@@ -286,7 +358,12 @@ origin_name=""
 peer_name=""
 net_name=""
 other_net_name=""
-secret_dir=""
+data_vol=""
+# The single-use enrollment secret the Fleet writes into its read-only secrets
+# volume at the fixed /secrets/aurora-enrollment path (model.AuroraEnrollmentFile).
+secret_dir="$(mktemp -d "$work/secret.XXXXXX")"
+printf 'mse_%040d' 0 >"$secret_dir/aurora-enrollment"
+chmod 0400 "$secret_dir/aurora-enrollment"
 
 boundary_cleanup() {
   if [ -n "$sandbox_name" ]; then docker rm -f "$sandbox_name" >/dev/null 2>&1 || true; fi
@@ -295,7 +372,8 @@ boundary_cleanup() {
   if [ -n "$peer_name" ]; then docker rm -f "$peer_name" >/dev/null 2>&1 || true; fi
   if [ -n "$net_name" ]; then docker network rm "$net_name" >/dev/null 2>&1 || true; fi
   if [ -n "$other_net_name" ]; then docker network rm "$other_net_name" >/dev/null 2>&1 || true; fi
-  sandbox_name=""; proxy_name=""; origin_name=""; peer_name=""; net_name=""; other_net_name=""
+  if [ -n "$data_vol" ]; then docker volume rm "$data_vol" >/dev/null 2>&1 || true; fi
+  sandbox_name=""; proxy_name=""; origin_name=""; peer_name=""; net_name=""; other_net_name=""; data_vol=""
 }
 # Keep the leak-free guarantee even if a probe aborts the run.
 trap 'boundary_cleanup; cleanup' EXIT
@@ -304,9 +382,11 @@ test_isolation_boundary() {
   start_test
   local id="$$-$RANDOM" gateway peer_ip
 
-  secret_dir="$(mktemp -d "$work/secret.XXXXXX")"
-  printf 'mse_%040d' 0 >"$secret_dir/aurora-enrollment"
-  chmod 0400 "$secret_dir/aurora-enrollment"
+  printf '# isolation behaviour: the AppArmor and seccomp profiles below are probe fixture configuration; NodeHostConfig does not set them yet, so the Go provider test is the authority for provider drift\n'
+
+  data_vol="aurora-acc-net-data-$id"
+  docker volume rm "$data_vol" >/dev/null 2>&1 || true
+  docker volume create "$data_vol" >/dev/null 2>&1 || note_fail "could not create the isolation /data volume"
 
   net_name="aurora-acc-net-$id"
   other_net_name="aurora-acc-other-$id"
@@ -334,9 +414,12 @@ test_isolation_boundary() {
     -e MULTICA_EGRESS_SERVER_ORIGIN="http://origin:8080" \
     "$proxy_image" >/dev/null 2>&1 || note_fail "could not start the egress sidecar"
 
-  # The sandbox runs the fixed probe under the same hardening the Fleet applies
-  # (non-root, read-only root, capability drop, no-new-privileges, resource
-  # limits) plus the AppArmor and seccomp profiles.
+  # The sandbox runs the fixed probe under probe fixture configuration: the
+  # documented Fleet flags (non-root, capability drop, no-new-privileges,
+  # resource limits, the fixed /data + /secrets mounts) plus the AppArmor and
+  # seccomp profiles. A read-only rootfs, AppArmor and seccomp are fixture-only
+  # hardening today; the Go provider test is the authority for whether the Fleet
+  # sets them.
   docker run -d --name "$sandbox_name" --network "$net_name" --user 10001:10001 --read-only \
     --cap-drop ALL --security-opt no-new-privileges:true \
     --security-opt "seccomp=$seccomp_profile" --security-opt "apparmor=$apparmor_profile" \
@@ -344,10 +427,11 @@ test_isolation_boundary() {
     --tmpfs /workspace:rw,nosuid,nodev,noexec,size=2147483648,uid=10001,gid=10001,mode=0700 \
     --tmpfs /tmp:rw,nosuid,nodev,noexec,size=268435456,uid=10001,gid=10001,mode=0700 \
     --tmpfs /run:rw,nosuid,nodev,noexec,size=16777216,uid=10001,gid=10001,mode=0755 \
-    -v "$secret_dir/aurora-enrollment:/run/secrets/aurora-enrollment:ro" \
+    -v "$data_vol:/data" \
+    -v "$secret_dir:/secrets:ro" \
     -e MULTICA_SERVER_URL="http://origin:8080" \
     -e MULTICA_MANAGED=1 \
-    -e MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE=/run/secrets/aurora-enrollment \
+    -e MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE=/secrets/aurora-enrollment \
     -e HTTP_PROXY=http://egress:3128 \
     -e HTTPS_PROXY=http://egress:3128 \
     -e NO_PROXY=egress,127.0.0.1,localhost \
@@ -403,6 +487,85 @@ test_isolation_boundary() {
 }
 
 # ---------------------------------------------------------------------------
+# TestDockerSandboxFleetLayoutBoundary: the fixed Fleet layout is readable and
+# writable through the loaded AppArmor profile. This is the behavioural proof
+# for the profile's fixed-layout rules and is reported as isolation behaviour.
+# It runs the release image's own shell under the seccomp/AppArmor profiles the
+# isolation fixture uses, because the scratch probe image has no shell and the
+# profile is what is under test.
+# ---------------------------------------------------------------------------
+test_fleet_layout_boundary() {
+  start_test
+  local id="$$-$RANDOM" layout_data layout_secrets token out rc
+
+  token="$(printf 'mse_%040d' 0)"
+  layout_data="aurora-acc-layout-data-$id"
+  layout_secrets="aurora-acc-layout-secrets-$id"
+  docker volume rm "$layout_data" "$layout_secrets" >/dev/null 2>&1 || true
+  docker volume create "$layout_data" >/dev/null 2>&1 || note_fail "could not create the layout /data volume"
+  docker volume create "$layout_secrets" >/dev/null 2>&1 || note_fail "could not create the layout /secrets volume"
+
+  # Seed both volumes the way the Fleet installer does: the layout manifest and
+  # the single-use enrollment secret owned by 10001 with fixed modes. A second
+  # secret the profile does NOT name proves the rules do not widen /secrets.
+  if ! docker run --rm --network none --user 0:0 \
+    -e ACCEPTANCE_ENROLLMENT="$token" \
+    -v "$layout_data:/data" -v "$layout_secrets:/secrets" \
+    --entrypoint /bin/sh "$release_image" -c '
+      set -eu
+      install -d -o 10001 -g 10001 -m 0700 /data/home /data/workspaces /secrets
+      printf "%s" "{}" > /data/fleet-layout.json
+      printf "%s" "$ACCEPTANCE_ENROLLMENT" > /secrets/aurora-enrollment
+      printf "%s" "$ACCEPTANCE_ENROLLMENT" > /secrets/aurora-provider-x
+      chmod 0600 /data/fleet-layout.json
+      chmod 0400 /secrets/aurora-enrollment /secrets/aurora-provider-x
+      chown -R 10001:10001 /data /secrets
+    ' >/dev/null 2>&1; then
+    note_fail "could not seed the fixed Fleet layout volumes"
+    docker volume rm "$layout_data" "$layout_secrets" >/dev/null 2>&1 || true
+    finish_test
+    return 1
+  fi
+
+  cat >"$work/fleet-layout.sh" <<'LAYOUT'
+set -u
+fail=0
+mark() { echo "LAYOUT_BOUNDARY_$1 $2"; }
+# positive: the fixed enrollment secret is readable and holds the issued token.
+enroll="$(cat /secrets/aurora-enrollment 2>/dev/null || true)"
+[ "$enroll" = "$ACCEPTANCE_ENROLLMENT" ] || { mark DENIED "read /secrets/aurora-enrollment"; fail=1; }
+# positive: the /secrets directory the node resolves the file through is listable.
+ls /secrets >/dev/null 2>&1 || { mark DENIED "list /secrets"; fail=1; }
+# positive: the node writes its home, workspaces and layout manifest under /data.
+for path in /data/home/.acceptance /data/workspaces/.acceptance /data/fleet-layout.probe; do
+  printf 'x' >"$path" 2>/dev/null || { mark DENIED "write $path"; fail=1; }
+done
+# negative: the read-only /secrets volume accepts no write.
+if printf 'x' >/secrets/evil 2>/dev/null; then mark UNEXPECTED "write /secrets/evil"; fail=1; fi
+# negative: the profile does not widen /secrets to a secret it does not name.
+if cat /secrets/aurora-provider-x >/dev/null 2>&1; then mark UNEXPECTED "read /secrets/aurora-provider-x"; fail=1; fi
+# negative: paths outside the fixed layout stay default-denied.
+if printf 'x' >/aurora-probe-root-write 2>/dev/null; then mark UNEXPECTED "write /aurora-probe-root-write"; fail=1; fi
+[ "$fail" -eq 0 ] && mark OK "fixed Fleet layout permitted under AppArmor"
+exit "$fail"
+LAYOUT
+
+  out="$(docker run --rm -i --network none --read-only --user 10001:10001 \
+    --cap-drop ALL --security-opt no-new-privileges:true \
+    --security-opt "apparmor=$apparmor_profile" --security-opt "seccomp=$seccomp_profile" \
+    --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16777216,uid=10001,gid=10001,mode=0700 \
+    -e ACCEPTANCE_ENROLLMENT="$token" \
+    -v "$layout_data:/data" -v "$layout_secrets:/secrets:ro" \
+    --entrypoint /bin/sh "$release_image" - <"$work/fleet-layout.sh" 2>&1)"
+  rc=$?
+  printf '%s\n' "$out" | grep -q 'LAYOUT_BOUNDARY_OK' || note_fail "the fixed Fleet layout was not permitted under AppArmor (rc=$rc): $out"
+  [ "$rc" -eq 0 ] || note_fail "fixed Fleet layout probe exited $rc: $out"
+
+  docker volume rm "$layout_data" "$layout_secrets" >/dev/null 2>&1 || true
+  finish_test
+}
+
+# ---------------------------------------------------------------------------
 # TestDockerSandboxFakeAuroraPipelines: the containerized fake pipeline smoke
 # inside the release image, off the network, with no provider or agent call.
 # ---------------------------------------------------------------------------
@@ -444,9 +607,11 @@ test_fake_pipelines() {
 
 for pass in $(seq 1 "$count"); do
   printf '=== RUN   Fleet sandbox acceptance pass %s/%s\n' "$pass" "$count" >&2
-  run_test TestDockerSandboxContainerContract test_container_contract
+  run_test TestDockerSandboxImageContract test_image_contract
+  run_test TestDockerSandboxProbeFixtureConfig test_probe_fixture_config
   run_test TestDockerSandboxFixtureContract test_fixture_contract
   run_test TestDockerSandboxLinuxSecurityBoundary test_isolation_boundary
+  run_test TestDockerSandboxFleetLayoutBoundary test_fleet_layout_boundary
   run_test TestDockerSandboxFakeAuroraPipelines test_fake_pipelines
   [ "$fail_count" -eq 0 ] || break
 done
