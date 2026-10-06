@@ -82,7 +82,7 @@ Fleet 配置的 `aurora` 块用于选择受管沙箱 profile（见 `fleet-config
 - `seccomp_profile` — 已部署 seccomp profile 的宿主机绝对路径。Fleet 读取并校验它，然后内联进节点的 `HostConfig`；宿主机路径不会进入 Docker API。
 - `apparmor_profile` — 已加载的 AppArmor profile 名称。加载 profile 是 operator 步骤。
 - `egress_hosts` — 追加到 sidecar 允许列表的精确 `host:443` 条目。
-- `anthropic_base_url` 和 `anthropic_model` — 可选的受管 Claude 端点覆盖；为空时保留供应商默认值。
+- `anthropic_base_url` 和 `anthropic_model` — 可选的受管 Claude 端点覆盖；base URL 可带可选路径前缀（如 `/api/plan`），为空时保留供应商默认值。
 - `claude_env` — 传给受管子进程的额外 Claude Code 变量映射（可选）。
 - `provider_secret_files` — 固定目标名到宿主机绝对文件的映射，以只读方式挂载到 `/run/secrets/<name>`。
 - `readonly_rootfs` — 必须显式为 `true`。

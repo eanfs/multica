@@ -34,6 +34,31 @@ func TestLoadConfigAuroraProfile(t *testing.T) {
 	}
 }
 
+// TestLoadConfigAuroraAnthropicBaseURL proves the managed Claude endpoint accepts
+// the real ARK Agent Plan prefix for a full config load while a bare origin still
+// works, and that the Validate error names the optional path prefix.
+func TestLoadConfigAuroraAnthropicBaseURL(t *testing.T) {
+	accepted := map[string]string{
+		"ark agent plan": "https://ark.cn-beijing.volces.com/api/plan",
+		"origin only":    "https://ark.example.com",
+	}
+	for name, base := range accepted {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := loadTestConfig(t, strings.Replace(auroraConfig, "https://ark.example.com", base, 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Aurora == nil || cfg.Aurora.AnthropicBaseURL != base {
+				t.Fatalf("anthropic_base_url = %+v, want %q", cfg.Aurora, base)
+			}
+		})
+	}
+	_, err := loadTestConfig(t, strings.Replace(auroraConfig, "https://ark.example.com", "https://ark.example.com?x=1", 1))
+	if err == nil || !strings.Contains(err.Error(), "optional path prefix") {
+		t.Fatalf("query error = %v, want optional path prefix wording", err)
+	}
+}
+
 func TestLoadConfigRejectsUnsafeAuroraProfile(t *testing.T) {
 	cases := map[string]string{
 		"missing server url":          strings.Replace(auroraConfig, `"server_url":"http://api.internal:8080"`, "", 1),
@@ -48,7 +73,10 @@ func TestLoadConfigRejectsUnsafeAuroraProfile(t *testing.T) {
 		"non-443 egress":              strings.Replace(auroraConfig, "api.example.com:443", "api.example.com:8443", 1),
 		"egress without port":         strings.Replace(auroraConfig, "api.example.com:443", "api.example.com", 1),
 		"http anthropic base":         strings.Replace(auroraConfig, "https://ark.example.com", "http://ark.example.com", 1),
-		"anthropic path":              strings.Replace(auroraConfig, "https://ark.example.com", "https://ark.example.com/v1", 1),
+		"anthropic port":              strings.Replace(auroraConfig, "https://ark.example.com", "https://ark.example.com:8443", 1),
+		"anthropic query":             strings.Replace(auroraConfig, "https://ark.example.com", "https://ark.example.com?x=1", 1),
+		"anthropic fragment":          strings.Replace(auroraConfig, "https://ark.example.com", "https://ark.example.com#frag", 1),
+		"anthropic credentials":       strings.Replace(auroraConfig, "https://ark.example.com", "https://user:pass@ark.example.com", 1),
 		"claude env api key":          strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"ANTHROPIC_API_KEY":"leak"},`, 1),
 		"claude env auth token":       strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"ANTHROPIC_AUTH_TOKEN":"leak"},`, 1),
 		"claude env secret key":       strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"MY_SECRET_VALUE":"leak"},`, 1),
@@ -136,6 +164,58 @@ func TestAuroraClaudePathContract(t *testing.T) {
 	}
 	if AuroraClaudePath != "/opt/aurora/runtime/node_modules/.bin/claude" {
 		t.Fatalf("AuroraClaudePath = %q", AuroraClaudePath)
+	}
+}
+
+// TestValidAnthropicBaseURL pins the exact endpoint shape: a single https host
+// with no credentials, query or fragment, plus an optional absolute path prefix.
+// The ARK Agent Plan Messages endpoint is the value that must be accepted; every
+// other guard stays fail-closed.
+func TestValidAnthropicBaseURL(t *testing.T) {
+	valid := map[string]string{
+		"origin":            "https://ark.cn-beijing.volces.com",
+		"ark agent plan":    "https://ark.cn-beijing.volces.com/api/plan",
+		"versioned prefix":  "https://ark.cn-beijing.volces.com/api/plan/v2",
+		"unreserved prefix": "https://ark.example.com/api_plan-1.2~",
+		"sub-delim prefix":  "https://ark.example.com/api!$&'()*+,;=plan",
+		"canonical percent": "https://ark.example.com/api%25plan",
+	}
+	for name, raw := range valid {
+		t.Run(name, func(t *testing.T) {
+			if !ValidAnthropicBaseURL(raw) {
+				t.Fatalf("ValidAnthropicBaseURL(%q) = false, want true", raw)
+			}
+		})
+	}
+	invalid := map[string]string{
+		"empty":                               "",
+		"surrounding whitespace":              " https://ark.example.com/api/plan",
+		"trailing whitespace":                 "https://ark.example.com/api/plan ",
+		"embedded space":                      "https://ark.example.com/api plan",
+		"control character":                   "https://ark.example.com/api\x01plan",
+		"http scheme":                         "http://ark.example.com/api/plan",
+		"credentials":                         "https://user:pass@ark.example.com/api/plan",
+		"port":                                "https://ark.example.com:8443/api/plan",
+		"empty host":                          "https:///api/plan",
+		"comma host":                          "https://a,b/api/plan",
+		"query":                               "https://ark.example.com/api/plan?x=1",
+		"force query":                         "https://ark.example.com/api/plan?",
+		"fragment":                            "https://ark.example.com/api/plan#frag",
+		"hash anywhere":                       "https://ark.example.com/api#plan",
+		"opaque path not starting with slash": "https:api/plan",
+		"doubled slash":                       "https://ark.example.com/api//plan",
+		"trailing slash":                      "https://ark.example.com/api/plan/",
+		"root slash":                          "https://ark.example.com/",
+		"dot segment":                         "https://ark.example.com/api/../plan",
+		"encoded traversal":                   "https://ark.example.com/api/%2e%2e/plan",
+		"encoded slash":                       "https://ark.example.com/api%2Fplan",
+	}
+	for name, raw := range invalid {
+		t.Run(name, func(t *testing.T) {
+			if ValidAnthropicBaseURL(raw) {
+				t.Fatalf("ValidAnthropicBaseURL(%q) = true, want false", raw)
+			}
+		})
 	}
 }
 

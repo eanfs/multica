@@ -189,7 +189,7 @@ func (a AuroraConfig) Validate() error {
 		}
 	}
 	if a.AnthropicBaseURL != "" && !ValidAnthropicBaseURL(a.AnthropicBaseURL) {
-		return fmt.Errorf("%w: aurora anthropic_base_url must be a single https host without credentials, query or fragment", ErrInvalidRequest)
+		return fmt.Errorf("%w: aurora anthropic_base_url must be a single https host without credentials, query or fragment, with an optional path prefix", ErrInvalidRequest)
 	}
 	if a.AnthropicModel != "" && !validModelName(a.AnthropicModel) {
 		return fmt.Errorf("%w: aurora anthropic_model must be a non-empty model name", ErrInvalidRequest)
@@ -291,17 +291,45 @@ func validEgressHost(raw string) bool {
 	return err == nil && name != "" && port == "443" && !strings.Contains(name, "/")
 }
 
-// ValidAnthropicBaseURL requires a single https host with no credentials, path,
-// query or fragment. It mirrors the managed daemon's own startup validation.
+// anthropicBaseURLPathPattern matches the optional path prefix of an Anthropic
+// base URL. It starts with a single slash and then permits only URL path-segment
+// characters: unreserved (A-Z a-z 0-9 - . _ ~), percent-encoding, the standard
+// sub-delims (! $ & ' ( ) * + , ; =) and "/" separators.
+var anthropicBaseURLPathPattern = regexp.MustCompile(`^/[A-Za-z0-9\-._~/%!$&'()*+,;=]*$`)
+
+// ValidAnthropicBaseURL requires a single https host with no credentials, query
+// or fragment, plus an optional path prefix. An empty path is the bare origin; a
+// non-empty path must be an absolute, already-decoded and unambiguous request
+// prefix: it starts with "/", contains only unreserved/sub-delim path characters
+// or percent encoding, never contains "//", never ends in "/", never has a "."
+// or ".." segment, and u.RawPath agrees with u.Path so encoded bytes cannot
+// decode to a different request path. This admits an endpoint such as
+// https://ark.cn-beijing.volces.com/api/plan while staying as strict as the
+// managed daemon's own startup validation.
 func ValidAnthropicBaseURL(raw string) bool {
 	if strings.TrimSpace(raw) != raw || raw == "" || strings.Contains(raw, "#") {
 		return false
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.Port() != "" {
+	if err != nil || u.Scheme != "https" || u.User != nil ||
+		u.Host == "" || u.Hostname() == "" || strings.ContainsAny(u.Host, ", \t") || u.Port() != "" {
 		return false
 	}
-	return u.User == nil && u.Path == "" && u.RawQuery == "" && !u.ForceQuery && u.Fragment == "" && u.RawPath == ""
+	if u.Opaque != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.RawPath != "" && u.RawPath != u.Path) {
+		return false
+	}
+	if u.Path == "" {
+		return true
+	}
+	if !anthropicBaseURLPathPattern.MatchString(u.Path) || strings.Contains(u.Path, "//") || strings.HasSuffix(u.Path, "/") {
+		return false
+	}
+	for _, segment := range strings.Split(u.Path[1:], "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // validModelName requires a single opaque model token with no whitespace.

@@ -90,7 +90,7 @@ configuration, not a credential:
 - `seccomp_profile` — the absolute host path of the deployed seccomp profile. The Fleet reads and validates it and inlines it into the node's `HostConfig`; the host path never reaches the Docker API.
 - `apparmor_profile` — the loaded AppArmor profile name. Loading the profile is an operator step.
 - `egress_hosts` — exact `host:443` entries added to the sidecar's allowlist.
-- `anthropic_base_url` and `anthropic_model` — optional managed Claude endpoint override; empty keeps the provider default.
+- `anthropic_base_url` and `anthropic_model` — optional managed Claude endpoint override; the base URL may carry an optional path prefix such as `/api/plan`, and empty keeps the provider default.
 - `claude_env` — optional map of extra Claude Code variables for the managed child.
 - `provider_secret_files` — fixed target name to absolute host file, mounted read-only at `/run/secrets/<name>`.
 - `readonly_rootfs` — must be explicitly `true`.
