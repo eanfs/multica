@@ -950,6 +950,12 @@ func (h *Handler) mergeLegacyRuntimeTx(ctx context.Context, newRuntimeID, oldRun
 	defer tx.Rollback(fleetguard.RollbackContext(ctx))
 	qtx := h.Queries.WithTx(tx)
 	if err := fleetguard.CheckRuntimeMerge(ctx, qtx, "", oldRuntimeID, newRuntimeID); err != nil {
+		// A vanished target row is the fence refusing the merge, not a managed
+		// binding race to retry: the caller must keep the old runtime and its
+		// task history. Only a genuine binding change is retried whole.
+		if errors.Is(err, fleetguard.ErrRuntimeMissing) {
+			return errRuntimeMergeFenced
+		}
 		return err
 	}
 

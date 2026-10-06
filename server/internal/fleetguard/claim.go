@@ -18,6 +18,12 @@ import (
 // ErrBindingChanged requires rollback and retry of the WHOLE transaction.
 var ErrBindingChanged = errors.New("fleet runtime binding changed")
 
+// ErrRuntimeMissing reports that one of the runtime rows named by the caller no
+// longer exists. Unlike ErrBindingChanged this is not a managed binding race to
+// retry: the row is gone, so the operation is refused with the same fence
+// verdict the missing row would produce at reassignment time.
+var ErrRuntimeMissing = errors.New("fleet runtime row missing")
+
 func Managed(rt db.AgentRuntime) bool {
 	var meta map[string]json.RawMessage
 	if json.Unmarshal(rt.Metadata, &meta) != nil {
@@ -494,7 +500,7 @@ func CheckRuntimeMerge(ctx context.Context, q *db.Queries, namespace string, sou
 		return err
 	}
 	if len(locked) != 2 || len(candidates) != 2 {
-		return ErrBindingChanged
+		return ErrRuntimeMissing
 	}
 	old := map[pgtype.UUID]db.AgentRuntime{}
 	for _, rt := range candidates {
