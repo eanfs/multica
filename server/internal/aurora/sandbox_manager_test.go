@@ -230,6 +230,40 @@ func TestSandboxManagerConcurrentEnsureCreatesOneNode(t *testing.T) {
 	}
 }
 
+// TestSandboxManagerDoesNotAdoptUnconfirmedStartingNode pins the fail-closed
+// adoption gate: a starting node with a live enrollment but no Fleet backend id
+// is either mid-provision by another caller or abandoned, and neither is safe to
+// adopt. Ensure must not return success and must not call the Fleet, so the
+// handler's runtime-unavailable 503 leaves no reservation behind.
+func TestSandboxManagerDoesNotAdoptUnconfirmedStartingNode(t *testing.T) {
+	pool := auroraTestPool(t)
+	q := db.New(pool)
+	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
+	ctx := context.Background()
+
+	// A row exactly as arm() leaves it after committing: starting, one live
+	// single-use enrollment, and no backend id yet.
+	if _, err := q.CreateAuroraSandboxNode(ctx, sandboxNodeParams(t, ws, runtimeID, uuid.NewString())); err != nil {
+		t.Fatalf("create starting node: %v", err)
+	}
+
+	fleet := &fakeProvisioner{}
+	mgr := aurora.NewSandboxManager(q, pool, fleet, validSandboxImageDigest, nil)
+	if _, err := mgr.Ensure(ctx, ws, runtimeID); err == nil {
+		t.Fatal("Ensure adopted a starting node with no Fleet backend id")
+	}
+	if fleet.callCount() != 0 {
+		t.Fatalf("provisioner ensure calls = %d, want 0 for an unconfirmed starting node", fleet.callCount())
+	}
+
+	// The unconfirmed row is left for the arming caller or the fail-mark; the
+	// adopter must not have re-armed it with a competing secret.
+	stored := sandboxNodeByWorkspace(t, pool, ws)
+	if stored.State != "starting" || !stored.EnrollmentTokenHash.Valid || stored.BackendNodeID.Valid {
+		t.Fatalf("adopter mutated the unconfirmed node: %+v", stored)
+	}
+}
+
 // TestSandboxManagerMarksNodeFailedWhenFleetRejects pins rollback: a failed
 // provision leaves no live enrollment and records the node as failed with the
 // provisioner's error.

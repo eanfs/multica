@@ -144,22 +144,63 @@ func (m *SandboxManager) HandoffWorkspaceToFleet(ctx context.Context, workspaceI
 	return deleteFleetWorkspaceNode(ctx, m.queries, m.fleet, node)
 }
 
+// sandboxAdoptWait bounds how long a caller waits for a concurrent
+// provisioner's in-flight Fleet call to record its backend id before the caller
+// treats the row as abandoned and fails the request closed.
+const sandboxAdoptWait = 2 * time.Second
+
+// sandboxAdoptPoll is how often the waiting caller re-reads the node.
+const sandboxAdoptPoll = 20 * time.Millisecond
+
 // arm decides whether the existing node already satisfies the request and, when
-// it does not, arms a fresh enrollment. It returns the scrubbed node, the
-// locked runtime owner the Fleet call must carry, the raw secret (empty when no
-// new secret was minted), and whether the fleet must be called. The workspace
-// advisory lock is held for the whole decision, so concurrent callers cannot
-// both arm a node.
+// it does not, arms a fresh enrollment. A starting node with a live enrollment
+// but no backend id is a provision another caller owns and may still be
+// running; arm waits a bounded time for that caller to record the Fleet backend
+// id, then fails closed so the request never reserves credits for a node the
+// Fleet may never create.
 func (m *SandboxManager) arm(ctx context.Context, workspaceID, runtimeID pgtype.UUID) (sandboxArm, error) {
+	deadline := time.Now().Add(sandboxAdoptWait)
+	for {
+		armed, provisioning, err := m.armOnce(ctx, workspaceID, runtimeID)
+		if err != nil {
+			return sandboxArm{}, err
+		}
+		if !provisioning {
+			return armed, nil
+		}
+		if !time.Now().Before(deadline) {
+			return sandboxArm{}, fmt.Errorf(
+				"workspace %s sandbox is starting without a Fleet backend id; refusing to adopt an unconfirmed node",
+				util.UUIDToString(workspaceID))
+		}
+		timer := time.NewTimer(sandboxAdoptPoll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return sandboxArm{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// armOnce runs one decision under the per-workspace advisory lock. It returns
+// provisioning=true when the existing node is a starting node whose live
+// enrollment has not yet been confirmed by a Fleet backend id; the caller then
+// re-runs the decision after a short wait. Otherwise it returns the scrubbed
+// node, the locked runtime owner the Fleet call must carry, the raw secret
+// (empty when no new secret was minted), and whether the fleet must be called.
+// The workspace advisory lock is held for the whole decision, so concurrent
+// callers cannot both arm a node.
+func (m *SandboxManager) armOnce(ctx context.Context, workspaceID, runtimeID pgtype.UUID) (sandboxArm, bool, error) {
 	tx, err := m.tx.Begin(ctx)
 	if err != nil {
-		return sandboxArm{}, err
+		return sandboxArm{}, false, err
 	}
 	defer tx.Rollback(ctx)
 	qtx := m.queries.WithTx(tx)
 
 	if err := qtx.LockAuroraSandboxEnrollmentWorkspace(ctx, workspaceID); err != nil {
-		return sandboxArm{}, fmt.Errorf("lock workspace enrollment: %w", err)
+		return sandboxArm{}, false, fmt.Errorf("lock workspace enrollment: %w", err)
 	}
 	managed, err := qtx.GetAuroraManagedRuntime(ctx, db.GetAuroraManagedRuntimeParams{
 		WorkspaceID: workspaceID,
@@ -167,12 +208,12 @@ func (m *SandboxManager) arm(ctx context.Context, workspaceID, runtimeID pgtype.
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return sandboxArm{}, fmt.Errorf("workspace %s has no managed runtime", util.UUIDToString(workspaceID))
+			return sandboxArm{}, false, fmt.Errorf("workspace %s has no managed runtime", util.UUIDToString(workspaceID))
 		}
-		return sandboxArm{}, err
+		return sandboxArm{}, false, err
 	}
 	if managed.ID != runtimeID {
-		return sandboxArm{}, fmt.Errorf(
+		return sandboxArm{}, false, fmt.Errorf(
 			"runtime %s is not the workspace's managed runtime %s",
 			util.UUIDToString(runtimeID), util.UUIDToString(managed.ID))
 	}
@@ -181,21 +222,39 @@ func (m *SandboxManager) arm(ctx context.Context, workspaceID, runtimeID pgtype.
 	existing, err := qtx.LockAuroraSandboxNodeByWorkspace(ctx, workspaceID)
 	noRow := errors.Is(err, pgx.ErrNoRows)
 	if err != nil && !noRow {
-		return sandboxArm{}, err
+		return sandboxArm{}, false, err
 	}
-	if !noRow && m.reusable(existing, runtimeID) &&
-		(existing.State == "online" || m.freshStarting(existing)) {
-		// Already serving, or a live secret armed by another caller is still
-		// pending: adopt the row instead of calling the fleet again.
-		if err := tx.Commit(ctx); err != nil {
-			return sandboxArm{}, err
+	if !noRow && m.reusable(existing, runtimeID) {
+		// Already serving: adopt the row instead of calling the fleet again.
+		if existing.State == "online" {
+			if err := tx.Commit(ctx); err != nil {
+				return sandboxArm{}, false, err
+			}
+			return sandboxArm{node: scrubEnrollment(existing), ownerID: ownerID}, false, nil
 		}
-		return sandboxArm{node: scrubEnrollment(existing), ownerID: ownerID}, nil
+		if m.freshStarting(existing) {
+			// A starting node carries a live, unspent enrollment, but only a
+			// backend id proves the arming caller's Fleet call committed. The
+			// advisory lock is released before that call, so a second caller can
+			// see this row while the first is still provisioning (or after it
+			// died, since the fail-mark is best-effort). Adopting an unconfirmed
+			// row would reserve credits for a node the Fleet may never create;
+			// report it to the caller so it waits, then fails closed.
+			if !existing.BackendNodeID.Valid {
+				return sandboxArm{}, true, nil
+			}
+			// The arming caller's Fleet call committed a backend id; the live
+			// secret is still pending, so adopt the row.
+			if err := tx.Commit(ctx); err != nil {
+				return sandboxArm{}, false, err
+			}
+			return sandboxArm{node: scrubEnrollment(existing), ownerID: ownerID}, false, nil
+		}
 	}
 
 	raw, err := auth.GenerateManagedEnrollmentToken()
 	if err != nil {
-		return sandboxArm{}, err
+		return sandboxArm{}, false, err
 	}
 	expiresAt := m.now().Add(enrollmentTokenTTL)
 	hash := pgtype.Text{String: auth.HashToken(raw), Valid: true}
@@ -215,7 +274,7 @@ func (m *SandboxManager) arm(ctx context.Context, workspaceID, runtimeID pgtype.
 			EnrollmentExpiresAt: expiry,
 		})
 		if err != nil {
-			return sandboxArm{}, fmt.Errorf("create sandbox node: %w", err)
+			return sandboxArm{}, false, fmt.Errorf("create sandbox node: %w", err)
 		}
 	} else {
 		// Stopped, failed, stale-starting, or derived from another runtime or
@@ -229,14 +288,14 @@ func (m *SandboxManager) arm(ctx context.Context, workspaceID, runtimeID pgtype.
 			EnrollmentExpiresAt: expiry,
 		})
 		if err != nil {
-			return sandboxArm{}, fmt.Errorf("re-arm sandbox node: %w", err)
+			return sandboxArm{}, false, fmt.Errorf("re-arm sandbox node: %w", err)
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return sandboxArm{}, err
+		return sandboxArm{}, false, err
 	}
-	return sandboxArm{node: scrubEnrollment(node), ownerID: ownerID, token: raw, needFleet: true}, nil
+	return sandboxArm{node: scrubEnrollment(node), ownerID: ownerID, token: raw, needFleet: true}, false, nil
 }
 
 // reusable reports whether the node is bound to the requested runtime and was
