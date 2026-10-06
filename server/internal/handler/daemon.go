@@ -3515,6 +3515,28 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 			resp.QuickCreatePriority = qc.Priority
 			resp.QuickCreateDueDate = qc.DueDate
 			resp.QuickCreateAttachmentIDs = append([]string(nil), qc.AttachmentIDs...)
+			// An Aurora system-agent task must carry the real generation id:
+			// the daemon writes it into the broker context and never falls
+			// back to the task id. The row is keyed by this task, and the
+			// enqueue path writes task_id just after the task becomes
+			// claimable, so a miss is preserved for redelivery (the next claim
+			// resolves it) rather than settled as an impossible task.
+			if resp.Agent != nil && strings.HasPrefix(resp.Agent.SystemKey, "aurora:") {
+				generation, genErr := h.Queries.GetAuroraGenerationByTaskID(r.Context(), task.ID)
+				if genErr != nil {
+					slog.Warn("quick-create claim: aurora generation lookup failed; preserving task for redelivery",
+						"task_id", uuidToString(task.ID), "error", genErr)
+					if _, requeueErr := h.TaskService.RequeueTaskAfterClaimFailure(r.Context(), *task); requeueErr != nil {
+						slog.Error("quick-create claim: requeue after aurora generation lookup failed",
+							"task_id", uuidToString(task.ID), "error", requeueErr)
+					}
+					return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount, &claimBuildFailure{
+						outcome: "error_aurora_generation", status: http.StatusInternalServerError,
+						message: "failed to resolve the aurora generation for the claimed task",
+					}
+				}
+				resp.GenerationID = uuidToString(generation.ID)
+			}
 			resp.ThreadName = qc.Prompt
 			resp.WorkspaceID = qc.WorkspaceID
 			if failure := h.rejectClaimOnWorkspaceMismatch(r.Context(), task, resp.WorkspaceID, runtimeID, runtimeWorkspaceID, true); failure != nil {

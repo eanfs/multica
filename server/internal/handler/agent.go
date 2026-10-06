@@ -365,6 +365,7 @@ type AgentTaskResponse struct {
 	ID                   string                 `json:"id"`
 	AgentID              string                 `json:"agent_id"`
 	RuntimeID            string                 `json:"runtime_id"`
+	GenerationID         string                 `json:"generation_id,omitempty"` // Aurora generation named in the broker task context; empty on non-Aurora claims
 	IssueID              string                 `json:"issue_id"`
 	WorkspaceID          string                 `json:"workspace_id"`
 	WorkspaceSlug        string                 `json:"workspace_slug,omitempty"`

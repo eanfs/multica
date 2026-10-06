@@ -12,11 +12,13 @@ package daemon
 // Claude may call.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/multica-ai/multica/server/internal/aurora"
@@ -51,7 +53,87 @@ const (
 
 	auroraBrokerContextSchema  = "com.multica.aurora.task-context"
 	auroraBrokerContextVersion = 1
+
+	// auroraBrokerServerName is the mcpServers key the daemon injects. Claude
+	// Code qualifies every MCP tool as mcp__<server>__<tool>, so the reviewed
+	// allowlist in ExecOptions.AllowedTools must use this exact server segment.
+	auroraBrokerServerName = "aurora"
 )
+
+// auroraBrokerAttachmentType is the broker's exact extension -> (MIME, kind)
+// contract from deploy/aurora-sandbox/runtime/src/policy.mjs (KIND_TYPES). A
+// staged file only passes the broker's classifyAttachment when its extension
+// and the declared mime_type are one of these pairs, so the daemon derives the
+// relative path extension from this table and never trusts the uploader's
+// content type for the pair.
+type auroraBrokerAttachmentType struct {
+	mimeType string
+	kind     aurora.AttachmentKind
+}
+
+var auroraBrokerAttachmentTypes = map[string]auroraBrokerAttachmentType{
+	".png":      {"image/png", aurora.AttachmentImage},
+	".jpg":      {"image/jpeg", aurora.AttachmentImage},
+	".jpeg":     {"image/jpeg", aurora.AttachmentImage},
+	".txt":      {"text/plain", aurora.AttachmentDocument},
+	".md":       {"text/markdown", aurora.AttachmentDocument},
+	".markdown": {"text/markdown", aurora.AttachmentDocument},
+	".pdf":      {"application/pdf", aurora.AttachmentDocument},
+	".docx":     {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", aurora.AttachmentDocument},
+	".wav":      {"audio/wav", aurora.AttachmentAudio},
+	".mp3":      {"audio/mpeg", aurora.AttachmentAudio},
+	".ogg":      {"audio/ogg", aurora.AttachmentAudio},
+	".opus":     {"audio/opus", aurora.AttachmentAudio},
+	".mp4":      {"video/mp4", aurora.AttachmentVideo},
+	".mov":      {"video/quicktime", aurora.AttachmentVideo},
+	".webm":     {"video/webm", aurora.AttachmentVideo},
+}
+
+// auroraBrokerAttachmentMaxBytes mirrors policy.mjs kindLimit: the per-kind cap
+// the broker enforces on the declared size_bytes.
+func auroraBrokerAttachmentMaxBytes(kind aurora.AttachmentKind) (int64, bool) {
+	switch kind {
+	case aurora.AttachmentImage:
+		return 25 << 20, true
+	case aurora.AttachmentDocument:
+		return 25 << 20, true
+	case aurora.AttachmentAudio:
+		return 100 << 20, true
+	case aurora.AttachmentVideo:
+		return 100 << 20, true
+	default:
+		return 0, false
+	}
+}
+
+// auroraBrokerAttachment is one entry of the broker context's attachments map.
+// Its JSON shape is exactly the broker's ATTACHMENT_FIELDS contract; adding a
+// field would make loadTaskContext reject the whole context.
+type auroraBrokerAttachment struct {
+	RelativePath string `json:"relative_path"`
+	MIMEType     string `json:"mime_type"`
+	SizeBytes    int64  `json:"size_bytes"`
+}
+
+// auroraBrokerMCPToolName maps a broker tool method to the identifier Claude
+// Code accepts in --allowedTools. The Claude CLI names MCP tools
+// mcp__<server>__<tool>: its tool-name validator is
+// ^mcp__[\w-]+(?:__(?:[\w.-]+|\*))?$ (Claude Code 2.1.282), the second
+// segment allows the broker's dotted method names, and the server segment is
+// the mcpServers key above.
+func auroraBrokerMCPToolName(method string) string {
+	return "mcp__" + auroraBrokerServerName + "__" + method
+}
+
+// auroraBrokerInputRootPath is the root the daemon stages inputs in and names
+// in AURORA_INPUT_ROOT. Production uses the fixed broker default; a test may
+// point it at a temp dir so the default suite never writes /workspace.
+func (d *Daemon) auroraBrokerInputRootPath() string {
+	if root := strings.TrimSpace(d.auroraInputRoot); root != "" {
+		return root
+	}
+	return auroraSandboxInputRoot
+}
 
 // errAuroraBrokerContextInvalid is returned when an Aurora task cannot produce
 // the broker's bounded context. runTask returns it before launch, so the task
@@ -121,7 +203,7 @@ func auroraBrokerMcpConfig(bc auroraBrokerContext) (json.RawMessage, error) {
 	}
 
 	cfg := auroraBrokerMcpConfigFile{McpServers: map[string]auroraBrokerServerConfig{
-		"aurora": {
+		auroraBrokerServerName: {
 			Command: "node",
 			Args:    []string{auroraBrokerEntrypoint},
 			// Exactly the compiled broker env allowlist. Adding any other key
@@ -147,23 +229,24 @@ func auroraBrokerMcpConfig(bc auroraBrokerContext) (json.RawMessage, error) {
 	return raw, nil
 }
 
-// writeAuroraBrokerContext writes the broker's mode-0400 context JSON and the
-// mode-0400 task token under env.WorkDir, then returns the resolved context the
-// MCP config is built from. It is fail-closed: every missing or non-UUID
-// identity, absent token, or unknown skill is an error the caller turns into a
-// task failure (the existing refund path).
+// writeAuroraBrokerContext stages the task's inputs into the broker input root,
+// writes the broker's mode-0400 context JSON and the mode-0400 task token under
+// env.WorkDir, then returns the resolved context the MCP config is built from.
+// It is fail-closed: every missing or non-UUID identity, absent token, unknown
+// skill, or unstaged attachment is an error the caller turns into a task
+// failure (the existing refund path), so the broker is never handed a context
+// its own loadTaskContext would reject.
 //
-// generation_id: the claim endpoint does not yet forward the Aurora generation
-// id, and the daemon cannot reach the database. The server resolves the real
-// generation from the task id on every task-token call, so the task id is the
-// only stable UUID available here; it is written as an opaque identity the
-// broker validates, never used to authorize anything.
-func (d *Daemon) writeAuroraBrokerContext(task Task, env execenv.Environment) (auroraBrokerContext, error) {
+// generation_id is the real Aurora generation id the claim payload carries. It
+// is never replaced with the task id: Aurora's completion and artifact routes
+// key on the generation, so a placeholder would make the context lie.
+func (d *Daemon) writeAuroraBrokerContext(ctx context.Context, task Task, env execenv.Environment) (auroraBrokerContext, error) {
 	skillID, ok := auroraSkillID(task)
 	if !ok {
 		return auroraBrokerContext{}, fmt.Errorf("%w: no trusted skill id", errAuroraBrokerContextInvalid)
 	}
-	if _, ok := aurora.ExecutionPolicy(skillID); !ok {
+	policy, ok := aurora.ExecutionPolicy(skillID)
+	if !ok {
 		return auroraBrokerContext{}, fmt.Errorf("%w: skill %q is not executable", errAuroraBrokerContextInvalid, skillID)
 	}
 	workDir := strings.TrimSpace(env.WorkDir)
@@ -186,17 +269,22 @@ func (d *Daemon) writeAuroraBrokerContext(task Task, env execenv.Environment) (a
 	if err != nil {
 		return auroraBrokerContext{}, err
 	}
-	generationID := strings.TrimSpace(task.GenerationID)
-	if generationID == "" {
-		generationID = taskID
+	if strings.TrimSpace(task.GenerationID) == "" {
+		return auroraBrokerContext{}, fmt.Errorf("%w: task generation id is required", errAuroraBrokerContextInvalid)
 	}
-	generationID, err = auroraBrokerUUID(generationID, "generation id")
+	generationID, err := auroraBrokerUUID(task.GenerationID, "generation id")
 	if err != nil {
 		return auroraBrokerContext{}, err
 	}
 	prompt := task.QuickCreatePrompt
 	if strings.TrimSpace(prompt) == "" {
 		return auroraBrokerContext{}, fmt.Errorf("%w: task prompt is required", errAuroraBrokerContextInvalid)
+	}
+
+	inputRoot := d.auroraBrokerInputRootPath()
+	attachments, err := d.stageAuroraBrokerAttachments(ctx, task, policy, inputRoot)
+	if err != nil {
+		return auroraBrokerContext{}, err
 	}
 
 	stateDir := filepath.Join(workDir, filepath.FromSlash(auroraBrokerStateRelDir))
@@ -231,7 +319,7 @@ func (d *Daemon) writeAuroraBrokerContext(task Task, env execenv.Environment) (a
 		"workspace_id":    workspaceID,
 		"skill_id":        skillID,
 		"prompt":          prompt,
-		"attachments":     map[string]any{},
+		"attachments":     attachments,
 		"output_root":     auroraSandboxOutputRoot,
 		"server_origin":   serverOrigin,
 		"task_token_file": tokenPath,
@@ -254,7 +342,7 @@ func (d *Daemon) writeAuroraBrokerContext(task Task, env execenv.Environment) (a
 		GenerationID:   generationID,
 		WorkspaceID:    workspaceID,
 		Prompt:         prompt,
-		InputRoot:      auroraSandboxInputRoot,
+		InputRoot:      inputRoot,
 		OutputRoot:     auroraSandboxOutputRoot,
 		ContextPath:    contextPath,
 		TaskTokenPath:  tokenPath,
@@ -273,4 +361,145 @@ func auroraBrokerUUID(value, label string) (string, error) {
 		return "", fmt.Errorf("%w: %s is not a UUID", errAuroraBrokerContextInvalid, label)
 	}
 	return util.UUIDToString(parsed), nil
+}
+
+// stagedAttachment is one attachment the daemon has already classified and
+// written, kept only so the skill-policy check runs over the exact facts the
+// broker will read.
+type stagedAttachment struct {
+	kind aurora.AttachmentKind
+	size int64
+}
+
+// stageAuroraBrokerAttachments downloads every quick-create attachment into the
+// broker input root and returns the exact attachments map loadTaskContext
+// accepts. It fails closed on any gap — an unresolvable id, a filename outside
+// the broker's extension table, a download error, an over-cap file, or a set
+// the skill's attachment policy rejects — so runTask aborts before launch
+// instead of handing the broker a context it will refuse.
+func (d *Daemon) stageAuroraBrokerAttachments(ctx context.Context, task Task, policy aurora.SkillExecutionPolicy, inputRoot string) (map[string]auroraBrokerAttachment, error) {
+	requested := task.QuickCreateAttachmentIDs
+	attachments := make(map[string]auroraBrokerAttachment, len(requested))
+	staged := make([]stagedAttachment, 0, len(requested))
+	if len(requested) == 0 {
+		if err := validateAuroraBrokerAttachmentPolicy(policy, staged); err != nil {
+			return nil, fmt.Errorf("%w: %v", errAuroraBrokerContextInvalid, err)
+		}
+		return attachments, nil
+	}
+	if d.client == nil {
+		return nil, fmt.Errorf("%w: attachment staging requires the daemon client", errAuroraBrokerContextInvalid)
+	}
+
+	token := strings.TrimSpace(task.AuthToken)
+	if err := os.MkdirAll(inputRoot, 0o700); err != nil {
+		return nil, fmt.Errorf("%w: create broker input root: %v", errAuroraBrokerContextInvalid, err)
+	}
+
+	for _, raw := range requested {
+		id, err := auroraBrokerUUID(raw, "attachment id")
+		if err != nil {
+			return nil, err
+		}
+		if _, duplicate := attachments[id]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate attachment id %s", errAuroraBrokerContextInvalid, id)
+		}
+		meta, err := d.client.GetAuroraAttachment(ctx, token, id)
+		if err != nil {
+			return nil, fmt.Errorf("%w: load attachment %s: %v", errAuroraBrokerContextInvalid, id, err)
+		}
+		extension := strings.ToLower(filepath.Ext(strings.TrimSpace(meta.Filename)))
+		format, ok := auroraBrokerAttachmentTypes[extension]
+		if !ok {
+			return nil, fmt.Errorf("%w: attachment %s has an unsupported extension %q", errAuroraBrokerContextInvalid, id, extension)
+		}
+		maxBytes, ok := auroraBrokerAttachmentMaxBytes(format.kind)
+		if !ok {
+			return nil, fmt.Errorf("%w: attachment %s has an unsupported kind", errAuroraBrokerContextInvalid, id)
+		}
+		if meta.SizeBytes > maxBytes {
+			return nil, fmt.Errorf("%w: attachment %s exceeds the broker size cap", errAuroraBrokerContextInvalid, id)
+		}
+		data, err := d.client.DownloadAuroraAttachment(ctx, token, meta.DownloadURL, maxBytes)
+		if err != nil {
+			return nil, fmt.Errorf("%w: download attachment %s: %v", errAuroraBrokerContextInvalid, id, err)
+		}
+		if len(data) == 0 {
+			return nil, fmt.Errorf("%w: attachment %s staged empty", errAuroraBrokerContextInvalid, id)
+		}
+		if int64(len(data)) > maxBytes {
+			return nil, fmt.Errorf("%w: attachment %s exceeds the broker size cap", errAuroraBrokerContextInvalid, id)
+		}
+
+		// The id is a canonical UUID and the extension comes from the compiled
+		// table above, so the relative path is daemon-owned; the containment
+		// check is the defensive assertion that the broker's own path rule
+		// cannot fail.
+		relative := id + extension
+		target := filepath.Join(inputRoot, relative)
+		if filepath.Dir(target) != filepath.Clean(inputRoot) {
+			return nil, fmt.Errorf("%w: attachment %s path escapes the input root", errAuroraBrokerContextInvalid, id)
+		}
+		if err := writeAuroraInputFile(target, data); err != nil {
+			return nil, fmt.Errorf("%w: stage attachment %s: %v", errAuroraBrokerContextInvalid, id, err)
+		}
+		attachments[id] = auroraBrokerAttachment{
+			RelativePath: relative,
+			MIMEType:     format.mimeType,
+			SizeBytes:    int64(len(data)),
+		}
+		staged = append(staged, stagedAttachment{kind: format.kind, size: int64(len(data))})
+	}
+
+	if err := validateAuroraBrokerAttachmentPolicy(policy, staged); err != nil {
+		return nil, fmt.Errorf("%w: %v", errAuroraBrokerContextInvalid, err)
+	}
+	return attachments, nil
+}
+
+// writeAuroraInputFile replaces any leftover input with the exact 0600 bytes.
+// A prior task's run under a reused input root must never survive as a
+// same-named file the broker would read.
+func writeAuroraInputFile(path string, data []byte) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
+// validateAuroraBrokerAttachmentPolicy mirrors aurora.ValidateSkillInputs over
+// the daemon's staged facts: every staged kind must belong to a constraint,
+// every constraint's min/max must hold, and the per-constraint byte cap must not
+// be exceeded. The daemon cannot read the attachment rows, so it re-derives the
+// same decision from what it actually staged.
+func validateAuroraBrokerAttachmentPolicy(policy aurora.SkillExecutionPolicy, staged []stagedAttachment) error {
+	counts := make([]int, len(policy.Attachments))
+	for _, file := range staged {
+		index := -1
+		for j, constraint := range policy.Attachments {
+			if slices.Contains(constraint.Kinds, file.kind) {
+				index = j
+				break
+			}
+		}
+		if index < 0 {
+			return fmt.Errorf("%s files are not accepted by %s", file.kind, policy.SkillID)
+		}
+		if max := policy.Attachments[index].MaxBytes; max > 0 && file.size > max {
+			return fmt.Errorf("attachment exceeds the %d byte cap for %s", max, policy.SkillID)
+		}
+		counts[index]++
+	}
+	for i, constraint := range policy.Attachments {
+		if counts[i] < constraint.Min {
+			return fmt.Errorf("%s requires at least %d %s file(s), got %d", policy.SkillID, constraint.Min, constraint.Kinds, counts[i])
+		}
+		if counts[i] > constraint.Max {
+			return fmt.Errorf("%s accepts at most %d %s file(s), got %d", policy.SkillID, constraint.Max, constraint.Kinds, counts[i])
+		}
+	}
+	return nil
 }

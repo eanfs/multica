@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/aurora"
@@ -208,8 +209,12 @@ func TestAuroraSurfaceDeniesGeneralPurposeTools(t *testing.T) {
 		if !ok {
 			t.Fatalf("ExecutionPolicy(%q) not found", skill)
 		}
-		if !slices.Equal(surface.allowed, policy.RequiredTools) {
-			t.Errorf("surface allowed = %v, want the policy tools %v", surface.allowed, policy.RequiredTools)
+		wantAllowed := make([]string, 0, len(policy.RequiredTools))
+		for _, method := range policy.RequiredTools {
+			wantAllowed = append(wantAllowed, auroraBrokerMCPToolName(method))
+		}
+		if !slices.Equal(surface.allowed, wantAllowed) {
+			t.Errorf("surface allowed = %v, want the Claude MCP identifiers %v", surface.allowed, wantAllowed)
 		}
 		for _, denied := range generalPurpose {
 			if !slices.Contains(surface.disallowed, denied) {
@@ -228,6 +233,30 @@ func TestAuroraSurfaceDeniesGeneralPurposeTools(t *testing.T) {
 	}
 	if _, err := auroraToolSurface(auroraTaskForSkill(""), "claude"); err == nil {
 		t.Fatal("missing Aurora skill must fail closed")
+	}
+}
+
+// TestAuroraSurfaceUsesClaudeMCPIdentifiers pins the exact identifier list for
+// a multi-tool skill: Claude Code addresses MCP tools as mcp__<server>__<tool>,
+// so the broker's dotted methods travel under the "aurora" server segment.
+func TestAuroraSurfaceUsesClaudeMCPIdentifiers(t *testing.T) {
+	t.Parallel()
+
+	surface, err := auroraToolSurface(auroraTaskForSkill("video-captions"), "claude")
+	if err != nil {
+		t.Fatalf("auroraToolSurface: %v", err)
+	}
+	want := []string{
+		"mcp__aurora__aurora.volc_asr_transcribe",
+		"mcp__aurora__aurora.render_video_captions",
+	}
+	if !slices.Equal(surface.allowed, want) {
+		t.Fatalf("surface allowed = %v, want %v", surface.allowed, want)
+	}
+	for _, allowed := range surface.allowed {
+		if !strings.HasPrefix(allowed, "mcp__aurora__") {
+			t.Fatalf("allowed tool %q is not a Claude MCP identifier", allowed)
+		}
 	}
 }
 

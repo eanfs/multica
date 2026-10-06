@@ -355,6 +355,7 @@ func TestAuroraManagedDaemonEnrollsClaimsAndCompletesWithFakeClaude(t *testing.T
 	runtimeID := uuidToString(runtimeUUID)
 
 	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM aurora_generation WHERE workspace_id = $1`, workspaceID)
 		testPool.Exec(ctx, `DELETE FROM daemon_token WHERE workspace_id = $1`, workspaceID)
 		testPool.Exec(ctx, `DELETE FROM aurora_sandbox_node WHERE workspace_id = $1`, workspaceID)
 		testPool.Exec(ctx, `DELETE FROM task_token WHERE task_id IN (SELECT id FROM agent_task_queue WHERE agent_id IN (SELECT id FROM agent WHERE workspace_id = $1))`, workspaceID)
@@ -381,6 +382,15 @@ func TestAuroraManagedDaemonEnrollsClaimsAndCompletesWithFakeClaude(t *testing.T
 	taskID := uuidToString(task.ID)
 	if task.RuntimeID != runtimeUUID {
 		t.Fatalf("quick-create task runtime = %s, want managed runtime %s", uuidToString(task.RuntimeID), runtimeID)
+	}
+	// The claim payload resolves the real generation id from this row and the
+	// daemon fails an Aurora task whose generation id is empty, so the fixture
+	// must carry the generation the production create path would have written.
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO aurora_generation (workspace_id, user_id, skill_id, prompt, status, task_id)
+		VALUES ($1, $2, 'poster', $3, 'queued', $4)
+	`, workspaceID, ownerID, "A poster of a lighthouse at dusk", taskID); err != nil {
+		t.Fatalf("seed aurora generation: %v", err)
 	}
 
 	// Issue the single-use enrollment secret through the real service and stage

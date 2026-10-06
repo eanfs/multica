@@ -355,19 +355,23 @@ func TestBuildClaudeArgsUsesStrictMCPForManagedConfig(t *testing.T) {
 func TestBuildClaudeArgsAllowsReviewedTools(t *testing.T) {
 	t.Parallel()
 
-	args := buildClaudeArgs(ExecOptions{
-		AllowedTools: []string{"aurora.seedream_generate", "aurora.write_text_artifact"},
-	}, slog.Default())
+	allowed := []string{
+		"mcp__aurora__aurora.seedream_generate",
+		"mcp__aurora__aurora.write_text_artifact",
+	}
+	args := buildClaudeArgs(ExecOptions{AllowedTools: allowed}, slog.Default())
 
 	idx := slices.Index(args, "--allowedTools")
 	if idx < 0 || idx+1 >= len(args) {
 		t.Fatalf("expected --allowedTools in args: %v", args)
 	}
-	joined := args[idx+1]
-	for _, want := range []string{"aurora.seedream_generate", "aurora.write_text_artifact"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("expected %q in --allowedTools %q", want, joined)
-		}
+	// One comma-joined value, exactly the reviewed identifiers: the flag must
+	// not repeat and the Claude MCP prefix must survive verbatim.
+	if got := args[idx+1]; got != strings.Join(allowed, ",") {
+		t.Fatalf("--allowedTools = %q, want %q", got, strings.Join(allowed, ","))
+	}
+	if count := strings.Count(strings.Join(args, " "), "--allowedTools"); count != 1 {
+		t.Fatalf("--allowedTools appears %d times in %v, want once", count, args)
 	}
 }
 

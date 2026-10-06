@@ -345,6 +345,61 @@ func TestCreateAuroraGenerationAttachmentIDsReachEnqueue(t *testing.T) {
 	}
 }
 
+// TestAuroraGenerationIDReachesClaimPayload proves the claim response carries
+// the real generation id: the daemon writes it into the broker context and
+// refuses to substitute the task id, so the protocol must supply it.
+func TestAuroraGenerationIDReachesClaimPayload(t *testing.T) {
+	creditTestReset(t)
+	cleanupAuroraSystemAgents(t)
+	ctx := context.Background()
+	user := parseUUID(testUserID)
+	ws := parseUUID(testWorkspaceID)
+
+	if err := testHandler.Credit.Grant(ctx, user, ws, 1_000_000_000, aurora.LedgerKindAdjustment, creditRef("seed")); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
+	req := newRequest(http.MethodPost, "/api/aurora/generations", map[string]any{
+		"skillId": "text-image",
+		"prompt":  "a claim regression",
+	})
+	out := testutil.Decode[struct {
+		Generation struct {
+			ID string `json:"id"`
+		} `json:"generation"`
+	}](t, testHandler.CreateAuroraGeneration, req, http.StatusCreated)
+	generationID := out.Generation.ID
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = (SELECT task_id FROM aurora_generation WHERE id = $1)`, generationID)
+		testPool.Exec(context.Background(), `DELETE FROM aurora_generation WHERE id = $1`, generationID)
+	})
+
+	var taskID pgtype.UUID
+	if err := testPool.QueryRow(ctx, `SELECT task_id FROM aurora_generation WHERE id = $1`, generationID).Scan(&taskID); err != nil {
+		t.Fatalf("load generation task id: %v", err)
+	}
+	if !taskID.Valid {
+		t.Fatal("generation has no task id")
+	}
+	task, err := testHandler.Queries.GetAgentTask(ctx, taskID)
+	if err != nil {
+		t.Fatalf("load task: %v", err)
+	}
+	runtime, err := testHandler.Queries.GetAgentRuntime(ctx, task.RuntimeID)
+	if err != nil {
+		t.Fatalf("load runtime: %v", err)
+	}
+
+	claimReq := newRequest(http.MethodPost, "/api/claim", nil)
+	resp, _, _, _, _, failure := testHandler.buildClaimedTaskResponse(claimReq, &task, runtime, uuidToString(task.RuntimeID), testWorkspaceID)
+	if failure != nil {
+		t.Fatalf("buildClaimedTaskResponse: %+v", failure)
+	}
+	if resp.GenerationID != generationID {
+		t.Fatalf("claim generation_id = %q, want %q", resp.GenerationID, generationID)
+	}
+}
+
 // TestCreateAuroraGenerationAttachmentRejectedBeforeReserve proves a bad
 // attachment fails the request before the sandbox is ensured, a generation row
 // is written, or any credit is reserved.

@@ -25,6 +25,7 @@ const (
 	auroraBrokerTestWorkspaceID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 	auroraBrokerTestAgentID     = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 	auroraBrokerTestSkill       = "text-image"
+	auroraBrokerTestImageID     = "11111111-1111-4111-8111-111111111111"
 )
 
 func auroraBrokerTestTask() Task {
@@ -46,7 +47,34 @@ func auroraBrokerTestTask() Task {
 	}
 }
 
+// auroraBrokerTestTaskForSkill builds the same trusted task shape for another
+// reviewed skill, optionally naming quick-create attachments.
+func auroraBrokerTestTaskForSkill(skillID string, attachmentIDs ...string) Task {
+	task := auroraBrokerTestTask()
+	task.Agent.SystemKey = "aurora:" + skillID
+	task.QuickCreateAttachmentIDs = append([]string(nil), attachmentIDs...)
+	return task
+}
+
+// auroraBrokerTestFile is one attachment the fake server can serve. sizeOverride
+// lets a case exercise the broker cap without allocating the whole object.
+type auroraBrokerTestFile struct {
+	filename     string
+	contentType  string
+	blob         []byte
+	missing      bool
+	sizeOverride int64
+}
+
 func newAuroraBrokerTestDaemon(t *testing.T) (*Daemon, string, string, func()) {
+	return newAuroraBrokerTestDaemonWithAttachments(t, nil)
+}
+
+// newAuroraBrokerTestDaemonWithAttachments is newAuroraBrokerTestDaemon plus a
+// fake task-token attachment surface: GET /api/attachments/{id} returns the
+// metadata and /blob/{id} the bytes, matching the real relative download_url
+// shape the daemon resolves against its client base URL.
+func newAuroraBrokerTestDaemonWithAttachments(t *testing.T, files map[string]auroraBrokerTestFile) (*Daemon, string, string, func()) {
 	t.Helper()
 
 	testDir := t.TempDir()
@@ -70,8 +98,37 @@ func newAuroraBrokerTestDaemon(t *testing.T) (*Daemon, string, string, func()) {
 		"echo '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"done\"}'\n"
 	writeTestExecutable(t, fakeBin, []byte(script))
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("{}"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/attachments/"):
+			id := strings.TrimPrefix(r.URL.Path, "/api/attachments/")
+			file, ok := files[id]
+			if !ok || file.missing {
+				http.NotFound(w, r)
+				return
+			}
+			size := int64(len(file.blob))
+			if file.sizeOverride > 0 {
+				size = file.sizeOverride
+			}
+			_ = json.NewEncoder(w).Encode(auroraAttachmentMetadata{
+				ID:          id,
+				Filename:    file.filename,
+				ContentType: file.contentType,
+				SizeBytes:   size,
+				DownloadURL: "/blob/" + id,
+			})
+		case strings.HasPrefix(r.URL.Path, "/blob/"):
+			id := strings.TrimPrefix(r.URL.Path, "/blob/")
+			file, ok := files[id]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write(file.blob)
+		default:
+			_, _ = w.Write([]byte("{}"))
+		}
 	}))
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -214,7 +271,7 @@ func TestWriteAuroraBrokerContextWritesOwnerOnlyFiles(t *testing.T) {
 	d := &Daemon{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), cfg: Config{ServerBaseURL: "https://api.aurora.example.test"}}
 	workDir := t.TempDir()
 
-	bc, err := d.writeAuroraBrokerContext(auroraBrokerTestTask(), execenv.Environment{WorkDir: workDir})
+	bc, err := d.writeAuroraBrokerContext(context.Background(), auroraBrokerTestTask(), execenv.Environment{WorkDir: workDir})
 	if err != nil {
 		t.Fatalf("writeAuroraBrokerContext: %v", err)
 	}
@@ -287,22 +344,26 @@ func TestWriteAuroraBrokerContextWritesOwnerOnlyFiles(t *testing.T) {
 	}
 }
 
-// TestWriteAuroraBrokerContextFallsBackToTaskIDForGeneration pins the interim
-// generation identity: the claim endpoint does not yet forward it, so the daemon
-// writes the task id (the server resolves the real generation from the task on
-// every task-token call). The value is still a validated UUID.
-func TestWriteAuroraBrokerContextFallsBackToTaskIDForGeneration(t *testing.T) {
+// TestWriteAuroraBrokerContextRequiresGenerationID pins the contract field: the
+// real Aurora generation id must be forwarded, and the task id is never a
+// stand-in, because the completion and artifact routes key on the generation.
+func TestWriteAuroraBrokerContextRequiresGenerationID(t *testing.T) {
 	t.Parallel()
 
 	d := &Daemon{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), cfg: Config{ServerBaseURL: "https://api.aurora.example.test"}}
 	task := auroraBrokerTestTask()
 	task.GenerationID = ""
-	bc, err := d.writeAuroraBrokerContext(task, execenv.Environment{WorkDir: t.TempDir()})
+	if _, err := d.writeAuroraBrokerContext(context.Background(), task, execenv.Environment{WorkDir: t.TempDir()}); err == nil {
+		t.Fatal("writeAuroraBrokerContext with an empty generation id succeeded, want fail-closed error")
+	}
+
+	task.GenerationID = auroraBrokerTestGeneration
+	bc, err := d.writeAuroraBrokerContext(context.Background(), task, execenv.Environment{WorkDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("writeAuroraBrokerContext: %v", err)
 	}
-	if bc.GenerationID != auroraBrokerTestTaskID {
-		t.Fatalf("GenerationID = %q, want the task id fallback %q", bc.GenerationID, auroraBrokerTestTaskID)
+	if bc.GenerationID != auroraBrokerTestGeneration {
+		t.Fatalf("GenerationID = %q, want %q", bc.GenerationID, auroraBrokerTestGeneration)
 	}
 }
 
@@ -321,6 +382,7 @@ func TestWriteAuroraBrokerContextFailsClosed(t *testing.T) {
 		{"missing skill key", func(_ *Daemon, task *Task, _ *execenv.Environment) { task.Agent.SystemKey = "" }},
 		{"unknown skill", func(_ *Daemon, task *Task, _ *execenv.Environment) { task.Agent.SystemKey = "aurora:not-a-skill" }},
 		{"missing server origin", func(d *Daemon, _ *Task, _ *execenv.Environment) { d.cfg.ServerBaseURL = "" }},
+		{"missing generation id", func(_ *Daemon, task *Task, _ *execenv.Environment) { task.GenerationID = "" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -329,7 +391,7 @@ func TestWriteAuroraBrokerContextFailsClosed(t *testing.T) {
 			task := auroraBrokerTestTask()
 			env := execenv.Environment{WorkDir: t.TempDir()}
 			tc.mutate(d, &task, &env)
-			if _, err := d.writeAuroraBrokerContext(task, env); err == nil {
+			if _, err := d.writeAuroraBrokerContext(context.Background(), task, env); err == nil {
 				t.Fatalf("writeAuroraBrokerContext(%s) succeeded, want fail-closed error", tc.name)
 			}
 		})
@@ -365,8 +427,13 @@ func TestAuroraBrokerRunTaskInjectsSurface(t *testing.T) {
 		t.Fatalf("argv missing --allowedTools:\n%s", args)
 	}
 	atIdx := slices.Index(lines, "--allowedTools")
-	if atIdx+1 >= len(lines) || !strings.Contains(lines[atIdx+1], "aurora.seedream_generate") {
-		t.Fatalf("--allowedTools = %v, want the reviewed aurora tool", lines)
+	if atIdx+1 >= len(lines) {
+		t.Fatalf("--allowedTools has no value:\n%s", args)
+	}
+	// Claude Code addresses MCP tools as mcp__<server>__<tool>; a bare broker
+	// method name approves nothing, so the exact identifier is load-bearing.
+	if want := auroraBrokerMCPToolName("aurora.seedream_generate"); lines[atIdx+1] != want {
+		t.Fatalf("--allowedTools = %q, want exactly %q", lines[atIdx+1], want)
 	}
 	if !slices.Contains(lines, "--disallowedTools") {
 		t.Fatalf("argv missing --disallowedTools:\n%s", args)
@@ -453,5 +520,199 @@ func TestAuroraBrokerNonAuroraMcpConfigUnchanged(t *testing.T) {
 	}
 	if strings.Contains(string(mcpRaw), "aurora") {
 		t.Fatalf("non-Aurora task received the Aurora broker: %s", mcpRaw)
+	}
+}
+
+// TestAuroraBrokerRunTaskStagesAttachments is the fake-CLI regression for a
+// skill whose policy requires one input: the daemon stages the attachment into
+// the broker input root, the written context carries the exact broker
+// attachments entry, and --allowedTools names the skill's MCP identifier.
+func TestAuroraBrokerRunTaskStagesAttachments(t *testing.T) {
+	t.Parallel()
+
+	blob := []byte("reference-bytes")
+	d, argsFile, _, cleanup := newAuroraBrokerTestDaemonWithAttachments(t, map[string]auroraBrokerTestFile{
+		auroraBrokerTestImageID: {filename: "reference.png", contentType: "image/png", blob: blob},
+	})
+	defer cleanup()
+	inputRoot := t.TempDir()
+	d.auroraInputRoot = inputRoot
+
+	task := auroraBrokerTestTaskForSkill("id-photo", auroraBrokerTestImageID)
+	result, err := d.runTask(context.Background(), task, "claude", 0, d.logger)
+	if err != nil {
+		t.Fatalf("runTask: %v", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("result status = %q, want completed: %+v", result.Status, result)
+	}
+
+	contextRaw, err := os.ReadFile(filepath.Join(result.WorkDir, filepath.FromSlash(auroraBrokerStateRelDir), auroraBrokerContextFileName))
+	if err != nil {
+		t.Fatalf("read written task context: %v", err)
+	}
+	var parsed struct {
+		GenerationID string `json:"generation_id"`
+		Attachments  map[string]struct {
+			RelativePath string `json:"relative_path"`
+			MIMEType     string `json:"mime_type"`
+			SizeBytes    int64  `json:"size_bytes"`
+		} `json:"attachments"`
+	}
+	if err := json.Unmarshal(contextRaw, &parsed); err != nil {
+		t.Fatalf("parse task context: %v", err)
+	}
+	if parsed.GenerationID != auroraBrokerTestGeneration {
+		t.Errorf("generation_id = %q, want %q", parsed.GenerationID, auroraBrokerTestGeneration)
+	}
+	entry, ok := parsed.Attachments[auroraBrokerTestImageID]
+	if !ok {
+		t.Fatalf("attachments = %v, want key %s", parsed.Attachments, auroraBrokerTestImageID)
+	}
+	wantRelative := auroraBrokerTestImageID + ".png"
+	if entry.RelativePath != wantRelative || entry.MIMEType != "image/png" || entry.SizeBytes != int64(len(blob)) {
+		t.Fatalf("attachment = %+v, want relative_path=%s mime_type=image/png size_bytes=%d", entry, wantRelative, len(blob))
+	}
+	staged, err := os.ReadFile(filepath.Join(inputRoot, wantRelative))
+	if err != nil {
+		t.Fatalf("read staged attachment: %v", err)
+	}
+	if !reflect.DeepEqual(staged, blob) {
+		t.Fatalf("staged bytes = %q, want %q", staged, blob)
+	}
+
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read claude args: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(args)), "\n")
+	atIdx := slices.Index(lines, "--allowedTools")
+	if atIdx < 0 || atIdx+1 >= len(lines) || lines[atIdx+1] != auroraBrokerMCPToolName("aurora.id_photo") {
+		t.Fatalf("--allowedTools = %v, want exactly %q", lines, auroraBrokerMCPToolName("aurora.id_photo"))
+	}
+}
+
+// TestStageAuroraBrokerAttachmentsFailsClosed proves the broker is never handed
+// a context its loader would reject: an unresolvable id, an unsupported
+// extension, an empty object, a policy violation, or an over-cap file all fail
+// the task before launch.
+func TestStageAuroraBrokerAttachmentsFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	secondImageID := "22222222-2222-4222-8222-222222222222"
+	blob := []byte("bytes")
+
+	cases := []struct {
+		name  string
+		skill string
+		ids   []string
+		files map[string]auroraBrokerTestFile
+	}{
+		{
+			name:  "missing required attachment",
+			skill: "id-photo",
+		},
+		{
+			name:  "unresolvable attachment",
+			skill: "id-photo",
+			ids:   []string{auroraBrokerTestImageID},
+			files: map[string]auroraBrokerTestFile{auroraBrokerTestImageID: {filename: "reference.png", contentType: "image/png", missing: true}},
+		},
+		{
+			name:  "unsupported extension",
+			skill: "id-photo",
+			ids:   []string{auroraBrokerTestImageID},
+			files: map[string]auroraBrokerTestFile{auroraBrokerTestImageID: {filename: "reference.bmp", contentType: "image/bmp", blob: blob}},
+		},
+		{
+			name:  "empty object",
+			skill: "id-photo",
+			ids:   []string{auroraBrokerTestImageID},
+			files: map[string]auroraBrokerTestFile{auroraBrokerTestImageID: {filename: "reference.png", contentType: "image/png", blob: nil}},
+		},
+		{
+			name:  "kind not accepted by skill",
+			skill: "id-photo",
+			ids:   []string{auroraBrokerTestImageID},
+			files: map[string]auroraBrokerTestFile{auroraBrokerTestImageID: {filename: "clip.mp4", contentType: "video/mp4", blob: blob}},
+		},
+		{
+			name:  "more than the policy maximum",
+			skill: "id-photo",
+			ids:   []string{auroraBrokerTestImageID, secondImageID},
+			files: map[string]auroraBrokerTestFile{
+				auroraBrokerTestImageID: {filename: "one.png", contentType: "image/png", blob: blob},
+				secondImageID:           {filename: "two.png", contentType: "image/png", blob: blob},
+			},
+		},
+		{
+			name:  "duplicate ids",
+			skill: "id-photo",
+			ids:   []string{auroraBrokerTestImageID, auroraBrokerTestImageID},
+			files: map[string]auroraBrokerTestFile{auroraBrokerTestImageID: {filename: "one.png", contentType: "image/png", blob: blob}},
+		},
+		{
+			name:  "over the broker size cap",
+			skill: "id-photo",
+			ids:   []string{auroraBrokerTestImageID},
+			files: map[string]auroraBrokerTestFile{auroraBrokerTestImageID: {filename: "huge.png", contentType: "image/png", blob: blob, sizeOverride: (25 << 20) + 1}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _, cleanup := newAuroraBrokerTestDaemonWithAttachments(t, tc.files)
+			defer cleanup()
+			d.auroraInputRoot = t.TempDir()
+			task := auroraBrokerTestTaskForSkill(tc.skill, tc.ids...)
+			if _, err := d.writeAuroraBrokerContext(context.Background(), task, execenv.Environment{WorkDir: t.TempDir()}); err == nil {
+				t.Fatalf("writeAuroraBrokerContext(%s) succeeded, want a fail-closed staging error", tc.name)
+			}
+		})
+	}
+}
+
+// TestStageAuroraBrokerAttachmentsPopulatesBrokerShape is the unit half of the
+// min>=1 regression: a valid image set is staged and marshalled into exactly the
+// relative_path/mime_type/size_bytes shape loadTaskContext reads.
+func TestStageAuroraBrokerAttachmentsPopulatesBrokerShape(t *testing.T) {
+	t.Parallel()
+
+	blob := []byte("reference-bytes")
+	d, _, _, cleanup := newAuroraBrokerTestDaemonWithAttachments(t, map[string]auroraBrokerTestFile{
+		auroraBrokerTestImageID: {filename: "reference.PNG", contentType: "image/png", blob: blob},
+	})
+	defer cleanup()
+	inputRoot := t.TempDir()
+	d.auroraInputRoot = inputRoot
+
+	bc, err := d.writeAuroraBrokerContext(context.Background(), auroraBrokerTestTaskForSkill("id-photo", auroraBrokerTestImageID), execenv.Environment{WorkDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("writeAuroraBrokerContext: %v", err)
+	}
+	if bc.InputRoot != inputRoot {
+		t.Fatalf("InputRoot = %q, want %q", bc.InputRoot, inputRoot)
+	}
+	raw, err := os.ReadFile(bc.ContextPath)
+	if err != nil {
+		t.Fatalf("read context: %v", err)
+	}
+	var parsed struct {
+		Attachments map[string]struct {
+			RelativePath string `json:"relative_path"`
+			MIMEType     string `json:"mime_type"`
+			SizeBytes    int64  `json:"size_bytes"`
+		} `json:"attachments"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("parse context: %v", err)
+	}
+	entry := parsed.Attachments[auroraBrokerTestImageID]
+	if entry.RelativePath != auroraBrokerTestImageID+".png" || entry.MIMEType != "image/png" || entry.SizeBytes != int64(len(blob)) {
+		t.Fatalf("attachment = %+v, want relative_path=%s.png mime_type=image/png size_bytes=%d", entry, auroraBrokerTestImageID, len(blob))
+	}
+	if _, err := os.Stat(filepath.Join(inputRoot, entry.RelativePath)); err != nil {
+		t.Fatalf("staged attachment missing: %v", err)
 	}
 }

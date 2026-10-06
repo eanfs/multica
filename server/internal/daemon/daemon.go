@@ -390,6 +390,11 @@ type Daemon struct {
 	skillCache *SkillBundleCache
 	logger     *slog.Logger
 
+	// auroraInputRoot overrides the compiled Aurora broker input root
+	// (/workspace/input). Production leaves it empty; a focused test points it
+	// at a temp dir so the default suite never writes the container mount.
+	auroraInputRoot string
+
 	// terminalReports is the durable outbox for complete/fail callbacks. The
 	// sender hook is production-wired through Client and overridable in focused
 	// tests; terminalReportWakeup coalesces new-report and reconnect nudges.
@@ -8886,7 +8891,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		// any managed config) keeps host-local MCP servers out. Any failure to
 		// resolve that context fails the task through the normal refund path
 		// rather than launching a wider surface.
-		brokerContext, contextErr := d.writeAuroraBrokerContext(task, *env)
+		brokerContext, contextErr := d.writeAuroraBrokerContext(ctx, task, *env)
 		if contextErr != nil {
 			return TaskResult{}, contextErr
 		}

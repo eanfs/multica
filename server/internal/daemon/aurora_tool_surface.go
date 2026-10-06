@@ -107,9 +107,17 @@ func auroraToolSurface(task Task, provider string) (auroraSurface, error) {
 	if !ok {
 		return auroraSurface{}, fmt.Errorf("%w: %q", errAuroraSurfaceUnknownSkill, skillID)
 	}
+	// Claude Code reaches MCP tools only by their mcp__<server>__<tool>
+	// identifier, so a bare broker method name in --allowedTools approves
+	// nothing. Each trusted policy method is qualified with the broker's fixed
+	// server key here; the name never comes from a prompt or agent payload.
+	allowed := make([]string, 0, len(policy.RequiredTools))
+	for _, method := range policy.RequiredTools {
+		allowed = append(allowed, auroraBrokerMCPToolName(method))
+	}
 	return auroraSurface{
 		permissionMode: "default",
-		allowed:        slices.Clone(policy.RequiredTools),
+		allowed:        allowed,
 		disallowed:     slices.Clone(auroraDisallowedTools),
 	}, nil
 }
