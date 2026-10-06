@@ -39,7 +39,7 @@ func decodeReports(raw []byte) (reportStats, error) {
 }
 
 // Image defaults are inspected against one fixed whitelist, never administrator or caller env.
-func inspectEnvironment(env []string, maxRuns int) bool {
+func inspectEnvironment(env []string, maxRuns int, aurora bool) bool {
 	seen := map[string]bool{}
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
@@ -60,13 +60,34 @@ func inspectEnvironment(env []string, maxRuns int) bool {
 			if maxRuns <= 0 || value != strconv.Itoa(maxRuns) {
 				return false
 			}
+		case model.AuroraManagedEnv:
+			if !aurora || value != "1" {
+				return false
+			}
+		case model.AuroraServerURLEnv:
+			if !aurora || (model.AuroraConfig{ServerURL: value}).Validate() != nil {
+				return false
+			}
+		case model.AuroraEnrollmentFileEnv:
+			if !aurora || value != model.AuroraEnrollmentFile {
+				return false
+			}
 		default:
 			return false
 		}
 	}
-	return maxRuns == 0 || (seen["HOME"] && seen["FLEET_NODE_MAX_RUNS"])
+	if maxRuns == 0 {
+		return true
+	}
+	if !seen["HOME"] || !seen["FLEET_NODE_MAX_RUNS"] {
+		return false
+	}
+	if aurora && (!seen[model.AuroraManagedEnv] || !seen[model.AuroraServerURLEnv] || !seen[model.AuroraEnrollmentFileEnv]) {
+		return false
+	}
+	return true
 }
-func validateNodeInspection(r container.InspectResponse, n model.Node, networkName string) error {
+func validateNodeInspection(r container.InspectResponse, n model.Node, networkName string, aurora bool) error {
 	if r.ContainerJSONBase == nil || r.Config == nil || r.HostConfig == nil || r.NetworkSettings == nil {
 		return model.ErrForbidden
 	}
@@ -75,7 +96,7 @@ func validateNodeInspection(r container.InspectResponse, n model.Node, networkNa
 	if c.Image != n.Image || c.User != "10001:10001" || c.Tty || c.OpenStdin || len(c.ExposedPorts) != 0 || !reflect.DeepEqual([]string(c.Entrypoint), []string{"/usr/local/bin/fleet-node"}) || !reflect.DeepEqual([]string(c.Cmd), []string{"run"}) {
 		return model.ErrForbidden
 	}
-	if !inspectEnvironment(c.Env, n.Resources.MaxRuns) {
+	if !inspectEnvironment(c.Env, n.Resources.MaxRuns, aurora) {
 		return model.ErrForbidden
 	}
 	if h.ReadonlyRootfs != want.ReadonlyRootfs || h.NanoCPUs != want.NanoCPUs || h.Memory != want.Memory || h.PidsLimit == nil || *h.PidsLimit != *want.PidsLimit || h.Privileged || h.PidMode != "" || len(h.Binds) != 0 || len(h.Devices) != 0 || len(h.DeviceRequests) != 0 || len(h.VolumesFrom) != 0 || len(h.PortBindings) != 0 || h.PublishAllPorts || h.NetworkMode != container.NetworkMode(networkName) || h.RestartPolicy.Name != container.RestartPolicyDisabled || len(h.CapAdd) != 0 || !reflect.DeepEqual(h.CapDrop, want.CapDrop) || !reflect.DeepEqual(h.SecurityOpt, want.SecurityOpt) || !reflect.DeepEqual(h.ExtraHosts, want.ExtraHosts) {
@@ -114,7 +135,7 @@ func (p *Provider) validSDKSnapshot(n model.Node, i Inspection) error {
 		if i.sdk == nil {
 			return model.ErrForbidden
 		}
-		return validateNodeInspection(*i.sdk, n, p.networkName())
+		return validateNodeInspection(*i.sdk, n, p.networkName(), p.cfg.Aurora != nil)
 	}
 	return nil
 }

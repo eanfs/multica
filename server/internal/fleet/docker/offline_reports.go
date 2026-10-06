@@ -281,7 +281,7 @@ func (e *sdkEngine) offlineIdentity(ctx context.Context, n model.Node) error {
 				return model.ErrUnknownHealth
 			}
 			p := Provider{cfg: e.cfg}
-			if err := validateNodeInspection(c, n, p.networkName()); err != nil {
+			if err := validateNodeInspection(c, n, p.networkName(), p.cfg.Aurora != nil); err != nil {
 				return err
 			}
 			if c.State.Status != "exited" && c.State.Status != "created" {
@@ -575,7 +575,7 @@ func sameLabels(a, b map[string]string) bool {
 	return true
 }
 func validateHelper(actual container.InspectResponse, c *container.Config, h *container.HostConfig) error {
-	if actual.Config == nil || actual.HostConfig == nil || actual.NetworkSettings == nil || actual.Config.Image != c.Image || actual.Config.User != c.User || actual.Config.Tty || actual.Config.OpenStdin || len(actual.Config.ExposedPorts) != 0 || !actual.Config.NetworkDisabled || !inspectEnvironment(actual.Config.Env, 0) || !reflect.DeepEqual(actual.Config.Entrypoint, c.Entrypoint) || !reflect.DeepEqual(actual.Config.Cmd, c.Cmd) {
+	if actual.Config == nil || actual.HostConfig == nil || actual.NetworkSettings == nil || actual.Config.Image != c.Image || actual.Config.User != c.User || actual.Config.Tty || actual.Config.OpenStdin || len(actual.Config.ExposedPorts) != 0 || !actual.Config.NetworkDisabled || !inspectEnvironment(actual.Config.Env, 0, false) || !reflect.DeepEqual(actual.Config.Entrypoint, c.Entrypoint) || !reflect.DeepEqual(actual.Config.Cmd, c.Cmd) {
 		return model.ErrForbidden
 	}
 	if actual.NetworkSettings != nil {

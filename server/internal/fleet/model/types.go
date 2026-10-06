@@ -78,6 +78,9 @@ type Bootstrap struct {
 	Model     string `json:"model,omitempty"`
 	ServerURL string `json:"server_url"`
 	DaemonID  string `json:"daemon_id"`
+	// EnrollmentToken is the Aurora managed-enrollment secret. It is a private
+	// input delivered once into the node secrets volume and never persisted.
+	EnrollmentToken string `json:"enrollment_token,omitempty"`
 }
 
 // ReportStatsKnown is false until explicitly observed. Offline never implies Ready.

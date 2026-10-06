@@ -18,6 +18,10 @@ type Config struct {
 	APIURL    string          `json:"api_url"`
 	Specs     map[string]Spec `json:"specs"`
 	MaxNodes  int             `json:"max_nodes"`
+	// Aurora, when present, selects the managed-sandbox execution profile.
+	// The tag carries no omitempty because DecodeStrictObject matches exact
+	// json tag values when it rejects unknown administrator keys.
+	Aurora *AuroraConfig `json:"aurora"`
 }
 
 type Spec struct {
@@ -46,6 +50,11 @@ func DecodeConfig(raw []byte) (Config, error) {
 	if strings.TrimSpace(cfg.Namespace) == "" || strings.TrimSpace(cfg.FleetID) == "" ||
 		strings.TrimSpace(cfg.Image) == "" || strings.TrimSpace(cfg.APIURL) == "" || cfg.MaxNodes <= 0 || len(cfg.Specs) == 0 {
 		return Config{}, fmt.Errorf("%w: required config identity, image, API URL, specs and positive node limit", ErrInvalidRequest)
+	}
+	if cfg.Aurora != nil {
+		if err := cfg.Aurora.Validate(); err != nil {
+			return Config{}, err
+		}
 	}
 	var specs map[string]json.RawMessage
 	if _, err := DecodeStrictObject(fields["specs"], &specs); err != nil {

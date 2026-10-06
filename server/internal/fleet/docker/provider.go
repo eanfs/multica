@@ -105,8 +105,8 @@ func (p *Provider) Ensure(ctx context.Context, n model.Node, b model.Bootstrap) 
 	if n.ContainerID != "" {
 		return model.Observation{Status: "missing", ObservedAt: time.Now()}, model.ErrConflict
 	}
-	if b.DaemonID != n.DaemonID || b.NodeToken == "" || b.APIKey == "" || b.ServerURL != p.cfg.APIURL {
-		return model.Observation{}, model.ErrInvalidRequest
+	if e := p.validBootstrap(n, b); e != nil {
+		return model.Observation{}, e
 	}
 	network := Resource{Name: p.networkName(), Role: "network", Labels: labels(n.Namespace, p.cfg.FleetID, "namespace", "network")}
 	if e = bounded(ctx, func(c context.Context) error { return p.engine.EnsureNetwork(c, network) }); e != nil {
@@ -118,7 +118,7 @@ func (p *Provider) Ensure(ctx context.Context, n model.Node, b model.Bootstrap) 
 			return model.Observation{}, safeError(e)
 		}
 	}
-	tar, e := bootstrapTar(n, p.cfg, b)
+	tar, e := installerTar(n, p.cfg, b)
 	if e != nil {
 		return model.Observation{}, e
 	}
@@ -127,8 +127,8 @@ func (p *Provider) Ensure(ctx context.Context, n model.Node, b model.Bootstrap) 
 	}
 	h := NodeHostConfig(n.Resources, true)
 	h.NetworkMode = container.NetworkMode(network.Name)
-	h.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: n.DataVolume, Target: model.DataMount}, {Type: mount.TypeVolume, Source: n.SecretsVolume, Target: "/secrets", ReadOnly: true}}
-	c := &container.Config{Image: n.Image, User: "10001:10001", Labels: labels(n.Namespace, p.cfg.FleetID, nodeID(n), "node"), Env: []string{"HOME=" + model.NodeHome, "FLEET_NODE_MAX_RUNS=" + strconv.Itoa(n.Resources.MaxRuns)}, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"run"}, Healthcheck: &container.HealthConfig{Test: []string{"CMD", "/usr/local/bin/fleet-node", "health"}, Interval: 5 * time.Second, Timeout: 5 * time.Second, Retries: 3}}
+	h.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: n.DataVolume, Target: model.DataMount}, {Type: mount.TypeVolume, Source: n.SecretsVolume, Target: model.AuroraEnrollmentDir, ReadOnly: true}}
+	c := &container.Config{Image: n.Image, User: "10001:10001", Labels: labels(n.Namespace, p.cfg.FleetID, nodeID(n), "node"), Env: p.nodeEnv(n), Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"run"}, Healthcheck: &container.HealthConfig{Test: []string{"CMD", "/usr/local/bin/fleet-node", "health"}, Interval: 5 * time.Second, Timeout: 5 * time.Second, Retries: 3}}
 	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	created, createErr := p.engine.Create(callCtx, c, &h, network.Name, p.containerName(n))
 	cancel()
@@ -146,6 +146,43 @@ func (p *Provider) Ensure(ctx context.Context, n model.Node, b model.Bootstrap) 
 	}
 	return p.ensureStarted(ctx, n, i)
 }
+
+// validBootstrap enforces the private payload for the configured profile. The
+// two profiles never share an installer: a Claude node must carry a node token
+// and API key, while an Aurora node must carry exactly one enrollment secret
+// and no model credentials.
+func (p *Provider) validBootstrap(n model.Node, b model.Bootstrap) error {
+	if n.DaemonID == "" || b.DaemonID != n.DaemonID {
+		return model.ErrInvalidRequest
+	}
+	if p.cfg.Aurora != nil {
+		if !model.ValidEnrollmentToken(b.EnrollmentToken) || b.ServerURL != p.cfg.Aurora.ServerURL ||
+			b.NodeToken != "" || b.APIKey != "" || b.BaseURL != "" || b.Model != "" {
+			return model.ErrInvalidRequest
+		}
+		return nil
+	}
+	if b.EnrollmentToken != "" || b.NodeToken == "" || b.APIKey == "" || b.ServerURL != p.cfg.APIURL {
+		return model.ErrInvalidRequest
+	}
+	return nil
+}
+
+// nodeEnv is the exact container environment for a node. The managed Aurora
+// profile adds only the three fixed enrollment variables; the daemon still
+// reads its secret from the read-only secrets mount.
+func (p *Provider) nodeEnv(n model.Node) []string {
+	env := []string{"HOME=" + model.NodeHome, "FLEET_NODE_MAX_RUNS=" + strconv.Itoa(n.Resources.MaxRuns)}
+	if p.cfg.Aurora != nil {
+		env = append(env,
+			model.AuroraManagedEnv+"=1",
+			model.AuroraServerURLEnv+"="+p.cfg.Aurora.ServerURL,
+			model.AuroraEnrollmentFileEnv+"="+model.AuroraEnrollmentFile,
+		)
+	}
+	return env
+}
+
 func bounded(ctx context.Context, f func(context.Context) error) error {
 	c, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
