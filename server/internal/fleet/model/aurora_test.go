@@ -69,6 +69,18 @@ func TestLoadConfigRejectsUnsafeAuroraProfile(t *testing.T) {
 	}
 }
 
+// TestAuroraClaudePathContract pins the one agent executable path the provider
+// supplies at container start. The neutral image bakes no MULTICA_CLAUDE_PATH,
+// so this exact pairing is the whole runtime contract the Fleet must satisfy.
+func TestAuroraClaudePathContract(t *testing.T) {
+	if AuroraClaudePathEnv != "MULTICA_CLAUDE_PATH" {
+		t.Fatalf("AuroraClaudePathEnv = %q", AuroraClaudePathEnv)
+	}
+	if AuroraClaudePath != "/opt/aurora/runtime/node_modules/.bin/claude" {
+		t.Fatalf("AuroraClaudePath = %q", AuroraClaudePath)
+	}
+}
+
 func TestValidEnrollmentToken(t *testing.T) {
 	valid := "mse_" + strings.Repeat("a", 40)
 	if !ValidEnrollmentToken(valid) {

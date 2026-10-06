@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# Verify the managed daemon can resolve and run its one agent executable from
-# the image's own environment, exactly as server/internal/daemon/config.go
-# managedClaudeAgent does:
+# Verify the managed daemon can resolve and run its one agent executable,
+# exactly as server/internal/daemon/config.go managedClaudeAgent does:
 #
 #   exec.LookPath(envOrDefault("MULTICA_CLAUDE_PATH", "claude"))
+#
+# The neutral sandbox image bakes no MULTICA_CLAUDE_PATH; the Fleet provider
+# supplies the fixed path at container start. Pass that path with --path so the
+# probe runs the same resolution as the sandbox user. When --path is omitted the
+# probe falls back to the image's own MULTICA_CLAUDE_PATH (legacy fixtures) and
+# then to a PATH lookup for "claude".
 #
 # A launcher that exists inside the image but is not reachable from the daemon's
 # PATH is a real shipped defect: the sandbox container exited 1 with
@@ -14,13 +19,14 @@
 # user and requires the resolved executable to report a version.
 #
 # Usage:
-#   scripts/verify-aurora-sandbox-managed-agent.sh [--user USER] <image>
+#   scripts/verify-aurora-sandbox-managed-agent.sh [--user USER] [--path PATH] <image>
 #
 # The image must already be present locally; this script never pulls.
 
 set -euo pipefail
 
 user="10001:10001"
+path=""
 image=""
 
 while [ "$#" -gt 0 ]; do
@@ -34,8 +40,17 @@ while [ "$#" -gt 0 ]; do
       user="${1#--user=}"
       shift
       ;;
+    --path)
+      [ "$#" -ge 2 ] || { printf 'verify-aurora-sandbox-managed-agent: --path needs a value\n' >&2; exit 2; }
+      path="$2"
+      shift 2
+      ;;
+    --path=*)
+      path="${1#--path=}"
+      shift
+      ;;
     -h|--help)
-      printf 'usage: %s [--user USER] <image>\n' "$(basename "$0")"
+      printf 'usage: %s [--user USER] [--path PATH] <image>\n' "$(basename "$0")"
       exit 0
       ;;
     --)
@@ -56,16 +71,24 @@ done
 fail() { printf 'verify-aurora-sandbox-managed-agent: FAIL: %s\n' "$*" >&2; exit 1; }
 pass() { printf 'verify-aurora-sandbox-managed-agent: ok: %s\n' "$*"; }
 
-[ -n "$image" ] || fail "usage: $(basename "$0") [--user USER] <image>"
+[ -n "$image" ] || fail "usage: $(basename "$0") [--user USER] [--path PATH] <image>"
 command -v docker >/dev/null 2>&1 || fail "docker is not on PATH"
 docker image inspect "$image" >/dev/null 2>&1 || fail "image '$image' is not present locally (this check never pulls)"
 
-# Run the resolution inside the image as the sandbox user. The daemon's process
-# environment includes the image's own ENV, so this reads the same
-# MULTICA_CLAUDE_PATH the daemon would.
+# Resolve the agent command the Fleet supplies. --path is authoritative; when it
+# is omitted, fall back to the image's own MULTICA_CLAUDE_PATH (legacy fixtures)
+# and finally to a PATH lookup for "claude".
+if [ -n "$path" ]; then
+  agent_cmd="$path"
+else
+  agent_cmd="$(docker run --rm --entrypoint /bin/sh "$image" -c 'printf "%s" "${MULTICA_CLAUDE_PATH:-claude}"')"
+fi
+
+# Run the same resolution as the sandbox user: an absolute path is executed
+# directly, a bare command is looked up on the daemon's PATH.
 probe='
 set -u
-cmd="${MULTICA_CLAUDE_PATH:-claude}"
+cmd="${MULTICA_AGENT_PATH:-claude}"
 case "$cmd" in
   */*) path="$cmd" ;;
   *) path="$(command -v "$cmd" 2>/dev/null || true)" ;;
@@ -95,7 +118,7 @@ fi
 printf "MANAGED_AGENT %s -> %s [%s]\n" "$cmd" "$path" "$version"
 '
 
-out="$(docker run --rm --user "$user" --entrypoint /bin/sh "$image" -c "$probe" 2>&1)" || \
+out="$(docker run --rm --user "$user" -e MULTICA_AGENT_PATH="$agent_cmd" --entrypoint /bin/sh "$image" -c "$probe" 2>&1)" || \
   fail "the managed daemon cannot resolve and run its agent executable as $user: $(printf '%s' "$out" | tail -n1)"
 printf '%s\n' "$out" | grep -q '^MANAGED_AGENT ' || fail "managed-agent probe produced no resolution line: $out"
 pass "$(printf '%s' "$out" | grep '^MANAGED_AGENT ' | head -n1)"

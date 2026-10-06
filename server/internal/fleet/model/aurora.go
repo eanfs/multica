@@ -32,6 +32,14 @@ const (
 	AuroraAnthropicBaseURLEnv = "ANTHROPIC_BASE_URL"
 	AuroraAnthropicModelEnv   = "ANTHROPIC_MODEL"
 
+	// AuroraClaudePathEnv and AuroraClaudePath are the one agent executable the
+	// Fleet provides to the managed node. The neutral image no longer bakes the
+	// path; the provider sets exactly this variable so the daemon resolves the
+	// CLI, and the adoption authority rejects a live container that omits it or
+	// carries a different value.
+	AuroraClaudePathEnv = "MULTICA_CLAUDE_PATH"
+	AuroraClaudePath    = "/opt/aurora/runtime/node_modules/.bin/claude"
+
 	// AuroraEgressAlias is the Docker network alias the egress sidecar takes on
 	// the workspace-internal network, so the sandbox can reach it by name.
 	AuroraEgressAlias = "egress"

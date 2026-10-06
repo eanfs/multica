@@ -126,13 +126,16 @@ RUN node /src/scripts/verify-aurora-volc-skills.mjs \
  && find /opt/aurora/vendor -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}' > /opt/aurora/vendor-tree.sha256
 
 # ---------------------------------------------------------------------------
-# Stage 5: Final runtime. Digest-pinned Debian snapshot apt set, root-owned
-# non-writable runtime files, non-root user, fixed entrypoint and health check.
+# Stage 5: Final runtime. A digest-pinned neutral Debian base (the Node runtime
+# is copied from Stage 3, never inherited) keeps NODE_VERSION/YARN_VERSION out
+# of the image environment, so it satisfies the Fleet's container-env contract.
+# Digest-pinned snapshot apt set, root-owned non-writable runtime files,
+# non-root user, fixed entrypoint and health check.
 # ---------------------------------------------------------------------------
-FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS sandbox
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS sandbox
 ARG SOURCE_DATE_EPOCH=0
 # Exact versions from deploy/aurora-sandbox/apt-packages.lock (20260925T000000Z).
-# The node base ships no CA bundle, so the bootstrap apt transport disables TLS
+# The neutral base ships no CA bundle, so the bootstrap apt transport disables TLS
 # peer/host verification and relies on apt GPG verification plus the SHA-256 in
 # the authenticated Packages index, exactly as scripts/update-aurora-sandbox-apt-lock.sh
 # does; the override is removed again below.
@@ -155,7 +158,10 @@ RUN set -eux; \
       fonts-noto-cjk=1:20220127+repack1-1 \
       fonts-noto-color-emoji=2.042-0+deb12u1 \
       imagemagick=8:6.9.11.60+dfsg-1.6+deb12u13 \
+      libatomic1=12.2.0-14+deb12u1 \
+      libgcc-s1=12.2.0-14+deb12u1 \
       libnss3=2:3.87.1-1+deb12u4 \
+      libstdc++6=12.2.0-14+deb12u1 \
       poppler-utils=22.12.0-2+deb12u3 \
       tini=0.19.0-1+b3 \
       unzip=6.0-28+deb12u1 && \
@@ -179,6 +185,11 @@ RUN set -eux; \
 COPY --from=gobuilder --chown=0:0 /out/multica /usr/local/bin/multica
 # fleet-node is the fixed node entrypoint; it execs the managed daemon above.
 COPY --from=gobuilder --chown=0:0 /out/fleet-node /usr/local/bin/fleet-node
+# The neutral base ships no Node, so copy the runtime binary the daemon, broker
+# and pnpm shims need from the dependency stage. libstdc++6/libgcc-s1 already
+# come from the base and libatomic1 is installed above, so the copied binary
+# keeps its dynamic ABI on both architectures.
+COPY --from=nodedeps --chown=0:0 /usr/local/bin/node /usr/local/bin/node
 # The pnpm workspace layout is preserved so the broker node_modules symlinks
 # keep resolving; the runtime tree lives under /opt/aurora/runtime/deploy/.
 COPY --from=nodedeps --chown=0:0 /src /opt/aurora/runtime
@@ -208,13 +219,11 @@ RUN set -eux; \
 
 # The managed daemon resolves its one agent executable through
 # exec.LookPath(envOrDefault("MULTICA_CLAUDE_PATH", "claude")) in
-# server/internal/daemon/config.go. The pnpm shim installed by the nodedeps
-# stage is not on the base image PATH, so pin the daemon to its absolute path.
-# Without this the container exits 1 with "managed mode requires a claude
-# executable: exec: \"claude\": executable file not found in $PATH".
-# scripts/verify-aurora-sandbox-image.sh proves this exact resolution from the
-# image's own environment as the sandbox user.
-ENV MULTICA_CLAUDE_PATH=/opt/aurora/runtime/node_modules/.bin/claude
+# server/internal/daemon/config.go. The neutral image deliberately bakes no
+# MULTICA_CLAUDE_PATH: the Fleet provider sets exactly model.AuroraClaudePath
+# at container start, so the image environment stays inside the Fleet's
+# container-env allowlist. scripts/verify-aurora-sandbox-image.sh proves the
+# shim exists at that fixed path and runs as the sandbox user.
 # HOME and the working directory follow the fixed Fleet node layout; the Fleet
 # also passes HOME explicitly, so both contracts agree.
 ENV HOME=/data/home

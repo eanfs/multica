@@ -212,8 +212,9 @@ func (p *Provider) validBootstrap(n model.Node, b model.Bootstrap) error {
 }
 
 // nodeEnv is the exact container environment for a node. The managed Aurora
-// profile adds only the fixed enrollment and egress-proxy variables; the daemon
-// still reads its secret from the read-only secrets mount.
+// profile adds the fixed enrollment, egress-proxy and agent-path variables; the
+// daemon still reads its secret from the read-only secrets mount, and the image
+// bakes neither the agent path nor any Node version banner.
 func (p *Provider) nodeEnv(n model.Node) []string {
 	env := []string{"HOME=" + model.NodeHome, "FLEET_NODE_MAX_RUNS=" + strconv.Itoa(n.Resources.MaxRuns)}
 	if p.cfg.Aurora != nil {
@@ -224,6 +225,7 @@ func (p *Provider) nodeEnv(n model.Node) []string {
 			model.AuroraHTTPProxyEnv+"="+model.AuroraEgressProxyEndpoint,
 			model.AuroraHTTPSProxyEnv+"="+model.AuroraEgressProxyEndpoint,
 			model.AuroraNoProxyEnv+"="+model.AuroraNoProxyValue,
+			model.AuroraClaudePathEnv+"="+model.AuroraClaudePath,
 		)
 		if p.cfg.Aurora.AnthropicBaseURL != "" {
 			env = append(env, model.AuroraAnthropicBaseURLEnv+"="+p.cfg.Aurora.AnthropicBaseURL)

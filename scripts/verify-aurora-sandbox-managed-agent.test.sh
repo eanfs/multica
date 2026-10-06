@@ -88,4 +88,22 @@ grep -q 'MANAGED_AGENT ' "$work/declared.out" || {
 }
 pass "the probe accepts the fixed image ($(grep 'MANAGED_AGENT ' "$work/declared.out" | head -n1))"
 
+# The Fleet provider supplies MULTICA_CLAUDE_PATH at container start, so the
+# neutral image bakes nothing. --path must be authoritative for that case.
+if ! "$probe" --path /opt/agent/claude aurora-managed-agent-misplaced >"$work/path.out" 2>&1; then
+  cat "$work/path.out" >&2
+  fail "the probe rejected a provider-supplied agent path"
+fi
+grep -q 'MANAGED_AGENT /opt/agent/claude -> /opt/agent/claude' "$work/path.out" || {
+  cat "$work/path.out" >&2
+  fail "the probe accepted --path without resolving the supplied path"
+}
+pass "the probe accepts a provider-supplied --path"
+
+if "$probe" --path /opt/agent/missing aurora-managed-agent-declared >"$work/path-missing.out" 2>&1; then
+  cat "$work/path-missing.out" >&2
+  fail "the probe accepted a missing provider-supplied agent path"
+fi
+pass "the probe rejects a missing provider-supplied --path"
+
 printf 'verify-aurora-sandbox-managed-agent.test: PASS\n'

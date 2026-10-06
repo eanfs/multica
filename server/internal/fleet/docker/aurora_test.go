@@ -148,6 +148,7 @@ func TestProviderEnsureAuroraProfile(t *testing.T) {
 		"HTTP_PROXY=" + model.AuroraEgressProxyEndpoint,
 		"HTTPS_PROXY=" + model.AuroraEgressProxyEndpoint,
 		"NO_PROXY=" + model.AuroraNoProxyValue,
+		"MULTICA_CLAUDE_PATH=" + model.AuroraClaudePath,
 		"ANTHROPIC_BASE_URL=https://ark.example.com",
 		"ANTHROPIC_MODEL=ark-model",
 	}
@@ -223,7 +224,8 @@ func TestInspectAuroraEnvironment(t *testing.T) {
 	base := []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=" + model.NodeHome, "FLEET_NODE_MAX_RUNS=1"}
 	managed := []string{"MULTICA_MANAGED=1", "MULTICA_SERVER_URL=http://api.internal:8080", "MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE=" + model.AuroraEnrollmentFile}
 	proxy := []string{"HTTP_PROXY=" + model.AuroraEgressProxyEndpoint, "HTTPS_PROXY=" + model.AuroraEgressProxyEndpoint, "NO_PROXY=" + model.AuroraNoProxyValue}
-	full := append(append(append(append([]string{}, base...), managed...), proxy...), "ANTHROPIC_BASE_URL=https://ark.example.com", "ANTHROPIC_MODEL=ark-model")
+	agent := []string{"MULTICA_CLAUDE_PATH=" + model.AuroraClaudePath}
+	full := append(append(append(append(append([]string{}, base...), managed...), proxy...), agent...), "ANTHROPIC_BASE_URL=https://ark.example.com", "ANTHROPIC_MODEL=ark-model")
 	if !inspectEnvironment(full, 1, auroraConfig().Aurora) {
 		t.Fatal("valid aurora environment rejected")
 	}
@@ -237,8 +239,24 @@ func TestInspectAuroraEnvironment(t *testing.T) {
 	if inspectEnvironment(noProxy, 1, auroraConfig().Aurora) {
 		t.Fatal("missing egress proxy environment accepted")
 	}
+	// The provider supplies the agent path, so an adopted container that omits
+	// it would let the daemon fall back to a PATH lookup the image no longer
+	// satisfies.
+	noAgent := append(append(append([]string{}, base...), managed...), proxy...)
+	noAgent = append(noAgent, "ANTHROPIC_BASE_URL=https://ark.example.com", "ANTHROPIC_MODEL=ark-model")
+	if inspectEnvironment(noAgent, 1, auroraConfig().Aurora) {
+		t.Fatal("aurora environment without the provider agent path accepted")
+	}
+	// The neutral image no longer carries the Node base banners; a container
+	// that presents them is drift and must fail closed.
+	for _, banner := range []string{"NODE_VERSION=22.23.3", "YARN_VERSION=1.22.22"} {
+		if inspectEnvironment(append(append([]string{}, full...), banner), 1, auroraConfig().Aurora) {
+			t.Fatalf("aurora environment with baked %s accepted", banner)
+		}
+	}
 	credentialed := append(append([]string{}, base...), "MULTICA_MANAGED=1", "MULTICA_SERVER_URL=http://user:pass@api.internal:8080", "MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE="+model.AuroraEnrollmentFile)
 	credentialed = append(credentialed, proxy...)
+	credentialed = append(credentialed, agent...)
 	if inspectEnvironment(credentialed, 1, auroraConfig().Aurora) {
 		t.Fatal("credentialed server url accepted")
 	}
@@ -260,6 +278,7 @@ func TestInspectAuroraEnvironmentRejectsConfigDrift(t *testing.T) {
 		model.AuroraHTTPProxyEnv + "=" + model.AuroraEgressProxyEndpoint,
 		model.AuroraHTTPSProxyEnv + "=" + model.AuroraEgressProxyEndpoint,
 		model.AuroraNoProxyEnv + "=" + model.AuroraNoProxyValue,
+		model.AuroraClaudePathEnv + "=" + model.AuroraClaudePath,
 		model.AuroraAnthropicBaseURLEnv + "=" + cfg.Aurora.AnthropicBaseURL,
 		model.AuroraAnthropicModelEnv + "=" + cfg.Aurora.AnthropicModel,
 	}
@@ -305,6 +324,20 @@ func TestInspectAuroraEnvironmentRejectsConfigDrift(t *testing.T) {
 	}
 	if inspectEnvironment(without(model.AuroraAnthropicModelEnv), 1, cfg.Aurora) {
 		t.Fatal("adopted a node missing its configured anthropic model")
+	}
+	if inspectEnvironment(withValue(model.AuroraClaudePathEnv, "/opt/other/claude"), 1, cfg.Aurora) {
+		t.Fatal("adopted a node with a non-provider agent path")
+	}
+	if inspectEnvironment(without(model.AuroraClaudePathEnv), 1, cfg.Aurora) {
+		t.Fatal("adopted a node missing the provider agent path")
+	}
+	// NODE_VERSION/YARN_VERSION come from a Node base image, which the neutral
+	// final stage no longer uses; either one is forbidden drift.
+	if inspectEnvironment(append(append([]string{}, canonical...), "NODE_VERSION=22.23.3"), 1, cfg.Aurora) {
+		t.Fatal("adopted a node carrying NODE_VERSION")
+	}
+	if inspectEnvironment(append(append([]string{}, canonical...), "YARN_VERSION=1.22.22"), 1, cfg.Aurora) {
+		t.Fatal("adopted a node carrying YARN_VERSION")
 	}
 
 	// A deployment that carries no override must reject ANTHROPIC_* entirely,
