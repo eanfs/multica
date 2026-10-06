@@ -1,0 +1,75 @@
+# Local all-in-Docker stack for the Aurora-on-Fleet runtime.
+#
+# Everything runs in containers: the Fleet control plane, the API (sharing the
+# Fleet's network namespace so its loopback-only local-Fleet guard holds), the
+# web client and the Aurora client. PostgreSQL comes from the checkout's managed
+# environment (make up) via DATABASE_URL in .env.worktree; this file does not
+# create a second database.
+#
+# Usage:
+#   docker compose -p multica-local -f docker-compose.local-aurora.yml up -d
+#   docker compose -p multica-local -f docker-compose.local-aurora.yml down
+#
+# Ports: API 18102 (published by fleet), Fleet 19023, Web 13022, Aurora 13011.
+name: multica-local
+
+services:
+  fleet:
+    image: multica-fleet-local:aurora
+    user: "0:0"
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./.superpowers/fleet-local/container:/cfg:ro
+    environment:
+      FLEET_CONFIG_FILE: /cfg/fleet-config.json
+      FLEET_SERVICE_KEY_FILE: /cfg/service-key
+      FLEET_ADDR: 0.0.0.0:8090
+      DATABASE_URL: ${LOCAL_FLEET_DATABASE_URL:?set LOCAL_FLEET_DATABASE_URL to the checkout database reachable as host.docker.internal}
+    ports:
+      - "127.0.0.1:19023:8090"
+      - "127.0.0.1:18102:8080"
+
+  backend:
+    image: multica-backend:dev
+    # Shares the Fleet's network namespace: the local-Fleet client only accepts a
+    # loopback URL, so 127.0.0.1:8090 must be the Fleet itself.
+    network_mode: "service:fleet"
+    restart: unless-stopped
+    depends_on:
+      - fleet
+    env_file:
+      - .env.worktree
+    environment:
+      PORT: "8080"
+      MAINTENANCE_PORT: "18081"
+      DATABASE_URL: ${LOCAL_FLEET_DATABASE_URL}
+      MULTICA_LOCAL_FLEET_URL: http://127.0.0.1:8090
+      MULTICA_LOCAL_FLEET_SECRET_FILE: /run/fleet/service-key
+      AURORA_SANDBOX_IMAGE: ${AURORA_SANDBOX_IMAGE:?set AURORA_SANDBOX_IMAGE to the digest-pinned node image}
+    volumes:
+      - ./.superpowers/fleet-local/service-key:/run/fleet/service-key:ro
+
+  web:
+    image: multica-web:dev
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:13022:3000"
+    environment:
+      REMOTE_API_URL: http://host.docker.internal:18102
+      NEXT_PUBLIC_API_URL: http://localhost:18102
+      NEXT_PUBLIC_WS_URL: ws://localhost:18102
+
+  aurora:
+    image: multica-aurora:dev
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:13011:3000"
+    environment:
+      REMOTE_API_URL: http://host.docker.internal:18102
+      NEXT_PUBLIC_API_URL: http://localhost:18102
+      NEXT_PUBLIC_WS_URL: ws://localhost:18102
