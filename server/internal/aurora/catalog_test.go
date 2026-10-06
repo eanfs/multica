@@ -52,6 +52,44 @@ func TestCatalogAvailability(t *testing.T) {
 	}
 }
 
+// TestCatalogCreditPrices pins every skill's credit price. The catalog is the
+// single source of truth the API serves and every client displays, so a change
+// here is user-visible pricing and must be deliberate.
+func TestCatalogCreditPrices(t *testing.T) {
+	want := map[string]int{
+		"poster":           76,
+		"xhs-image":        62,
+		"product-image":    86,
+		"text-image":       68,
+		"image-edit":       52,
+		"id-photo":         36,
+		"image-video":      188,
+		"text-video":       168,
+		"video-captions":   98,
+		"avatar-video":     148,
+		"xhs-copy":         26,
+		"resume":           42,
+		"document-summary": 38,
+		"transcription":    30,
+		"ppt":              82,
+		"excel":            46,
+	}
+	cat := aurora.Catalog()
+	if len(cat) != len(want) {
+		t.Fatalf("catalog has %d skills, want %d", len(cat), len(want))
+	}
+	for _, e := range cat {
+		credits, ok := want[e.ID]
+		if !ok {
+			t.Errorf("unexpected skill %q in catalog", e.ID)
+			continue
+		}
+		if e.Credits != credits {
+			t.Errorf("skill %q credits = %d, want %d", e.ID, e.Credits, credits)
+		}
+	}
+}
+
 func TestExists(t *testing.T) {
 	for _, e := range aurora.Catalog() {
 		if !aurora.Exists(e.ID) {
