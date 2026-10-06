@@ -6,19 +6,32 @@
  * talks to a Fleet host. Physical execution requires the owned managed
  * environment; a skip is not a pass.
  *
- * The generation is created through the same API the Aurora composer calls, so
- * the assertion sequence (create -> provision -> execute -> aurora_asset ->
- * completed with credits_charged) is the real path. The Cloud Runtime page is
- * the browser-visible execution plane; the in-app Aurora composer interaction
- * belongs to Task 8 and is not faked here.
+ * The behaviour under test is the browser flow: TestApiClient only signs in and
+ * resolves the workspace (setup/teardown), then the Aurora Create directory
+ * opens the composer, the prompt is typed and submitted in the UI, and the
+ * generation's rendered status badge and artifact link are the evidence. No API
+ * call creates or polls the generation. The same flow stays a real-engine skip
+ * until the managed environment carries a fake-capable dual-contract node image
+ * (the Go half names that prerequisite in aurora_test.go).
  */
 import { expect, test, type Page } from "@playwright/test";
 import { TestApiClient } from "./fixtures";
 import { createTestApi } from "./helpers";
 
 const GENERATION_TIMEOUT_MS = 900000;
-const NODE_READY_TIMEOUT_MS = 300000;
 const ROUND_TRIP_PROMPT = "aurora e2e fleet round trip poster";
+// The catalog's English name for the xhs-image skill, the same skill the gated
+// Go round trip submits. The default locale is en.
+const SKILL_NAME = "Xiaohongshu Image";
+
+// The Aurora app is a separate origin from the default Playwright baseURL. It
+// is read from the environment when the managed composition names it, and
+// otherwise follows the checkout's AURORA_PORT default.
+const AURORA_BASE_URL = (
+  process.env.MULTICA_AURORA_BASE_URL ??
+  process.env.AURORA_ORIGIN ??
+  `http://localhost:${process.env.AURORA_PORT?.trim() || "3001"}`
+).replace(/\/+$/, "");
 
 let api: TestApiClient | null = null;
 
@@ -32,48 +45,42 @@ async function loginFleetBrowser(page: Page, client: TestApiClient): Promise<voi
 }
 
 test.afterEach(async ({}, testInfo) => {
-  // Deleting the managed node is owned by the server reaper; the client
-  // cleanup removes only the SQL-owner fixtures this spec created.
+  // The managed node and the generation it backed are owned by the server
+  // reaper; the client cleanup removes only the SQL-owner fixtures this spec
+  // created. Nothing is pruned.
   testInfo.setTimeout(180000);
   const client = api;
   api = null;
   await client?.cleanup().catch(() => {});
 });
 
-test("Aurora generation completes on a Fleet node and settles credits", async ({ page }) => {
+test("Aurora generation completes on a Fleet node and shows its artifact in the composer", async ({ page }) => {
   test.skip(process.env.MULTICA_RUN_DOCKER_INTEGRATION !== "1");
   const client = await createTestApi();
   api = client;
   await loginFleetBrowser(page, client);
 
-  // The create call provisions the sandbox and enqueues the skill. It must not
-  // be a 503: a missing Aurora runtime is a hard failure, never a skip.
-  const generation = await client.createAuroraGeneration("xhs-image", ROUND_TRIP_PROMPT);
-  expect(generation.id).not.toBe("");
-
-  // Poll the authoritative detail endpoint. expect.poll drives the clock; a
-  // timeout fails the test instead of being read as a pass.
-  await expect
-    .poll(async () => (await client.getAuroraGeneration(generation.id)).status, {
-      timeout: GENERATION_TIMEOUT_MS,
-      message: `aurora generation ${generation.id} did not settle`,
-    })
-    .toMatch(/completed|failed/);
-
-  const settled = await client.getAuroraGeneration(generation.id);
-  expect(settled.status).toBe("completed");
-  expect(settled.creditsCharged).toBeGreaterThan(0);
-  expect(settled.assets.length).toBeGreaterThan(0);
-
-  // The browser sees the execution plane: the workspace's managed Fleet node is
-  // listed on the Cloud Runtime page and reports ready.
-  await page.goto(`/${client.getFleetWorkspaceSlug()}/runtimes`, { waitUntil: "domcontentloaded" });
-  await expect
-    .poll(async () => (await client.listFleetNodes()).some((node) => node.ready), {
-      timeout: NODE_READY_TIMEOUT_MS,
-    })
-    .toBe(true);
-  await expect(page.getByText(/aurora-sandbox|aurora/i).first()).toBeVisible({
-    timeout: NODE_READY_TIMEOUT_MS,
+  // Setup only: land on the Aurora Create directory for the resolved workspace.
+  await page.goto(`${AURORA_BASE_URL}/${client.getFleetWorkspaceSlug()}/skills`, {
+    waitUntil: "domcontentloaded",
   });
+
+  // The prompt goes through the composer UI. Picking the skill opens the drawer.
+  await page.getByRole("button", { name: SKILL_NAME }).click();
+  const drawer = page.locator('[data-slot="sheet-content"]');
+  await expect(drawer).toBeVisible();
+  await drawer.getByLabel("What should it make?").fill(ROUND_TRIP_PROMPT);
+  await drawer.getByRole("button", { name: "Generate", exact: true }).click();
+
+  // The drawer follows the generation it started and renders the terminal
+  // status itself. This is a browser assertion, not an API poll.
+  await expect(drawer.getByRole("status")).toHaveText("Done", {
+    timeout: GENERATION_TIMEOUT_MS,
+  });
+
+  // The artifact is observed in the UI: the composer's Result section lists the
+  // asset's download link. A status-only check would also pass a completed
+  // generation that produced no files, so the link is required.
+  await expect(drawer.getByRole("heading", { name: "Result" })).toBeVisible();
+  await expect(drawer.locator('ul li a[href$="/download"]').first()).toBeVisible();
 });

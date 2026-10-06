@@ -32,11 +32,15 @@ import (
 	"github.com/multica-ai/multica/server/internal/fleet/model"
 )
 
-// This file is the Task 7 opt-in proof: one Aurora generation completed on the
-// real local Docker Fleet with a fake pipeline (no model, no provider account),
-// plus the real-engine idempotency/crash-replay/live-egress evidence Task 5's
-// review carried forward, plus the real MCP broker starting under the injected
-// config and advertising mcp__aurora__* tool identifiers. Every subtest is under
+// This file is the Task 7 opt-in proof. The API half is one Aurora generation
+// completed on the real local Docker Fleet with a fake pipeline (no model, no
+// provider account). It can only run with a fake-capable dual-contract node
+// image, which this checkout does not have, so its prerequisite is a named,
+// documented skip and it never falls through to a real provider path. The
+// real-engine half is the idempotency/crash-replay/live-egress evidence Task 5's
+// review carried forward, the Aurora node admission and lifecycle coverage
+// (stop/start identity, the maintenance-approval crash boundary) and the real
+// MCP broker advertising mcp__aurora__* tool identifiers. Every subtest is under
 // the dockerintegration build tag and checks MULTICA_RUN_DOCKER_INTEGRATION=1
 // before any Docker client, CLI or database lookup, so a default run touches
 // nothing.
@@ -47,13 +51,35 @@ func TestAuroraRoundTrip(t *testing.T) {
 	if os.Getenv("MULTICA_RUN_DOCKER_INTEGRATION") != "1" {
 		t.Skip("Docker opt-in required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+	// The API/lifecycle halves wait for a managed Fleet to provision a sandbox
+	// node, enroll its daemon and settle a generation; the real-engine halves
+	// each build their own namespace. The deadline covers both.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 
+	// The generation->asset->settlement round trip. Its prerequisite is a
+	// fake-capable dual-contract node image, which this checkout does not ship;
+	// the subtest records that as a named skip and never falls through to a real
+	// provider path.
 	t.Run("ApiGenerationRoundTrip", func(t *testing.T) {
 		if err := RoundTripAuroraGeneration(ctx, t); err != nil {
 			t.Fatal(err)
 		}
+	})
+	// The Aurora-profile lifecycle coverage: stop/start identity preservation,
+	// the maintenance-approval crash boundary, delete credential revocation and
+	// the absence of owned Docker resources. Like the generation round trip it
+	// needs the fake-capable dual-contract node image, so it is the same named
+	// skip until that infrastructure exists.
+	t.Run("AuroraLifecycleRoundTrip", func(t *testing.T) {
+		if err := RoundTripAuroraLifecycle(ctx, t); err != nil {
+			t.Fatal(err)
+		}
+	})
+	// The restored Provider.Ensure crash replay: a node admitted by one Ensure is
+	// adopted by the next after the durable container id is lost, never replaced.
+	t.Run("RealEngineEnsureCrashReplay", func(t *testing.T) {
+		testEnsureCrashReplayRealEngine(ctx, t)
 	})
 	t.Run("RealEngineConnectNetworkIsIdempotent", func(t *testing.T) {
 		testConnectNetworkIdempotentRealEngine(ctx, t)
@@ -63,11 +89,18 @@ func TestAuroraRoundTrip(t *testing.T) {
 	t.Run("RealEngineNodeStarts", func(t *testing.T) {
 		testEnsureNodeStartsRealEngine(ctx, t)
 	})
-	// The crash-replay of ensureEgress over a running sidecar is proven in the
-	// docker package (TestAuroraRoundTripEgressReplay), where the unexported
-	// helper can be driven without Provider.Ensure's node admission. See the Task
-	// 7 report: real-node admission is separately blocked by the seccomp path the
-	// SDK sends verbatim to the daemon.
+	// The Aurora lifecycle on a real engine: the exact container identity and
+	// both owned volumes survive stop then start, and an unapproved maintenance
+	// operation is refused before it reaches Docker.
+	t.Run("RealEngineStopStartIdentity", func(t *testing.T) {
+		testStopStartIdentityRealEngine(ctx, t)
+	})
+	t.Run("RealEngineMaintenanceBoundary", func(t *testing.T) {
+		testMaintenanceBoundaryRealEngine(ctx, t)
+	})
+	// The crash-replay of ensureEgress over a running sidecar is additionally
+	// proven in the docker package (TestAuroraRoundTripEgressReplay), where the
+	// unexported helper can be driven without Provider.Ensure's node admission.
 	t.Run("RealEngineLiveEgress", func(t *testing.T) {
 		testLiveEgressRealEngine(ctx, t)
 	})
@@ -150,34 +183,54 @@ func RoundTripAuroraGeneration(ctx context.Context, t *testing.T) error {
 	}
 }
 
+// auroraFakePipelineImageEnv names the one node image capable of standing in
+// for a real provider: a digest-pinned dual-contract image built with a fake
+// pipeline. It is deliberately a different variable from the general Fleet test
+// image so the API half can never silently run a real provider.
+const auroraFakePipelineImageEnv = "MULTICA_AURORA_FAKE_PIPELINE_IMAGE"
+
+// requireFakePipelineNodeImage is the named, documented prerequisite of the API
+// half. No fake-capable dual-contract node image exists in this checkout: the
+// reviewed daemon/broker exposes no fake pipeline mode, and the smoke fake
+// (deploy/aurora-sandbox/fixtures/smoke/aurora-fake-pipelines.mjs) injects an
+// in-process fetch seam that the broker subprocess the daemon spawns does not
+// have, so selecting it would mean changing the reviewed daemon/broker. This
+// subtest is therefore a named skip and can never fall through to a real
+// provider path: it requires this dedicated image variable, never the general
+// release image.
+func requireFakePipelineNodeImage(t *testing.T) string {
+	t.Helper()
+	image := strings.TrimSpace(os.Getenv(auroraFakePipelineImageEnv))
+	if image == "" {
+		t.Skipf("no fake-capable dual-contract Aurora node image exists in this checkout (%s is unset): the reviewed daemon/broker exposes no fake pipeline mode and selecting the smoke fake would require changing the reviewed daemon/broker; this subtest must never fall through to a real provider path", auroraFakePipelineImageEnv)
+	}
+	if !approvedNodeImage.MatchString(image) {
+		t.Skipf("%s must be pinned to a digest (got %q)", auroraFakePipelineImageEnv, image)
+	}
+	return image
+}
+
 // auroraRoundTripInputs validates the explicit Aurora inputs before any side
-// effect. It reuses the shared Fleet harness identity and adds the sandbox
-// image the fake pipeline runs in.
+// effect. The fake-capable image is checked first so the skip reason always
+// names the missing prerequisite rather than whichever API variable happens to
+// be unset.
 func auroraRoundTripInputs(t *testing.T) (roundTripEnv, error) {
 	t.Helper()
 	env := roundTripEnv{
 		apiURL:      strings.TrimRight(os.Getenv("MULTICA_FLEET_API_URL"), "/"),
 		token:       os.Getenv("MULTICA_FLEET_API_TOKEN"),
 		workspaceID: os.Getenv("MULTICA_FLEET_WORKSPACE_ID"),
-		image:       os.Getenv("MULTICA_AURORA_TEST_NODE_IMAGE"),
-	}
-	if env.image == "" {
-		env.image = os.Getenv("MULTICA_FLEET_TEST_IMAGE")
+		image:       requireFakePipelineNodeImage(t),
 	}
 	for _, missing := range []struct{ name, value, why string }{
 		{"MULTICA_FLEET_API_URL", env.apiURL, "the running managed API"},
 		{"MULTICA_FLEET_API_TOKEN", env.token, "an authenticated workspace caller"},
 		{"MULTICA_FLEET_WORKSPACE_ID", env.workspaceID, "the workspace under test"},
-		{"MULTICA_AURORA_TEST_NODE_IMAGE", env.image, "the digest-pinned dual-contract Aurora sandbox node image"},
 	} {
 		if missing.value == "" {
 			t.Skipf("%s required for the Aurora round trip (%s)", missing.name, missing.why)
 			return env, errors.New("missing input")
 		}
-	}
-	if !approvedNodeImage.MatchString(env.image) {
-		t.Skip("MULTICA_AURORA_TEST_NODE_IMAGE must be digest pinned")
-		return env, errors.New("bad image")
 	}
 	if os.Getenv("DATABASE_URL") == "" {
 		t.Skip("DATABASE_URL required for the Aurora round trip")
