@@ -99,6 +99,20 @@ func (p *Provider) Delete(ctx context.Context, n model.Node, ref model.Operation
 	if e != nil {
 		return e
 	}
+	if o.Status == "running" {
+		// The approval already revoked the credential and closed admission, so an
+		// idle running node is stopped here; otherwise the stopped/missing proof
+		// below could never be satisfied and the delete would retry forever.
+		if !o.Ready || !o.ReportStatsKnown || o.StartEpoch != n.StartEpoch || o.DaemonID != n.DaemonID {
+			return model.ErrUnknownHealth
+		}
+		if e = bounded(ctx, func(c context.Context) error { return p.engine.Stop(c, n.ContainerID) }); e != nil {
+			return safeError(e)
+		}
+		if o, e = p.Inspect(ctx, n); e != nil {
+			return e
+		}
+	}
 	if o.Status != "stopped" && o.Status != "missing" {
 		return model.ErrUnknownHealth
 	}

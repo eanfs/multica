@@ -48,25 +48,6 @@ async function createFleetNode(client: TestApiClient, name: string) {
   return node;
 }
 
-/** Stop every still-running owned node so a later delete can be executed. */
-async function stopOwnedNodes(client: TestApiClient, ids: string[]): Promise<void> {
-  if (ids.length === 0) return;
-  for (const id of ids) {
-    await client.stopFleetNode(id).catch(() => {
-      /* already stopped, gone, or not stoppable from its current state */
-    });
-  }
-  const deadline = Date.now() + 90000;
-  while (Date.now() < deadline) {
-    const nodes = await client.listFleetNodes().catch(() => []);
-    const pending = ids.filter((id) =>
-      nodes.some((node) => node.id === id && node.status !== "stopped" && node.status !== "terminated"),
-    );
-    if (pending.length === 0) return;
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-  }
-}
-
 test.afterEach(async ({}, testInfo) => {
   // Deleting a running node stops it first, which can take longer than the
   // default hook budget; the wait below still fails closed on a bounded clock.
@@ -75,9 +56,6 @@ test.afterEach(async ({}, testInfo) => {
   api = null;
   if (!client) return;
   const owned = createdNodeIds.splice(0);
-  // Deletion requires a stopped container, so stop first and wait for the
-  // lifecycle to settle; a node may already be gone and each step is idempotent.
-  await stopOwnedNodes(client, owned);
   for (const nodeId of owned) {
     await client.deleteFleetNode(nodeId).catch(() => {
       /* the test may already have deleted it; cleanup stays idempotent */
@@ -229,8 +207,7 @@ test("deleting a node requires confirmation and removes its owned volumes", asyn
   api = client;
   const node = await createFleetNode(client, "E2E Delete node");
   await waitForNodeReady(client, node.id);
-  // Deletion accepts only a stopped container, so stop it before the UI flow.
-  await stopOwnedNodes(client, [node.id]);
+  // The node is running here: the product stops an idle node before removing it.
 
   const deleteKeys: string[] = [];
   await page.route("**/api/cloud-runtime/nodes", async (route) => {
