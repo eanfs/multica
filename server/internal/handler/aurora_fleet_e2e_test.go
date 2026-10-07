@@ -2,27 +2,29 @@ package handler
 
 import (
 	"context"
-	"encoding/hex"
 	"net/http"
-	"os"
-	"path/filepath"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/aurora"
-	"github.com/multica-ai/multica/server/internal/aurorafleet"
+	"github.com/multica-ai/multica/server/internal/cloudruntime"
+	"github.com/multica-ai/multica/server/internal/fleet"
+	"github.com/multica-ai/multica/server/internal/fleet/model"
+	"github.com/multica-ai/multica/server/internal/fleet/store"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
-// TestAuroraFleetProvisionToClaim is the fleet acceptance test: a node
-// provisioned by the self-host controller bootstraps a sandbox daemon that
-// exchanges its scoped enrollment secret (Task 3) for a daemon credential and
-// then claims a queued task as the daemon identity it just enrolled. The daemon
-// itself is simulated with the server's own HTTP endpoints — the exact calls a
-// real daemon inside the node would make — while the node runs on the fleet's
-// in-memory backend so the test needs no Docker daemon.
+// TestAuroraFleetProvisionToClaim is the Fleet acceptance test: the server's
+// real SandboxManager provisions a workspace node through the Task 3 Fleet
+// route (over the production cloudruntime client and an in-process Fleet
+// service, so no Docker is needed), the sandbox daemon exchanges the
+// enrollment secret the manager shipped for a daemon credential, and it claims
+// a queued task as the identity it just enrolled. The daemon itself is
+// simulated with the server's own HTTP endpoints - the exact calls a real
+// daemon inside the node would make.
 func TestAuroraFleetProvisionToClaim(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
@@ -56,45 +58,56 @@ func TestAuroraFleetProvisionToClaim(t *testing.T) {
 		testPool.Exec(ctx, `DELETE FROM aurora_sandbox_node WHERE workspace_id = $1`, testWorkspaceID)
 	})
 
-	// Ensure the workspace node through the authenticated internal API. The
-	// request carries identity only; the controller stages the enrollment
-	// secret into a 0400 host file and hands the backend its path.
-	tokenRaw := []byte(strings.Repeat("m", 32))
-	tokenFile := filepath.Join(t.TempDir(), "control-token")
-	if err := os.WriteFile(tokenFile, []byte(hex.EncodeToString(tokenRaw)), 0o400); err != nil {
-		t.Fatalf("write control token file: %v", err)
+	// Run an in-process Fleet service with the Aurora profile and drive it
+	// through the production provisioner, exactly as main.go wires it. The
+	// enrollment secret travels only in the exported header and stays in the
+	// Fleet's process-local handoff.
+	namespace := "aurora-e2e-" + testUserID
+	secret := []byte("test-only-012345678901234567890123456789")
+	cfg := model.Config{
+		Namespace: namespace,
+		FleetID:   "aurora-e2e",
+		Image:     auroraEnrollmentImageDigest,
+		APIURL:    "http://127.0.0.1:1",
+		Specs:     map[string]model.Spec{"sandbox": {CPUs: 2, MemoryBytes: 4294967296, Pids: 256, MaxRuns: 1}},
+		MaxNodes:  2,
+		Aurora:    &model.AuroraConfig{ServerURL: "http://api.test"},
 	}
-	auth, err := aurorafleet.LoadControlAuth(tokenFile)
+	repo := store.New(testPool, namespace, store.WithProvisioningConfig(cfg))
+	svc := fleet.NewService(repo, cfg, nil)
+	fleetServer := httptest.NewServer(svc.Handler(secret))
+	defer fleetServer.Close()
+	t.Cleanup(func() {
+		for _, table := range []string{"fleet_node_credentials", "fleet_node_operations", "fleet_nodes", "fleet_credential_profiles"} {
+			testPool.Exec(ctx, "DELETE FROM "+table+" WHERE namespace=$1 AND owner_id=$2", namespace, testUserID)
+		}
+	})
+
+	client := cloudruntime.NewClient(cloudruntime.Config{BaseURL: fleetServer.URL, ServiceSecret: secret})
+	mgr := aurora.NewSandboxManager(testHandler.Queries, testPool, aurora.NewFleetProvisioner(client), auroraEnrollmentImageDigest, nil)
+	node, err := mgr.Ensure(ctx, parseUUID(testWorkspaceID), parseUUID(runtimeID))
 	if err != nil {
-		t.Fatalf("load control auth: %v", err)
+		t.Fatalf("ensure workspace sandbox: %v", err)
 	}
-	backend := aurorafleet.NewMemoryBackend()
-	ctrl := aurorafleet.NewController(aurorafleet.Config{Backend: backend, Auth: auth, SecretRoot: t.TempDir()})
-	nodeID := "01933e60-0000-7d4e-9f01-2a3b4c5d6e01"
-	node := testutil.Decode[struct {
-		ID    string `json:"id"`
-		State string `json:"state"`
-	}](t, ctrl.Handler().ServeHTTP,
-		testutil.WithHeaders(
-			testutil.JSONRequest(http.MethodPut, "/internal/v1/workspace-nodes/"+nodeID, aurorafleet.EnsureRequest{
-				NodeID:          nodeID,
-				WorkspaceID:     testWorkspaceID,
-				RuntimeID:       runtimeID,
-				DaemonID:        "01933e60-0000-7d4e-9f01-2a3b4c5d6e02",
-				EnrollmentToken: "mse_0123456789abcdef0123456789abcdef01234567",
-			}),
-			"Authorization", "Bearer "+string(tokenRaw),
-		), http.StatusOK)
-	if node.ID != nodeID || node.State != aurorafleet.StateOnline {
-		t.Fatalf("ensured node = %+v, want %s online", node, nodeID)
+	if node.State != "starting" {
+		t.Fatalf("ensured node state = %q, want starting", node.State)
+	}
+	if !node.BackendNodeID.Valid || node.BackendNodeID.String == "" {
+		t.Fatalf("fleet backend node id was not recorded: %+v", node.BackendNodeID)
+	}
+	if node.BackendNodeID.String != uuidToString(node.ID) {
+		t.Fatalf("backend node id = %q, want the Fleet node identity %q", node.BackendNodeID.String, uuidToString(node.ID))
+	}
+
+	// The Fleet holds the single-use secret the manager shipped. Handing it to
+	// the daemon here mirrors the reconciler taking it at bootstrap.
+	issued, ok := svc.TakeAuroraEnrollment(node.ID)
+	if !ok || !strings.HasPrefix(issued, "mse_") {
+		t.Fatalf("fleet enrollment handoff = %q ok=%v, want a single-use mse_ secret", issued, ok)
 	}
 
 	// The sandbox daemon exchanges the workspace-scoped enrollment secret for
 	// an mdt_ credential and learns the runtime and daemon identity it serves.
-	issued, err := newSandboxEnrollmentService().Issue(ctx, parseUUID(testWorkspaceID), parseUUID(runtimeID), auroraEnrollmentImageDigest)
-	if err != nil {
-		t.Fatalf("issue managed enrollment: %v", err)
-	}
 	enrolled := testutil.Decode[struct {
 		DaemonID    string `json:"daemon_id"`
 		DaemonToken string `json:"daemon_token"`
@@ -102,7 +115,7 @@ func TestAuroraFleetProvisionToClaim(t *testing.T) {
 			ID     string `json:"id"`
 			Status string `json:"status"`
 		} `json:"runtime"`
-	}](t, testHandler.ManagedRuntimeEnroll, managedEnrollRequest(issued.Token, nil), http.StatusOK)
+	}](t, testHandler.ManagedRuntimeEnroll, managedEnrollRequest(issued, nil), http.StatusOK)
 	if enrolled.Runtime.ID != runtimeID {
 		t.Fatalf("enrolled runtime id = %q, want %q", enrolled.Runtime.ID, runtimeID)
 	}
@@ -128,7 +141,7 @@ func TestAuroraFleetProvisionToClaim(t *testing.T) {
 	// Every available skill route is materialized on the fleet's managed
 	// runtime: the enrolled daemon's claim set therefore reaches each skill's
 	// system agent, not just the generic task above. This is the fleet-level
-	// half of "prove all 13 routes" — the handler matrix owns the lifecycle.
+	// half of "prove all 13 routes" - the handler matrix owns the lifecycle.
 	if err := aurora.EnsureSystemAgents(ctx, testHandler.Queries, parseUUID(testWorkspaceID), parseUUID(testUserID)); err != nil {
 		t.Fatalf("seed aurora system agents: %v", err)
 	}

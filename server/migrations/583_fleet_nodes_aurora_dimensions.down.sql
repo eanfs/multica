@@ -1,0 +1,2 @@
+ALTER TABLE IF EXISTS fleet_nodes DROP COLUMN IF EXISTS runtime_id;
+ALTER TABLE IF EXISTS fleet_nodes DROP COLUMN IF EXISTS workspace_id;

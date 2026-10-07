@@ -195,7 +195,14 @@ type TaskContextForEnv struct {
 	AutopilotSource         string
 	AutopilotTriggerPayload string
 	QuickCreatePrompt       string // non-empty for quick-create tasks
-	IsSquadLeader           bool   // true when THIS TASK runs the agent in the squad-leader role (may exit silently on no_action); derived from the claim's is_leader_task / squad_id, never sniffed from instructions text (MUL-5811)
+	// AuroraSkillID is the trusted skill id of a managed Aurora generation run
+	// (the claim's "aurora:<skillID>" system key). A generation is enqueued
+	// through the quick-create carrier, so it also carries QuickCreatePrompt;
+	// this field is what tells the brief and the per-turn prompt to use the
+	// Aurora skill workflow instead of the generic issue-creation one. Empty on
+	// every non-Aurora task.
+	AuroraSkillID string
+	IsSquadLeader bool // true when THIS TASK runs the agent in the squad-leader role (may exit silently on no_action); derived from the claim's is_leader_task / squad_id, never sniffed from instructions text (MUL-5811)
 	// WorkspaceContext is the workspace-level system prompt (workspace.context
 	// in the DB). Rendered into the brief as `## Workspace Context` when
 	// non-empty so every agent in the workspace sees the same shared context,

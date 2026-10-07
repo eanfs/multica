@@ -340,7 +340,7 @@ build: ## Build the server, CLI, migrate, and fleet binaries into server/bin
 	cd server && go build -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT)" -o bin/server$(EXE) ./cmd/server
 	cd server && go build -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)" -o bin/multica$(EXE) ./cmd/multica
 	cd server && go build -o bin/migrate$(EXE) ./cmd/migrate
-	cd server && go build -o bin/aurora-fleet$(EXE) ./cmd/aurora-fleet
+	cd server && go build -o bin/fleet$(EXE) ./cmd/fleet
 
 test: ## Run Go tests after ensuring the target DB exists and migrations are applied
 	$(REQUIRE_ENV)

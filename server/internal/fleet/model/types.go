@@ -70,6 +70,23 @@ type OperationRef struct {
 
 type CreateRequest struct{ Name, Spec, IdempotencyKey string }
 
+// AuroraNodeRequest is one Aurora workspace-node create intent. WorkspaceID and
+// RuntimeID are trusted server UUIDs, DaemonID is the caller-supplied daemon
+// UUID persisted on the node, and ImageDigest must name the administrator's
+// approved image. EnrollmentToken is the single-use managed-enrollment secret:
+// it is handed to the reconciler in memory only, is never persisted, and is
+// deliberately excluded from the idempotency fingerprint so a rotated secret
+// still replays the original node and operation.
+type AuroraNodeRequest struct {
+	WorkspaceID, RuntimeID pgtype.UUID
+	DaemonID               string
+	ImageDigest            string
+	Name                   string
+	Spec                   string
+	IdempotencyKey         string
+	EnrollmentToken        string
+}
+
 // Bootstrap contains private provider inputs, not public configuration or log data.
 type Bootstrap struct {
 	NodeToken string `json:"node_token"`
@@ -78,6 +95,9 @@ type Bootstrap struct {
 	Model     string `json:"model,omitempty"`
 	ServerURL string `json:"server_url"`
 	DaemonID  string `json:"daemon_id"`
+	// EnrollmentToken is the Aurora managed-enrollment secret. It is a private
+	// input delivered once into the node secrets volume and never persisted.
+	EnrollmentToken string `json:"enrollment_token,omitempty"`
 }
 
 // ReportStatsKnown is false until explicitly observed. Offline never implies Ready.

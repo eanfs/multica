@@ -34,6 +34,81 @@ func privateOperationError(resp *Response) error {
 	}
 }
 
+// AuroraWorkspaceNodeRequest is the transport identity of one Aurora
+// workspace-node intent. EnrollmentToken travels in the AuroraEnrollmentHeader,
+// never in the JSON body, and the strict body therefore carries identity only.
+type AuroraWorkspaceNodeRequest struct {
+	NodeID          string
+	WorkspaceID     string
+	RuntimeID       string
+	DaemonID        string
+	EnrollmentToken string
+	ImageDigest     string
+	Name            string
+	Spec            string
+	IdempotencyKey  string
+}
+
+// EnsureAuroraWorkspaceNode provisions (or replays) one Aurora workspace node
+// through the Fleet internal route. The response is the public NodeDTO.
+func (c *Client) EnsureAuroraWorkspaceNode(ctx context.Context, owner string, req AuroraWorkspaceNodeRequest) (fleet.NodeDTO, error) {
+	if _, e := util.ParseUUID(req.NodeID); e != nil {
+		return fleet.NodeDTO{}, model.ErrInvalidRequest
+	}
+	body, e := json.Marshal(struct {
+		WorkspaceID    string `json:"workspace_id"`
+		RuntimeID      string `json:"runtime_id"`
+		DaemonID       string `json:"daemon_id"`
+		ImageDigest    string `json:"image_digest"`
+		Name           string `json:"name"`
+		Spec           string `json:"spec"`
+		IdempotencyKey string `json:"idempotency_key"`
+	}{req.WorkspaceID, req.RuntimeID, req.DaemonID, req.ImageDigest, req.Name, req.Spec, req.IdempotencyKey})
+	if e != nil {
+		return fleet.NodeDTO{}, e
+	}
+	headers := http.Header{}
+	headers.Set(fleet.AuroraEnrollmentHeader, req.EnrollmentToken)
+	resp, e := c.Do(ctx, Request{Method: http.MethodPut, Path: "/internal/v1/workspace-nodes/" + req.NodeID, UserID: owner, Body: body, Headers: headers, Op: "provision"})
+	if e != nil {
+		return fleet.NodeDTO{}, e
+	}
+	if resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fleet.NodeDTO{}, privateOperationError(resp)
+	}
+	var node fleet.NodeDTO
+	if e = json.Unmarshal(resp.Body, &node); e != nil {
+		return fleet.NodeDTO{}, e
+	}
+	if node.ID != req.NodeID || node.OwnerID != owner {
+		return fleet.NodeDTO{}, model.ErrConflict
+	}
+	return node, nil
+}
+
+// DeleteAuroraWorkspaceNode records one destroy intent. The route is idempotent,
+// so a node the Fleet no longer knows is success; a still-unknown 404/403 is
+// reported as ErrNodeNotFound for callers that treat cleanup as repeatable.
+func (c *Client) DeleteAuroraWorkspaceNode(ctx context.Context, owner, nodeID string) error {
+	if _, e := util.ParseUUID(nodeID); e != nil {
+		return model.ErrInvalidRequest
+	}
+	resp, e := c.Do(ctx, Request{Method: http.MethodDelete, Path: "/internal/v1/workspace-nodes/" + nodeID, UserID: owner, Op: "terminate"})
+	if e != nil {
+		return e
+	}
+	if resp == nil {
+		return model.ErrUnavailable
+	}
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusForbidden {
+		return ErrNodeNotFound
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return privateOperationError(resp)
+	}
+	return nil
+}
+
 func operationRequest(ref model.OperationRef) fleet.OperationRequestDTO {
 	return fleet.OperationRequestDTO{Namespace: ref.Namespace, NodeID: util.UUIDToString(ref.NodeID), OperationID: util.UUIDToString(ref.OperationID), Generation: ref.Generation, Action: ref.Action}
 }

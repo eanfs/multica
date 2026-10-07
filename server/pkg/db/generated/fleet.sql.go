@@ -1039,7 +1039,7 @@ func (q *Queries) FleetNodeSharedLock(ctx context.Context, arg FleetNodeSharedLo
 }
 
 const fleetObservable = `-- name: FleetObservable :many
-SELECT n.id, n.namespace, n.owner_id, n.created_at, n.updated_at, n.container_id, n.daemon_id, n.name, n.spec, n.image, n.profile_ref, n.start_epoch, n.data_volume, n.secrets_volume, n.desired, n.status, n.generation, n.ready, n.health_at, n.active_runs, n.pending_reports, n.failed_reports, n.maintenance, n.revoked, n.error_code, n.error_message, n.spec_config, n.observation FROM fleet_nodes n
+SELECT n.id, n.namespace, n.owner_id, n.created_at, n.updated_at, n.container_id, n.daemon_id, n.name, n.spec, n.image, n.profile_ref, n.start_epoch, n.data_volume, n.secrets_volume, n.desired, n.status, n.generation, n.ready, n.health_at, n.active_runs, n.pending_reports, n.failed_reports, n.maintenance, n.revoked, n.error_code, n.error_message, n.spec_config, n.observation, n.workspace_id, n.runtime_id FROM fleet_nodes n
 WHERE n.namespace= $1 AND n.container_id<>'' AND NOT n.revoked AND NOT n.maintenance AND n.desired='running'
  AND n.id> $2::uuid
  AND NOT EXISTS (SELECT 1 FROM fleet_node_operations o WHERE o.namespace=n.namespace AND o.node_id=n.id
@@ -1090,6 +1090,8 @@ func (q *Queries) FleetObservable(ctx context.Context, arg FleetObservableParams
 			&i.ErrorMessage,
 			&i.SpecConfig,
 			&i.Observation,
+			&i.WorkspaceID,
+			&i.RuntimeID,
 		); err != nil {
 			return nil, err
 		}
@@ -1306,6 +1308,143 @@ func (q *Queries) FleetRecoveryClock(ctx context.Context) (pgtype.Timestamptz, e
 	return sql_now, err
 }
 
+const fleetResetAuroraCreateOperation = `-- name: FleetResetAuroraCreateOperation :one
+UPDATE fleet_node_operations o SET generation= $1,phase='queued',
+ request_hash= $2,
+ bootstrap_minted=false,non_retryable=false,bootstrap_claimed_at=NULL,attempts=0,
+ next_attempt_at=NULL,error_code='',error_message='',updated_at=now()
+WHERE o.namespace= $3 AND o.owner_id= $4 AND o.node_id= $5 AND o.id= $6
+ AND o.generation= $7 AND o.action='create'
+RETURNING o.id, o.namespace, o.owner_id, o.created_at, o.updated_at, o.node_id, o.action, o.idempotency_key, o.request_hash, o.phase, o.prior_desired, o.generation, o.approved, o.attempts, o.error_code, o.error_message, o.bootstrap_claimed_at, o.bootstrap_minted, o.non_retryable, o.next_attempt_at, o.action_claimed_at, o.action_start_epoch
+`
+
+type FleetResetAuroraCreateOperationParams struct {
+	NextGeneration int64       `json:"next_generation"`
+	RequestHash    string      `json:"request_hash"`
+	Namespace      string      `json:"namespace"`
+	OwnerID        pgtype.UUID `json:"owner_id"`
+	NodeID         pgtype.UUID `json:"node_id"`
+	OperationID    pgtype.UUID `json:"operation_id"`
+	Generation     int64       `json:"generation"`
+}
+
+// Make the original create operation claimable again at the reset generation.
+// The idempotency key is untouched: this is the same create intent, not a second
+// one. request_hash is rewritten to the current deployment fingerprint so the
+// re-armed intent replays under the new image instead of conflicting forever.
+func (q *Queries) FleetResetAuroraCreateOperation(ctx context.Context, arg FleetResetAuroraCreateOperationParams) (FleetNodeOperation, error) {
+	row := q.db.QueryRow(ctx, fleetResetAuroraCreateOperation,
+		arg.NextGeneration,
+		arg.RequestHash,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.NodeID,
+		arg.OperationID,
+		arg.Generation,
+	)
+	var i FleetNodeOperation
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.NodeID,
+		&i.Action,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.Phase,
+		&i.PriorDesired,
+		&i.Generation,
+		&i.Approved,
+		&i.Attempts,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+		&i.BootstrapClaimedAt,
+		&i.BootstrapMinted,
+		&i.NonRetryable,
+		&i.NextAttemptAt,
+		&i.ActionClaimedAt,
+		&i.ActionStartEpoch,
+	)
+	return i, err
+}
+
+const fleetResetAuroraNode = `-- name: FleetResetAuroraNode :one
+UPDATE fleet_nodes n SET generation= $1,image= $2,desired='running',status='creating',
+ container_id='',start_epoch='',ready=false,maintenance=false,revoked=false,
+ error_code='',error_message='',observation='{}'::jsonb,updated_at=now()
+WHERE n.namespace= $3 AND n.owner_id= $4 AND n.id= $5 AND n.generation= $6
+ AND (n.revoked OR n.image<> $2 OR EXISTS (SELECT 1 FROM fleet_node_operations o
+  WHERE o.namespace=n.namespace AND o.owner_id=n.owner_id AND o.node_id=n.id AND o.id= $7
+   AND (o.phase='failed' OR o.non_retryable)))
+RETURNING n.id, n.namespace, n.owner_id, n.created_at, n.updated_at, n.container_id, n.daemon_id, n.name, n.spec, n.image, n.profile_ref, n.start_epoch, n.data_volume, n.secrets_volume, n.desired, n.status, n.generation, n.ready, n.health_at, n.active_runs, n.pending_reports, n.failed_reports, n.maintenance, n.revoked, n.error_code, n.error_message, n.spec_config, n.observation, n.workspace_id, n.runtime_id
+`
+
+type FleetResetAuroraNodeParams struct {
+	NextGeneration int64       `json:"next_generation"`
+	Image          string      `json:"image"`
+	Namespace      string      `json:"namespace"`
+	OwnerID        pgtype.UUID `json:"owner_id"`
+	NodeID         pgtype.UUID `json:"node_id"`
+	Generation     int64       `json:"generation"`
+	OperationID    pgtype.UUID `json:"operation_id"`
+}
+
+// Re-arm the same Aurora node identity after its create failed, it was revoked,
+// or the deployed image digest changed. Volumes, daemon id, owner and
+// workspace/runtime dimensions are durable identity and must survive; only the
+// control generation, the approved deployment image, and the fresh-bootstrap
+// state change. An image change is deployment-scoped, not identity: reusing the
+// same row keeps the same idempotency key and create intent. The old observation
+// may carry a bootstrap success receipt bound to the prior generation, so it is
+// cleared.
+func (q *Queries) FleetResetAuroraNode(ctx context.Context, arg FleetResetAuroraNodeParams) (FleetNode, error) {
+	row := q.db.QueryRow(ctx, fleetResetAuroraNode,
+		arg.NextGeneration,
+		arg.Image,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.NodeID,
+		arg.Generation,
+		arg.OperationID,
+	)
+	var i FleetNode
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ContainerID,
+		&i.DaemonID,
+		&i.Name,
+		&i.Spec,
+		&i.Image,
+		&i.ProfileRef,
+		&i.StartEpoch,
+		&i.DataVolume,
+		&i.SecretsVolume,
+		&i.Desired,
+		&i.Status,
+		&i.Generation,
+		&i.Ready,
+		&i.HealthAt,
+		&i.ActiveRuns,
+		&i.PendingReports,
+		&i.FailedReports,
+		&i.Maintenance,
+		&i.Revoked,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+		&i.SpecConfig,
+		&i.Observation,
+		&i.WorkspaceID,
+		&i.RuntimeID,
+	)
+	return i, err
+}
+
 const fleetRestoreMaintenance = `-- name: FleetRestoreMaintenance :execrows
 UPDATE fleet_nodes SET desired = $1,maintenance=false,ready=false,updated_at=now()
 WHERE namespace = $2 AND owner_id = $3 AND id = $4 AND generation = $5 AND maintenance
@@ -1322,6 +1461,37 @@ type FleetRestoreMaintenanceParams struct {
 func (q *Queries) FleetRestoreMaintenance(ctx context.Context, arg FleetRestoreMaintenanceParams) (int64, error) {
 	result, err := q.db.Exec(ctx, fleetRestoreMaintenance,
 		arg.Desired,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.NodeID,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const fleetRetireAuroraLifecycleOperations = `-- name: FleetRetireAuroraLifecycleOperations :execrows
+UPDATE fleet_node_operations SET phase='failed',non_retryable=true,error_code='superseded',
+ error_message='',next_attempt_at=NULL,updated_at=now()
+WHERE namespace= $1 AND owner_id= $2 AND node_id= $3
+ AND generation<= $4 AND action<>'create' AND phase NOT IN ('completed','failed')
+`
+
+type FleetRetireAuroraLifecycleOperationsParams struct {
+	Namespace  string      `json:"namespace"`
+	OwnerID    pgtype.UUID `json:"owner_id"`
+	NodeID     pgtype.UUID `json:"node_id"`
+	Generation int64       `json:"generation"`
+}
+
+// Re-arming the one create intent supersedes any unfinished non-create intent
+// recorded for the same node (for example a queued destroy from an earlier
+// workspace teardown). Retiring it here keeps the identity re-creatable instead
+// of leaving an operation that can never match the re-created generation.
+func (q *Queries) FleetRetireAuroraLifecycleOperations(ctx context.Context, arg FleetRetireAuroraLifecycleOperationsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, fleetRetireAuroraLifecycleOperations,
 		arg.Namespace,
 		arg.OwnerID,
 		arg.NodeID,
@@ -1410,6 +1580,8 @@ SELECT n.id,
  n.error_message,
  n.spec_config,
  n.observation,
+ n.workspace_id,
+ n.runtime_id,
  o.id,
  o.namespace,
  o.owner_id,
@@ -1614,7 +1786,7 @@ func (q *Queries) GetFleetNamespaceFence(ctx context.Context, namespace string) 
 }
 
 const getFleetNode = `-- name: GetFleetNode :one
-SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation FROM fleet_nodes WHERE namespace = $1 AND owner_id = $2 AND id = $3
+SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation, workspace_id, runtime_id FROM fleet_nodes WHERE namespace = $1 AND owner_id = $2 AND id = $3
 `
 
 type GetFleetNodeParams struct {
@@ -1655,12 +1827,14 @@ func (q *Queries) GetFleetNode(ctx context.Context, arg GetFleetNodeParams) (Fle
 		&i.ErrorMessage,
 		&i.SpecConfig,
 		&i.Observation,
+		&i.WorkspaceID,
+		&i.RuntimeID,
 	)
 	return i, err
 }
 
 const getFleetNodeByID = `-- name: GetFleetNodeByID :one
-SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation FROM fleet_nodes WHERE namespace = $1 AND id = $2
+SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation, workspace_id, runtime_id FROM fleet_nodes WHERE namespace = $1 AND id = $2
 `
 
 type GetFleetNodeByIDParams struct {
@@ -1700,12 +1874,14 @@ func (q *Queries) GetFleetNodeByID(ctx context.Context, arg GetFleetNodeByIDPara
 		&i.ErrorMessage,
 		&i.SpecConfig,
 		&i.Observation,
+		&i.WorkspaceID,
+		&i.RuntimeID,
 	)
 	return i, err
 }
 
 const getFleetNodeForRuntime = `-- name: GetFleetNodeForRuntime :one
-SELECT n.id, n.namespace, n.owner_id, n.created_at, n.updated_at, n.container_id, n.daemon_id, n.name, n.spec, n.image, n.profile_ref, n.start_epoch, n.data_volume, n.secrets_volume, n.desired, n.status, n.generation, n.ready, n.health_at, n.active_runs, n.pending_reports, n.failed_reports, n.maintenance, n.revoked, n.error_code, n.error_message, n.spec_config, n.observation FROM fleet_nodes n JOIN agent_runtime r ON r.metadata->>'fleet_node_id' = n.id::text
+SELECT n.id, n.namespace, n.owner_id, n.created_at, n.updated_at, n.container_id, n.daemon_id, n.name, n.spec, n.image, n.profile_ref, n.start_epoch, n.data_volume, n.secrets_volume, n.desired, n.status, n.generation, n.ready, n.health_at, n.active_runs, n.pending_reports, n.failed_reports, n.maintenance, n.revoked, n.error_code, n.error_message, n.spec_config, n.observation, n.workspace_id, n.runtime_id FROM fleet_nodes n JOIN agent_runtime r ON r.metadata->>'fleet_node_id' = n.id::text
 WHERE n.namespace = $1 AND n.owner_id = $2 AND r.owner_id = n.owner_id
  AND r.id = $3 AND r.metadata->>'managed_by' = 'local_fleet'
 `
@@ -1748,12 +1924,14 @@ func (q *Queries) GetFleetNodeForRuntime(ctx context.Context, arg GetFleetNodeFo
 		&i.ErrorMessage,
 		&i.SpecConfig,
 		&i.Observation,
+		&i.WorkspaceID,
+		&i.RuntimeID,
 	)
 	return i, err
 }
 
 const getFleetNodeIdentity = `-- name: GetFleetNodeIdentity :one
-SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation FROM fleet_nodes WHERE id = $1 AND owner_id = $2
+SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation, workspace_id, runtime_id FROM fleet_nodes WHERE id = $1 AND owner_id = $2
 `
 
 type GetFleetNodeIdentityParams struct {
@@ -1794,6 +1972,8 @@ func (q *Queries) GetFleetNodeIdentity(ctx context.Context, arg GetFleetNodeIden
 		&i.ErrorMessage,
 		&i.SpecConfig,
 		&i.Observation,
+		&i.WorkspaceID,
+		&i.RuntimeID,
 	)
 	return i, err
 }
@@ -1858,6 +2038,81 @@ func (q *Queries) GetFleetProfile(ctx context.Context, arg GetFleetProfileParams
 		&i.UpdatedAt,
 		&i.ProfileRef,
 		&i.ConfigVersion,
+	)
+	return i, err
+}
+
+const insertFleetAuroraNode = `-- name: InsertFleetAuroraNode :one
+INSERT INTO fleet_nodes (id, daemon_id, namespace, owner_id, workspace_id, runtime_id, name, spec, image, profile_ref, spec_config, data_volume, secrets_volume)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, '', $10, $11, $12)
+RETURNING id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation, workspace_id, runtime_id
+`
+
+type InsertFleetAuroraNodeParams struct {
+	NodeID        pgtype.UUID `json:"node_id"`
+	DaemonID      pgtype.UUID `json:"daemon_id"`
+	Namespace     string      `json:"namespace"`
+	OwnerID       pgtype.UUID `json:"owner_id"`
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	RuntimeID     pgtype.UUID `json:"runtime_id"`
+	Name          string      `json:"name"`
+	Spec          string      `json:"spec"`
+	Image         string      `json:"image"`
+	SpecConfig    []byte      `json:"spec_config"`
+	DataVolume    string      `json:"data_volume"`
+	SecretsVolume string      `json:"secrets_volume"`
+}
+
+// Aurora owns the node and daemon UUIDs. Persist them verbatim with the
+// workspace/runtime dimensions and the administrator's approved image, so the
+// SSOT identity is never a generated default and no enrollment secret is written.
+func (q *Queries) InsertFleetAuroraNode(ctx context.Context, arg InsertFleetAuroraNodeParams) (FleetNode, error) {
+	row := q.db.QueryRow(ctx, insertFleetAuroraNode,
+		arg.NodeID,
+		arg.DaemonID,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.WorkspaceID,
+		arg.RuntimeID,
+		arg.Name,
+		arg.Spec,
+		arg.Image,
+		arg.SpecConfig,
+		arg.DataVolume,
+		arg.SecretsVolume,
+	)
+	var i FleetNode
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ContainerID,
+		&i.DaemonID,
+		&i.Name,
+		&i.Spec,
+		&i.Image,
+		&i.ProfileRef,
+		&i.StartEpoch,
+		&i.DataVolume,
+		&i.SecretsVolume,
+		&i.Desired,
+		&i.Status,
+		&i.Generation,
+		&i.Ready,
+		&i.HealthAt,
+		&i.ActiveRuns,
+		&i.PendingReports,
+		&i.FailedReports,
+		&i.Maintenance,
+		&i.Revoked,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+		&i.SpecConfig,
+		&i.Observation,
+		&i.WorkspaceID,
+		&i.RuntimeID,
 	)
 	return i, err
 }
@@ -2027,7 +2282,7 @@ SELECT n.id, $1, $2, $3, $4, $5, $6, $7,
        'multica-fleet-' || n.id::text || '-data',
        'multica-fleet-' || n.id::text || '-secrets'
 FROM new_node n
-RETURNING id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation
+RETURNING id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation, workspace_id, runtime_id
 `
 
 type InsertFleetNodeParams struct {
@@ -2082,12 +2337,14 @@ func (q *Queries) InsertFleetNode(ctx context.Context, arg InsertFleetNodeParams
 		&i.ErrorMessage,
 		&i.SpecConfig,
 		&i.Observation,
+		&i.WorkspaceID,
+		&i.RuntimeID,
 	)
 	return i, err
 }
 
 const listFleetNamespaceNodes = `-- name: ListFleetNamespaceNodes :many
-SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation FROM fleet_nodes WHERE namespace= $1
+SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation, workspace_id, runtime_id FROM fleet_nodes WHERE namespace= $1
 AND ($2::uuid = '00000000-0000-0000-0000-000000000000'::uuid OR id > $2::uuid)
 ORDER BY id LIMIT $3
 `
@@ -2136,6 +2393,8 @@ func (q *Queries) ListFleetNamespaceNodes(ctx context.Context, arg ListFleetName
 			&i.ErrorMessage,
 			&i.SpecConfig,
 			&i.Observation,
+			&i.WorkspaceID,
+			&i.RuntimeID,
 		); err != nil {
 			return nil, err
 		}
@@ -2148,7 +2407,7 @@ func (q *Queries) ListFleetNamespaceNodes(ctx context.Context, arg ListFleetName
 }
 
 const listFleetNodesByOwner = `-- name: ListFleetNodesByOwner :many
-SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation FROM fleet_nodes WHERE namespace = $1 AND owner_id = $2
+SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation, workspace_id, runtime_id FROM fleet_nodes WHERE namespace = $1 AND owner_id = $2
  AND NOT (desired = 'terminated' AND status = 'terminated')
 ORDER BY created_at, id LIMIT $4 OFFSET $3
 `
@@ -2205,6 +2464,8 @@ func (q *Queries) ListFleetNodesByOwner(ctx context.Context, arg ListFleetNodesB
 			&i.ErrorMessage,
 			&i.SpecConfig,
 			&i.Observation,
+			&i.WorkspaceID,
+			&i.RuntimeID,
 		); err != nil {
 			return nil, err
 		}
@@ -2380,7 +2641,7 @@ func (q *Queries) UpsertFleetProfile(ctx context.Context, arg UpsertFleetProfile
 }
 
 const verifyFleetCredential = `-- name: VerifyFleetCredential :one
-SELECT n.id, n.namespace, n.owner_id, n.created_at, n.updated_at, n.container_id, n.daemon_id, n.name, n.spec, n.image, n.profile_ref, n.start_epoch, n.data_volume, n.secrets_volume, n.desired, n.status, n.generation, n.ready, n.health_at, n.active_runs, n.pending_reports, n.failed_reports, n.maintenance, n.revoked, n.error_code, n.error_message, n.spec_config, n.observation FROM fleet_node_credentials c
+SELECT n.id, n.namespace, n.owner_id, n.created_at, n.updated_at, n.container_id, n.daemon_id, n.name, n.spec, n.image, n.profile_ref, n.start_epoch, n.data_volume, n.secrets_volume, n.desired, n.status, n.generation, n.ready, n.health_at, n.active_runs, n.pending_reports, n.failed_reports, n.maintenance, n.revoked, n.error_code, n.error_message, n.spec_config, n.observation, n.workspace_id, n.runtime_id FROM fleet_node_credentials c
 JOIN fleet_nodes n ON n.id = c.node_id AND n.owner_id = c.owner_id AND n.namespace = c.namespace
 JOIN "user" u ON u.id = n.owner_id
 WHERE c.namespace = $1 AND c.token_hash = $2 AND c.revoked_at IS NULL
@@ -2426,6 +2687,8 @@ func (q *Queries) VerifyFleetCredential(ctx context.Context, arg VerifyFleetCred
 		&i.ErrorMessage,
 		&i.SpecConfig,
 		&i.Observation,
+		&i.WorkspaceID,
+		&i.RuntimeID,
 	)
 	return i, err
 }

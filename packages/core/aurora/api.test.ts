@@ -8,6 +8,7 @@ import {
   createAuroraGeneration,
   createAuroraTopupCheckout,
   deleteAuroraAsset,
+  getAuroraRuntime,
   getAuroraSubscription,
   isAuroraCheckoutConflictError,
   isAuroraDegraded,
@@ -24,6 +25,7 @@ import {
   parseAuroraGeneration,
   parseAuroraGenerationDetail,
   parseAuroraGenerations,
+  parseAuroraRuntime,
   parseAuroraSkills,
   parseAuroraSubscription,
   parseAuroraTopupCheckout,
@@ -52,7 +54,7 @@ describe("parseAuroraSkills", () => {
           name: "海报制作",
           name_en: "Poster",
           category: "image",
-          credits: 760,
+          credits: 76,
           input: ["text", "image"],
           output: ["image"],
           featured: true,
@@ -64,7 +66,7 @@ describe("parseAuroraSkills", () => {
     expect(skills.degraded).toBe(false);
     expect(skills.value).toHaveLength(1);
     expect(skills.value[0]?.nameEn).toBe("Poster");
-    expect(skills.value[0]?.credits).toBe(760);
+    expect(skills.value[0]?.credits).toBe(76);
   });
 
   it("degrades a non-array body to an empty directory, flagged as degraded", () => {
@@ -92,7 +94,7 @@ describe("parseAuroraSkills", () => {
           id: "poster",
           name: "海报制作",
           category: "image",
-          credits: 760,
+          credits: 76,
           attachment_rules: [
             { kinds: ["image"], min: 0, max: 4, max_bytes: 26_214_400 },
           ],
@@ -108,7 +110,7 @@ describe("parseAuroraSkills", () => {
     // absent rule set as "this skill takes no attachments".
     const withoutRules = parseAuroraSkills({
       skills: [
-        { id: "text-image", name: "文字生成图片", category: "image", credits: 680 },
+        { id: "text-image", name: "文字生成图片", category: "image", credits: 68 },
       ],
     });
 
@@ -144,13 +146,13 @@ describe("parseAuroraGeneration", () => {
         skillId: "poster",
         prompt: "a cat",
         status: "queued",
-        creditsReserved: 760,
+        creditsReserved: 76,
       },
     });
 
     expect(parsed.degraded).toBe(false);
     expect(parsed.value?.id).toBe("gen-1");
-    expect(parsed.value?.creditsReserved).toBe(760);
+    expect(parsed.value?.creditsReserved).toBe(76);
   });
 
   it("reads an unreadable body as null rather than an empty generation", () => {
@@ -176,7 +178,7 @@ describe("parseAuroraGenerationDetail", () => {
         skillId: "poster",
         prompt: "a cat",
         status: "completed",
-        creditsReserved: 760,
+        creditsReserved: 76,
         assets: [
           {
             id: "asset-1",
@@ -212,6 +214,81 @@ describe("parseAuroraAssets", () => {
   });
 });
 
+describe("parseAuroraRuntime", () => {
+  it("reads the workspace's execution target", () => {
+    const parsed = parseAuroraRuntime({
+      workspaceId: "ws-1",
+      node: {
+        id: "node-1",
+        status: "online",
+        ready: true,
+        provider: "docker",
+        createdAt: "2026-10-06T00:00:00Z",
+      },
+      runtimeId: "rt-1",
+      state: "online",
+    });
+
+    expect(parsed.degraded).toBe(false);
+    expect(parsed.value.state).toBe("online");
+    expect(parsed.value.node?.id).toBe("node-1");
+    expect(parsed.value.node?.ready).toBe(true);
+    expect(parsed.value.runtimeId).toBe("rt-1");
+  });
+
+  it("degrades a malformed body to the unconfigured projection", () => {
+    // The endpoint is a console view; a drifted body must render "not set up"
+    // rather than crash the screen. schema.test.ts owns the defaults.
+    expect(parseAuroraRuntime("not-an-object")).toEqual({
+      value: {
+        workspaceId: "",
+        node: null,
+        runtimeId: null,
+        state: "unconfigured",
+      },
+      degraded: true,
+    });
+    expect(parseAuroraRuntime({ node: "not-an-object" }).degraded).toBe(true);
+  });
+
+  it("maps an unknown state to unconfigured without discarding the node", () => {
+    // The server's state is a plain string, so a value from a newer server must
+    // still parse; the view's vocabulary is the four documented states.
+    const parsed = parseAuroraRuntime({
+      workspaceId: "ws-1",
+      node: {
+        id: "node-1",
+        status: "future",
+        ready: false,
+        provider: "docker",
+        createdAt: "2026-10-06T00:00:00Z",
+      },
+      runtimeId: "rt-1",
+      state: "paused",
+    });
+
+    expect(parsed.value.state).toBe("unconfigured");
+    expect(parsed.value.node?.status).toBe("future");
+    expect(parsed.value.runtimeId).toBe("rt-1");
+  });
+
+  it("keeps a node whose provider field is missing", () => {
+    const parsed = parseAuroraRuntime({
+      workspaceId: "ws-1",
+      node: {
+        id: "node-1",
+        status: "starting",
+        ready: false,
+        createdAt: "2026-10-06T00:00:00Z",
+      },
+      state: "provisioning",
+    });
+
+    expect(parsed.value.state).toBe("provisioning");
+    expect(parsed.value.node?.provider).toBe("");
+  });
+});
+
 describe("parseAuroraBalance and parseAuroraTransactions", () => {
   it("reads the wallet and the ledger", () => {
     expect(parseAuroraBalance({ availableMicro: 12_000_000 })).toEqual({
@@ -224,7 +301,7 @@ describe("parseAuroraBalance and parseAuroraTransactions", () => {
           {
             id: "tx-1",
             kind: "deduction",
-            amountMicro: -760_000_000,
+            amountMicro: -76_000_000,
             balanceAfterMicro: 4_000_000,
             reference: "gen-1",
             createdAt: "2026-09-22T00:00:00Z",
@@ -331,6 +408,22 @@ describe("request paths", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.path).toBe("/api/aurora/skills");
     expect(requests[0]?.init).toBeUndefined();
+  });
+
+  it("reads the execution target from the runtime endpoint", async () => {
+    const requests = installFakeClient({
+      workspaceId: "ws-1",
+      node: null,
+      runtimeId: null,
+      state: "unconfigured",
+    });
+
+    const parsed = await getAuroraRuntime();
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.path).toBe("/api/aurora/runtime");
+    expect(requests[0]?.init).toBeUndefined();
+    expect(parsed.value.state).toBe("unconfigured");
   });
 
   it("passes the generation list's paging through as query params", async () => {

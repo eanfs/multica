@@ -21,14 +21,18 @@ export default defineConfig({
       // default suite must never drive Docker or a Fleet environment. The perf
       // scenario stays excluded here too: a project-level testIgnore replaces
       // the top-level one rather than extending it.
-      testIgnore: ["**/perf/**", "**/cloud-runtime.spec.ts"],
+      testIgnore: [
+        "**/perf/**",
+        "**/cloud-runtime.spec.ts",
+        "**/aurora-cloud-runtime.spec.ts",
+      ],
     },
     ...(process.env.MULTICA_RUN_DOCKER_INTEGRATION === "1"
       ? [
           {
             name: "fleet-docker",
             use: { browserName: "chromium" as const },
-            testMatch: ["**/cloud-runtime.spec.ts"],
+            testMatch: ["**/cloud-runtime.spec.ts", "**/aurora-cloud-runtime.spec.ts"],
           },
         ]
       : []),

@@ -176,7 +176,7 @@ func TestProxyLogsHostWithoutPathQueryOrAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p, err := NewPolicy("http://localhost:"+u.Port(), nil)
+	p, err := NewPolicy("http://localhost:"+u.Port(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func proxyClientFor(t *testing.T, proxyURL string) *http.Client {
 // unknown host, a wrong port, and an out-of-policy CONNECT target are refused.
 func TestProxyFakeOriginAllowAndDenyMatrix(t *testing.T) {
 	origin, originURL := newFakeOrigin(t)
-	p, err := NewPolicy(origin.URL, nil)
+	p, err := NewPolicy(origin.URL, nil, nil)
 	if err != nil {
 		t.Fatalf("NewPolicy: %v", err)
 	}

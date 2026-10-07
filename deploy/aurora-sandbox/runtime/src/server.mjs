@@ -26,7 +26,7 @@ import {
 } from './task-context.mjs';
 import { createManifest } from './manifest.mjs';
 import { createProviderRunClient } from './provider-run.mjs';
-import { createProviderFetch, createProcessRunner } from './transport.mjs';
+import { createHttpProxyFetch, createProviderFetch, createProcessRunner } from './transport.mjs';
 import { createHttpImporter, normalizeImporter } from './importer.mjs';
 import { seedreamGenerate } from './tools/seedream.mjs';
 import { seedanceGenerate } from './tools/seedance.mjs';
@@ -105,6 +105,21 @@ export function createBroker(options = {}) {
   }
   const context = options.context || loadTaskContext({ contextPath: options.contextPath, inputRoot, outputRoot, serverOrigin, allowedSecretPaths });
   const fetchImpl = options.fetchImpl || globalThis.fetch;
+  // The sandbox has no direct route out: the server origin is only reachable as
+  // an absolute-form request through the egress sidecar, while provider HTTPS
+  // uses the global fetch's CONNECT tunnel (NODE_USE_ENV_PROXY=1, set by the
+  // daemon). A custom fetchImpl (tests) bypasses proxy wiring entirely so a
+  // developer's own HTTP_PROXY cannot leak into the suite.
+  const proxyUrl =
+    process.env.HTTP_PROXY || process.env.http_proxy || process.env.HTTPS_PROXY || process.env.https_proxy;
+  const serverFetch =
+    fetchImpl === globalThis.fetch
+      ? createHttpProxyFetch({
+          proxyUrl,
+          noProxy: process.env.NO_PROXY || process.env.no_proxy || '',
+          fetchImpl,
+        })
+      : fetchImpl;
   const providerFetch = options.providerFetch || createProviderFetch({
     fetchImpl,
     allowedOrigins: Object.values(PROVIDER_ORIGINS),
@@ -122,7 +137,7 @@ export function createBroker(options = {}) {
       taskToken: readSecret(context.taskTokenFile, { allowedPaths: allowedSecretPaths }),
       taskId: context.taskId,
       path: options.importerPath,
-      fetchImpl,
+      fetchImpl: serverFetch,
       timeoutMs: options.importerTimeoutMs,
     });
     importer = async (request) => normalizeStaging(await delegate(request));
@@ -132,7 +147,7 @@ export function createBroker(options = {}) {
     serverOrigin,
     taskToken: readSecret(context.taskTokenFile, { allowedPaths: allowedSecretPaths }),
     taskId: context.taskId,
-    fetchImpl,
+    fetchImpl: serverFetch,
     timeoutMs: options.providerRunTimeoutMs,
   });
 

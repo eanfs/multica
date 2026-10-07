@@ -146,6 +146,21 @@
       "unavailable": "このインスタンスでは支払いを利用できません。"
     }
   },
+  "runtime": {
+    "title": "実行",
+    "status": {
+      "unconfigured": "未設定",
+      "provisioning": "準備中",
+      "online": "オンライン",
+      "failed": "失敗"
+    },
+    "recovery": {
+      "unconfigured": "このワークスペースには実行ノードがありません。生成を開始するとプロビジョニングされます。",
+      "failed": "実行ノードを起動できませんでした。生成を開始すると再試行されます。失敗が続く場合は、管理者に Fleet 実行環境の確認を依頼してください。"
+    },
+    "generations_title": "実行中の生成",
+    "generations_empty": "実行中の生成はありません。"
+  },
   "workspace": {
     "unavailable_title": "このワークスペースを開けません",
     "unavailable_description": "削除されたか、アクセス権がない可能性があります。",

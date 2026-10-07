@@ -30,6 +30,9 @@ type Resource struct {
 	deletion       *deletionContext
 	ID, Name, Role string
 	Labels         map[string]string
+	// Internal marks a workspace network that has no route off the host except
+	// through the egress sidecar.
+	Internal bool
 }
 type Inspection struct {
 	ID, State, StartedAt string
@@ -41,6 +44,8 @@ type Engine interface {
 	Find(context.Context, map[string]string) ([]Resource, error)
 	Inspect(context.Context, string) (Inspection, error)
 	EnsureNetwork(context.Context, Resource) error
+	ConnectNetwork(context.Context, string, string, []string) error
+	RemoveNetwork(context.Context, Resource) error
 	EnsureVolume(context.Context, Resource) error
 	Create(context.Context, *container.Config, *container.HostConfig, string, string) (string, error)
 	InstallBootstrap(context.Context, []Resource, []byte) error
@@ -146,6 +151,35 @@ func (l *helperLifecycles) forget(id string) { l.mu.Lock(); defer l.mu.Unlock();
 func NewEngine(c *client.Client) Engine {
 	return &sdkEngine{client: c, helpers: &helperLifecycles{now: time.Now, seen: map[string]helperLifecycle{}}}
 }
+
+// AppArmorSupported reports whether the Docker daemon itself advertises AppArmor
+// support through its info endpoint. This is the daemon-authoritative capability
+// probe the startup preflight uses instead of trusting a host path or a loaded
+// profile name, because Docker 25 silently accepts and ignores apparmor=<name>
+// when the daemon has no AppArmor.
+func AppArmorSupported(ctx context.Context, c *client.Client) (bool, error) {
+	if c == nil {
+		return false, model.ErrUnavailable
+	}
+	info, err := c.Info(ctx)
+	if err != nil {
+		return false, err
+	}
+	return appArmorInSecurityOptions(info.SecurityOptions), nil
+}
+
+// appArmorInSecurityOptions reports whether one docker info security-options list
+// names AppArmor. docker info reports entries such as "name=apparmor" or
+// "name=selinux", so this is a substring match: a daemon without AppArmor
+// reports "name=selinux" or similar and must not be mistaken for support.
+func appArmorInSecurityOptions(options []string) bool {
+	for _, option := range options {
+		if strings.Contains(strings.ToLower(option), "apparmor") {
+			return true
+		}
+	}
+	return false
+}
 func (e *sdkEngine) Find(ctx context.Context, labels map[string]string) ([]Resource, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -188,7 +222,21 @@ func (e *sdkEngine) EnsureNetwork(ctx context.Context, r Resource) error {
 	if e.client == nil {
 		return model.ErrUnavailable
 	}
-	if r.Role != "network" || r.Name == "" || !Owns(r.Labels, e.cfg.Namespace, e.cfg.FleetID, "namespace", "network") {
+	if r.Name == "" {
+		return model.ErrForbidden
+	}
+	switch r.Role {
+	case "network":
+		if !Owns(r.Labels, e.cfg.Namespace, e.cfg.FleetID, "namespace", "network") {
+			return model.ErrForbidden
+		}
+	case "workspace-network":
+		// A workspace network is only ever an Aurora-internal bridge owned by
+		// exactly one node.
+		if !r.Internal || !Owns(r.Labels, e.cfg.Namespace, e.cfg.FleetID, r.Labels["multica.fleet.node"], "workspace-network") {
+			return model.ErrForbidden
+		}
+	default:
 		return model.ErrForbidden
 	}
 	check := func() error {
@@ -196,7 +244,7 @@ func (e *sdkEngine) EnsureNetwork(ctx context.Context, r Resource) error {
 		if err != nil {
 			return err
 		}
-		if n.Name != r.Name || n.ID == "" || n.Driver != "bridge" || !sameLabels(n.Labels, r.Labels) {
+		if n.Name != r.Name || n.ID == "" || n.Driver != "bridge" || n.Internal != r.Internal || !sameLabels(n.Labels, r.Labels) {
 			return model.ErrForbidden
 		}
 		return nil
@@ -208,7 +256,7 @@ func (e *sdkEngine) EnsureNetwork(ctx context.Context, r Resource) error {
 	if !errdefs.IsNotFound(err) {
 		return err
 	}
-	_, createErr := e.client.NetworkCreate(ctx, r.Name, network.CreateOptions{Driver: "bridge", Labels: r.Labels})
+	_, createErr := e.client.NetworkCreate(ctx, r.Name, network.CreateOptions{Driver: "bridge", Labels: r.Labels, Internal: r.Internal})
 	if err = check(); err == nil {
 		return nil
 	}
@@ -217,6 +265,72 @@ func (e *sdkEngine) EnsureNetwork(ctx context.Context, r Resource) error {
 	}
 	return err
 }
+
+// ConnectNetwork attaches one owned container to one owned workspace network
+// under the supplied aliases. It never renames or re-creates either resource.
+// The call is idempotent: an attachment already present is success, and a
+// duplicate-endpoint response from Docker is treated the same way, because a
+// crash between an attach and the node create replays this step. Any other
+// failure is returned.
+func (e *sdkEngine) ConnectNetwork(ctx context.Context, networkName, containerID string, aliases []string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if e.client == nil {
+		return model.ErrUnavailable
+	}
+	if networkName == "" || containerID == "" {
+		return model.ErrInvalidRequest
+	}
+	n, err := e.client.NetworkInspect(ctx, networkName, network.InspectOptions{})
+	if err == nil {
+		if _, attached := n.Containers[containerID]; attached {
+			return nil
+		}
+	} else if !errdefs.IsNotFound(err) {
+		return err
+	}
+	if err = e.client.NetworkConnect(ctx, networkName, containerID, &network.EndpointSettings{Aliases: aliases}); err != nil {
+		if isAlreadyConnected(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// isAlreadyConnected reports Docker's duplicate network-endpoint response, which
+// is success for an idempotent attach and never for any other error.
+func isAlreadyConnected(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "already exists in network") || strings.Contains(message, "already connected")
+}
+
+// RemoveNetwork removes one owned network. A missing network is already clean.
+func (e *sdkEngine) RemoveNetwork(ctx context.Context, r Resource) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if e.client == nil {
+		return model.ErrUnavailable
+	}
+	if r.Name == "" {
+		return model.ErrForbidden
+	}
+	n, err := e.client.NetworkInspect(ctx, r.Name, network.InspectOptions{})
+	if errdefs.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if n.Name != r.Name || n.ID == "" || !sameLabels(n.Labels, r.Labels) {
+		return model.ErrForbidden
+	}
+	return e.client.NetworkRemove(ctx, r.Name)
+}
+
 func (e *sdkEngine) EnsureVolume(ctx context.Context, r Resource) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -334,16 +448,22 @@ func (e *sdkEngine) RemoveVolume(ctx context.Context, r Resource) error {
 		if n.DataVolume != r.ID || !validRef(n, ref) || ref.Action != model.Delete || !n.Revoked || n.Desired != "terminating" {
 			return model.ErrForbidden
 		}
-		raw, proofErr := e.FixedOfflineReports(ctx, n, ref)
-		if proofErr != nil {
-			return proofErr
-		}
-		o, proofErr := parseOffline(raw, n, e.cfg)
-		if proofErr != nil || !o.ReportStatsKnown {
-			return model.ErrUnknownHealth
-		}
-		if o.PendingReports != 0 || o.FailedReports != 0 {
-			return model.ErrBusy
+		// A container-less node has no report queue to drain; Delete already ran
+		// reclaimContainerlessData to prove there is no writer, and the ownership
+		// and noWriter checks below still apply. A node that ever confirmed a
+		// container keeps the full offline-report re-proof.
+		if n.ContainerID != "" {
+			raw, proofErr := e.FixedOfflineReports(ctx, n, ref)
+			if proofErr != nil {
+				return proofErr
+			}
+			o, proofErr := parseOffline(raw, n, e.cfg)
+			if proofErr != nil || !o.ReportStatsKnown {
+				return model.ErrUnknownHealth
+			}
+			if o.PendingReports != 0 || o.FailedReports != 0 {
+				return model.ErrBusy
+			}
 		}
 	}
 	err = e.client.VolumeRemove(ctx, r.ID, false)

@@ -54,6 +54,13 @@ export const LOCKED = {
     runtime_image:
       "node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c",
   },
+  // The final runtime stage is a neutral Debian base, never a Node base: the
+  // Node image bakes NODE_VERSION/YARN_VERSION, which the Fleet container-env
+  // allowlist forbids. Node is copied in from the dependency stage instead.
+  debian: {
+    runtime_image:
+      "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587",
+  },
   runtime_packages: {
     "@anthropic-ai/claude-code": "2.1.282",
     "@modelcontextprotocol/sdk": "1.30.1",
@@ -81,7 +88,10 @@ export const LOCKED = {
     "fonts-noto-cjk",
     "fonts-noto-color-emoji",
     "imagemagick",
+    "libatomic1",
+    "libgcc-s1",
     "libnss3",
+    "libstdc++6",
     "poppler-utils",
     "tini",
     "unzip",
@@ -512,6 +522,51 @@ function checkEsbuildRebuild(state, versions, errors) {
   }
 }
 
+// The sandbox image is also the Fleet node image: the same Dockerfile must
+// build and ship the fixed fleet-node entrypoint and the /data + /secrets
+// layout. scripts/verify-aurora-sandbox-image.sh proves it on the built image;
+// this keeps the static lock gate from drifting first.
+function checkFleetNodeContract(state, errors) {
+  const text = typeof state.dockerfile === "string" ? state.dockerfile : null;
+  if (text === null) return;
+  const required = [
+    [text.includes("./cmd/fleet-node"), "build ./cmd/fleet-node"],
+    [text.includes("/out/fleet-node"), "write the fleet-node binary"],
+    [text.includes("COPY --from=gobuilder") && text.includes("/out/fleet-node /usr/local/bin/fleet-node"), "ship fleet-node at /usr/local/bin/fleet-node"],
+    [text.includes("install -d") && text.includes("/data /data/home /data/workspaces /secrets"), "create the fixed /data + /secrets layout"],
+    [text.includes('ENTRYPOINT ["/usr/local/bin/fleet-node", "run"]'), "fix ENTRYPOINT to fleet-node run"],
+    [/HEALTHCHECK[\s\S]*?CMD \["\/usr\/local\/bin\/fleet-node", "health"\]/.test(text), "fix HEALTHCHECK to fleet-node health"],
+  ];
+  for (const [ok, label] of required) {
+    if (!ok) errors.push("Dockerfile sandbox must " + label + " for the Fleet node contract");
+  }
+}
+
+// The final Aurora stage must be built from the neutral Debian base, never the
+// Node base: the Node image bakes NODE_VERSION/YARN_VERSION, which the Fleet's
+// container-env allowlist forbids. Node is copied in from the dependency stage,
+// and the agent path is supplied by the Fleet at container start, never baked.
+function checkNeutralRuntimeBase(state, errors) {
+  const text = typeof state.dockerfile === "string" ? state.dockerfile : null;
+  if (text === null) return;
+  const base = LOCKED.debian.runtime_image;
+  const marker = "FROM " + base + " AS sandbox";
+  if (!text.includes(marker)) {
+    errors.push("Dockerfile sandbox must build its final stage FROM the neutral Debian base " + base);
+    return;
+  }
+  const sandboxStage = text.slice(text.indexOf(marker));
+  if (!/COPY\s+--from=nodedeps[\s\S]*?\/usr\/local\/bin\/node\b/.test(sandboxStage)) {
+    errors.push("Dockerfile sandbox must copy the Node runtime from the nodedeps stage into the neutral base");
+  }
+  for (const key of ["NODE_VERSION", "YARN_VERSION", "MULTICA_CLAUDE_PATH"]) {
+    const pattern = new RegExp("^[ \\t]*ENV[ \\t]+" + key + "(?:[ =])", "m");
+    if (pattern.test(text)) {
+      errors.push("Dockerfile sandbox must not bake " + key + " into the image environment");
+    }
+  }
+}
+
 export function validate(state) {
   const errors = [];
   const versions = state.versions.value;
@@ -538,6 +593,11 @@ export function validate(state) {
     errors.push("versions.json is missing the node lock");
   } else {
     checkImageRef("Node runtime", versions.node.runtime_image, LOCKED.node.runtime_image, errors);
+  }
+  if (!isPlainObject(versions.debian)) {
+    errors.push("versions.json is missing the neutral Debian runtime base lock");
+  } else {
+    checkImageRef("Debian runtime", versions.debian.runtime_image, LOCKED.debian.runtime_image, errors);
   }
 
   if (!isPlainObject(versions.hyperframes_source)) {
@@ -749,6 +809,8 @@ export function validate(state) {
     checkDockerfile("egress", state.dockerfileEgress, versions, state, errors);
   }
   checkEsbuildRebuild(state, versions, errors);
+  checkFleetNodeContract(state, errors);
+  checkNeutralRuntimeBase(state, errors);
 
   return errors;
 }

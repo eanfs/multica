@@ -140,6 +140,7 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
+	"584_fleet_nodes_workspace_index":                           "public.fleet_nodes_workspace_idx",
 	"580_fleet_namespace_fences_namespace_index":                "fleet_namespace_fences_namespace_uidx",
 	"565_fleet_nodes_id_index":                                  "public.fleet_nodes_id_idx",
 	"566_fleet_nodes_daemon_index":                              "public.fleet_nodes_daemon_idx",

@@ -97,39 +97,44 @@ func TestFleetInvalidConcurrentIndexRetry(t *testing.T) {
 	}
 	opts.Files = files[1:]
 	opts.Hooks = map[string]preMigrationHook{}
+	// Index-aware: only the Fleet migrations that actually build a concurrent
+	// index carry a cleanup hook. concurrentIndexCleanups is the authority for
+	// which ones do, and TestEveryConcurrentUpBuildHasCleanup independently
+	// proves every concurrent build (Fleet or not) is registered. A Fleet
+	// migration outside the registry must not register a hook, so a stray hook
+	// cannot hide the fact that a build has no cleanup.
+	var fleetIndexes []string
 	for _, file := range opts.Files {
 		version := strings.TrimSuffix(filepath.Base(file), ".up.sql")
-		if version == "576_fleet_provisioning_snapshot" {
-			if _, registered := concurrentIndexCleanups[version]; registered {
-				t.Fatal("non-index Fleet snapshot migration must not register index cleanup")
-			}
-			if _, registered := preMigrationHooks[version]; registered {
-				t.Fatal("non-index Fleet snapshot migration must not register a pre-migration hook")
+		index, registered := concurrentIndexCleanups[version]
+		if !registered {
+			if _, hooked := preMigrationHooks[version]; hooked {
+				t.Fatalf("non-index Fleet migration must not register a pre-migration hook: %s", version)
 			}
 			continue
 		}
-		index := concurrentIndexCleanups[version]
-		if index == "" || preMigrationHooks[version] == nil {
+		if preMigrationHooks[version] == nil {
 			t.Fatalf("missing Fleet cleanup registration: %s", version)
 		}
 		index = strings.TrimPrefix(index, "public.")
+		fleetIndexes = append(fleetIndexes, index)
 		opts.Hooks[version] = cleanupInvalidConcurrentIndexHook(schema + "." + index)
 	}
 	if err = runMigrations(ctx, scoped, opts); err != nil {
 		t.Fatal(err)
 	}
-	for _, index := range []string{"fleet_nodes_id_idx", "fleet_nodes_daemon_idx", "fleet_operations_id_idx", "fleet_operations_idempotency_idx", "fleet_credentials_id_idx", "fleet_credentials_hash_idx", "fleet_profiles_id_idx", "fleet_profiles_owner_idx", "fleet_nodes_owner_idx", "fleet_operations_pending_idx", "fleet_runtime_node_idx"} {
+	for _, index := range fleetIndexes {
 		assertIndexValidity(t, scoped, schema, index, true)
 	}
 	var constraints, required, indexes int
 	if err = scoped.QueryRow(ctx, "SELECT count(*) FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace JOIN pg_class r ON r.oid=c.conrelid WHERE n.nspname=$1 AND r.relname LIKE 'fleet_%' AND c.contype IN ('f','p','u')", schema).Scan(&constraints); err != nil || constraints != 0 {
 		t.Fatalf("inline FK/PK/UNIQUE constraints=%d err=%v", constraints, err)
 	}
-	if err = scoped.QueryRow(ctx, "SELECT count(*) FROM information_schema.columns WHERE table_schema=$1 AND table_name LIKE 'fleet_%' AND column_name IN ('id','node_id','owner_id','namespace') AND is_nullable='NO'", schema).Scan(&required); err != nil || required != 14 {
+	if err = scoped.QueryRow(ctx, "SELECT count(*) FROM information_schema.columns WHERE table_schema=$1 AND table_name LIKE 'fleet_%' AND column_name IN ('id','node_id','owner_id','namespace') AND is_nullable='NO'", schema).Scan(&required); err != nil || required != 15 {
 		t.Fatalf("required NOT NULL fields=%d err=%v", required, err)
 	}
-	if err = scoped.QueryRow(ctx, "SELECT count(*) FROM pg_indexes WHERE schemaname=$1 AND indexname LIKE 'fleet_%'", schema).Scan(&indexes); err != nil || indexes != 11 {
-		t.Fatalf("Fleet pg_indexes=%d err=%v", indexes, err)
+	if err = scoped.QueryRow(ctx, "SELECT count(*) FROM pg_indexes WHERE schemaname=$1 AND indexname LIKE 'fleet_%'", schema).Scan(&indexes); err != nil || indexes != len(fleetIndexes) {
+		t.Fatalf("Fleet pg_indexes=%d want=%d err=%v", indexes, len(fleetIndexes), err)
 	}
 	// Interrupt a concurrent DROP while a reader retains the old index snapshot.
 	blocker, err := scoped.Begin(ctx)

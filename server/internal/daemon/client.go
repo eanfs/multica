@@ -761,6 +761,78 @@ func writeAuroraArtifactMultipart(writer *multipart.Writer, upload AuroraArtifac
 	return writer.Close()
 }
 
+// auroraAttachmentMetadata is the single-attachment response the task-scoped
+// credential can read (GET /api/attachments/{id}). Only the fields the broker
+// context needs are decoded; the download URL is short-lived and never leaves
+// the daemon.
+type auroraAttachmentMetadata struct {
+	ID          string `json:"id"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	SizeBytes   int64  `json:"size_bytes"`
+	DownloadURL string `json:"download_url"`
+}
+
+// GetAuroraAttachment resolves one quick-create attachment id with the task
+// token. The mat_ token authenticates as the task's owning user and workspace,
+// so the endpoint's normal membership check still applies; the daemon never
+// reads attachment bytes with its long-lived PAT.
+func (c *Client) GetAuroraAttachment(ctx context.Context, taskToken, attachmentID string) (auroraAttachmentMetadata, error) {
+	if strings.TrimSpace(taskToken) == "" {
+		return auroraAttachmentMetadata{}, errors.New("aurora attachment lookup requires a task token")
+	}
+	var meta auroraAttachmentMetadata
+	path := "/api/attachments/" + url.PathEscape(strings.TrimSpace(attachmentID))
+	if err := c.getJSONWithToken(ctx, path, taskToken, &meta); err != nil {
+		return auroraAttachmentMetadata{}, err
+	}
+	return meta, nil
+}
+
+// DownloadAuroraAttachment streams the object behind a resolved download URL.
+// Relative URLs are resolved against the server and sent with the task token;
+// absolute URLs (a presigned storage object or a capability path) are used
+// as-is and never receive the credential, matching multica's attachment
+// download contract. maxBytes bounds what is read into memory; the caller
+// re-checks the returned length against the broker's per-kind cap.
+func (c *Client) DownloadAuroraAttachment(ctx context.Context, taskToken, downloadURL string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = 100 << 20
+	}
+	if strings.TrimSpace(downloadURL) == "" {
+		return nil, errors.New("aurora attachment has no download URL")
+	}
+	relative := !strings.HasPrefix(downloadURL, "http://") && !strings.HasPrefix(downloadURL, "https://")
+	target := downloadURL
+	if relative {
+		if c.baseURL == "" {
+			return nil, errors.New("aurora attachment download URL is relative but the client has no base URL")
+		}
+		if strings.TrimSpace(taskToken) == "" {
+			return nil, errors.New("aurora attachment download requires a task token")
+		}
+		target = c.baseURL + downloadURL
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	if relative {
+		req.Header.Set("Authorization", "Bearer "+taskToken)
+		c.setIdentityHeaders(req)
+	}
+	resp, err := c.bundleClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, &requestError{Method: http.MethodGet, Path: target, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+}
+
 func (c *Client) FailTask(ctx context.Context, taskID, errMsg, sessionID, workDir, branchName, failureReason string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string) error {
 	return c.failTaskWithRetrySchedule(ctx, taskID, errMsg, sessionID, workDir, branchName, failureReason, sessionRolloutMissing, retiredSessionID, durableWorkDir, defaultTerminalRetrySchedule)
 }

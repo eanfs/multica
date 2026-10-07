@@ -549,7 +549,11 @@ WHERE channel_media_pending_object.workspace_id = $1
 // workspace, and a NULL generation_id (a prompt rejected before its generation
 // existed) is deleted by the same statement.
 // Sandbox node rows are workspace-keyed leaf data with no FK, so the workspace
-// teardown removes them by workspace_id. The bound runtime and daemon tokens are
+// teardown removes them by workspace_id. The handler hands each row to the Fleet
+// lifecycle immediately before this statement (DeleteWorkspace's "hand off
+// sandbox nodes to fleet" step) because this row is the reaper's only index into
+// the node's Docker container and data/secrets volumes; without the handoff a
+// row deleted here would strand them. The bound runtime and daemon tokens are
 // swept by the runtime/administration steps; the node itself has no cascading
 // relationship to them.
 // Create-once provider-run rows are workspace-keyed leaf data with no FK, so

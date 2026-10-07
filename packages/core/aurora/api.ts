@@ -8,6 +8,7 @@ import {
   auroraAssetsSchema,
   auroraBalanceSchema,
   auroraCheckoutResponseSchema,
+  auroraExecutionTargetSchema,
   auroraGenerationDetailSchema,
   auroraGenerationResponseSchema,
   auroraGenerationsSchema,
@@ -19,6 +20,7 @@ import {
   type AuroraAsset,
   type AuroraBalance,
   type AuroraCheckout,
+  type AuroraExecutionTarget,
   type AuroraGeneration,
   type AuroraGenerationDetail,
   type AuroraSkill,
@@ -26,12 +28,13 @@ import {
   type AuroraTopup,
   type AuroraTransaction,
 } from "./schema";
-import type {
-  AuroraAssetsParams,
-  AuroraListParams,
-  CreateAuroraCheckoutRequest,
-  CreateAuroraGenerationRequest,
-  CreateAuroraTopupCheckoutRequest,
+import {
+  normalizeAuroraRuntimeState,
+  type AuroraAssetsParams,
+  type AuroraListParams,
+  type CreateAuroraCheckoutRequest,
+  type CreateAuroraGenerationRequest,
+  type CreateAuroraTopupCheckoutRequest,
 } from "./types";
 
 /**
@@ -61,6 +64,7 @@ import type {
 const AURORA_SKILLS_PATH = "/api/aurora/skills";
 const AURORA_GENERATIONS_PATH = "/api/aurora/generations";
 const AURORA_ASSETS_PATH = "/api/aurora/assets";
+const AURORA_RUNTIME_PATH = "/api/aurora/runtime";
 const AURORA_BALANCE_PATH = "/api/aurora/billing/balance";
 const AURORA_TRANSACTIONS_PATH = "/api/aurora/billing/transactions";
 const AURORA_SUBSCRIPTION_PATH = "/api/aurora/billing/subscription";
@@ -76,6 +80,7 @@ const GENERATIONS_ENDPOINT = `GET ${AURORA_GENERATIONS_PATH}`;
 const GENERATION_ENDPOINT = `GET ${AURORA_GENERATIONS_PATH}/{id}`;
 const CREATE_GENERATION_ENDPOINT = `POST ${AURORA_GENERATIONS_PATH}`;
 const ASSETS_ENDPOINT = `GET ${AURORA_ASSETS_PATH}`;
+const RUNTIME_ENDPOINT = `GET ${AURORA_RUNTIME_PATH}`;
 const BALANCE_ENDPOINT = `GET ${AURORA_BALANCE_PATH}`;
 const TRANSACTIONS_ENDPOINT = `GET ${AURORA_TRANSACTIONS_PATH}`;
 const SUBSCRIPTION_ENDPOINT = `GET ${AURORA_SUBSCRIPTION_PATH}`;
@@ -174,6 +179,33 @@ export function parseAuroraAssets(data: unknown): ParseResult<AuroraAsset[]> {
     { endpoint: ASSETS_ENDPOINT },
   );
   return { value: parsed.value.assets, degraded: parsed.degraded };
+}
+
+/**
+ * The workspace's execution target, or the unconfigured projection.
+ *
+ * A malformed body degrades to `unconfigured` with `degraded: true`: the safe
+ * default offers provisioning guidance rather than claiming a node is ready.
+ * An unrecognized but well-formed `state` is normalized to `unconfigured` too,
+ * while the rest of the target (node, runtime id) is kept — the node's own
+ * fields are still readable even when this build does not know its state.
+ */
+export function parseAuroraRuntime(
+  data: unknown,
+): ParseResult<AuroraExecutionTarget> {
+  const parsed = parseWithFallbackResult<AuroraExecutionTarget>(
+    data,
+    auroraExecutionTargetSchema,
+    { workspaceId: "", node: null, runtimeId: null, state: "unconfigured" },
+    { endpoint: RUNTIME_ENDPOINT },
+  );
+  return {
+    value: {
+      ...parsed.value,
+      state: normalizeAuroraRuntimeState(parsed.value.state),
+    },
+    degraded: parsed.degraded,
+  };
 }
 
 /** The caller's wallet, or a zero balance the next refetch will correct. */
@@ -308,6 +340,13 @@ export async function getAuroraGeneration(
     `${AURORA_GENERATIONS_PATH}/${encodeURIComponent(id)}`,
   );
   return parseAuroraGenerationDetail(raw);
+}
+
+/** The workspace's managed execution node and its runtime binding. */
+export async function getAuroraRuntime(): Promise<
+  ParseResult<AuroraExecutionTarget>
+> {
+  return parseAuroraRuntime(await api.requestJson(AURORA_RUNTIME_PATH));
 }
 
 /** The workspace's content library, optionally narrowed to one generation. */

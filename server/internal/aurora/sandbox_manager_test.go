@@ -2,58 +2,88 @@ package aurora_test
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/aurora"
-	"github.com/multica-ai/multica/server/internal/aurorafleet"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
-// fakeFleet is the manager's view of the fleet control API without HTTP. It
-// records every ensure request and answers with a configured node or error, so
-// the manager's ordering and rollback can be asserted directly.
-type fakeFleet struct {
-	mu    sync.Mutex
-	calls int
-	last  aurorafleet.EnsureRequest
-	node  aurorafleet.Node
-	err   error
+// fakeProvisioner is the manager's view of the provider-neutral workspace-node
+// provisioner without HTTP. It records every ensure request and answers with a
+// configured node or error, so the manager's ordering and rollback can be
+// asserted directly.
+type fakeProvisioner struct {
+	mu        sync.Mutex
+	calls     int
+	lastOwner string
+	last      aurora.FleetEnsureRequest
+	node      aurora.FleetNode
+	err       error
+	deletes   []provisionerDelete
+	deleteErr error
 }
 
-func (f *fakeFleet) EnsureWorkspaceNode(_ context.Context, req aurorafleet.EnsureRequest) (aurorafleet.Node, error) {
+type provisionerDelete struct {
+	owner  string
+	nodeID string
+}
+
+func (f *fakeProvisioner) EnsureWorkspaceNode(_ context.Context, ownerID string, req aurora.FleetEnsureRequest) (aurora.FleetNode, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	f.lastOwner = ownerID
 	f.last = req
 	if f.err != nil {
-		return aurorafleet.Node{}, f.err
+		return aurora.FleetNode{}, f.err
 	}
 	node := f.node
 	if node.ID == "" {
-		node = aurorafleet.Node{ID: "fleet-" + req.NodeID, State: aurorafleet.StateStarting}
+		node = aurora.FleetNode{ID: "fleet-" + req.NodeID, State: "launching", BackendID: "container-" + req.NodeID}
 	}
 	return node, nil
 }
 
-func (f *fakeFleet) callCount() int {
+func (f *fakeProvisioner) DeleteWorkspaceNode(_ context.Context, ownerID, nodeID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deletes = append(f.deletes, provisionerDelete{owner: ownerID, nodeID: nodeID})
+	return nil
+}
+
+func (f *fakeProvisioner) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
 }
 
+// sandboxNodeOwner reads the owner the manager must derive from the locked
+// managed-runtime row.
+func sandboxNodeOwner(t *testing.T, q *db.Queries, ws pgtype.UUID) string {
+	t.Helper()
+	managed, err := q.GetAuroraManagedRuntime(context.Background(), db.GetAuroraManagedRuntimeParams{
+		WorkspaceID: ws,
+		Provider:    "aurora_managed",
+	})
+	if err != nil {
+		t.Fatalf("read managed runtime owner: %v", err)
+	}
+	return util.UUIDToString(managed.OwnerID)
+}
+
 // TestSandboxManagerReturnsHealthyOnlineNodeWithoutFleetCall pins the no-op
 // path: an online node whose runtime and image still match is already the
-// desired state, so Ensure must not disturb it or call the fleet.
+// desired state, so Ensure must not disturb it or call the provisioner.
 func TestSandboxManagerReturnsHealthyOnlineNodeWithoutFleetCall(t *testing.T) {
 	pool := auroraTestPool(t)
 	q := db.New(pool)
@@ -70,7 +100,7 @@ func TestSandboxManagerReturnsHealthyOnlineNodeWithoutFleetCall(t *testing.T) {
 		t.Fatalf("consume enrollment to online: %v", err)
 	}
 
-	fleet := &fakeFleet{}
+	fleet := &fakeProvisioner{}
 	mgr := aurora.NewSandboxManager(q, pool, fleet, validSandboxImageDigest, nil)
 	node, err := mgr.Ensure(ctx, ws, runtimeID)
 	if err != nil {
@@ -83,7 +113,7 @@ func TestSandboxManagerReturnsHealthyOnlineNodeWithoutFleetCall(t *testing.T) {
 		t.Fatalf("ensured node state = %q, want online", node.State)
 	}
 	if fleet.callCount() != 0 {
-		t.Fatalf("fleet ensure calls = %d, want 0 for a healthy online node", fleet.callCount())
+		t.Fatalf("provisioner ensure calls = %d, want 0 for a healthy online node", fleet.callCount())
 	}
 	if node.EnrollmentTokenHash.Valid {
 		t.Fatal("returned node carries an enrollment token hash")
@@ -91,16 +121,16 @@ func TestSandboxManagerReturnsHealthyOnlineNodeWithoutFleetCall(t *testing.T) {
 }
 
 // TestSandboxManagerIssuesEnrollmentAndCallsFleetOnce pins first provision:
-// Ensure mints one single-use enrollment, sends exactly one fleet request
-// carrying that secret and the node identity, and persists the backend id the
-// fleet returns.
+// Ensure mints one single-use enrollment, sends exactly one provision request
+// carrying that secret, the locked runtime owner and the node identity, and
+// persists the backend id the Fleet returns.
 func TestSandboxManagerIssuesEnrollmentAndCallsFleetOnce(t *testing.T) {
 	pool := auroraTestPool(t)
 	q := db.New(pool)
 	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
 	ctx := context.Background()
 
-	fleet := &fakeFleet{node: aurorafleet.Node{ID: "backend-node-7", State: aurorafleet.StateStarting}}
+	fleet := &fakeProvisioner{node: aurora.FleetNode{ID: "backend-node-7", State: "launching", BackendID: "container-7"}}
 	mgr := aurora.NewSandboxManager(q, pool, fleet, validSandboxImageDigest, nil)
 	node, err := mgr.Ensure(ctx, ws, runtimeID)
 	if err != nil {
@@ -110,22 +140,31 @@ func TestSandboxManagerIssuesEnrollmentAndCallsFleetOnce(t *testing.T) {
 		t.Fatalf("ensured node state = %q, want starting (the daemon has not enrolled yet)", node.State)
 	}
 	if fleet.callCount() != 1 {
-		t.Fatalf("fleet ensure calls = %d, want 1", fleet.callCount())
+		t.Fatalf("provisioner ensure calls = %d, want 1", fleet.callCount())
 	}
 	if got, want := fleet.last.NodeID, util.UUIDToString(node.ID); got != want {
-		t.Fatalf("fleet node id = %q, want %q", got, want)
+		t.Fatalf("provisioner node id = %q, want %q", got, want)
 	}
 	if got, want := fleet.last.WorkspaceID, util.UUIDToString(ws); got != want {
-		t.Fatalf("fleet workspace id = %q, want %q", got, want)
+		t.Fatalf("provisioner workspace id = %q, want %q", got, want)
 	}
 	if got, want := fleet.last.RuntimeID, util.UUIDToString(runtimeID); got != want {
-		t.Fatalf("fleet runtime id = %q, want %q", got, want)
+		t.Fatalf("provisioner runtime id = %q, want %q", got, want)
 	}
 	if fleet.last.DaemonID != node.DaemonID {
-		t.Fatalf("fleet daemon id = %q, want %q", fleet.last.DaemonID, node.DaemonID)
+		t.Fatalf("provisioner daemon id = %q, want %q", fleet.last.DaemonID, node.DaemonID)
 	}
 	if !strings.HasPrefix(fleet.last.EnrollmentToken, "mse_") {
-		t.Fatalf("fleet enrollment token %q is not a single-use mse_ secret", fleet.last.EnrollmentToken)
+		t.Fatalf("provisioner enrollment token %q is not a single-use mse_ secret", fleet.last.EnrollmentToken)
+	}
+	if got, want := fleet.last.ImageDigest, validSandboxImageDigest; got != want {
+		t.Fatalf("provisioner image digest = %q, want %q", got, want)
+	}
+	if fleet.last.Name == "" || fleet.last.Spec != "sandbox" {
+		t.Fatalf("provisioner name/spec = %q/%q, want a name and the sandbox spec", fleet.last.Name, fleet.last.Spec)
+	}
+	if got, want := fleet.lastOwner, sandboxNodeOwner(t, q, ws); got != want {
+		t.Fatalf("provisioner owner = %q, want the locked runtime owner %q", got, want)
 	}
 
 	stored := sandboxNodeByWorkspace(t, pool, ws)
@@ -142,15 +181,15 @@ func TestSandboxManagerIssuesEnrollmentAndCallsFleetOnce(t *testing.T) {
 
 // TestSandboxManagerConcurrentEnsureCreatesOneNode proves the workspace
 // advisory lock serialises first provision: racing callers converge on one node
-// row and exactly one fleet ensure request, and later callers adopt the node
-// the winner armed instead of minting a competing secret.
+// row and exactly one provision request, and later callers adopt the node the
+// winner armed instead of minting a competing secret.
 func TestSandboxManagerConcurrentEnsureCreatesOneNode(t *testing.T) {
 	pool := auroraTestPool(t)
 	q := db.New(pool)
 	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
 	ctx := context.Background()
 
-	fleet := &fakeFleet{}
+	fleet := &fakeProvisioner{}
 	mgr := aurora.NewSandboxManager(q, pool, fleet, validSandboxImageDigest, nil)
 
 	const workers = 8
@@ -180,7 +219,7 @@ func TestSandboxManagerConcurrentEnsureCreatesOneNode(t *testing.T) {
 		}
 	}
 	if fleet.callCount() != 1 {
-		t.Fatalf("fleet ensure calls = %d, want exactly 1", fleet.callCount())
+		t.Fatalf("provisioner ensure calls = %d, want exactly 1", fleet.callCount())
 	}
 	var rows int
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM aurora_sandbox_node WHERE workspace_id = $1", ws).Scan(&rows); err != nil {
@@ -191,19 +230,53 @@ func TestSandboxManagerConcurrentEnsureCreatesOneNode(t *testing.T) {
 	}
 }
 
+// TestSandboxManagerDoesNotAdoptUnconfirmedStartingNode pins the fail-closed
+// adoption gate: a starting node with a live enrollment but no Fleet backend id
+// is either mid-provision by another caller or abandoned, and neither is safe to
+// adopt. Ensure must not return success and must not call the Fleet, so the
+// handler's runtime-unavailable 503 leaves no reservation behind.
+func TestSandboxManagerDoesNotAdoptUnconfirmedStartingNode(t *testing.T) {
+	pool := auroraTestPool(t)
+	q := db.New(pool)
+	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
+	ctx := context.Background()
+
+	// A row exactly as arm() leaves it after committing: starting, one live
+	// single-use enrollment, and no backend id yet.
+	if _, err := q.CreateAuroraSandboxNode(ctx, sandboxNodeParams(t, ws, runtimeID, uuid.NewString())); err != nil {
+		t.Fatalf("create starting node: %v", err)
+	}
+
+	fleet := &fakeProvisioner{}
+	mgr := aurora.NewSandboxManager(q, pool, fleet, validSandboxImageDigest, nil)
+	if _, err := mgr.Ensure(ctx, ws, runtimeID); err == nil {
+		t.Fatal("Ensure adopted a starting node with no Fleet backend id")
+	}
+	if fleet.callCount() != 0 {
+		t.Fatalf("provisioner ensure calls = %d, want 0 for an unconfirmed starting node", fleet.callCount())
+	}
+
+	// The unconfirmed row is left for the arming caller or the fail-mark; the
+	// adopter must not have re-armed it with a competing secret.
+	stored := sandboxNodeByWorkspace(t, pool, ws)
+	if stored.State != "starting" || !stored.EnrollmentTokenHash.Valid || stored.BackendNodeID.Valid {
+		t.Fatalf("adopter mutated the unconfirmed node: %+v", stored)
+	}
+}
+
 // TestSandboxManagerMarksNodeFailedWhenFleetRejects pins rollback: a failed
-// fleet ensure leaves no live enrollment and records the node as failed with
-// the backend's error.
+// provision leaves no live enrollment and records the node as failed with the
+// provisioner's error.
 func TestSandboxManagerMarksNodeFailedWhenFleetRejects(t *testing.T) {
 	pool := auroraTestPool(t)
 	q := db.New(pool)
 	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
 	ctx := context.Background()
 
-	fleet := &fakeFleet{err: errors.New("fleet exploded")}
+	fleet := &fakeProvisioner{err: errors.New("fleet exploded")}
 	mgr := aurora.NewSandboxManager(q, pool, fleet, validSandboxImageDigest, nil)
 	if _, err := mgr.Ensure(ctx, ws, runtimeID); err == nil {
-		t.Fatal("ensure succeeded, want the fleet error")
+		t.Fatal("ensure succeeded, want the provisioner error")
 	}
 
 	stored := sandboxNodeByWorkspace(t, pool, ws)
@@ -211,7 +284,7 @@ func TestSandboxManagerMarksNodeFailedWhenFleetRejects(t *testing.T) {
 		t.Fatalf("stored node state = %q, want failed", stored.State)
 	}
 	if !stored.FailureReason.Valid || !strings.Contains(stored.FailureReason.String, "fleet exploded") {
-		t.Fatalf("stored failure reason = %+v, want the fleet error", stored.FailureReason)
+		t.Fatalf("stored failure reason = %+v, want the provisioner error", stored.FailureReason)
 	}
 	if stored.EnrollmentTokenHash.Valid || stored.EnrollmentExpiresAt.Valid || stored.EnrollmentConsumedAt.Valid {
 		t.Fatalf("failed node kept enrollment fields: hash=%+v expires=%+v consumed=%+v",
@@ -223,15 +296,15 @@ func TestSandboxManagerMarksNodeFailedWhenFleetRejects(t *testing.T) {
 }
 
 // TestSandboxManagerDoesNotReturnEnrollmentToken pins the secret boundary: the
-// raw enrollment secret is handed to the fleet only and never leaks through the
-// value Ensure returns, while the database still holds its hash.
+// raw enrollment secret is handed to the provisioner only and never leaks
+// through the value Ensure returns, while the database still holds its hash.
 func TestSandboxManagerDoesNotReturnEnrollmentToken(t *testing.T) {
 	pool := auroraTestPool(t)
 	q := db.New(pool)
 	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
 	ctx := context.Background()
 
-	fleet := &fakeFleet{}
+	fleet := &fakeProvisioner{}
 	mgr := aurora.NewSandboxManager(q, pool, fleet, validSandboxImageDigest, nil)
 	node, err := mgr.Ensure(ctx, ws, runtimeID)
 	if err != nil {
@@ -250,51 +323,50 @@ func TestSandboxManagerDoesNotReturnEnrollmentToken(t *testing.T) {
 	}
 }
 
-// TestSandboxManagerEnsureSatisfiesFleetUUIDValidator is the server/fleet
-// daemon_id contract regression: the manager's real ControlClient request is
-// served by a real fleet Controller, and that controller rejects any identity
-// that is not a canonical UUID. A prefixed daemon identity therefore fails the
-// endpoint and no sandbox is ever provisioned.
-func TestSandboxManagerEnsureSatisfiesFleetUUIDValidator(t *testing.T) {
+// TestSandboxManagerEnsureResolvesOwner pins the binding owner ruling: the node
+// owner the manager ships to the provisioner is the OwnerID of the
+// aurora_managed runtime row read under the per-workspace lock, never a value
+// derived from the caller or the node row.
+func TestSandboxManagerEnsureResolvesOwner(t *testing.T) {
 	pool := auroraTestPool(t)
 	q := db.New(pool)
 	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
 	ctx := context.Background()
 
-	tokenRaw := []byte(strings.Repeat("m", 32))
-	tokenFile := filepath.Join(t.TempDir(), "fleet-control-token")
-	if err := os.WriteFile(tokenFile, []byte(hex.EncodeToString(tokenRaw)), 0o400); err != nil {
-		t.Fatalf("write control token: %v", err)
-	}
-	auth, err := aurorafleet.LoadControlAuth(tokenFile)
-	if err != nil {
-		t.Fatalf("load control auth: %v", err)
-	}
-	ctrl := aurorafleet.NewController(aurorafleet.Config{
-		Backend:    aurorafleet.NewMemoryBackend(),
-		Auth:       auth,
-		SecretRoot: t.TempDir(),
-	})
-	srv := httptest.NewServer(ctrl.Handler())
-	t.Cleanup(srv.Close)
-
-	client, err := aurorafleet.NewControlClient(srv.URL, tokenFile)
-	if err != nil {
-		t.Fatalf("new control client: %v", err)
+	owner := sandboxNodeOwner(t, q, ws)
+	if owner == "" || owner == util.UUIDToString(ws) {
+		t.Fatalf("fixture owner = %q, want a real user distinct from the workspace", owner)
 	}
 
-	mgr := aurora.NewSandboxManager(q, pool, client, validSandboxImageDigest, nil)
-	node, err := mgr.Ensure(ctx, ws, runtimeID)
-	if err != nil {
-		t.Fatalf("ensure through the fleet validator: %v", err)
+	fleet := &fakeProvisioner{}
+	mgr := aurora.NewSandboxManager(q, pool, fleet, validSandboxImageDigest, nil)
+	if _, err := mgr.Ensure(ctx, ws, runtimeID); err != nil {
+		t.Fatalf("ensure new node: %v", err)
 	}
-	if node.State != "starting" {
-		t.Fatalf("ensured node state = %q, want starting", node.State)
+	if fleet.callCount() != 1 {
+		t.Fatalf("provisioner ensure calls = %d, want 1", fleet.callCount())
 	}
-	if _, err := uuid.Parse(node.DaemonID); err != nil {
-		t.Fatalf("ensured daemon id = %q, want a canonical UUID", node.DaemonID)
+	if fleet.lastOwner != owner {
+		t.Fatalf("provisioner owner = %q, want the managed runtime owner %q", fleet.lastOwner, owner)
 	}
-	if !node.BackendNodeID.Valid || node.BackendNodeID.String == "" {
-		t.Fatalf("fleet backend id was not recorded: %+v", node.BackendNodeID)
+}
+
+// TestSandboxManagerRejectsCrossOwnerRuntime pins cross-owner rejection: a
+// runtime that belongs to another workspace is refused before any provisioner
+// call, so one workspace can never assert another owner's node.
+func TestSandboxManagerRejectsCrossOwnerRuntime(t *testing.T) {
+	pool := auroraTestPool(t)
+	q := db.New(pool)
+	wsA, _ := newSandboxNodeWorkspace(t, q, pool)
+	_, runtimeB := newSandboxNodeWorkspace(t, q, pool)
+	ctx := context.Background()
+
+	fleet := &fakeProvisioner{}
+	mgr := aurora.NewSandboxManager(q, pool, fleet, validSandboxImageDigest, nil)
+	if _, err := mgr.Ensure(ctx, wsA, runtimeB); err == nil {
+		t.Fatal("ensure accepted another workspace's managed runtime")
+	}
+	if fleet.callCount() != 0 {
+		t.Fatalf("provisioner ensure calls = %d, want 0 for a foreign runtime", fleet.callCount())
 	}
 }

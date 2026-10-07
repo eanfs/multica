@@ -176,6 +176,10 @@ func (f *fakeRecoveryEngine) Inspect(_ context.Context, id string) (docker.Inspe
 }
 
 func (f *fakeRecoveryEngine) EnsureNetwork(context.Context, docker.Resource) error { return nil }
+func (f *fakeRecoveryEngine) ConnectNetwork(context.Context, string, string, []string) error {
+	return nil
+}
+func (f *fakeRecoveryEngine) RemoveNetwork(context.Context, docker.Resource) error { return nil }
 func (f *fakeRecoveryEngine) EnsureVolume(context.Context, docker.Resource) error  { return nil }
 
 func (f *fakeRecoveryEngine) Create(context.Context, *container.Config, *container.HostConfig, string, string) (string, error) {
@@ -340,10 +344,10 @@ func TestRecoveryWrongMountIsUnknownNotEmpty(t *testing.T) {
 // used so a Linux node container can reach the API through the host gateway.
 func TestRecoveryLinuxHostGatewayExtraHosts(t *testing.T) {
 	want := []string{"host.docker.internal:host-gateway"}
-	if got := docker.NodeHostConfig(recoverySpec(), true).ExtraHosts; !reflect.DeepEqual(got, want) {
+	if got := docker.NodeHostConfig(recoverySpec(), true, nil, "").ExtraHosts; !reflect.DeepEqual(got, want) {
 		t.Fatalf("NodeHostConfig(..., true).ExtraHosts = %v, want %v", got, want)
 	}
-	if got := docker.NodeHostConfig(recoverySpec(), false).ExtraHosts; len(got) != 0 {
+	if got := docker.NodeHostConfig(recoverySpec(), false, nil, "").ExtraHosts; len(got) != 0 {
 		t.Fatalf("NodeHostConfig(..., false).ExtraHosts = %v, want none", got)
 	}
 }

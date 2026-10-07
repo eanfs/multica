@@ -47,6 +47,23 @@ import (
 // state poll interval.
 const claimPollHintMinDelay = time.Second
 
+// auroraGenerationLinkGrace bounds how long a claimed Aurora task may be
+// redelivered while its aurora_generation.task_id is still unlinked. The
+// enqueue path inserts the quick-create task and kicks the daemon BEFORE the
+// handler writes that back-link, so a daemon woken inside the window
+// legitimately reads no row. Once the task is older than this grace the writer
+// has either committed or failed and a miss is permanent.
+const auroraGenerationLinkGrace = 2 * time.Minute
+
+// auroraGenerationLinkWithinGrace reports whether a claimed Aurora task is
+// still young enough that its aurora_generation row may not be back-linked yet.
+func auroraGenerationLinkWithinGrace(task *db.AgentTaskQueue) bool {
+	if task == nil || !task.CreatedAt.Valid {
+		return false
+	}
+	return time.Since(task.CreatedAt.Time) <= auroraGenerationLinkGrace
+}
+
 // ---------------------------------------------------------------------------
 // Daemon workspace ownership helpers
 // ---------------------------------------------------------------------------
@@ -950,6 +967,12 @@ func (h *Handler) mergeLegacyRuntimeTx(ctx context.Context, newRuntimeID, oldRun
 	defer tx.Rollback(fleetguard.RollbackContext(ctx))
 	qtx := h.Queries.WithTx(tx)
 	if err := fleetguard.CheckRuntimeMerge(ctx, qtx, "", oldRuntimeID, newRuntimeID); err != nil {
+		// A vanished target row is the fence refusing the merge, not a managed
+		// binding race to retry: the caller must keep the old runtime and its
+		// task history. Only a genuine binding change is retried whole.
+		if errors.Is(err, fleetguard.ErrRuntimeMissing) {
+			return errRuntimeMergeFenced
+		}
 		return err
 	}
 
@@ -3515,6 +3538,54 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 			resp.QuickCreatePriority = qc.Priority
 			resp.QuickCreateDueDate = qc.DueDate
 			resp.QuickCreateAttachmentIDs = append([]string(nil), qc.AttachmentIDs...)
+			// An Aurora system-agent task must carry the real generation id:
+			// the daemon writes it into the broker context and never falls
+			// back to the task id. The row is keyed by this task, and the
+			// enqueue path inserts the task (kicking the daemon) BEFORE it
+			// writes task_id, so a no-rows read inside that window is
+			// transient: requeue while the task is younger than
+			// auroraGenerationLinkGrace. Once the grace has passed the writer
+			// has committed or failed, so the permanent miss settles through
+			// the normal failure path (which refunds the reservation) instead
+			// of being redelivered forever.
+			if resp.Agent != nil && strings.HasPrefix(resp.Agent.SystemKey, "aurora:") {
+				generation, genErr := h.Queries.GetAuroraGenerationByTaskID(r.Context(), task.ID)
+				if errors.Is(genErr, pgx.ErrNoRows) {
+					if auroraGenerationLinkWithinGrace(task) {
+						slog.Warn("quick-create claim: aurora generation not linked yet; preserving task for redelivery",
+							"task_id", uuidToString(task.ID), "agent_id", uuidToString(task.AgentID))
+						if _, requeueErr := h.TaskService.RequeueTaskAfterClaimFailure(r.Context(), *task); requeueErr != nil {
+							slog.Error("quick-create claim: requeue after unlinked aurora generation",
+								"task_id", uuidToString(task.ID), "error", requeueErr)
+						}
+						return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount, &claimBuildFailure{
+							outcome: "error_aurora_generation_unlinked", status: http.StatusInternalServerError,
+							message: "aurora generation is not linked to the claimed task yet",
+						}
+					}
+					slog.Error("quick-create claim: aurora generation row missing; settling task",
+						"task_id", uuidToString(task.ID), "agent_id", uuidToString(task.AgentID))
+					return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount, h.failClaimedTaskBeforeLaunch(
+						r.Context(), task,
+						"This generation's task is missing its generation record and cannot run.",
+						taskfailure.ReasonInvalidTaskIdentity,
+						"error_aurora_generation_missing", http.StatusConflict, "aurora generation row is missing",
+					)
+				}
+				if genErr != nil {
+					slog.Warn("quick-create claim: aurora generation lookup failed; preserving task for redelivery",
+						"task_id", uuidToString(task.ID), "error", genErr)
+					if _, requeueErr := h.TaskService.RequeueTaskAfterClaimFailure(r.Context(), *task); requeueErr != nil {
+						slog.Error("quick-create claim: requeue after aurora generation lookup failed",
+							"task_id", uuidToString(task.ID), "error", requeueErr)
+					}
+					return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount, &claimBuildFailure{
+						outcome: "error_aurora_generation", status: http.StatusInternalServerError,
+						message: "failed to resolve the aurora generation for the claimed task",
+					}
+				}
+				resp.GenerationID = uuidToString(generation.ID)
+			}
 			resp.ThreadName = qc.Prompt
 			resp.WorkspaceID = qc.WorkspaceID
 			if failure := h.rejectClaimOnWorkspaceMismatch(r.Context(), task, resp.WorkspaceID, runtimeID, runtimeWorkspaceID, true); failure != nil {

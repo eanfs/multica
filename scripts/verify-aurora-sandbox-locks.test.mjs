@@ -160,6 +160,40 @@ test("rejects a Dockerfile that rebuilds a different esbuild version", async () 
   await assert.rejects(() => verify({ root }), /esbuild/);
 });
 
+test("rejects a Dockerfile without the Fleet node entrypoint", async () => {
+  const text = readText(DOCKERFILE).replace(
+    'ENTRYPOINT ["/usr/local/bin/fleet-node", "run"]',
+    'ENTRYPOINT ["/usr/local/bin/multica"]',
+  );
+  const root = writeFixture({ [DOCKERFILE]: text });
+  await assert.rejects(() => verify({ root }), /Fleet node contract/);
+});
+
+test("rejects the Node base for the sandbox final stage", async () => {
+  const text = readText(DOCKERFILE).replace(
+    "FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS sandbox",
+    "FROM " + NODE_REF + " AS sandbox",
+  );
+  const root = writeFixture({ [DOCKERFILE]: text });
+  await assert.rejects(() => verify({ root }), /neutral Debian base/);
+});
+
+test("rejects a sandbox Dockerfile that does not copy Node from the dependency stage", async () => {
+  const text = readText(DOCKERFILE).replace(
+    "COPY --from=nodedeps --chown=0:0 /usr/local/bin/node /usr/local/bin/node\n",
+    "",
+  );
+  const root = writeFixture({ [DOCKERFILE]: text });
+  await assert.rejects(() => verify({ root }), /copy the Node runtime/);
+});
+
+for (const key of ["NODE_VERSION", "YARN_VERSION", "MULTICA_CLAUDE_PATH"]) {
+  test("rejects a sandbox Dockerfile that bakes " + key, async () => {
+    const root = writeFixture({ [DOCKERFILE]: readText(DOCKERFILE) + "\nENV " + key + "=forbidden\n" });
+    await assert.rejects(() => verify({ root }), new RegExp("must not bake " + key));
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Workflow supply-chain policy (--workflow mode). Each case mutates the
 // committed workflow and proves the policy rejects the drift. The committed

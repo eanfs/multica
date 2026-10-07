@@ -1,8 +1,9 @@
 # multica-aurora-sandbox: AppArmor profile for Aurora workspace sandbox
 # containers. AppArmor file rules are default-deny, so this profile grants only
-# the image's executables/libraries, the writable tmpfs surfaces, and the
-# read-only enrollment/provider secret files, and explicitly denies raw
-# networking, process memory, kernel/sysfs writes, and Docker socket paths.
+# the image's executables/libraries, the writable tmpfs surfaces, the fixed Fleet
+# node layout (/data read-write, /secrets read-only), and the read-only
+# enrollment/provider secret files, and explicitly denies raw networking, process
+# memory, kernel/sysfs writes, and Docker socket paths.
 # Mounts are owned by the seccomp KILL_PROCESS rules, not this profile. A
 # blanket `deny /**` rule must NOT be used here: an AppArmor deny
 # overrides the matching allow rules, including the writable tmpfs surfaces and
@@ -55,7 +56,22 @@ profile multica-aurora-sandbox flags=(attach_disconnected,mediate_deleted) {
   deny /run/docker.sock rwklx,
   deny /run/docker/** rwklx,
 
-  # Read-only secret files staged by the fleet controller.
+  # The fixed Fleet node layout (server/internal/fleet/model/aurora.go and
+  # model/layout.go): the Fleet mounts the node data volume read-write at /data
+  # and the secrets volume read-only at /secrets. The node owns /data and writes
+  # its home, workspaces and layout manifest there. The only secret it may read
+  # is the single-use enrollment file at its fixed runtime path; a directory rule
+  # is the trailing-slash form needed for listing.
+  /data rwk,
+  /data/ rwk,
+  /data/** rwk,
+  /secrets r,
+  /secrets/ r,
+  /secrets/aurora-enrollment r,
+
+  # Legacy secret files staged by the pre-Fleet controller. They stay permitted
+  # for deployments that still mount the old shape; the Fleet layout above is the
+  # contract the image actually ships.
   /run/secrets/aurora-enrollment r,
   /run/secrets/aurora-provider-* r,
 

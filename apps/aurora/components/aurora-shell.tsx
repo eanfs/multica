@@ -1,6 +1,6 @@
 "use client";
 
-import { Coins, Images, LogOut, Sparkles } from "lucide-react";
+import { Coins, Images, LogOut, Server, Sparkles } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { cn } from "@multica/ui/lib/utils";
 import { AppLink, useNavigation } from "@multica/views/navigation";
@@ -9,7 +9,7 @@ import { useLogout } from "@multica/views/auth";
 import { auroraRoutes } from "@/lib/routes";
 
 /**
- * The app's own chrome: three destinations, one account action.
+ * The app's own chrome: four destinations, one account action.
  *
  * A destination is a link, never a button — the shell is the only navigator in
  * Aurora, and a plain anchor keeps middle-click, "copy link" and the browser's
@@ -32,6 +32,7 @@ export function AuroraShell({
   const items = [
     { href: routes.skills(), icon: Sparkles, label: t(($) => $.directory.title) },
     { href: routes.works(), icon: Images, label: t(($) => $.works.title) },
+    { href: routes.runtime(), icon: Server, label: t(($) => $.runtime.title) },
     { href: routes.billing(), icon: Coins, label: t(($) => $.billing.title) },
   ];
   // Trailing slashes are the same destination, and Next keeps the URL the user

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"io"
+	"log"
 	"reflect"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/network"
 	"github.com/google/uuid"
 	"github.com/multica-ai/multica/server/internal/fleet/model"
 )
@@ -116,20 +118,35 @@ func (p *Provider) Delete(ctx context.Context, n model.Node, ref model.Operation
 	if o.Status != "stopped" && o.Status != "missing" {
 		return model.ErrUnknownHealth
 	}
-	copy := n
-	copy.Status = o.Status
-	c, cancel := context.WithTimeout(ctx, 5*time.Second)
-	raw, e := p.engine.FixedOfflineReports(c, copy, ref)
-	cancel()
-	if e != nil {
-		return safeError(e)
-	}
-	fresh, e := parseOffline(raw, copy, p.cfg)
-	if e != nil || !fresh.ReportStatsKnown {
-		return model.ErrUnknownHealth
-	}
-	if fresh.PendingReports != 0 || fresh.FailedReports != 0 {
-		return model.ErrBusy
+	if n.ContainerID == "" {
+		// A node with no confirmed container never ran a daemon, so there is no
+		// report queue to drain and an absent bootstrap layout must not block
+		// teardown forever. Reclaim owned helpers and prove the data volume has no
+		// writer; the queued destroy of a failed bootstrap can then complete.
+		if sdk, ok := p.engine.(*sdkEngine); ok {
+			c, cancel := context.WithTimeout(ctx, 30*time.Second)
+			e := sdk.reclaimContainerlessData(c, n)
+			cancel()
+			if e != nil {
+				return safeError(e)
+			}
+		}
+	} else {
+		copy := n
+		copy.Status = o.Status
+		c, cancel := context.WithTimeout(ctx, 5*time.Second)
+		raw, e := p.engine.FixedOfflineReports(c, copy, ref)
+		cancel()
+		if e != nil {
+			return safeError(e)
+		}
+		fresh, e := parseOffline(raw, copy, p.cfg)
+		if e != nil || !fresh.ReportStatsKnown {
+			return model.ErrUnknownHealth
+		}
+		if fresh.PendingReports != 0 || fresh.FailedReports != 0 {
+			return model.ErrBusy
+		}
 	}
 	if n.ContainerID != "" {
 		i, e := p.inspectOwned(ctx, n, n.ContainerID)
@@ -147,12 +164,25 @@ func (p *Provider) Delete(ctx context.Context, n model.Node, ref model.Operation
 			return safeError(e)
 		}
 	}
-	// Data is last: a crash or uncertain earlier deletion always leaves data for fresh proof/retry.
+	if p.cfg.Aurora != nil {
+		if e = p.removeEgress(ctx, n); e != nil {
+			return safeError(e)
+		}
+	}
+	// Volumes follow the sidecar; data still precedes the per-node network so a
+	// crash or uncertain earlier deletion leaves data for fresh proof/retry.
 	for _, r := range []Resource{p.volume(n, "secrets"), p.volume(n, "data")} {
 		if r.Role == "data" {
 			r.deletion = &deletionContext{node: n, ref: ref}
 		}
 		if e = bounded(ctx, func(c context.Context) error { return p.engine.RemoveVolume(c, r) }); e != nil {
+			return safeError(e)
+		}
+	}
+	// The workspace network is removed last; the Engine validates its ownership
+	// labels so a foreign network is never removed.
+	if p.cfg.Aurora != nil {
+		if e = p.removeWorkspaceNetwork(ctx, n); e != nil {
 			return safeError(e)
 		}
 	}
@@ -207,13 +237,26 @@ func (e *sdkEngine) nodeResourcesAbsent(ctx context.Context, n model.Node) (bool
 			return false, model.ErrForbidden
 		}
 		if r.ID != n.ContainerID {
-			if r.Role != "diagnostic" && r.Role != "bootstrap" {
+			if r.Role != "diagnostic" && r.Role != "bootstrap" && r.Role != egressProxyRole {
 				return false, model.ErrUnknownHealth
 			}
 			absent = false
 			continue
 		}
 		absent = false
+	}
+	// An Aurora node also owns its internal workspace network; completion needs
+	// that network gone, not only its containers and volumes.
+	if absent && e.cfg.Aurora != nil {
+		nw, err := e.client.NetworkInspect(ctx, p.workspaceNetwork(n).Name, network.InspectOptions{})
+		if err == nil {
+			if nw.Name != p.workspaceNetwork(n).Name || nw.ID == "" || !sameLabels(nw.Labels, p.workspaceNetwork(n).Labels) {
+				return false, model.ErrForbidden
+			}
+			absent = false
+		} else if !errdefs.IsNotFound(err) {
+			return false, model.ErrUnknownHealth
+		}
 	}
 	if absent && e.helpers != nil {
 		e.helpers.prune(n.Namespace+"\x00"+e.cfg.FleetID+"\x00"+nodeID(n), map[string]bool{})
@@ -236,7 +279,7 @@ func (e *sdkEngine) FixedOfflineReports(ctx context.Context, n model.Node, ref m
 	}
 	h := diagnosticHost()
 	h.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: n.DataVolume, Target: model.DataMount, ReadOnly: true}}
-	c := &container.Config{Image: e.cfg.Image, User: "10001:10001", Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"report-stats"}, Labels: labels(n.Namespace, e.cfg.FleetID, nodeID(n), "diagnostic"), NetworkDisabled: true}
+	c := &container.Config{Image: e.cfg.Image, User: helperUser, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"report-stats"}, Labels: labels(n.Namespace, e.cfg.FleetID, nodeID(n), "diagnostic"), NetworkDisabled: true}
 	raw, err := e.runHelper(ctx, c, &h, nil)
 	if err != nil {
 		return nil, model.ErrUnknownHealth
@@ -281,7 +324,11 @@ func (e *sdkEngine) offlineIdentity(ctx context.Context, n model.Node) error {
 				return model.ErrUnknownHealth
 			}
 			p := Provider{cfg: e.cfg}
-			if err := validateNodeInspection(c, n, p.networkName()); err != nil {
+			network := p.networkName()
+			if p.cfg.Aurora != nil {
+				network = p.workspaceNetwork(n).Name
+			}
+			if err := validateNodeInspection(c, n, network, p.cfg); err != nil {
 				return err
 			}
 			if c.State.Status != "exited" && c.State.Status != "created" {
@@ -310,6 +357,10 @@ func (e *sdkEngine) recoverHelpers(ctx context.Context, n model.Node) error {
 		}
 		if !Owns(r.Labels, n.Namespace, e.cfg.FleetID, nodeID(n), r.Role) {
 			return model.ErrForbidden
+		}
+		if r.Role == egressProxyRole {
+			// The egress sidecar is not a helper; Delete owns its removal.
+			continue
 		}
 		if r.Role != "diagnostic" && r.Role != "bootstrap" {
 			return model.ErrUnknownHealth
@@ -425,7 +476,7 @@ func (e *sdkEngine) recoveryVolumes(ctx context.Context, r Resource, n model.Nod
 	return validateVolume(v, p.volume(n, "secrets"))
 }
 func (e *sdkEngine) validateRecoveryHelper(ctx context.Context, actual container.InspectResponse, r Resource, n model.Node, daemonNow time.Time) error {
-	if actual.ContainerJSONBase == nil || actual.ID != r.ID || actual.Config == nil || actual.State == nil || !reflect.DeepEqual(actual.Config.Labels, labels(n.Namespace, e.cfg.FleetID, nodeID(n), r.Role)) {
+	if actual.ContainerJSONBase == nil || actual.ID != r.ID || actual.Config == nil || actual.State == nil || !sameLabels(actual.Config.Labels, labels(n.Namespace, e.cfg.FleetID, nodeID(n), r.Role)) {
 		return model.ErrForbidden
 	}
 	created, err := time.Parse(time.RFC3339Nano, actual.Created)
@@ -466,9 +517,22 @@ func (e *sdkEngine) validateRecoveryHelper(ctx context.Context, actual container
 		h.Mounts = append(h.Mounts, mount.Mount{Type: mount.TypeVolume, Source: n.SecretsVolume, Target: "/secrets"})
 		cmd = "bootstrap"
 	}
-	c := &container.Config{Image: e.cfg.Image, User: "10001:10001", Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{cmd}, Labels: labels(n.Namespace, e.cfg.FleetID, nodeID(n), r.Role), NetworkDisabled: true}
+	c := &container.Config{Image: e.cfg.Image, User: helperUser, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{cmd}, Labels: labels(n.Namespace, e.cfg.FleetID, nodeID(n), r.Role), NetworkDisabled: true}
 	return validateHelper(actual, c, &h)
 }
+
+// reclaimContainerlessData is the teardown proof for a node that never confirmed
+// a container. It reclaims crashed bootstrap/diagnostic helpers and proves the
+// data volume has no foreign writer, but it deliberately does not require an
+// offline report: a bootstrap that failed before any report existed has no queue
+// to drain, and demanding one would retry the delete forever.
+func (e *sdkEngine) reclaimContainerlessData(ctx context.Context, n model.Node) error {
+	if err := e.recoverHelpers(ctx, n); err != nil {
+		return err
+	}
+	return e.offlineRoot(ctx, n)
+}
+
 func (e *sdkEngine) noWriter(ctx context.Context, name string) error {
 	// No label filter: a foreign container may be writing this volume.
 	list, err := e.client.ContainerList(ctx, container.ListOptions{All: true})
@@ -530,9 +594,12 @@ func (e *sdkEngine) runHelper(ctx context.Context, c *container.Config, h *conta
 	}
 	id = actual.ID
 	defer func() {
-		if err := e.cleanupHelper(cleanupCtx, id, c, h); err != nil {
-			raw = nil
-			retErr = model.ErrUnknownHealth
+		if cerr := e.cleanupHelper(cleanupCtx, id, c, h); cerr != nil {
+			// Cleanup never overwrites the primary result: a successful helper run
+			// stays successful and a failed run keeps its own error. The leftover
+			// stays observable by id and removable through the label-scoped
+			// Find/recovery paths, so log it rather than swallow it.
+			log.Printf("fleet helper cleanup failed: container=%s err=%v", id, cerr)
 		}
 	}()
 	if archive != nil {
@@ -575,7 +642,7 @@ func sameLabels(a, b map[string]string) bool {
 	return true
 }
 func validateHelper(actual container.InspectResponse, c *container.Config, h *container.HostConfig) error {
-	if actual.Config == nil || actual.HostConfig == nil || actual.NetworkSettings == nil || actual.Config.Image != c.Image || actual.Config.User != c.User || actual.Config.Tty || actual.Config.OpenStdin || len(actual.Config.ExposedPorts) != 0 || !actual.Config.NetworkDisabled || !inspectEnvironment(actual.Config.Env, 0) || !reflect.DeepEqual(actual.Config.Entrypoint, c.Entrypoint) || !reflect.DeepEqual(actual.Config.Cmd, c.Cmd) {
+	if actual.Config == nil || actual.HostConfig == nil || actual.NetworkSettings == nil || actual.Config.Image != c.Image || actual.Config.User != c.User || actual.Config.Tty || actual.Config.OpenStdin || len(actual.Config.ExposedPorts) != 0 || !actual.Config.NetworkDisabled || !inspectEnvironment(actual.Config.Env, 0, nil) || !reflect.DeepEqual(actual.Config.Entrypoint, c.Entrypoint) || !reflect.DeepEqual(actual.Config.Cmd, c.Cmd) {
 		return model.ErrForbidden
 	}
 	if actual.NetworkSettings != nil {
@@ -612,7 +679,7 @@ func (e *sdkEngine) cleanupHelper(ctx context.Context, id string, c *container.C
 	if err != nil {
 		return err
 	}
-	if r.ContainerJSONBase == nil || r.ID != id || r.Config == nil || !reflect.DeepEqual(r.Config.Labels, c.Labels) {
+	if r.ContainerJSONBase == nil || r.ID != id || r.Config == nil || !sameLabels(r.Config.Labels, c.Labels) {
 		return model.ErrForbidden
 	}
 	if err = validateHelper(r, c, h); err != nil {

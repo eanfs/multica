@@ -10,15 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/multica-ai/multica/server/internal/aurorafleet"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
-
-// FleetNodeDeleter destroys a workspace's fleet node. It is satisfied by
-// *aurorafleet.ControlClient.
-type FleetNodeDeleter interface {
-	DeleteWorkspaceNode(ctx context.Context, nodeID string) error
-}
 
 // SandboxTaskSettler is the single responder that settles failed tasks. It is
 // satisfied by *service.TaskService and exists so the reaper never writes a
@@ -63,14 +56,14 @@ const (
 type SandboxReaper struct {
 	queries *db.Queries
 	tx      TxBeginner
-	fleet   FleetNodeDeleter
+	fleet   FleetProvisioner
 	tasks   SandboxTaskSettler
 	now     func() time.Time
 }
 
-// NewSandboxReaper wires the reaper to its database, fleet client, task
-// settler, and clock. now defaults to time.Now when omitted.
-func NewSandboxReaper(queries *db.Queries, tx TxBeginner, fleet FleetNodeDeleter, tasks SandboxTaskSettler, now func() time.Time) *SandboxReaper {
+// NewSandboxReaper wires the reaper to its database, provisioner, task settler,
+// and clock. now defaults to time.Now when omitted.
+func NewSandboxReaper(queries *db.Queries, tx TxBeginner, fleet FleetProvisioner, tasks SandboxTaskSettler, now func() time.Time) *SandboxReaper {
 	if now == nil {
 		now = time.Now
 	}
@@ -245,19 +238,48 @@ func (r *SandboxReaper) stopNode(ctx context.Context, node db.AuroraSandboxNode,
 	return nil
 }
 
-// deleteFleetNode removes the node from the fleet. A node that never reached
-// the fleet, or one the fleet no longer knows, needs no removal.
+// deleteFleetNode removes the node from the fleet. It delegates to the shared
+// workspace-node delete so the reaper and the workspace-teardown handoff enqueue
+// exactly the same destroy intent.
 func (r *SandboxReaper) deleteFleetNode(ctx context.Context, node db.AuroraSandboxNode) error {
+	return deleteFleetWorkspaceNode(ctx, r.queries, r.fleet, node)
+}
+
+// deleteFleetWorkspaceNode enqueues one Fleet destroy intent for a managed
+// sandbox node. The Fleet reconciler then removes the node's container and its
+// data/secrets volumes and revokes the node credential, so deleting the
+// aurora_sandbox_node row without this call strands every one of them. It is the
+// shared body of the reaper's per-node teardown and the workspace-teardown
+// handoff, and it deliberately performs no local write of its own.
+//
+// A node that never reached the fleet, or one the fleet no longer knows, needs
+// no removal.
+func deleteFleetWorkspaceNode(ctx context.Context, queries *db.Queries, fleet FleetProvisioner, node db.AuroraSandboxNode) error {
 	if !node.BackendNodeID.Valid || node.BackendNodeID.String == "" {
 		return nil
+	}
+	// The Fleet route scopes every intent by owner, so the delete must carry the
+	// owner of the node's aurora_managed runtime row. A foreign owner is a
+	// silent 204 on the Fleet side, which would leak the container.
+	managed, err := queries.GetAuroraManagedRuntime(ctx, db.GetAuroraManagedRuntimeParams{
+		WorkspaceID: node.WorkspaceID,
+		Provider:    managedRuntimeProvider,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// The managed runtime is gone, so no owner can authorize a Fleet
+			// delete; local teardown still proceeds.
+			return nil
+		}
+		return fmt.Errorf("resolve sandbox node owner: %w", err)
 	}
 	// The control API addresses a node by the UUID the server issued at ensure
 	// time; the backend resolves it to its own sandbox container through the
 	// controlled node label. Sending the fleet's backend name here would fail
 	// the route's UUID check and leave the node un-reapable.
 	nodeID := util.UUIDToString(node.ID)
-	if err := r.fleet.DeleteWorkspaceNode(ctx, nodeID); err != nil {
-		if errors.Is(err, aurorafleet.ErrNodeNotFound) {
+	if err := fleet.DeleteWorkspaceNode(ctx, util.UUIDToString(managed.OwnerID), nodeID); err != nil {
+		if errors.Is(err, ErrNodeNotFound) {
 			return nil
 		}
 		return fmt.Errorf("delete fleet node %s: %w", nodeID, err)

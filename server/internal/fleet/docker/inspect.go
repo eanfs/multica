@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -39,7 +40,11 @@ func decodeReports(raw []byte) (reportStats, error) {
 }
 
 // Image defaults are inspected against one fixed whitelist, never administrator or caller env.
-func inspectEnvironment(env []string, maxRuns int) bool {
+func inspectEnvironment(env []string, maxRuns int, aurora *model.AuroraConfig) bool {
+	var claudeEnv map[string]string
+	if aurora != nil {
+		claudeEnv = aurora.ClaudeEnv
+	}
 	seen := map[string]bool{}
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
@@ -60,52 +65,162 @@ func inspectEnvironment(env []string, maxRuns int) bool {
 			if maxRuns <= 0 || value != strconv.Itoa(maxRuns) {
 				return false
 			}
+		case model.AuroraManagedEnv:
+			if aurora == nil || value != "1" {
+				return false
+			}
+		case model.AuroraServerURLEnv:
+			// Compare against the configured origin exactly. A node built for a
+			// different server url would enroll and call back to the wrong API,
+			// so structural validity alone must not adopt it.
+			if aurora == nil || value != aurora.ServerURL {
+				return false
+			}
+		case model.AuroraEnrollmentFileEnv:
+			if aurora == nil || value != model.AuroraEnrollmentFile {
+				return false
+			}
+		case model.AuroraHTTPProxyEnv:
+			if aurora == nil || value != model.AuroraEgressProxyEndpoint {
+				return false
+			}
+		case model.AuroraHTTPSProxyEnv:
+			if aurora == nil || value != model.AuroraEgressProxyEndpoint {
+				return false
+			}
+		case model.AuroraNoProxyEnv:
+			if aurora == nil || value != model.AuroraNoProxyValue {
+				return false
+			}
+		case model.AuroraClaudePathEnv:
+			// The provider supplies the one agent executable path at container
+			// start; the neutral image deliberately bakes no MULTICA_CLAUDE_PATH.
+			// Adopting a node must require exactly the fixed provider path, never
+			// an arbitrary value from a stale or hand-built container.
+			if aurora == nil || value != model.AuroraClaudePath {
+				return false
+			}
+		case model.AuroraAnthropicBaseURLEnv:
+			// The operator-configured endpoint override is adoption-relevant:
+			// a container built for a different endpoint keeps talking to the
+			// old provider, so only an exact match of a configured value is
+			// acceptable. When the config carries none, the variable is drift.
+			if aurora == nil || aurora.AnthropicBaseURL == "" || value != aurora.AnthropicBaseURL {
+				return false
+			}
+		case model.AuroraAnthropicModelEnv:
+			if aurora == nil || aurora.AnthropicModel == "" || value != aurora.AnthropicModel {
+				return false
+			}
 		default:
-			return false
+			// Every key outside the fixed built-ins must be exactly one of the
+			// operator-configured claude_env pairs. An allowlisted key the
+			// configuration does not carry is drift, not an acceptable extra.
+			want, configured := claudeEnv[key]
+			if !configured || value != want {
+				return false
+			}
 		}
 	}
-	return maxRuns == 0 || (seen["HOME"] && seen["FLEET_NODE_MAX_RUNS"])
+	if maxRuns == 0 {
+		return true
+	}
+	if !seen["HOME"] || !seen["FLEET_NODE_MAX_RUNS"] {
+		return false
+	}
+	if aurora != nil && (!seen[model.AuroraManagedEnv] || !seen[model.AuroraServerURLEnv] || !seen[model.AuroraEnrollmentFileEnv] || !seen[model.AuroraHTTPProxyEnv] || !seen[model.AuroraHTTPSProxyEnv] || !seen[model.AuroraNoProxyEnv] || !seen[model.AuroraClaudePathEnv]) {
+		return false
+	}
+	if aurora != nil {
+		// A configured endpoint override must actually be present: adopting a
+		// container without it would silently fall back to the provider default
+		// the operator overrode.
+		if aurora.AnthropicBaseURL != "" && !seen[model.AuroraAnthropicBaseURLEnv] {
+			return false
+		}
+		if aurora.AnthropicModel != "" && !seen[model.AuroraAnthropicModelEnv] {
+			return false
+		}
+		// Every configured claude_env pair must actually be present: adopting a
+		// container missing one would silently drop operator configuration.
+		for key := range aurora.ClaudeEnv {
+			if !seen[key] {
+				return false
+			}
+		}
+	}
+	return true
 }
-func validateNodeInspection(r container.InspectResponse, n model.Node, networkName string) error {
+
+// sameBindSource reports whether an inspected bind-mount source is the
+// configured host source. Docker Desktop reports every bind source translated
+// into the VM's path space, observed as the fixed prefix "/host_mnt" followed by
+// the absolute host path, while Linux reports the source verbatim. Accept exactly
+// those two forms; every other difference still fails closed.
+func sameBindSource(inspected, want string) bool {
+	if inspected == want {
+		return true
+	}
+	return filepath.IsAbs(want) && inspected == "/host_mnt"+want
+}
+
+// validateNodeInspection is the adoption authority. It reconstructs the exact
+// HostConfig and mount set for the configured profile, so any drift between the
+// builder and a live container is rejected. The Claude profile (cfg.Aurora nil)
+// keeps its original two-volume, network-scoped shape.
+func validateNodeInspection(r container.InspectResponse, n model.Node, networkName string, cfg model.Config) error {
 	if r.ContainerJSONBase == nil || r.Config == nil || r.HostConfig == nil || r.NetworkSettings == nil {
 		return model.ErrForbidden
 	}
 	c, h := r.Config, r.HostConfig
-	want := NodeHostConfig(n.Resources, true)
+	// The adoption authority recomputes the exact inline seccomp profile from the
+	// configured operator file. An unreadable or malformed profile fails the
+	// inspection closed rather than admitting a container built from a weaker one.
+	seccompJSON, err := resolveAuroraSeccomp(cfg.Aurora)
+	if err != nil {
+		return model.ErrForbidden
+	}
+	want := NodeHostConfig(n.Resources, true, cfg.Aurora, seccompJSON)
 	if c.Image != n.Image || c.User != "10001:10001" || c.Tty || c.OpenStdin || len(c.ExposedPorts) != 0 || !reflect.DeepEqual([]string(c.Entrypoint), []string{"/usr/local/bin/fleet-node"}) || !reflect.DeepEqual([]string(c.Cmd), []string{"run"}) {
 		return model.ErrForbidden
 	}
-	if !inspectEnvironment(c.Env, n.Resources.MaxRuns) {
+	if !inspectEnvironment(c.Env, n.Resources.MaxRuns, cfg.Aurora) {
 		return model.ErrForbidden
 	}
-	if h.ReadonlyRootfs != want.ReadonlyRootfs || h.NanoCPUs != want.NanoCPUs || h.Memory != want.Memory || h.PidsLimit == nil || *h.PidsLimit != *want.PidsLimit || h.Privileged || h.PidMode != "" || len(h.Binds) != 0 || len(h.Devices) != 0 || len(h.DeviceRequests) != 0 || len(h.VolumesFrom) != 0 || len(h.PortBindings) != 0 || h.PublishAllPorts || h.NetworkMode != container.NetworkMode(networkName) || h.RestartPolicy.Name != container.RestartPolicyDisabled || len(h.CapAdd) != 0 || !reflect.DeepEqual(h.CapDrop, want.CapDrop) || !reflect.DeepEqual(h.SecurityOpt, want.SecurityOpt) || !reflect.DeepEqual(h.ExtraHosts, want.ExtraHosts) {
+	if h.ReadonlyRootfs != want.ReadonlyRootfs || h.NanoCPUs != want.NanoCPUs || h.Memory != want.Memory || h.PidsLimit == nil || *h.PidsLimit != *want.PidsLimit || h.Privileged || h.PidMode != "" || len(h.Binds) != 0 || len(h.Devices) != 0 || len(h.DeviceRequests) != 0 || len(h.VolumesFrom) != 0 || len(h.PortBindings) != 0 || h.PublishAllPorts || h.NetworkMode != container.NetworkMode(networkName) || h.RestartPolicy.Name != container.RestartPolicyDisabled || len(h.CapAdd) != 0 || !reflect.DeepEqual(h.CapDrop, want.CapDrop) || !reflect.DeepEqual(h.SecurityOpt, want.SecurityOpt) || !reflect.DeepEqual(h.ExtraHosts, want.ExtraHosts) || !reflect.DeepEqual(h.Tmpfs, want.Tmpfs) {
 		return model.ErrForbidden
 	}
-	if len(r.NetworkSettings.Networks) != 1 || r.NetworkSettings.Networks[networkName] == nil || len(r.Mounts) != 2 {
+	if len(r.NetworkSettings.Networks) != 1 || r.NetworkSettings.Networks[networkName] == nil {
 		return model.ErrForbidden
 	}
-	data, secrets := false, false
-	for _, m := range r.Mounts {
-		if m.Type != mount.TypeVolume {
+	expected := []container.MountPoint{
+		{Type: mount.TypeVolume, Name: n.DataVolume, Destination: model.DataMount, RW: true},
+		{Type: mount.TypeVolume, Name: n.SecretsVolume, Destination: model.AuroraEnrollmentDir, RW: false},
+	}
+	for _, m := range providerSecretMounts(cfg.Aurora) {
+		expected = append(expected, container.MountPoint{Type: mount.TypeBind, Source: m.Source, Destination: m.Target, RW: false})
+	}
+	if len(r.Mounts) != len(expected) {
+		return model.ErrForbidden
+	}
+	for _, wantMount := range expected {
+		matched := false
+		for _, m := range r.Mounts {
+			if m.Type != wantMount.Type || m.Destination != wantMount.Destination || m.RW != wantMount.RW {
+				continue
+			}
+			if wantMount.Type == mount.TypeBind {
+				matched = sameBindSource(m.Source, wantMount.Source)
+			} else {
+				matched = m.Name == wantMount.Name
+			}
+			if matched {
+				break
+			}
+		}
+		if !matched {
 			return model.ErrForbidden
 		}
-		switch m.Destination {
-		case model.DataMount:
-			if m.Name != n.DataVolume || !m.RW {
-				return model.ErrForbidden
-			}
-			data = true
-		case "/secrets":
-			if m.Name != n.SecretsVolume || m.RW {
-				return model.ErrForbidden
-			}
-			secrets = true
-		default:
-			return model.ErrForbidden
-		}
-	}
-	if !data || !secrets {
-		return model.ErrForbidden
 	}
 	return nil
 }
@@ -114,7 +229,11 @@ func (p *Provider) validSDKSnapshot(n model.Node, i Inspection) error {
 		if i.sdk == nil {
 			return model.ErrForbidden
 		}
-		return validateNodeInspection(*i.sdk, n, p.networkName())
+		network := p.networkName()
+		if p.cfg.Aurora != nil {
+			network = p.workspaceNetwork(n).Name
+		}
+		return validateNodeInspection(*i.sdk, n, network, p.cfg)
 	}
 	return nil
 }

@@ -13,20 +13,27 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
-// fakeNodeDeleter records fleet deletions without speaking HTTP.
+// fakeNodeDeleter records fleet deletions without speaking HTTP. It implements
+// the full FleetProvisioner seam because the reaper holds that interface.
 type fakeNodeDeleter struct {
 	mu      sync.Mutex
 	deleted []string
+	owners  []string
 	err     error
 }
 
-func (f *fakeNodeDeleter) DeleteWorkspaceNode(_ context.Context, nodeID string) error {
+func (f *fakeNodeDeleter) EnsureWorkspaceNode(context.Context, string, aurora.FleetEnsureRequest) (aurora.FleetNode, error) {
+	return aurora.FleetNode{}, nil
+}
+
+func (f *fakeNodeDeleter) DeleteWorkspaceNode(_ context.Context, ownerID, nodeID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
 	f.deleted = append(f.deleted, nodeID)
+	f.owners = append(f.owners, ownerID)
 	return nil
 }
 
@@ -491,5 +498,11 @@ func TestSandboxReaperAddressesFleetNodeByWorkspaceNodeID(t *testing.T) {
 	}
 	if want == node.BackendNodeID.String {
 		t.Fatalf("delete address %q is the backend name, not the node UUID", fleet.deleted[0])
+	}
+	// The delete must carry the owner derived from the workspace's locked
+	// aurora_managed runtime row, or the Fleet route treats it as a foreign
+	// delete and silently succeeds without removing the node.
+	if got, want := fleet.owners[0], util.UUIDToString(f.owner); got != want {
+		t.Fatalf("fleet delete owner = %q, want the managed runtime owner %q", got, want)
 	}
 }

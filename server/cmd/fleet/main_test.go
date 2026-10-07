@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/cloudruntime"
 	"github.com/multica-ai/multica/server/internal/fleet"
@@ -234,6 +235,50 @@ func TestFleetMainReviewCompositionUsesAPIOrigin(t *testing.T) {
 		t.Fatal("composition not exercised")
 	}
 }
+
+// TestFleetMainAuroraAppArmorPreflight pins the startup posture gate: a
+// configured profile on a daemon without AppArmor refuses startup with an error
+// naming the profile and the missing capability; the same profile on a
+// supporting daemon starts; an empty profile is accepted without probing and
+// logs the operator-acknowledged posture once.
+func TestFleetMainAuroraAppArmorPreflight(t *testing.T) {
+	ctx := context.Background()
+	configured := model.Config{Aurora: &model.AuroraConfig{AppArmorProfile: "multica-aurora-sandbox"}}
+	supported := func(context.Context) (bool, error) { return true, nil }
+	unsupported := func(context.Context) (bool, error) { return false, nil }
+
+	if err := checkAuroraAppArmor(ctx, configured, supported, nil); err != nil {
+		t.Fatalf("supporting daemon rejected: %v", err)
+	}
+	err := checkAuroraAppArmor(ctx, configured, unsupported, nil)
+	var apparmorErr *apparmorPreflightError
+	if !errors.As(err, &apparmorErr) {
+		t.Fatalf("missing daemon capability not refused: %v", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "multica-aurora-sandbox") || !strings.Contains(msg, "AppArmor support") {
+		t.Fatalf("error does not name the profile and capability: %q", msg)
+	}
+
+	empty := model.Config{Aurora: &model.AuroraConfig{}}
+	var logs []string
+	logf := func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+	if err := checkAuroraAppArmor(ctx, empty, unsupported, logf); err != nil {
+		t.Fatalf("empty profile rejected: %v", err)
+	}
+	if len(logs) != 1 || logs[0] != "aurora apparmor: disabled (operator-acknowledged)" {
+		t.Fatalf("acknowledged posture not logged exactly once: %v", logs)
+	}
+
+	// The default Claude profile is untouched: no probe, no log.
+	probed := false
+	if err := checkAuroraAppArmor(ctx, model.Config{}, func(context.Context) (bool, error) { probed = true; return false, nil }, logf); err != nil || probed {
+		t.Fatalf("default profile probed or refused: err=%v probed=%v", err, probed)
+	}
+	if err := checkAuroraAppArmor(ctx, configured, func(context.Context) (bool, error) { return false, errors.New("daemon down") }, nil); err == nil {
+		t.Fatal("daemon probe failure accepted")
+	}
+}
+
 func TestFleetMainMissingConfigStopsBeforeAnyDefaultLookup(t *testing.T) {
 	t.Setenv("FLEET_CONFIG_FILE", filepath.Join(t.TempDir(), "missing.json"))
 	t.Setenv("FLEET_SERVICE_KEY_FILE", filepath.Join(t.TempDir(), "missing-key"))

@@ -256,7 +256,7 @@ func TestAuroraModerationBlocksUnsafeArtifact(t *testing.T) {
 	moderator := &stubModerator{assetDecision: aurora.Decision{Allowed: false, Reason: "image is explicit"}}
 	withAuroraModeration(t, moderator)
 
-	const reservedMicro = 620_000_000
+	const reservedMicro = 62_000_000
 	generationID, taskID := runningAuroraGeneration(t, reservedMicro)
 	staged := seedAuroraStaging(t, store, taskID, generationID, "primary-1", "out.png", "primary", []byte("\x89PNG\r\n\x1a\n\x00\x00"), "{}")
 
@@ -312,7 +312,7 @@ func TestAuroraModerationFailsClosedWhenAssetScreenErrors(t *testing.T) {
 	moderator := &stubModerator{assetErr: errors.New("screening service unreachable")}
 	withAuroraModeration(t, moderator)
 
-	const reservedMicro = 620_000_000
+	const reservedMicro = 62_000_000
 	generationID, taskID := runningAuroraGeneration(t, reservedMicro)
 	staged := seedAuroraStaging(t, store, taskID, generationID, "primary-1", "out.png", "primary", []byte("\x89PNG\r\n\x1a\n\x00\x00"), "{}")
 
@@ -349,7 +349,7 @@ func TestAuroraModerationRejectsBeforeStoringAnyArtifact(t *testing.T) {
 	moderator := &stubModerator{blockAssetURL: "second.png"}
 	withAuroraModeration(t, moderator)
 
-	const reservedMicro = 620_000_000
+	const reservedMicro = 62_000_000
 	generationID, taskID := runningAuroraGeneration(t, reservedMicro)
 	first := seedAuroraStaging(t, store, taskID, generationID, "primary-1", "first.png", "primary", []byte("\x89PNG\r\n\x1a\n\x00\x00"), "{}")
 	second := seedAuroraStaging(t, store, taskID, generationID, "secondary-1", "second.png", "supporting", []byte("\x89PNG\r\n\x1a\n\x00\x01"), "{}")

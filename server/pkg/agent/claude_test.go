@@ -349,6 +349,32 @@ func TestBuildClaudeArgsUsesStrictMCPForManagedConfig(t *testing.T) {
 	}
 }
 
+// A narrowed system agent is allowed exactly the reviewed tools, comma-joined
+// into a single --allowedTools value; the flag stays absent (and ordinary
+// tasks byte-identical) when no allowlist is set.
+func TestBuildClaudeArgsAllowsReviewedTools(t *testing.T) {
+	t.Parallel()
+
+	allowed := []string{
+		"mcp__aurora__aurora.seedream_generate",
+		"mcp__aurora__aurora.write_text_artifact",
+	}
+	args := buildClaudeArgs(ExecOptions{AllowedTools: allowed}, slog.Default())
+
+	idx := slices.Index(args, "--allowedTools")
+	if idx < 0 || idx+1 >= len(args) {
+		t.Fatalf("expected --allowedTools in args: %v", args)
+	}
+	// One comma-joined value, exactly the reviewed identifiers: the flag must
+	// not repeat and the Claude MCP prefix must survive verbatim.
+	if got := args[idx+1]; got != strings.Join(allowed, ",") {
+		t.Fatalf("--allowedTools = %q, want %q", got, strings.Join(allowed, ","))
+	}
+	if count := strings.Count(strings.Join(args, " "), "--allowedTools"); count != 1 {
+		t.Fatalf("--allowedTools appears %d times in %v, want once", count, args)
+	}
+}
+
 // A narrowed surface turns off bypass and appends the host-touching tools to
 // the built-in deny list, comma-joined into a single --disallowedTools value.
 // TestBuildClaudeArgsInheritsMCPByDefault above locks the additive default:

@@ -487,8 +487,13 @@ API. Busy, unknown-health, or failed cleanup denies and keeps recovery inputs:
 queued or deferred runs must be cancelled before a node can be deleted, and
 deleting a node permanently removes its container and both volumes.
 
+With the Fleet configured, the server can also run the Aurora managed sandbox
+on the same Fleet: set `MULTICA_LOCAL_FLEET_URL`, `MULTICA_LOCAL_FLEET_SECRET_FILE`,
+and a digest-pinned `AURORA_SANDBOX_IMAGE`. Without all three, Aurora generation
+creation stays fail-closed and returns `aurora_runtime_unavailable`.
+
 See [Local Docker Fleet](apps/docs/content/docs/developers/local-docker-fleet.mdx)
-for the environment variables, descriptor fields, and verification gates.
+for the environment variables, descriptor fields, the Aurora profile, and verification gates.
 
 ### Isolation Guarantee
 

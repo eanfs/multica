@@ -55,6 +55,7 @@ type offlineHTTP struct {
 	t                                                                                *testing.T
 	nodeMount                                                                        string
 	nodeLabels                                                                       map[string]string
+	containerless                                                                    bool
 	volumeMissing, writer, createTimeout, helperMissing, cleanupForeign, waitBlocked bool
 	output                                                                           string
 	exit                                                                             int
@@ -90,6 +91,9 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 			s.recovered = append(s.recovered, id)
 			return response(204, ""), nil
 		}
+	}
+	if s.containerless && r.Method == "GET" && strings.HasPrefix(path, "/containers/multica-fleet-") && strings.HasSuffix(path, "/json") {
+		return response(404, `{"message":"no such node container"}`), nil
 	}
 	if s.accumulateBootstrap {
 		if s.helperID != "" {
@@ -165,7 +169,7 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 		}
 		n := fixtureNode()
 		net := (&Provider{cfg: fixtureConfig()}).networkName()
-		h := NodeHostConfig(n.Resources, true)
+		h := NodeHostConfig(n.Resources, true, nil, "")
 		h.NetworkMode = container.NetworkMode(net)
 		snapshot := container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "cid", State: &container.State{Status: "exited"}, HostConfig: &h}, Config: &container.Config{Image: n.Image, Labels: l, User: "10001:10001", Env: []string{"HOME=/data/home", "FLEET_NODE_MAX_RUNS=1"}, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"run"}}, NetworkSettings: &container.NetworkSettings{Networks: map[string]*network.EndpointSettings{net: {}}}, Mounts: []container.MountPoint{{Type: mount.TypeVolume, Name: name, Destination: "/data", RW: true}, {Type: mount.TypeVolume, Name: n.SecretsVolume, Destination: "/secrets"}}}
 		s.nodeInspectCount++
@@ -260,7 +264,15 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 		if s.crashStage == "cleanup" {
 			s.crashCleanup = true
 		}
-		raw, _ := json.Marshal(map[string]any{"StatusCode": s.exit})
+		exit := s.exit
+		if s.accumulateBootstrap {
+			// The accumulation fixtures model a bootstrap helper whose primary
+			// work fails and whose cleanup also cannot remove it. Only the
+			// primary failure keeps the run's error now that a cleanup failure
+			// no longer overwrites the primary result.
+			exit = 1
+		}
+		raw, _ := json.Marshal(map[string]any{"StatusCode": exit})
 		return response(200, string(raw)), nil
 	case r.Method == "GET" && path == "/containers/helper/logs":
 		if r.URL.Query().Get("stdout") != "1" || r.URL.Query().Get("stderr") != "1" {
@@ -469,7 +481,7 @@ func TestOfflineDeleteAccumulatedBootstrapHelpersProgressInBoundedBatches(t *tes
 			s.archive, _ = bootstrapTar(n, fixtureConfig(), b)
 			for i := 0; i < count; i++ {
 				if _, err := p.Ensure(context.Background(), n, b); err == nil {
-					t.Fatal("cleanup failure unexpectedly succeeded")
+					t.Fatal("failed bootstrap unexpectedly succeeded")
 				}
 			}
 			if len(s.leftovers) != count || !s.copied || s.helperCreates != count {
@@ -530,7 +542,7 @@ func TestOfflineMixedBatchPreservesBadHelpersWithoutStarvingNeighbors(t *testing
 			s.archive, _ = bootstrapTar(n, fixtureConfig(), b)
 			for i := 0; i < 10; i++ {
 				if _, err := p.Ensure(context.Background(), n, b); err == nil {
-					t.Fatal("expected cleanup failure")
+					t.Fatal("expected a failed bootstrap")
 				}
 			}
 			if len(s.leftovers) != 10 {
@@ -641,7 +653,7 @@ func TestOfflineRecoveryWaitResetsAndNeverCachesProof(t *testing.T) {
 			if kind == "multiple-roles" {
 				b := s.leftoverSnapshot()
 				b.ID = "bootstrap-leftover"
-				b.Config = &container.Config{Image: fixtureConfig().Image, User: "10001:10001", Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"bootstrap"}, Labels: fixtureLabels("bootstrap"), NetworkDisabled: true}
+				b.Config = &container.Config{Image: fixtureConfig().Image, User: helperUser, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"bootstrap"}, Labels: fixtureLabels("bootstrap"), NetworkDisabled: true}
 				bh := diagnosticHost()
 				// The adapter's bootstrap installer keeps a writable rootfs
 				// because the daemon refuses CopyToContainer into a read-only one.
@@ -922,7 +934,7 @@ func TestOfflineHelperHasNoCredentialsOrNetwork(t *testing.T) {
 		t.Fatal("helper did not complete and clean up")
 	}
 	c, h := s.helperConfig, s.helperHost
-	if c.Image != fixtureConfig().Image || c.User != "10001:10001" || len(c.Env) != 0 || c.Tty || strings.Join(c.Entrypoint, " ") != "/usr/local/bin/fleet-node" || strings.Join(c.Cmd, " ") != "report-stats" {
+	if c.Image != fixtureConfig().Image || c.User != helperUser || len(c.Env) != 0 || c.Tty || strings.Join(c.Entrypoint, " ") != "/usr/local/bin/fleet-node" || strings.Join(c.Cmd, " ") != "report-stats" {
 		t.Fatal("helper credential/command boundary violated")
 	}
 	if h.NetworkMode != "none" || !h.ReadonlyRootfs || h.Privileged || h.PidMode == "host" || len(h.Binds) != 0 || len(h.PortBindings) != 0 || len(h.Mounts) != 1 || h.Mounts[0].Type != mount.TypeVolume || h.Mounts[0].Source != "data-vol" || h.Mounts[0].Target != "/data" || !h.Mounts[0].ReadOnly || h.NanoCPUs != 250000000 || h.Memory != 64<<20 || h.PidsLimit == nil || *h.PidsLimit != 16 || strings.Join(h.CapDrop, ",") != "ALL" || strings.Join(h.SecurityOpt, ",") != "no-new-privileges:true" {
@@ -1018,12 +1030,23 @@ func TestOfflineHelperTimeoutCleansOnlyOwnResources(t *testing.T) {
 		t.Fatalf("timeout cleanup err=%v known=%v removed=%v", e, o.ReportStatsKnown, s.removed)
 	}
 }
+
+// TestOfflineHelperForeignCleanupNeverDeletesOrProves pins the reworked cleanup
+// contract: a cleanup-time label mismatch never removes the container or touches
+// a volume. The successful report is now preserved because ownership was already
+// validated before the helper started; labels are immutable after create, so the
+// observed mismatch models a foreign container or an injected image label. The
+// tolerant ownership refusal itself is covered directly by
+// TestCleanupHelperStillRejectsForeignFleetLabels.
 func TestOfflineHelperForeignCleanupNeverDeletesOrProves(t *testing.T) {
 	s := &offlineHTTP{cleanupForeign: true}
 	p := offlineProvider(t, s)
 	o, e := p.Diagnose(context.Background(), fixtureNode(), fixtureRef())
-	if e == nil || o.ReportStatsKnown || s.removed || s.volumeDeletes != 0 {
-		t.Fatal("foreign helper cleanup granted proof or removed resource")
+	if e != nil || !o.ReportStatsKnown {
+		t.Fatalf("cleanup failure discarded a successful primary report e=%v report=%+v", e, o)
+	}
+	if s.removed || s.volumeDeletes != 0 {
+		t.Fatal("foreign helper cleanup removed a resource")
 	}
 }
 func TestOfflineHelperUncertainCreateInspectsAndCleansOwn(t *testing.T) {
@@ -1217,5 +1240,33 @@ func TestProviderSDKConfigCopiesAreIsolated(t *testing.T) {
 	p, q := New(e, a), New(e, b)
 	if p.engine == q.engine || p.engine == e || q.engine == e || p.engine.(*sdkEngine).cfg.FleetID != "fleet" || q.engine.(*sdkEngine).cfg.FleetID != "other" || e.(*sdkEngine).cfg.FleetID != "" {
 		t.Fatal("shared adapter config mutated")
+	}
+}
+
+// TestOfflineDeleteContainerlessFailedBootstrapCompletes is the Task 27
+// regression for the second deadlock half: a queued destroy for a failed
+// bootstrap whose container never existed must still complete. There is no
+// report queue to drain, so a missing/garbled offline report must not make the
+// delete unknown forever (the reconciler would only defer it, leaving attempts at
+// zero and the identity un-re-armable). Volumes still follow the ownership and
+// no-writer checks.
+func TestOfflineDeleteContainerlessFailedBootstrapCompletes(t *testing.T) {
+	s := &offlineHTTP{containerless: true, output: "{}"}
+	p := offlineProvider(t, s)
+	n := fixtureNode()
+	n.ContainerID = ""
+	n.Revoked = true
+	n.Desired = "terminating"
+	if e := p.Delete(context.Background(), n, fixtureRef()); e != nil {
+		t.Fatalf("containerless delete = %v, want nil", e)
+	}
+	if strings.Join(s.removalOrder, ",") != "secrets,data" {
+		t.Fatalf("containerless delete removal order = %v", s.removalOrder)
+	}
+	if !s.secretsRemoved || !s.volumeMissing {
+		t.Fatalf("containerless volumes not removed: secrets=%v data=%v", s.secretsRemoved, s.volumeMissing)
+	}
+	if s.nodeRemoved {
+		t.Fatal("containerless delete removed a node container that never existed")
 	}
 }

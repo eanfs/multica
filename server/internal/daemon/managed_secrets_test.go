@@ -345,6 +345,29 @@ func TestManagedClaudeConfigForwardsOperatorEndpoint(t *testing.T) {
 	}
 }
 
+// TestManagedClaudeModelSurvivesVerbatim pins the invariant behind the
+// cosmetic Claude Code `[claude-code:unrecognized_model]` diagnostic: the
+// operator's ANTHROPIC_MODEL reaches the managed Claude child byte-for-byte,
+// including letter case and a trailing `[1M]` context marker. Claude Code,
+// not the daemon, decides how that string is displayed and sent (the wire keeps
+// the configured case and moves the marker into the context-1m beta header),
+// and both spellings answer 200 on the ARK Agent Plan endpoint, so the
+// diagnostic is noise, not an error. The daemon must never normalize the value.
+func TestManagedClaudeModelSurvivesVerbatim(t *testing.T) {
+	const model = "GLM-5.3-Flash[1M]"
+	t.Setenv("ANTHROPIC_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan")
+	t.Setenv("ANTHROPIC_MODEL", model)
+
+	cfg, err := LoadConfig(managedClaudeTestOverrides(t))
+	if err != nil {
+		t.Fatalf("LoadConfig(managed) = %v", err)
+	}
+	claude := cfg.Managed.ProviderSecrets.claudeChildEnv()
+	if claude["ANTHROPIC_MODEL"] != model {
+		t.Errorf("claude child env model = %q, want the verbatim %q", claude["ANTHROPIC_MODEL"], model)
+	}
+}
+
 // TestManagedMcpBrokerChildEnvIgnoresOperatorEndpoint keeps the broker scope
 // untouched: the Claude endpoint overrides never reach the MCP broker.
 func TestManagedMcpBrokerChildEnvIgnoresOperatorEndpoint(t *testing.T) {

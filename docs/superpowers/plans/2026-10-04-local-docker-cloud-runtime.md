@@ -10,6 +10,8 @@
 
 **Spec:** [已批准设计](<../specs/2026-10-04-local-docker-cloud-runtime-design.md>)，以用户批准的 PostgreSQL 修订版为准。
 
+> **2026-10-06 范围修订：** 用户确认本 Fleet 成为唯一 Docker 控制面，并直接承载 Aurora 的 skills 执行层；Aurora 侧改走 cloud runtime、`server/internal/aurorafleet` 退役、`apps/aurora` 增加 Runtime/执行状态视图。对应任务拆分见 [Aurora ↔ 本地 Docker Cloud Runtime 对接实现计划](2026-10-06-aurora-cloud-runtime-integration.md)，其 Task 1（Fleet Aurora 执行 profile）已提交 `cd759da6e`。本文件其余内容继续有效。
+
 ## Global Constraints
 
 - 用户已明确授权开发；本次准备只修订限定文档，不执行产品代码/迁移/构建/服务。后续实施先完成下方 managed environment 前置检查；Docker、registry 查询、共享数据库建立和真实模型仍须独立安全授权。

@@ -19,11 +19,14 @@ const (
 // teardown. Adding a table requires an explicit ownership decision here; the
 // handler deletion graph must then implement that decision before CI passes.
 //
-// Enforcement is split. This test checks the map against the live schema, and
+// Enforcement is split. This test checks the map against the live schema,
 // TestDeleteWorkspace_DetachesRatherThanDeletes drives the real teardown to
-// prove the workspaceDeleteDetach entries are implemented. The workspaceDelete
-// and workspaceDeleteSettle entries have no equivalent graph check yet, so
-// those still depend on review.
+// prove the workspaceDeleteDetach entries are implemented, and
+// TestDeleteWorkspace_HandsSandboxNodesToFleet drives the teardown to prove the
+// fleet_nodes workspaceDeleteSettle entry is a real handoff rather than an
+// exemption: teardown enqueues the Fleet destroy intent before the node row is
+// deleted. Plain workspaceDelete entries still have no equivalent graph check
+// and depend on review.
 var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"activity_log":                       workspaceDelete,
 	"agent":                              workspaceDelete,
@@ -159,6 +162,25 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"workspace":                          workspaceDelete,
 	"workspace_invitation":               workspaceDelete,
 	"workspace_share_link":               workspaceDelete,
+
+	// Fleet control-plane rows are deployment- or owner-scoped, not
+	// workspace-owned: the namespace fence, credential profiles, node token
+	// hashes and node operations carry no workspace_id and outlive any single
+	// workspace.
+	"fleet_credential_profiles": workspaceDeleteKeep,
+	"fleet_namespace_fences":    workspaceDeleteKeep,
+	"fleet_node_credentials":    workspaceDeleteKeep,
+	"fleet_node_operations":     workspaceDeleteKeep,
+	// An Aurora Fleet node carries the workspace_id/runtime_id dimensions, so
+	// the workspace teardown must decide its fate. The Fleet control plane owns
+	// the node's Docker container and volumes, which an API transaction cannot
+	// clean up, so the row keeps its attribution and is handed to the Fleet
+	// lifecycle reconciler instead of being deleted (or kept) here. That
+	// handoff is real: DeleteWorkspace enqueues the Fleet destroy intent for
+	// every workspace sandbox node before it deletes the aurora_sandbox_node
+	// rows, so the reconciler can still reach the node and its owned Docker
+	// resources. TestDeleteWorkspace_HandsSandboxNodesToFleet drives it.
+	"fleet_nodes": workspaceDeleteSettle,
 }
 
 func TestWorkspaceDeletionManifestCoversPublicSchema(t *testing.T) {
@@ -252,7 +274,12 @@ WHERE table_schema = 'public'
 			// to a reconciler, which is why every settle table's workspace_id is
 			// NOT NULL (channel_media_pending_object is marked for deletion by
 			// state, and the two outbox tables are drained by their own
-			// reconcilers). Only the selector is checked here.
+			// reconcilers). fleet_nodes is settled through a real handoff:
+			// DeleteWorkspace enqueues the Fleet destroy intent for each of the
+			// workspace's sandbox nodes before deleting their rows, so the Fleet
+			// reconciler can still reach the node (tested by
+			// TestDeleteWorkspace_HandsSandboxNodesToFleet). Only the selector is
+			// checked here.
 			if !hasWorkspaceID {
 				t.Errorf("settle table %s lost workspace_id; update its teardown selector", table)
 			}

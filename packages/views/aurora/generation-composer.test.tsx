@@ -55,7 +55,7 @@ function skill(overrides: Partial<AuroraSkill> = {}): AuroraSkill {
     name: "海报制作",
     nameEn: "Poster",
     category: "image",
-    credits: 760,
+    credits: 76,
     input: ["text", "image"],
     output: ["image"],
     featured: true,
@@ -91,7 +91,7 @@ function detail(
     skillId: "poster",
     prompt: "a launch poster",
     status: "queued",
-    creditsReserved: 760 * MICRO,
+    creditsReserved: 76 * MICRO,
     assets: [],
     ...overrides,
   };
@@ -138,7 +138,7 @@ describe("GenerationComposer", () => {
       refetch: mocks.detailRefetch,
     });
     mocks.balance.mockReturnValue({
-      data: payload({ availableMicro: 100 * MICRO }),
+      data: payload({ availableMicro: 50 * MICRO }),
       isPending: false,
     });
   });
@@ -192,7 +192,7 @@ describe("GenerationComposer", () => {
 
     expect(await screen.findByText("Not enough credits")).toBeInTheDocument();
     expect(
-      screen.getByText("This skill costs 760 credits and you have 100."),
+      screen.getByText("This skill costs 76 credits and you have 50."),
     ).toBeInTheDocument();
   });
 
@@ -401,7 +401,7 @@ describe("GenerationComposer", () => {
 
     expect(await screen.findByText("Not enough credits")).toBeInTheDocument();
     expect(
-      screen.getByText("This skill costs 760 credits."),
+      screen.getByText("This skill costs 76 credits."),
     ).toBeInTheDocument();
   });
 
@@ -421,7 +421,7 @@ describe("GenerationComposer", () => {
 
     expect(await screen.findByText("Not enough credits")).toBeInTheDocument();
     expect(
-      screen.getByText("This skill costs 760 credits."),
+      screen.getByText("This skill costs 76 credits."),
     ).toBeInTheDocument();
   });
 

@@ -37,6 +37,10 @@ done
 
 max_image_bytes=$((4 * 1024 * 1024 * 1024))
 sandbox_user="10001:10001"
+# The one agent executable path the Fleet provider supplies at container start
+# (model.AuroraClaudePath). The neutral image bakes no MULTICA_CLAUDE_PATH, so
+# the verifier passes this path to the managed-agent probe explicitly.
+aurora_claude_path="/opt/aurora/runtime/node_modules/.bin/claude"
 
 versions_json="$repo_root/deploy/aurora-sandbox/versions.json"
 apt_lock="$repo_root/deploy/aurora-sandbox/apt-packages.lock"
@@ -144,19 +148,41 @@ check_no_exported_secrets() {
   pass "$name config, labels, environment and history carry no token/key pattern"
 }
 
+check_neutral_environment() {
+  # check_neutral_environment <name> <ref>
+  # The final runtime stage must be a neutral base: the image environment may
+  # carry only PATH and HOME. The Node base's NODE_VERSION/YARN_VERSION and any
+  # baked MULTICA_CLAUDE_PATH would trip the Fleet container-env allowlist.
+  local name="$1" ref="$2" env forbidden extra
+  env="$(docker image inspect --format '{{json .Config.Env}}' "$ref")"
+  for forbidden in NODE_VERSION YARN_VERSION MULTICA_CLAUDE_PATH; do
+    case "$env" in
+      *"\"$forbidden="*) fail "$name image bakes $forbidden into Config.Env: $env" ;;
+    esac
+  done
+  extra="$(printf '%s' "$env" | node -e '
+let s = "";
+process.stdin.on("data", function (d) { s += d; }).on("end", function () {
+  const bad = JSON.parse(s).map(function (e) { return e.split("=")[0]; }).filter(function (k) { return k !== "PATH" && k !== "HOME"; });
+  process.stdout.write(Array.from(new Set(bad)).join(","));
+});
+')"
+  [ -z "$extra" ] || fail "$name image Config.Env carries non-neutral keys '$extra': $env"
+  pass "$name image environment is the neutral PATH/HOME contract"
+}
+
 # ===========================================================================
 # Sandbox image
 # ===========================================================================
 sandbox_id="$(resolve_image "$sandbox_image")"
 sandbox="multica-aurora-sandbox-verify"
 docker tag "$sandbox_id" "$sandbox" >/dev/null
-check_image_identity "sandbox" "$sandbox" '["/usr/local/bin/multica","daemon","start","--managed","--foreground","--managed-enrollment-token-file=/run/secrets/aurora-enrollment"]'
+check_image_identity "sandbox" "$sandbox" '["/usr/local/bin/fleet-node","run"]'
 
 healthcheck="$(docker image inspect --format '{{json .Config.Healthcheck}}' "$sandbox")"
 case "$healthcheck" in
-  *managed-healthcheck*--url=http://127.0.0.1:19514/health*--max-age=90s*) ;;
-  *managed-healthcheck*--max-age=90s*--url=http://127.0.0.1:19514/health*) ;;
-  *) fail "sandbox image health check is $healthcheck, want the fixed non-shell managed-healthcheck command" ;;
+  *fleet-node*health*) ;;
+  *) fail "sandbox image health check is $healthcheck, want the fixed non-shell fleet-node health command" ;;
 esac
 volumes="$(docker image inspect --format '{{json .Config.Volumes}}' "$sandbox")"
 case "$volumes" in
@@ -166,6 +192,7 @@ esac
 pass "sandbox image health check is fixed and declares no volume"
 
 check_no_exported_secrets "sandbox" "$sandbox"
+check_neutral_environment "sandbox" "$sandbox"
 
 # --- locked versions table, derived from the lock files ---------------------
 export VERIFY_ARCH="$(docker image inspect --format '{{.Architecture}}' "$sandbox")"
@@ -209,7 +236,7 @@ set -eu
 fail() { echo "INSPECT_FAIL: $*"; exit 1; }
 
 missing=""
-for b in /usr/local/bin/multica /usr/local/bin/node /usr/bin/ffmpeg /usr/bin/ffprobe \
+for b in /usr/local/bin/multica /usr/local/bin/fleet-node /usr/local/bin/node /usr/bin/ffmpeg /usr/bin/ffprobe \
          /usr/bin/chromium /usr/bin/convert /usr/bin/pdftoppm /usr/bin/pdfinfo \
          /usr/bin/unzip /usr/bin/tini; do
   [ -x "$b" ] || missing="$missing $b"
@@ -237,6 +264,35 @@ claude_version="$(printf '%s\n' "$claude_version" | head -n1)"
 echo "CLAUDE $claude_version"
 [ -x /usr/local/bin/multica ] || fail "missing multica daemon"
 echo "CLIS ok"
+
+# The fixed Fleet node layout: /data, /data/home, /data/workspaces and /secrets
+# exist and are owned by the non-root node, so a fresh named volume mounted there
+# is writable by UID 10001 and the read-only secrets volume is readable by it.
+for d in /data /data/home /data/workspaces /secrets; do
+  [ -d "$d" ] || fail "missing fixed Fleet layout directory $d"
+  owner="$(stat -c '%u:%g' "$d")"
+  [ "$owner" = "10001:10001" ] || fail "Fleet layout directory $d is owned by $owner, want 10001:10001"
+done
+echo "LAYOUT ok"
+
+# fleet-node is runnable and fails closed on an empty command; a missing or
+# mistyped binary must not be able to masquerade as a healthy node.
+set +e
+fleet_out="$(/usr/local/bin/fleet-node 2>&1)"
+fleet_rc=$?
+set -e
+[ "$fleet_rc" -ne 0 ] || fail "fleet-node accepted an empty command"
+case "$fleet_out" in
+  *"fleet-node command failed"*) ;;
+  *) fail "fleet-node did not report its fixed rejection: $fleet_out" ;;
+esac
+echo "FLEET_NODE ok"
+
+# No fixed enrollment secret is baked in: the Fleet installs the one-time mse_
+# secret into the mounted secrets volume at runtime.
+baked="$(find / -xdev -name 'aurora-enrollment' -print -quit 2>/dev/null || true)"
+[ -z "$baked" ] || fail "image bakes a fixed enrollment secret: $baked"
+echo "NO_BAKED_ENROLLMENT ok"
 
 forbidden=""
 for b in npm npx pnpm pnpx corepack yarn git curl wget ssh scp sftp \
@@ -303,15 +359,16 @@ printf '%s\n' "$inspect_out" | grep -q '^SELFTEST ok$' || fail "sandbox in-image
 pass "sandbox required binaries, forbidden-binary boundary, writable-directory boundary and build residue are clean"
 pass "sandbox in-image self-test passed"
 
-# Prove the daemon can actually resolve the agent launcher from its own
-# environment: the in-image check above proves the shim exists and runs as root,
-# but the daemon resolves exec.LookPath(envOrDefault("MULTICA_CLAUDE_PATH",
-# "claude")) as the sandbox user. That gap is why a container could exit 1 with
-# "managed mode requires a claude executable" while this verifier stayed green.
-managed_out="$("$script_dir/verify-aurora-sandbox-managed-agent.sh" --user "$sandbox_user" "$sandbox")" \
+# Prove the daemon can actually resolve the agent launcher the Fleet supplies:
+# the in-image check above proves the shim exists at the fixed path and runs as
+# root, but the daemon resolves exec.LookPath(envOrDefault(
+# "MULTICA_CLAUDE_PATH", "claude")) as the sandbox user. The neutral image bakes
+# no MULTICA_CLAUDE_PATH, so pass the provider's fixed path explicitly and
+# require it to resolve and report a version.
+managed_out="$("$script_dir/verify-aurora-sandbox-managed-agent.sh" --user "$sandbox_user" --path "$aurora_claude_path" "$sandbox")" \
   || fail "sandbox managed-agent resolution: $(printf '%s' "$managed_out" | tail -n1)"
 printf '%s\n' "$managed_out"
-pass "sandbox daemon resolves and runs its managed agent executable"
+pass "sandbox daemon resolves and runs its provider-supplied managed agent executable"
 
 # Token/key patterns over every regular, non-binary file in the image rootfs.
 sandbox_cid="$(docker create "$sandbox")"

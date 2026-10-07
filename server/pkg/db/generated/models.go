@@ -868,6 +868,8 @@ type FleetNode struct {
 	ErrorMessage   string             `json:"error_message"`
 	SpecConfig     []byte             `json:"spec_config"`
 	Observation    []byte             `json:"observation"`
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	RuntimeID      pgtype.UUID        `json:"runtime_id"`
 }
 
 type FleetNodeCredential struct {

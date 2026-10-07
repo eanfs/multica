@@ -46,6 +46,10 @@ describe("AuroraShell", () => {
       "href",
       "/acme/works",
     );
+    expect(screen.getByRole("link", { name: "Execution" })).toHaveAttribute(
+      "href",
+      "/acme/runtimes",
+    );
     expect(screen.getByRole("link", { name: "Credits" })).toHaveAttribute(
       "href",
       "/acme/billing",
@@ -79,7 +83,7 @@ describe("AuroraShell", () => {
   it("marks nothing on a route the nav does not own", () => {
     renderShell("/acme/works/abc");
 
-    for (const name of ["Create", "My works", "Credits"]) {
+    for (const name of ["Create", "My works", "Execution", "Credits"]) {
       expect(screen.getByRole("link", { name })).not.toHaveAttribute(
         "aria-current",
       );

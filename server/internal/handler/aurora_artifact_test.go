@@ -40,7 +40,7 @@ func auroraReportFixture(t *testing.T, skillID string) (taskID, generationID str
 		"prompt":           "artifact report",
 		"status":           "running",
 		"task_id":          taskID,
-		"credits_reserved": int64(620_000_000),
+		"credits_reserved": int64(62_000_000),
 	})
 	return taskID, generationID
 }

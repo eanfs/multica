@@ -9,6 +9,9 @@
   "node": {
     "runtime_image": "node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c"
   },
+  "debian": {
+    "runtime_image": "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587"
+  },
   "runtime_packages": {
     "@anthropic-ai/claude-code": "2.1.282",
     "@modelcontextprotocol/sdk": "1.30.1",
@@ -56,7 +59,10 @@
       "fonts-noto-cjk",
       "fonts-noto-color-emoji",
       "imagemagick",
+      "libatomic1",
+      "libgcc-s1",
       "libnss3",
+      "libstdc++6",
       "poppler-utils",
       "tini",
       "unzip"

@@ -1,9 +1,8 @@
 // Containerized fake end-to-end smoke for the managed Aurora sandbox image.
 //
 // This file is mounted read-only at /opt/aurora/smoke and executed inside the
-// real sandbox image by /usr/local/bin/node (see
-// server/internal/aurorafleet/docker_integration_test.go,
-// TestDockerSandboxFakeAuroraPipelines). The container runs with --network none,
+// real sandbox image by /usr/local/bin/node (see deploy/aurora-sandbox/docker-smoke.sh,
+// which runs it on Docker Desktop). The container runs with --network none,
 // so the only reachable endpoints are the loopback fakes started below.
 //
 // The broker's provider transport allowlist is compiled to the real provider

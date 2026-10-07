@@ -11,6 +11,15 @@ import (
 	"github.com/multica-ai/multica/server/internal/fleet/operator"
 )
 
+// TestMain supplies the HOME-free private invocation the operator contract
+// requires. execute() runs operator.Validate, which refuses an ambient HOME (or
+// inherited PG settings) so the command can never discover implicit
+// credentials; the command's own tests must therefore start without HOME.
+func TestMain(m *testing.M) {
+	os.Unsetenv("HOME")
+	os.Exit(m.Run())
+}
+
 func TestPrivateCommandExplicitFakeAndSanitizedOutput(t *testing.T) {
 	dir := t.TempDir()
 	paths := map[string]string{}

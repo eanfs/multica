@@ -146,6 +146,21 @@
       "unavailable": "Payments are not available on this instance."
     }
   },
+  "runtime": {
+    "title": "Execution",
+    "status": {
+      "unconfigured": "Not set up",
+      "provisioning": "Preparing",
+      "online": "Online",
+      "failed": "Failed"
+    },
+    "recovery": {
+      "unconfigured": "This workspace has no running execution node. Start a generation to provision one.",
+      "failed": "The execution node failed to start. Start a generation to retry; if it keeps failing, ask an administrator to check the Fleet runtime."
+    },
+    "generations_title": "Running generations",
+    "generations_empty": "Nothing is running."
+  },
   "workspace": {
     "unavailable_title": "This workspace isn't available",
     "unavailable_description": "It may have been removed, or you may not have access to it.",

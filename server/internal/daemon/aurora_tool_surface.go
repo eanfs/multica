@@ -54,6 +54,26 @@ var auroraDisallowedTools = []string{
 	"Task", "TodoWrite",
 }
 
+// auroraToolArgumentHints documents, per broker method, the arguments the
+// model may pass. It mirrors the broker's own TOOL_ARGUMENTS / TOOL_SCHEMAS
+// (deploy/aurora-sandbox/runtime/src/server.mjs) and exists so the per-turn
+// prompt can name the qualified tool without inventing an argument the broker
+// would reject. A method with no entry is called with an empty object.
+//
+// These are hints, not policy: the broker still validates every argument and
+// the reviewed allowlist still contains only the qualified method name.
+var auroraToolArgumentHints = map[string]string{
+	"aurora.seedream_generate":     `{"prompt": <optional; omit to use this run's prompt>, "attachment_ids": [<staged image ids to use as references>], "output_name": <optional>}`,
+	"aurora.seedance_generate":     `{"prompt": <optional; omit to use this run's prompt>, "attachment_ids": [<staged image ids to use as references>], "output_name": <optional>}`,
+	"aurora.openai_image":          `{"prompt": <optional; omit to use this run's prompt>, "attachment_ids": [<staged image ids to use as references>], "output_name": <optional>}`,
+	"aurora.id_photo":              `{"attachment_id": "<the staged image id>", "output_name": <optional>}`,
+	"aurora.volc_asr_transcribe":   `{"attachment_id": "<the staged audio or video id>", "output_name": <optional>}`,
+	"aurora.read_document":         `{"attachment_id": "<the staged document id>"}`,
+	"aurora.render_video_captions": `{"attachment_id": "<the staged video id>", "cues": [{"start": <seconds>, "end": <seconds>, "text": "<caption>"}], "output_name": <optional>}`,
+	"aurora.render_resume":         `{"sections": {<the resume sections you authored>}, "output_name": <optional>}`,
+	"aurora.write_text_artifact":   `{"content": "<the text you authored>", "name": "<name>.md or <name>.txt>"}`,
+}
+
 // isAuroraTask reports whether the claimed task is an Aurora system-agent run.
 func isAuroraTask(task Task) bool {
 	return task.Agent != nil && strings.HasPrefix(task.Agent.SystemKey, auroraSystemKeyPrefix)
@@ -107,9 +127,17 @@ func auroraToolSurface(task Task, provider string) (auroraSurface, error) {
 	if !ok {
 		return auroraSurface{}, fmt.Errorf("%w: %q", errAuroraSurfaceUnknownSkill, skillID)
 	}
+	// Claude Code reaches MCP tools only by their mcp__<server>__<tool>
+	// identifier, so a bare broker method name in --allowedTools approves
+	// nothing. Each trusted policy method is qualified with the broker's fixed
+	// server key here; the name never comes from a prompt or agent payload.
+	allowed := make([]string, 0, len(policy.RequiredTools))
+	for _, method := range policy.RequiredTools {
+		allowed = append(allowed, auroraBrokerMCPToolName(method))
+	}
 	return auroraSurface{
 		permissionMode: "default",
-		allowed:        slices.Clone(policy.RequiredTools),
+		allowed:        allowed,
 		disallowed:     slices.Clone(auroraDisallowedTools),
 	}, nil
 }

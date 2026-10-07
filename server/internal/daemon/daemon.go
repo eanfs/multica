@@ -390,6 +390,11 @@ type Daemon struct {
 	skillCache *SkillBundleCache
 	logger     *slog.Logger
 
+	// auroraInputRoot overrides the compiled Aurora broker input root
+	// (/workspace/input). Production leaves it empty; a focused test points it
+	// at a temp dir so the default suite never writes the container mount.
+	auroraInputRoot string
+
 	// terminalReports is the durable outbox for complete/fail callbacks. The
 	// sender hook is production-wired through Client and overridable in focused
 	// tests; terminalReportWakeup coalesces new-report and reconnect nudges.
@@ -7919,6 +7924,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// Prepare isolated execution environment.
 	// Repos are passed as metadata only — the agent checks them out on demand
 	// via `multica repo checkout <url>`.
+	//
+	// A managed Aurora generation is enqueued through the quick-create
+	// carrier, so it carries QuickCreatePrompt too. Its trusted skill id is
+	// what selects the Aurora brief and per-turn prompt instead of the generic
+	// issue-creation one (task-20).
+	taskAuroraSkillID, _ := auroraSkillID(task)
 	taskCtx := execenv.TaskContextForEnv{
 		IssueID:             task.IssueID,
 		TriggerCommentID:    task.TriggerCommentID,
@@ -7952,6 +7963,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		AutopilotSource:                  task.AutopilotSource,
 		AutopilotTriggerPayload:          strings.TrimSpace(string(task.AutopilotTriggerPayload)),
 		QuickCreatePrompt:                task.QuickCreatePrompt,
+		AuroraSkillID:                    taskAuroraSkillID,
 		IsSquadLeader:                    taskIsSquadLeader(task),
 		RequestingUserName:               task.RequestingUserName,
 		RequestingUserProfileDescription: task.RequestingUserProfileDescription,
@@ -8870,18 +8882,35 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// narrowed surface. Non-Aurora tasks leave auroraSandbox nil, so this keeps
 	// the default autonomous surface and a zero MaxTurns for them.
 	if auroraSandbox != nil {
+		// The reviewed allowlist is the whole point of the narrowed surface: an
+		// empty one would silently fall back to Claude's own defaults, so fail
+		// the task instead of launching it.
+		if len(auroraSandbox.allowed) == 0 {
+			return TaskResult{}, errors.New("aurora task has no reviewed tool allowlist")
+		}
 		execOpts.MaxTurns = auroraMaxTurns
 		execOpts.PermissionMode = auroraSandbox.permissionMode
 		execOpts.DisallowedTools = auroraSandbox.disallowed
+		execOpts.AllowedTools = auroraSandbox.allowed
 		// Aurora tasks never inherit agent-, task-, or plugin-supplied MCP
-		// configuration: generic MCP configuration is denied, and the reviewed
-		// broker config is injected by the managed sandbox path. An empty strict
-		// config keeps Claude from falling back to host-local MCP servers.
-		execOpts.McpConfig = json.RawMessage(`{"mcpServers":{}}`)
+		// configuration: the reviewed broker is written into the workdir and
+		// injected as the only MCP server, and --strict-mcp-config (added for
+		// any managed config) keeps host-local MCP servers out. Any failure to
+		// resolve that context fails the task through the normal refund path
+		// rather than launching a wider surface.
+		brokerContext, contextErr := d.writeAuroraBrokerContext(ctx, task, *env)
+		if contextErr != nil {
+			return TaskResult{}, contextErr
+		}
+		brokerConfig, configErr := auroraBrokerMcpConfig(brokerContext, auroraBrokerProxyEnv())
+		if configErr != nil {
+			return TaskResult{}, configErr
+		}
+		execOpts.McpConfig = brokerConfig
 		taskLog.Info("aurora sandbox policy applied",
 			"max_turns", execOpts.MaxTurns,
 			"permission_mode", execOpts.PermissionMode,
-			"allowed_tools", auroraSandbox.allowed,
+			"allowed_tools", execOpts.AllowedTools,
 			"disallowed_tools", execOpts.DisallowedTools,
 		)
 	}

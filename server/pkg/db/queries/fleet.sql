@@ -31,6 +31,8 @@ SELECT n.id,
  n.error_message,
  n.spec_config,
  n.observation,
+ n.workspace_id,
+ n.runtime_id,
  o.id,
  o.namespace,
  o.owner_id,
@@ -260,9 +262,58 @@ SELECT n.id, @namespace, @owner_id, @name, @spec, @image, @profile_ref, @spec_co
 FROM new_node n
 RETURNING *;
 
+-- name: InsertFleetAuroraNode :one
+-- Aurora owns the node and daemon UUIDs. Persist them verbatim with the
+-- workspace/runtime dimensions and the administrator's approved image, so the
+-- SSOT identity is never a generated default and no enrollment secret is written.
+INSERT INTO fleet_nodes (id, daemon_id, namespace, owner_id, workspace_id, runtime_id, name, spec, image, profile_ref, spec_config, data_volume, secrets_volume)
+VALUES (@node_id, @daemon_id, @namespace, @owner_id, @workspace_id, @runtime_id, @name, @spec, @image, '', @spec_config, @data_volume, @secrets_volume)
+RETURNING *;
+
 -- name: InsertFleetCreateOperation :one
 INSERT INTO fleet_node_operations (namespace, owner_id, node_id, action, idempotency_key, request_hash)
 VALUES (@namespace, @owner_id, @node_id, 'create', @idempotency_key, @request_hash) RETURNING *;
+
+-- name: FleetResetAuroraNode :one
+-- Re-arm the same Aurora node identity after its create failed, it was revoked,
+-- or the deployed image digest changed. Volumes, daemon id, owner and
+-- workspace/runtime dimensions are durable identity and must survive; only the
+-- control generation, the approved deployment image, and the fresh-bootstrap
+-- state change. An image change is deployment-scoped, not identity: reusing the
+-- same row keeps the same idempotency key and create intent. The old observation
+-- may carry a bootstrap success receipt bound to the prior generation, so it is
+-- cleared.
+UPDATE fleet_nodes n SET generation= @next_generation,image= @image,desired='running',status='creating',
+ container_id='',start_epoch='',ready=false,maintenance=false,revoked=false,
+ error_code='',error_message='',observation='{}'::jsonb,updated_at=now()
+WHERE n.namespace= @namespace AND n.owner_id= @owner_id AND n.id= @node_id AND n.generation= @generation
+ AND (n.revoked OR n.image<> @image OR EXISTS (SELECT 1 FROM fleet_node_operations o
+  WHERE o.namespace=n.namespace AND o.owner_id=n.owner_id AND o.node_id=n.id AND o.id= @operation_id
+   AND (o.phase='failed' OR o.non_retryable)))
+RETURNING n.*;
+
+-- name: FleetResetAuroraCreateOperation :one
+-- Make the original create operation claimable again at the reset generation.
+-- The idempotency key is untouched: this is the same create intent, not a second
+-- one. request_hash is rewritten to the current deployment fingerprint so the
+-- re-armed intent replays under the new image instead of conflicting forever.
+UPDATE fleet_node_operations o SET generation= @next_generation,phase='queued',
+ request_hash= @request_hash,
+ bootstrap_minted=false,non_retryable=false,bootstrap_claimed_at=NULL,attempts=0,
+ next_attempt_at=NULL,error_code='',error_message='',updated_at=now()
+WHERE o.namespace= @namespace AND o.owner_id= @owner_id AND o.node_id= @node_id AND o.id= @operation_id
+ AND o.generation= @generation AND o.action='create'
+RETURNING o.*;
+
+-- name: FleetRetireAuroraLifecycleOperations :execrows
+-- Re-arming the one create intent supersedes any unfinished non-create intent
+-- recorded for the same node (for example a queued destroy from an earlier
+-- workspace teardown). Retiring it here keeps the identity re-creatable instead
+-- of leaving an operation that can never match the re-created generation.
+UPDATE fleet_node_operations SET phase='failed',non_retryable=true,error_code='superseded',
+ error_message='',next_attempt_at=NULL,updated_at=now()
+WHERE namespace= @namespace AND owner_id= @owner_id AND node_id= @node_id
+ AND generation<= @generation AND action<>'create' AND phase NOT IN ('completed','failed');
 
 -- name: FleetUnfinishedOperations :one
 SELECT count(*) FROM fleet_node_operations WHERE namespace = @namespace AND owner_id = @owner_id AND node_id = @node_id

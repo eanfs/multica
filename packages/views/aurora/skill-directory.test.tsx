@@ -37,19 +37,19 @@ import { SkillDirectory } from "./skill-directory";
  * mirrors it rather than shrinking to a convenient sample.
  */
 const CATALOG: AuroraSkill[] = [
-  ["poster", "海报制作", "Poster", "image", 760],
-  ["xhs-image", "小红书图片", "Xiaohongshu Image", "image", 620],
-  ["product-image", "商品图制作", "Product Image", "image", 860],
-  ["text-image", "文字生成图片", "Text to Image", "image", 680],
-  ["image-edit", "图片修改", "Image Edit", "image", 520],
-  ["id-photo", "证件照制作", "ID Photo", "image", 360],
-  ["image-video", "图片生成视频", "Image to Video", "video", 1880],
-  ["text-video", "文字生成视频", "Text to Video", "video", 1680],
-  ["video-captions", "视频剪辑与字幕", "Video Captions", "video", 980],
-  ["xhs-copy", "小红书文案", "Xiaohongshu Copy", "content", 260],
-  ["resume", "简历制作", "Resume", "office", 420],
-  ["document-summary", "文件总结", "Document Summary", "office", 380],
-  ["transcription", "录音转文字", "Transcription", "office", 300],
+  ["poster", "海报制作", "Poster", "image", 76],
+  ["xhs-image", "小红书图片", "Xiaohongshu Image", "image", 62],
+  ["product-image", "商品图制作", "Product Image", "image", 86],
+  ["text-image", "文字生成图片", "Text to Image", "image", 68],
+  ["image-edit", "图片修改", "Image Edit", "image", 52],
+  ["id-photo", "证件照制作", "ID Photo", "image", 36],
+  ["image-video", "图片生成视频", "Image to Video", "video", 188],
+  ["text-video", "文字生成视频", "Text to Video", "video", 168],
+  ["video-captions", "视频剪辑与字幕", "Video Captions", "video", 98],
+  ["xhs-copy", "小红书文案", "Xiaohongshu Copy", "content", 26],
+  ["resume", "简历制作", "Resume", "office", 42],
+  ["document-summary", "文件总结", "Document Summary", "office", 38],
+  ["transcription", "录音转文字", "Transcription", "office", 30],
 ].map(([id, name, nameEn, category, credits]) => ({
   id: id as string,
   name: name as string,
@@ -69,7 +69,7 @@ const UNAVAILABLE: AuroraSkill[] = [
     name: "数字人口播",
     nameEn: "Avatar Video",
     category: "video",
-    credits: 1480,
+    credits: 148,
     input: ["text"],
     output: ["video"],
     featured: false,
@@ -81,7 +81,7 @@ const UNAVAILABLE: AuroraSkill[] = [
     name: "PPT 制作",
     nameEn: "PPT",
     category: "office",
-    credits: 820,
+    credits: 82,
     input: ["text"],
     output: ["pptx"],
     featured: false,
@@ -93,7 +93,7 @@ const UNAVAILABLE: AuroraSkill[] = [
     name: "Excel 数据分析",
     nameEn: "Excel Analysis",
     category: "office",
-    credits: 460,
+    credits: 46,
     input: ["text"],
     output: ["xlsx"],
     featured: false,
@@ -178,7 +178,7 @@ describe("SkillDirectory", () => {
     expect(
       await screen.findByRole("button", { name: "Generate" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("760 credits per generation")).toBeInTheDocument();
+    expect(screen.getByText("76 credits per generation")).toBeInTheDocument();
   });
 
   it("offers the composer for a skill that has not launched, so the reason is reachable", async () => {

@@ -46,14 +46,18 @@ type Reconciler struct {
 	reviewer       OperationReviewer
 	claimLifecycle func(context.Context, store.RecoverySnapshot) (lifecycleHandle, error)
 	claimBootstrap func(context.Context, store.RecoverySnapshot) (bootstrapHandle, error)
-	mu             sync.Mutex
-	observeAfter   pgtype.UUID
-	recoverAfter   pgtype.UUID
-	initialization *initializationSlot
-	serviceContext context.Context
-	stopping       bool
-	running        bool
-	clock          func() time.Time
+	// auroraEnrollment is the process-local handoff supplied by the Fleet
+	// composition when the Aurora profile is active. It is read at most once per
+	// bootstrap and never persisted.
+	auroraEnrollment func(pgtype.UUID) (string, bool)
+	mu               sync.Mutex
+	observeAfter     pgtype.UUID
+	recoverAfter     pgtype.UUID
+	initialization   *initializationSlot
+	serviceContext   context.Context
+	stopping         bool
+	running          bool
+	clock            func() time.Time
 }
 
 func NewReconciler(repo *store.Store, p model.Provider, cfg model.Config) *Reconciler {
@@ -72,6 +76,12 @@ func NewReconciler(repo *store.Store, p model.Provider, cfg model.Config) *Recon
 	return r
 }
 func (r *Reconciler) SetReviewer(reviewer OperationReviewer) { r.reviewer = reviewer }
+
+// SetAuroraEnrollment wires the process-local one-time enrollment handoff. It is
+// only consulted when the Aurora managed-sandbox profile is active.
+func (r *Reconciler) SetAuroraEnrollment(take func(pgtype.UUID) (string, bool)) {
+	r.auroraEnrollment = take
+}
 
 // Tick serializes scheduling, not accepted physical I/O. Each lane has its own fixed budget.
 func (r *Reconciler) Tick(parent context.Context) error {
@@ -482,6 +492,7 @@ type bootstrapHandle interface {
 	Snapshot() store.RecoverySnapshot
 	Check(context.Context) (model.Node, error)
 	Mint(context.Context) (string, int64, error)
+	Mark(context.Context) error
 	Confirm(context.Context, model.Observation) error
 	Fail(context.Context, string) error
 }
@@ -500,12 +511,31 @@ func (c sqlBootstrap) Check(ctx context.Context) (model.Node, error) {
 func (c sqlBootstrap) Mint(ctx context.Context) (string, int64, error) {
 	return c.repo.MintBootstrapToken(ctx, c.claim)
 }
+func (c sqlBootstrap) Mark(ctx context.Context) error {
+	return c.repo.MarkBootstrapMinted(ctx, c.claim)
+}
 func (c sqlBootstrap) Confirm(ctx context.Context, o model.Observation) error {
 	return c.repo.ConfirmBootstrap(ctx, c.claim, o)
 }
 func (c sqlBootstrap) Fail(ctx context.Context, code string) error {
 	return c.repo.FailBootstrap(ctx, c.claim, code)
 }
+
+// auroraBootstrap takes the one-time enrollment secret the provision route
+// handed to this process and builds the managed-sandbox bootstrap. The secret
+// is consumed exactly once: a missing, foreign or malformed value is a normal
+// bootstrap failure, never a Fleet-minted node token and never a retry loop.
+func (r *Reconciler) auroraBootstrap(ctx context.Context, n model.Node) (model.Bootstrap, error) {
+	if r.cfg.Aurora == nil || r.auroraEnrollment == nil {
+		return model.Bootstrap{}, model.ErrInvalidRequest
+	}
+	token, ok := r.auroraEnrollment(n.ID)
+	if !ok || !model.ValidEnrollmentToken(token) {
+		return model.Bootstrap{}, model.ErrUnavailable
+	}
+	return model.Bootstrap{DaemonID: n.DaemonID, EnrollmentToken: token, ServerURL: r.cfg.Aurora.ServerURL}, nil
+}
+
 func (r *Reconciler) initialize(ctx context.Context, s store.RecoverySnapshot, claim bootstrapHandle) error {
 	c, cancel := claim.Context(ctx)
 	defer cancel()
@@ -520,29 +550,51 @@ func (r *Reconciler) initialize(ctx context.Context, s store.RecoverySnapshot, c
 	if e != nil {
 		return nil
 	}
-	profile, e := r.repo.GetProfileForNode(c, n)
-	if e != nil {
-		return fail(e)
+	var b model.Bootstrap
+	if r.cfg.Aurora != nil {
+		// Aurora nodes carry no credential profile and never a Fleet-minted node
+		// token. The only bootstrap input is the one-time enrollment secret from
+		// the provision handoff. Recheck the claim immediately before consuming
+		// it, because taking the secret is irreversible; a missing or malformed
+		// secret fails the bootstrap the normal way (no guess, no retry timer).
+		if _, e = claim.Check(c); e != nil {
+			return nil
+		}
+		// Aurora has no Fleet node token to mint, but ConfirmBootstrap's SQL/lease
+		// fence requires the operation to be marked before Ensure. Marking writes no
+		// credential row and keeps the same claim/generation/lease authority.
+		if e = claim.Mark(c); e != nil {
+			return fail(e)
+		}
+		b, e = r.auroraBootstrap(c, n)
+		if e != nil {
+			return fail(e)
+		}
+	} else {
+		profile, e := r.repo.GetProfileForNode(c, n)
+		if e != nil {
+			return fail(e)
+		}
+		// Check immediately before reading private bytes, not just before SQL routing lookup.
+		n, e = claim.Check(c)
+		if e != nil {
+			return nil
+		}
+		b, e = LoadProfile(profile.Ref)
+		if e != nil {
+			return fail(e)
+		}
+		if _, e = claim.Check(c); e != nil {
+			return nil
+		}
+		token, _, e := claim.Mint(c)
+		if e != nil {
+			return fail(e)
+		}
+		b.NodeToken = token
+		b.DaemonID = n.DaemonID
+		b.ServerURL = r.cfg.APIURL
 	}
-	// Check immediately before reading private bytes, not just before SQL routing lookup.
-	n, e = claim.Check(c)
-	if e != nil {
-		return nil
-	}
-	b, e := LoadProfile(profile.Ref)
-	if e != nil {
-		return fail(e)
-	}
-	if _, e = claim.Check(c); e != nil {
-		return nil
-	}
-	token, _, e := claim.Mint(c)
-	if e != nil {
-		return fail(e)
-	}
-	b.NodeToken = token
-	b.DaemonID = n.DaemonID
-	b.ServerURL = r.cfg.APIURL
 	n, e = claim.Check(c)
 	if e != nil {
 		return nil

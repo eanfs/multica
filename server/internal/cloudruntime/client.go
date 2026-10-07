@@ -20,6 +20,9 @@ const (
 var (
 	ErrDisabled       = errors.New("multica-cloud URL is not configured")
 	ErrInvalidBaseURL = errors.New("multica-cloud URL is invalid")
+	// ErrNodeNotFound reports a delete of a workspace node the Fleet does not
+	// know. Callers treat it as success so cleanup is idempotent across restarts.
+	ErrNodeNotFound = errors.New("fleet node not found")
 )
 
 // RequestRecorder is the small interface the client uses to instrument every

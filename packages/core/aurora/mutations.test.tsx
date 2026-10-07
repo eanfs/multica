@@ -67,7 +67,7 @@ describe("useCreateAuroraGeneration", () => {
           skillId: "poster",
           prompt: "a cat",
           status: "queued",
-          creditsReserved: 760,
+          creditsReserved: 76,
         },
       })),
     } as unknown as ApiClient);

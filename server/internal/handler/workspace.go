@@ -1067,6 +1067,20 @@ func lockWorkspaceTaskOwners(ctx context.Context, qtx *db.Queries, workspaceID p
 	return nil
 }
 
+// handOffWorkspaceSandboxNodes hands the workspace's managed sandbox to the
+// Fleet lifecycle before the teardown transaction opens, so its aurora_sandbox_node
+// row is still present and readable through the pool while no database lock is
+// held across the Fleet HTTP call. The row is the reaper's only handle on the
+// node's Docker container and its data/secrets volumes, so a nil manager (Fleet
+// unconfigured) is the only safe no-op: with a configured manager a handoff
+// failure fails the teardown closed rather than orphaning the resources.
+func (h *Handler) handOffWorkspaceSandboxNodes(ctx context.Context, workspaceID pgtype.UUID) error {
+	if h.SandboxManager == nil {
+		return nil
+	}
+	return h.SandboxManager.HandoffWorkspaceToFleet(ctx, workspaceID)
+}
+
 func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 	workspaceID := workspaceIDFromURL(r, "id")
 
@@ -1095,6 +1109,23 @@ func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 			h.MembershipCache.Invalidate(r.Context(), userID, workspaceID)
 			affectedUserIDs = append(affectedUserIDs, userID)
 		}
+	}
+
+	// Hand the workspace's managed sandbox to the Fleet lifecycle before the
+	// teardown transaction opens. The aurora_sandbox_node row is the reaper's
+	// only index into the node's container and its data/secrets volumes, and
+	// the Fleet delete is an HTTP call: running it inside the transaction would
+	// hold the global rollup lock (4246), the workspace FOR UPDATE, and the
+	// chat-session/task-owner locks across up to the Fleet client's timeout,
+	// stalling the hourly rollup for every workspace. The row is still present
+	// in the pool here and nothing local has been deleted, so a handoff failure
+	// returns with the workspace intact; a node that never reached the Fleet is
+	// a no-op. The handoff enqueues exactly the destroy intent the reaper uses,
+	// so the Fleet reconciler removes the container/volumes and revokes the
+	// node credential.
+	if err := h.handOffWorkspaceSandboxNodes(r.Context(), requester.WorkspaceID); err != nil {
+		failWorkspaceDelete(w, r, workspaceID, "hand off sandbox nodes to fleet", err)
+		return
 	}
 
 	// The teardown runs in one transaction so the chat_session row locks below

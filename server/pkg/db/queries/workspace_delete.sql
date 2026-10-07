@@ -350,7 +350,11 @@ deleted_aurora_moderation_logs AS (
     DELETE FROM aurora_moderation_log WHERE workspace_id = $1
 ),
 -- Sandbox node rows are workspace-keyed leaf data with no FK, so the workspace
--- teardown removes them by workspace_id. The bound runtime and daemon tokens are
+-- teardown removes them by workspace_id. The handler hands each row to the Fleet
+-- lifecycle immediately before this statement (DeleteWorkspace's "hand off
+-- sandbox nodes to fleet" step) because this row is the reaper's only index into
+-- the node's Docker container and data/secrets volumes; without the handoff a
+-- row deleted here would strand them. The bound runtime and daemon tokens are
 -- swept by the runtime/administration steps; the node itself has no cascading
 -- relationship to them.
 deleted_aurora_sandbox_nodes AS (

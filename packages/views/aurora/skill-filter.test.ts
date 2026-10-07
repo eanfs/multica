@@ -9,7 +9,7 @@ function skill(overrides: Partial<AuroraSkill> = {}): AuroraSkill {
     name: "海报制作",
     nameEn: "Poster",
     category: "image",
-    credits: 760,
+    credits: 76,
     input: ["text"],
     output: ["image"],
     featured: false,

@@ -3,6 +3,7 @@ import { useWorkspaceId } from "../hooks";
 import {
   getAuroraBalance,
   getAuroraGeneration,
+  getAuroraRuntime,
   getAuroraSubscription,
   listAuroraAssets,
   listAuroraGenerations,
@@ -37,6 +38,8 @@ export const auroraKeys = {
   generation: (wsId: string, id: string) =>
     [...auroraKeys.generations(wsId), id] as const,
   assets: (wsId: string) => [...auroraKeys.all(wsId), "assets"] as const,
+  /** The workspace's managed execution node and its runtime binding. */
+  runtime: (wsId: string) => [...auroraKeys.all(wsId), "runtime"] as const,
   // No "list" segment here: assets has no id-keyed sibling to collide with, so
   // the params object is the only thing that can occupy this position.
   assetList: (wsId: string, params?: AuroraAssetsParams) =>
@@ -138,6 +141,24 @@ export function auroraAssetsOptions(wsId: string, params?: AuroraAssetsParams) {
   });
 }
 
+/**
+ * The workspace's execution target.
+ *
+ * The node moves on its own — provisioning starts on a generation and the
+ * reaper stops an idle node later — so a short stale-time lets a return to the
+ * screen pick that up without polling for it. A malformed body degrades to
+ * `unconfigured` in the parser rather than throwing, so this query has no
+ * error path to drive from a drifted response.
+ */
+export function auroraRuntimeOptions(wsId: string) {
+  return queryOptions({
+    queryKey: auroraKeys.runtime(wsId),
+    queryFn: () => getAuroraRuntime(),
+    enabled: wsId.length > 0,
+    staleTime: 30 * 1000,
+  });
+}
+
 export function auroraBalanceOptions() {
   return queryOptions({
     queryKey: auroraWalletKeys.balance(),
@@ -208,6 +229,12 @@ export function useAuroraGenerationDetail(id: string) {
 export function useAuroraAssets(params?: AuroraAssetsParams) {
   const wsId = useWorkspaceId();
   return useQuery(auroraAssetsOptions(wsId, params));
+}
+
+/** The workspace's managed execution node and its runtime binding. */
+export function useAuroraRuntime() {
+  const wsId = useWorkspaceId();
+  return useQuery(auroraRuntimeOptions(wsId));
 }
 
 /** The caller's wallet. */
