@@ -85,7 +85,7 @@
     "no_match_title": "Aucun résultat pour ces filtres",
     "no_match_description": "Essayez un autre statut ou skill.",
     "status_all": "Tout",
-    "skill_label": "Skill",
+    "skill_label": "Compétence",
     "skill_all": "Tous les skills",
     "preview_label": "Aperçu {{format}}",
     "preview_description": "Le fichier en taille réelle produit par cette génération.",
