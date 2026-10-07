@@ -190,7 +190,7 @@ func TestInspectHelperCannotGainPrivilegesOrHostResources(t *testing.T) {
 			h := diagnosticHost()
 			h.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: "data-vol", Target: "/data", ReadOnly: true}}
 			want := h
-			c := &container.Config{Image: fixtureConfig().Image, User: "10001:10001", NetworkDisabled: true, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"report-stats"}}
+			c := &container.Config{Image: fixtureConfig().Image, User: helperUser, NetworkDisabled: true, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"report-stats"}}
 			actual := container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "helper", HostConfig: &h}, Config: c, NetworkSettings: &container.NetworkSettings{}, Mounts: []container.MountPoint{{Type: mount.TypeVolume, Name: "data-vol", Destination: "/data", RW: false}}}
 			switch kind {
 			case "missing-network":

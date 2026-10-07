@@ -649,7 +649,7 @@ func TestOfflineRecoveryWaitResetsAndNeverCachesProof(t *testing.T) {
 			if kind == "multiple-roles" {
 				b := s.leftoverSnapshot()
 				b.ID = "bootstrap-leftover"
-				b.Config = &container.Config{Image: fixtureConfig().Image, User: "10001:10001", Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"bootstrap"}, Labels: fixtureLabels("bootstrap"), NetworkDisabled: true}
+				b.Config = &container.Config{Image: fixtureConfig().Image, User: helperUser, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"bootstrap"}, Labels: fixtureLabels("bootstrap"), NetworkDisabled: true}
 				bh := diagnosticHost()
 				// The adapter's bootstrap installer keeps a writable rootfs
 				// because the daemon refuses CopyToContainer into a read-only one.
@@ -930,7 +930,7 @@ func TestOfflineHelperHasNoCredentialsOrNetwork(t *testing.T) {
 		t.Fatal("helper did not complete and clean up")
 	}
 	c, h := s.helperConfig, s.helperHost
-	if c.Image != fixtureConfig().Image || c.User != "10001:10001" || len(c.Env) != 0 || c.Tty || strings.Join(c.Entrypoint, " ") != "/usr/local/bin/fleet-node" || strings.Join(c.Cmd, " ") != "report-stats" {
+	if c.Image != fixtureConfig().Image || c.User != helperUser || len(c.Env) != 0 || c.Tty || strings.Join(c.Entrypoint, " ") != "/usr/local/bin/fleet-node" || strings.Join(c.Cmd, " ") != "report-stats" {
 		t.Fatal("helper credential/command boundary violated")
 	}
 	if h.NetworkMode != "none" || !h.ReadonlyRootfs || h.Privileged || h.PidMode == "host" || len(h.Binds) != 0 || len(h.PortBindings) != 0 || len(h.Mounts) != 1 || h.Mounts[0].Type != mount.TypeVolume || h.Mounts[0].Source != "data-vol" || h.Mounts[0].Target != "/data" || !h.Mounts[0].ReadOnly || h.NanoCPUs != 250000000 || h.Memory != 64<<20 || h.PidsLimit == nil || *h.PidsLimit != 16 || strings.Join(h.CapDrop, ",") != "ALL" || strings.Join(h.SecurityOpt, ",") != "no-new-privileges:true" {

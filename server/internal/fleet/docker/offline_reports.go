@@ -264,7 +264,7 @@ func (e *sdkEngine) FixedOfflineReports(ctx context.Context, n model.Node, ref m
 	}
 	h := diagnosticHost()
 	h.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: n.DataVolume, Target: model.DataMount, ReadOnly: true}}
-	c := &container.Config{Image: e.cfg.Image, User: "10001:10001", Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"report-stats"}, Labels: labels(n.Namespace, e.cfg.FleetID, nodeID(n), "diagnostic"), NetworkDisabled: true}
+	c := &container.Config{Image: e.cfg.Image, User: helperUser, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"report-stats"}, Labels: labels(n.Namespace, e.cfg.FleetID, nodeID(n), "diagnostic"), NetworkDisabled: true}
 	raw, err := e.runHelper(ctx, c, &h, nil)
 	if err != nil {
 		return nil, model.ErrUnknownHealth
@@ -502,7 +502,7 @@ func (e *sdkEngine) validateRecoveryHelper(ctx context.Context, actual container
 		h.Mounts = append(h.Mounts, mount.Mount{Type: mount.TypeVolume, Source: n.SecretsVolume, Target: "/secrets"})
 		cmd = "bootstrap"
 	}
-	c := &container.Config{Image: e.cfg.Image, User: "10001:10001", Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{cmd}, Labels: labels(n.Namespace, e.cfg.FleetID, nodeID(n), r.Role), NetworkDisabled: true}
+	c := &container.Config{Image: e.cfg.Image, User: helperUser, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{cmd}, Labels: labels(n.Namespace, e.cfg.FleetID, nodeID(n), r.Role), NetworkDisabled: true}
 	return validateHelper(actual, c, &h)
 }
 func (e *sdkEngine) noWriter(ctx context.Context, name string) error {

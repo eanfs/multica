@@ -14,6 +14,16 @@ import (
 	"github.com/multica-ai/multica/server/internal/util"
 )
 
+// helperUser is the numeric uid helper containers run as. It deliberately omits
+// the group: an archive copy (CopyToContainer with CopyUIDGID) makes Docker
+// resolve the container's whole user spec through a chrooted getent, so the
+// "uid:gid" form fails with `getent unable to find entry "10001:10001"` on
+// Docker 25 - verified on the Amazon Linux 2023 host running Docker 25.0.16,
+// where every annotation of the spec failed while the bare uid resolved and the
+// process still ran as 10001:10001 because the image's passwd supplies the
+// group. Later Docker versions accept either form.
+const helperUser = "10001"
+
 func (e *sdkEngine) InstallBootstrap(ctx context.Context, vols []Resource, raw []byte) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -47,7 +57,7 @@ func (e *sdkEngine) InstallBootstrap(ctx context.Context, vols []Resource, raw [
 	// the archive still lands only in the two owned volumes.
 	h.ReadonlyRootfs = false
 	h.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: data.ID, Target: model.DataMount}, {Type: mount.TypeVolume, Source: secrets.ID, Target: "/secrets"}}
-	c := &container.Config{Image: e.cfg.Image, User: "10001:10001", Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"bootstrap"}, Labels: labels(e.cfg.Namespace, e.cfg.FleetID, data.Labels["multica.fleet.node"], "bootstrap"), NetworkDisabled: true}
+	c := &container.Config{Image: e.cfg.Image, User: helperUser, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"bootstrap"}, Labels: labels(e.cfg.Namespace, e.cfg.FleetID, data.Labels["multica.fleet.node"], "bootstrap"), NetworkDisabled: true}
 	_, err := e.runHelper(ctx, c, &h, raw)
 	return err
 }

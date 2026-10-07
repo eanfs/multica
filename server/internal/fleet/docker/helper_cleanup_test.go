@@ -24,7 +24,7 @@ func helperSpec() (*container.Config, *container.HostConfig) {
 	h := diagnosticHost()
 	c := &container.Config{
 		Image:           "example/fleet@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		User:            "10001:10001",
+		User:            helperUser,
 		Entrypoint:      []string{"/usr/local/bin/fleet-node"},
 		Cmd:             []string{"bootstrap"},
 		Labels:          labels("ns", "fleet", "01000000-0000-0000-0000-000000000000", "bootstrap"),
