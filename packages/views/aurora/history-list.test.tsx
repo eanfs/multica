@@ -7,7 +7,9 @@ import type {
   AuroraGenerationDetail,
   AuroraSkill,
 } from "@multica/core/aurora";
+import { NavigationProvider } from "../navigation";
 import { renderWithI18n } from "../test/i18n";
+import { stubNavigationAdapter } from "../test/navigation";
 
 // `auroraAssetDownloadPath` is deliberately left real: the href a row points at
 // is part of the contract with the download route, not of the query layer being
@@ -58,6 +60,7 @@ function generation(
     creditsCharged: 76 * MICRO,
     error: null,
     createdAt: "2026-09-23T00:00:00Z",
+    taskId: "",
     ...overrides,
   };
 }
@@ -267,5 +270,17 @@ describe("HistoryList", () => {
 
     expect(screen.getByText("Could not load your history")).toBeInTheDocument();
     expect(screen.queryByText("No generations yet")).not.toBeInTheDocument();
+  });
+
+  it("links each row to the app's generation detail route when it provides one", () => {
+    renderWithI18n(
+      <NavigationProvider value={stubNavigationAdapter()}>
+        <HistoryList generationHref={(id) => "/acme/works/" + id} />
+      </NavigationProvider>,
+    );
+
+    expect(
+      screen.getByRole("link", { name: "a launch poster" }),
+    ).toHaveAttribute("href", "/acme/works/gen-1");
   });
 });

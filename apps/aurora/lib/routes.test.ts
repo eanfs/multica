@@ -17,6 +17,7 @@ describe("auroraRoutes", () => {
     const routes = auroraRoutes("acme");
     expect(routes.skills()).toBe("/acme/skills");
     expect(routes.works()).toBe("/acme/works");
+    expect(routes.work("gen-1")).toBe("/acme/works/gen-1");
     expect(routes.history()).toBe("/acme/history");
     expect(routes.runtime()).toBe("/acme/runtimes");
     expect(routes.billing()).toBe("/acme/billing");

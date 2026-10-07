@@ -3,7 +3,8 @@ export {
   GenerationComposer,
   type GenerationComposerProps,
 } from "./generation-composer";
-export { HistoryList } from "./history-list";
+export { GenerationDetail, type GenerationDetailProps } from "./generation-detail";
+export { HistoryList, type HistoryListProps } from "./history-list";
 export { RuntimeStatus } from "./runtime-status";
 export { SkillDirectory, type SkillDirectoryProps } from "./skill-directory";
-export { WorksList } from "./works-list";
+export { WorksList, type WorksListProps } from "./works-list";

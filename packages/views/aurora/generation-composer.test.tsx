@@ -95,6 +95,7 @@ function detail(
     creditsCharged: 0,
     error: null,
     createdAt: "2026-09-23T00:00:00Z",
+    taskId: "",
     assets: [],
     ...overrides,
   };

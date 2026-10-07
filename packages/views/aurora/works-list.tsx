@@ -13,14 +13,12 @@ import {
   AlertDialogTitle,
 } from "@multica/ui/components/ui/alert-dialog";
 import { Alert, AlertDescription } from "@multica/ui/components/ui/alert";
-import { Badge } from "@multica/ui/components/ui/badge";
 import { Button } from "@multica/ui/components/ui/button";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { Spinner } from "@multica/ui/components/ui/spinner";
 import {
   auroraAssetDownloadPath,
   isAuroraDegraded,
-  isAuroraGenerationTerminal,
   useAuroraAssets,
   useAuroraGenerations,
   useAuroraSkills,
@@ -32,8 +30,10 @@ import {
   CollectionPageHeader,
   CollectionPageState,
 } from "../layout/collection-page";
+import { AppLink } from "../navigation";
 import { useLocale, useT } from "../i18n";
 import { formatMicroCredits } from "./format";
+import { GenerationStatusBadge } from "./generation-artifacts";
 import { generationStatusLabel, skillDisplayNamesById } from "./labels";
 import { AuroraLoadFailed } from "./load-failed";
 
@@ -46,7 +46,15 @@ import { AuroraLoadFailed } from "./load-failed";
  * exist once it finishes — so they are rendered side by side instead of being
  * reconciled into a single tree the server does not offer.
  */
-export function WorksList() {
+export interface WorksListProps {
+  /**
+   * The app's route for one generation. Omitted, a row's prompt is plain text
+   * rather than a link.
+   */
+  generationHref?: (generationId: string) => string;
+}
+
+export function WorksList({ generationHref }: WorksListProps = {}) {
   const { t } = useT("aurora");
   const locale = useLocale();
   const generationsQuery = useAuroraGenerations();
@@ -175,6 +183,7 @@ export function WorksList() {
                             )
                       }
                       noPrompt={t(($) => $.works.no_prompt)}
+                      generationHref={generationHref}
                     />
                   ))}
                 </ul>
@@ -246,6 +255,7 @@ function GenerationRow({
   skillName,
   credits,
   noPrompt,
+  generationHref,
 }: {
   generation: AuroraGeneration;
   /** Null when the catalog could not name the skill — nothing to say, not a fact. */
@@ -253,14 +263,24 @@ function GenerationRow({
   /** Null when nothing was charged for it — a failed generation is refunded. */
   credits: string | null;
   noPrompt: string;
+  generationHref?: (generationId: string) => string;
 }) {
   const { t } = useT("aurora");
-  const status = generationStatusLabel(generation.status);
+  const prompt = generation.prompt || noPrompt;
   return (
     <li className="flex items-center gap-3 border-b border-surface-border px-3 py-2 last:border-b-0">
       <div className="flex min-w-0 flex-1 flex-col">
         <span className="truncate text-body">
-          {generation.prompt || noPrompt}
+          {generationHref ? (
+            <AppLink
+              href={generationHref(generation.id)}
+              className="transition-colors hover:text-foreground hover:underline"
+            >
+              {prompt}
+            </AppLink>
+          ) : (
+            prompt
+          )}
         </span>
         {skillName ? (
           <span className="truncate text-caption text-muted-foreground">
@@ -273,14 +293,7 @@ function GenerationRow({
           {t(($) => $.credits, { credits })}
         </span>
       ) : null}
-      <Badge
-        variant={
-          isAuroraGenerationTerminal(generation.status) ? "outline" : "secondary"
-        }
-        className="shrink-0"
-      >
-        {t(($) => $.composer.status[status])}
-      </Badge>
+      <GenerationStatusBadge status={generation.status} className="shrink-0" />
     </li>
   );
 }

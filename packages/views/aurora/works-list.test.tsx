@@ -6,7 +6,9 @@ import type {
   AuroraGeneration,
   AuroraSkill,
 } from "@multica/core/aurora";
+import { NavigationProvider } from "../navigation";
 import { renderWithI18n } from "../test/i18n";
+import { stubNavigationAdapter } from "../test/navigation";
 
 // `auroraAssetDownloadPath` is deliberately left real: the href a row points at
 // is part of the contract with the download route, not of the query layer being
@@ -49,6 +51,7 @@ function generation(
     creditsCharged: 76 * MICRO,
     error: null,
     createdAt: "2026-09-23T00:00:00Z",
+    taskId: "",
     ...overrides,
   };
 }
@@ -271,5 +274,22 @@ describe("WorksList", () => {
 
     expect(screen.getByText("Could not load your works")).toBeInTheDocument();
     expect(screen.queryByText("a launch poster")).not.toBeInTheDocument();
+  });
+
+  it("links each generation row to the app's detail route and navigates there", async () => {
+    const user = userEvent.setup();
+    const push = vi.fn();
+
+    renderWithI18n(
+      <NavigationProvider value={stubNavigationAdapter({ push })}>
+        <WorksList generationHref={(id) => "/acme/works/" + id} />
+      </NavigationProvider>,
+    );
+
+    const row = screen.getByRole("link", { name: "a launch poster" });
+    expect(row).toHaveAttribute("href", "/acme/works/gen-1");
+
+    await user.click(row);
+    expect(push).toHaveBeenCalledWith("/acme/works/gen-1");
   });
 });

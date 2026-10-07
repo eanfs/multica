@@ -19,6 +19,7 @@ function generation(
     creditsCharged: 0,
     error: null,
     createdAt: "",
+    taskId: "",
     ...overrides,
   };
 }
