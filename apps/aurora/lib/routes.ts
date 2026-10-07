@@ -29,6 +29,7 @@ export function auroraRoutes(slug: string) {
   return {
     skills: () => `${ws}/skills`,
     works: () => `${ws}/works`,
+    history: () => `${ws}/history`,
     runtime: () => `${ws}/runtimes`,
     billing: () => `${ws}/billing`,
   };
