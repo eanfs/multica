@@ -96,6 +96,13 @@ export const auroraGenerationSchema = z.object({
   error: z.string().nullable().default(null),
   /** RFC 3339 creation timestamp; empty when an older server omits it. */
   createdAt: z.string().default(""),
+  /**
+   * The enqueued agent task this generation runs as, or "" when the server does
+   * not expose one — an older server that predates the field, or a row that
+   * never enqueued. The empty-string default is deliberate: the detail view
+   * treats "" as "no task link to offer", which is the same state as absent.
+   */
+  taskId: z.string().default(""),
 });
 export type AuroraGeneration = z.infer<typeof auroraGenerationSchema>;
 

@@ -476,6 +476,16 @@ export function isAuroraPaymentsUnavailableError(error: unknown): boolean {
 }
 
 /**
+ * 404: no generation with this id exists in the caller's workspace. The detail
+ * route renders a not-found state rather than a retry card — the read
+ * succeeded, the generation is simply gone. A generation in another workspace
+ * answers the same way, because the query is scoped by workspace.
+ */
+export function isAuroraGenerationNotFoundError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
+}
+
+/**
  * A read the server answered 2xx to, with a body the schema rejected.
  *
  * The query is not in an error state — nothing threw — so a view that branches

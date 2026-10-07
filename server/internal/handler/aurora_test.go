@@ -1064,6 +1064,33 @@ func TestListAuroraGenerationsOrdersAndPages(t *testing.T) {
 	list("/api/aurora/generations?limit=9999&offset=-5")
 }
 
+func TestListAuroraGenerationsExposesTaskID(t *testing.T) {
+	resetAuroraGenerations(t)
+
+	agentID := dbfx.Agent(t, "Aurora list task id agent", testRuntimeID)
+	taskID := dbfx.Task(t, agentID, testutil.Cols{"status": "running", "runtime_id": testRuntimeID})
+	withTask := insertGeneration(t, "has task", testutil.Cols{"task_id": taskID})
+	withoutTask := insertGeneration(t, "no task")
+
+	out := testutil.Decode[struct {
+		Generations []struct {
+			ID     string `json:"id"`
+			TaskID string `json:"taskId"`
+		} `json:"generations"`
+	}](t, testHandler.ListAuroraGenerations, newRequest(http.MethodGet, "/api/aurora/generations", nil), http.StatusOK)
+
+	byID := make(map[string]string, len(out.Generations))
+	for _, g := range out.Generations {
+		byID[g.ID] = g.TaskID
+	}
+	if byID[withTask] != taskID {
+		t.Fatalf("taskId for generation with task = %q, want %q", byID[withTask], taskID)
+	}
+	if byID[withoutTask] != "" {
+		t.Fatalf("taskId for generation without task = %q, want empty", byID[withoutTask])
+	}
+}
+
 func TestGetAuroraGenerationIncludesAssets(t *testing.T) {
 	resetAuroraGenerations(t)
 
@@ -1153,11 +1180,16 @@ func TestGetAuroraGenerationDerivesStatusFromTask(t *testing.T) {
 			out := testutil.Decode[struct {
 				Generation struct {
 					Status string `json:"status"`
+					TaskID string `json:"taskId"`
 				} `json:"generation"`
 			}](t, testHandler.GetAuroraGeneration, req, http.StatusOK)
 
 			if out.Generation.Status != tc.want {
 				t.Fatalf("status for task %q = %q, want %q", tc.taskStatus, out.Generation.Status, tc.want)
+			}
+			// The detail read exposes the enqueued task so the client can link to it.
+			if out.Generation.TaskID != taskID {
+				t.Fatalf("taskId = %q, want %q", out.Generation.TaskID, taskID)
 			}
 		})
 	}

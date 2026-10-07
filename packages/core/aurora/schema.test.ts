@@ -70,6 +70,20 @@ describe("auroraGenerationSchema", () => {
 
     expect(res.creditsReserved).toBe(0);
     expect(res.status).toBe("some-future-status");
+    // An older server that predates taskId still parses; "" is "no task link".
+    expect(res.taskId).toBe("");
+  });
+
+  it("keeps the task id the list and detail endpoints expose", () => {
+    const res = auroraGenerationSchema.parse({
+      id: "gen-1",
+      skillId: "poster",
+      prompt: "a cat",
+      status: "running",
+      taskId: "task-1",
+    });
+
+    expect(res.taskId).toBe("task-1");
   });
 
   it("rejects an entry missing its id", () => {
