@@ -45,11 +45,33 @@ interface PreviewState {
   generation: AuroraGeneration;
 }
 
-/** Whether an asset has an image to render, narrowing away the nullable URL. */
+/**
+ * Whether an asset has an image to render, narrowing away an unusable URL.
+ *
+ * A missing URL is not the only unusable one: the server can emit an empty
+ * `mediaUrl` for a valid-empty pointer, and a relative or non-http(s) value is
+ * not an image the browser can load. Each of those takes the download-row path
+ * rather than rendering a broken thumbnail.
+ */
 export function isPreviewableImage(
   asset: AuroraAsset,
 ): asset is AuroraAsset & { mediaUrl: string } {
-  return asset.kind === "image" && asset.mediaUrl !== null;
+  return asset.kind === "image" && isAbsoluteHttpUrl(asset.mediaUrl);
+}
+
+/** A non-empty absolute http(s) URL, the only form an `<img>` can load. */
+function isAbsoluteHttpUrl(url: string | null): url is string {
+  if (!url) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return (
+    (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+    parsed.host !== ""
+  );
 }
 
 /**
@@ -120,7 +142,18 @@ export function GenerationArtifacts({
   const [preview, setPreview] = useState<PreviewState | null>(null);
 
   if (loading) {
-    return <Skeleton className="h-20 w-20 rounded-md" />;
+    // Reserve the geometry the loaded block occupies: a line of thumbnails at
+    // the cap below, plus the gap-2 wrapper the files use. Without it the row
+    // grows from one thumbnail to the real files as soon as the read lands.
+    return (
+      <div className="flex flex-col gap-2" aria-hidden="true">
+        <div className="flex flex-wrap gap-2">
+          {Array.from({ length: maxThumbnails }, (_, index) => (
+            <Skeleton key={index} className="size-20 rounded-md" />
+          ))}
+        </div>
+      </div>
+    );
   }
 
   const images = assets.filter(isPreviewableImage);
@@ -139,7 +172,9 @@ export function GenerationArtifacts({
   }
 
   return (
-    <div className="flex flex-col gap-2">
+    // min-h keeps a download-only result from shrinking the row below the
+    // thumbnail line the loading placeholder reserves.
+    <div className="flex min-h-20 flex-col gap-2">
       {previewable.length > 0 ? (
         <ul className="flex flex-wrap gap-2">
           {previewable.map((asset) => (

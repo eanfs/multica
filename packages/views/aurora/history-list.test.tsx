@@ -31,6 +31,7 @@ vi.mock("@multica/core/aurora", async (importOriginal) => {
   };
 });
 
+import { MAX_GENERATION_THUMBNAILS } from "./generation-artifacts";
 import { HistoryList } from "./history-list";
 
 const MICRO = 1_000_000;
@@ -176,6 +177,43 @@ describe("HistoryList", () => {
     expect(
       within(download as HTMLElement).getByText("Download"),
     ).toBeInTheDocument();
+  });
+
+  it("renders an image with an unusable URL as a download row, like a missing one", () => {
+    install([generation()], {
+      "gen-1": [
+        asset({ id: "asset-null", mediaUrl: null }),
+        asset({ id: "asset-empty", mediaUrl: "" }),
+      ],
+    });
+
+    const { container } = renderHistory();
+
+    // Neither a null nor an empty pointer is an image the browser can load, so
+    // both fall back to the download row rather than a broken thumbnail.
+    expect(
+      screen.queryByRole("button", { name: /Preview/ }),
+    ).not.toBeInTheDocument();
+    for (const id of ["asset-null", "asset-empty"]) {
+      expect(
+        container.querySelector(`a[href="/api/aurora/assets/${id}/download"]`),
+      ).not.toBeNull();
+    }
+  });
+
+  it("reserves one artifact slot per thumbnail while the detail read is pending", () => {
+    mocks.detail.mockReturnValue({
+      data: undefined,
+      isPending: true,
+      isError: false,
+      refetch: vi.fn(),
+    });
+
+    const { container } = renderHistory();
+
+    expect(
+      container.querySelectorAll("[data-slot='skeleton']").length,
+    ).toBe(MAX_GENERATION_THUMBNAILS);
   });
 
   it("opens a larger view from a thumbnail, with open and download actions", async () => {
