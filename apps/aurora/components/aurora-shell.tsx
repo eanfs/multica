@@ -36,6 +36,7 @@ export function AuroraShell({
     { href: routes.runtime(), icon: Server, label: t(($) => $.runtime.title) },
     { href: routes.billing(), icon: Coins, label: t(($) => $.billing.title) },
   ];
+  const worksHref = routes.works();
   // Trailing slashes are the same destination, and Next keeps the URL the user
   // typed. Comparing raw strings would drop the selected state for `…/works/`.
   const current = pathname.replace(/\/+$/, "");
@@ -51,7 +52,12 @@ export function AuroraShell({
         </p>
         <ul className="flex flex-col gap-0.5 px-2">
           {items.map(({ href, icon: Icon, label }) => {
-            const selected = current === href;
+            // The works destination owns the per-generation detail route below
+            // it (…/works/{generationId}), so it stays selected while one is
+            // open; every other destination matches its own path exactly.
+            const selected =
+              current === href ||
+              (href === worksHref && current.startsWith(`${href}/`));
             return (
               <li key={href}>
                 <AppLink
