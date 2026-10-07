@@ -77,6 +77,20 @@
     "no_prompt": "无描述",
     "skill_unknown": "未知功能"
   },
+  "history": {
+    "title": "历史记录",
+    "load_failed_title": "无法加载历史记录",
+    "empty_title": "还没有生成记录",
+    "empty_description": "完成后的生成及其结果会显示在这里。",
+    "no_match_title": "没有符合筛选的生成",
+    "no_match_description": "换个状态或功能试试。",
+    "status_all": "全部",
+    "skill_label": "功能",
+    "skill_all": "全部功能",
+    "preview_label": "预览 {{format}}",
+    "preview_description": "该次生成产出的完整文件。",
+    "open_in_new_tab": "在新标签页打开"
+  },
   "billing": {
     "title": "积分",
     "balance_title": "可用积分",

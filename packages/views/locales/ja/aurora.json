@@ -77,6 +77,20 @@
     "no_prompt": "プロンプトなし",
     "skill_unknown": "不明なスキル"
   },
+  "history": {
+    "title": "履歴",
+    "load_failed_title": "履歴を読み込めませんでした",
+    "empty_title": "生成履歴がありません",
+    "empty_description": "完了した生成とその結果がここに並びます。",
+    "no_match_title": "条件に一致する生成がありません",
+    "no_match_description": "別のステータスやスキルを選んでください。",
+    "status_all": "すべて",
+    "skill_label": "スキル",
+    "skill_all": "すべてのスキル",
+    "preview_label": "{{format}} をプレビュー",
+    "preview_description": "この生成が作成した原寸ファイルです。",
+    "open_in_new_tab": "新しいタブで開く"
+  },
   "billing": {
     "title": "クレジット",
     "balance_title": "利用可能なクレジット",

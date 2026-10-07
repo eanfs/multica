@@ -72,6 +72,9 @@ const GENERATION: AuroraGeneration = {
   prompt: "a launch poster",
   status: "completed",
   creditsReserved: 76 * MICRO,
+  creditsCharged: 76 * MICRO,
+  error: null,
+  createdAt: "2026-09-23T00:00:00Z",
 };
 
 function subscription(

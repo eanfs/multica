@@ -77,6 +77,20 @@
     "no_prompt": "Aucun prompt",
     "skill_unknown": "Skill inconnu"
   },
+  "history": {
+    "title": "Historique",
+    "load_failed_title": "Impossible de charger votre historique",
+    "empty_title": "Aucune génération",
+    "empty_description": "Les générations terminées et leurs résultats apparaissent ici.",
+    "no_match_title": "Aucun résultat pour ces filtres",
+    "no_match_description": "Essayez un autre statut ou skill.",
+    "status_all": "Tout",
+    "skill_label": "Skill",
+    "skill_all": "Tous les skills",
+    "preview_label": "Aperçu {{format}}",
+    "preview_description": "Le fichier en taille réelle produit par cette génération.",
+    "open_in_new_tab": "Ouvrir dans un nouvel onglet"
+  },
   "billing": {
     "title": "Crédits",
     "balance_title": "Crédits disponibles",

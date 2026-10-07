@@ -77,6 +77,20 @@
     "no_prompt": "No prompt",
     "skill_unknown": "Unknown skill"
   },
+  "history": {
+    "title": "History",
+    "load_failed_title": "Could not load your history",
+    "empty_title": "No generations yet",
+    "empty_description": "Finished generations and their results appear here.",
+    "no_match_title": "Nothing matches these filters",
+    "no_match_description": "Try another status or skill.",
+    "status_all": "All",
+    "skill_label": "Skill",
+    "skill_all": "All skills",
+    "preview_label": "Preview {{format}}",
+    "preview_description": "The full-size file this generation produced.",
+    "open_in_new_tab": "Open in new tab"
+  },
   "billing": {
     "title": "Credits",
     "balance_title": "Available credits",

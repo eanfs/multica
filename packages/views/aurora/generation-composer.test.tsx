@@ -92,6 +92,9 @@ function detail(
     prompt: "a launch poster",
     status: "queued",
     creditsReserved: 76 * MICRO,
+    creditsCharged: 0,
+    error: null,
+    createdAt: "2026-09-23T00:00:00Z",
     assets: [],
     ...overrides,
   };
