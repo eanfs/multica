@@ -171,21 +171,18 @@ describe("GenerationDetail", () => {
       ),
     );
 
-    const { container } = renderDetail();
+    renderDetail();
 
     const preview = screen.getByRole("button", { name: "Preview png" });
     const image = preview.querySelector("img");
     expect(image).toHaveAttribute("src", "https://cdn.test/poster.png");
     expect(image).toHaveAttribute("loading", "lazy");
 
-    const download = container.querySelector(
-      'a[href="/api/aurora/assets/asset-2/download"]',
-    );
-    expect(download).not.toBeNull();
-    expect(within(download as HTMLElement).getByText("mp4")).toBeInTheDocument();
-    expect(
-      within(download as HTMLElement).getByText("Download"),
-    ).toBeInTheDocument();
+    // A bare anchor to the download route would 401, so the row is a button
+    // that goes through the authenticated client.
+    const download = screen.getByRole("button", { name: "mp4 Download" });
+    expect(within(download).getByText("mp4")).toBeInTheDocument();
+    expect(within(download).getByText("Download")).toBeInTheDocument();
 
     await user.click(preview);
     const dialog = await screen.findByRole("dialog");
@@ -193,8 +190,8 @@ describe("GenerationDetail", () => {
       within(dialog).getByRole("link", { name: "Open in new tab" }),
     ).toHaveAttribute("href", "https://cdn.test/poster.png");
     expect(
-      within(dialog).getByRole("link", { name: "Download" }),
-    ).toHaveAttribute("href", "/api/aurora/assets/asset-1/download");
+      within(dialog).getByRole("button", { name: "Download" }),
+    ).toBeInTheDocument();
   });
 
   it("shows the failure reason and the refunded state for a failed generation", () => {

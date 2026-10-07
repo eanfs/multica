@@ -69,6 +69,7 @@
     "assets_empty_description": "Finished generations put their files here.",
     "load_failed_title": "Could not load your works",
     "download": "Download",
+    "download_failed": "Could not download the file. Try again.",
     "delete": "Delete",
     "delete_failed": "Could not delete the file. Try again.",
     "delete_title": "Delete this file?",

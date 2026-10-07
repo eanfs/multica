@@ -11,9 +11,9 @@ import { NavigationProvider } from "../navigation";
 import { renderWithI18n } from "../test/i18n";
 import { stubNavigationAdapter } from "../test/navigation";
 
-// `auroraAssetDownloadPath` is deliberately left real: the href a row points at
-// is part of the contract with the download route, not of the query layer being
-// replaced here.
+// The download control is a real button from the shared helper; these tests
+// cover rendering and accessibility, not the request itself (the helper and
+// its transport have their own suites).
 
 const mocks = vi.hoisted(() => ({
   generations: vi.fn(),
@@ -157,7 +157,7 @@ describe("HistoryList", () => {
       ],
     });
 
-    const { container } = renderHistory();
+    renderHistory();
 
     const preview = screen.getByRole("button", { name: "Preview png" });
     const image = preview.querySelector("img");
@@ -167,16 +167,10 @@ describe("HistoryList", () => {
     expect(image).toHaveAttribute("width", "80");
     expect(image).toHaveAttribute("height", "80");
 
-    const download = container.querySelector(
-      'a[href="/api/aurora/assets/asset-2/download"]',
-    );
-    expect(download).not.toBeNull();
-    expect(
-      within(download as HTMLElement).getByText("mp4"),
-    ).toBeInTheDocument();
-    expect(
-      within(download as HTMLElement).getByText("Download"),
-    ).toBeInTheDocument();
+    // The download row is a button: a bare anchor to the route 401s.
+    const download = screen.getByRole("button", { name: "mp4 Download" });
+    expect(within(download).getByText("mp4")).toBeInTheDocument();
+    expect(within(download).getByText("Download")).toBeInTheDocument();
   });
 
   it("renders an image with an unusable URL as a download row, like a missing one", () => {
@@ -187,18 +181,16 @@ describe("HistoryList", () => {
       ],
     });
 
-    const { container } = renderHistory();
+    renderHistory();
 
     // Neither a null nor an empty pointer is an image the browser can load, so
     // both fall back to the download row rather than a broken thumbnail.
     expect(
       screen.queryByRole("button", { name: /Preview/ }),
     ).not.toBeInTheDocument();
-    for (const id of ["asset-null", "asset-empty"]) {
-      expect(
-        container.querySelector(`a[href="/api/aurora/assets/${id}/download"]`),
-      ).not.toBeNull();
-    }
+    expect(
+      screen.getAllByRole("button", { name: "png Download" }),
+    ).toHaveLength(2);
   });
 
   it("reserves one artifact slot per thumbnail while the detail read is pending", () => {
@@ -227,8 +219,8 @@ describe("HistoryList", () => {
       within(dialog).getByRole("link", { name: "Open in new tab" }),
     ).toHaveAttribute("href", "https://cdn.test/poster.png");
     expect(
-      within(dialog).getByRole("link", { name: "Download" }),
-    ).toHaveAttribute("href", "/api/aurora/assets/asset-1/download");
+      within(dialog).getByRole("button", { name: "Download" }),
+    ).toBeInTheDocument();
   });
 
   it("shows the failure reason when a failed generation's payload carries one", () => {

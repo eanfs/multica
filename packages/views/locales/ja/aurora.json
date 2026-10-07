@@ -69,6 +69,7 @@
     "assets_empty_description": "生成が完了するとファイルがここに並びます。",
     "load_failed_title": "作品を読み込めませんでした",
     "download": "ダウンロード",
+    "download_failed": "ファイルをダウンロードできませんでした。再試行してください。",
     "delete": "削除",
     "delete_failed": "ファイルを削除できませんでした。再試行してください。",
     "delete_title": "このファイルを削除しますか？",

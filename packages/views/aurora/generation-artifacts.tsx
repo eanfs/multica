@@ -14,13 +14,13 @@ import {
 } from "@multica/ui/components/ui/dialog";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import {
-  auroraAssetDownloadPath,
   isAuroraGenerationTerminal,
   type AuroraAsset,
   type AuroraGeneration,
 } from "@multica/core/aurora";
 import { useT } from "../i18n";
 import { generationStatusLabel } from "./labels";
+import { useAuroraAssetDownload } from "./use-aurora-asset-download";
 
 /**
  * The shared rendering of a generation's status and its produced files.
@@ -139,6 +139,7 @@ export function GenerationArtifacts({
   maxThumbnails?: number;
 }) {
   const { t } = useT("aurora");
+  const download = useAuroraAssetDownload();
   const [preview, setPreview] = useState<PreviewState | null>(null);
 
   if (loading) {
@@ -206,16 +207,18 @@ export function GenerationArtifacts({
         <ul className="flex flex-col gap-1">
           {files.map((asset) => (
             <li key={asset.id}>
-              <a
-                href={auroraAssetDownloadPath(asset.id)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 text-body text-muted-foreground underline decoration-muted-foreground/30 underline-offset-4 transition-colors hover:text-foreground focus-visible:text-foreground"
+              {/* The two spans read as one word to an assistive name, so the
+                  label spells out the separator the layout only draws. */}
+              <button
+                type="button"
+                onClick={() => void download(asset)}
+                aria-label={`${asset.format ?? asset.kind} ${t(($) => $.works.download)}`}
+                className="inline-flex items-center gap-1.5 text-body text-muted-foreground underline decoration-muted-foreground/30 underline-offset-4 transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-none"
               >
                 <FileDown aria-hidden="true" className="size-3.5 shrink-0" />
                 <span>{asset.format ?? asset.kind}</span>
                 <span>{t(($) => $.works.download)}</span>
-              </a>
+              </button>
             </li>
           ))}
         </ul>
@@ -245,6 +248,7 @@ function PreviewDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const { t } = useT("aurora");
+  const download = useAuroraAssetDownload();
   return (
     <Dialog open={preview !== null} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-3xl">
@@ -276,15 +280,14 @@ function PreviewDialog({
             </a>
           ) : null}
           {preview ? (
-            <a
-              href={auroraAssetDownloadPath(preview.asset.id)}
-              target="_blank"
-              rel="noopener noreferrer"
+            <button
+              type="button"
+              onClick={() => void download(preview.asset)}
               className={buttonVariants({ variant: "default", size: "sm" })}
             >
               <FileDown aria-hidden="true" className="size-3.5" />
               {t(($) => $.works.download)}
-            </a>
+            </button>
           ) : null}
         </DialogFooter>
       </DialogContent>

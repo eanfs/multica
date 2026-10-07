@@ -69,6 +69,7 @@
     "assets_empty_description": "生成完成后，文件会出现在这里。",
     "load_failed_title": "无法加载作品",
     "download": "下载",
+    "download_failed": "无法下载文件，请重试。",
     "delete": "删除",
     "delete_failed": "无法删除文件，请重试。",
     "delete_title": "删除这个文件？",

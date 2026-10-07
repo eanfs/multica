@@ -69,6 +69,7 @@
     "assets_empty_description": "생성이 끝나면 파일이 여기에 표시됩니다.",
     "load_failed_title": "작품을 불러오지 못했습니다",
     "download": "다운로드",
+    "download_failed": "파일을 다운로드하지 못했습니다. 다시 시도하세요.",
     "delete": "삭제",
     "delete_failed": "파일을 삭제하지 못했습니다. 다시 시도하세요.",
     "delete_title": "이 파일을 삭제할까요?",

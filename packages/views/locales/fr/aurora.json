@@ -69,6 +69,7 @@
     "assets_empty_description": "Les fichiers des générations terminées apparaissent ici.",
     "load_failed_title": "Impossible de charger vos œuvres",
     "download": "Télécharger",
+    "download_failed": "Impossible de télécharger le fichier. Réessayez.",
     "delete": "Supprimer",
     "delete_failed": "Impossible de supprimer le fichier. Réessayez.",
     "delete_title": "Supprimer ce fichier ?",

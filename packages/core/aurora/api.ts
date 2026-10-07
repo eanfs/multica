@@ -368,11 +368,12 @@ export async function deleteAuroraAsset(assetId: string): Promise<void> {
 }
 
 /**
- * The URL the browser downloads one asset from.
+ * The authenticated download route for one asset.
  *
- * The server answers with a redirect to a short-lived signed URL, or streams
- * the file itself where no URL can be signed, so this is a link target rather
- * than something to fetch — the same shape as `attachmentDownloadPath`.
+ * This is a request target, not a link target: the route requires the bearer
+ * token, so a bare navigation 401s. `downloadAuroraAsset` requests it through
+ * the shared API client and then follows whichever shape the server answers
+ * with — a redirect to a short-lived signed URL, or the streamed file.
  */
 export function auroraAssetDownloadPath(assetId: string): string {
   return `${AURORA_ASSETS_PATH}/${encodeURIComponent(assetId)}/download`;

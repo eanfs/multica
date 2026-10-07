@@ -17,7 +17,6 @@ import { Button } from "@multica/ui/components/ui/button";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { Spinner } from "@multica/ui/components/ui/spinner";
 import {
-  auroraAssetDownloadPath,
   isAuroraDegraded,
   useAuroraAssets,
   useAuroraGenerations,
@@ -36,6 +35,7 @@ import { formatMicroCredits } from "./format";
 import { GenerationStatusBadge } from "./generation-artifacts";
 import { generationStatusLabel, skillDisplayNamesById } from "./labels";
 import { AuroraLoadFailed } from "./load-failed";
+import { useAuroraAssetDownload } from "./use-aurora-asset-download";
 
 /**
  * The library: what has been generated, and the files those generations
@@ -313,6 +313,7 @@ function AssetRow({
   onRequestDelete: () => void;
 }) {
   const { t } = useT("aurora");
+  const download = useAuroraAssetDownload();
   // A row that carries no format falls back to its kind, and then has nothing
   // else to say — the second line is only there to add something.
   const detail = asset.format ? asset.kind : null;
@@ -326,15 +327,14 @@ function AssetRow({
           </span>
         ) : null}
       </div>
-      <a
-        href={auroraAssetDownloadPath(asset.id)}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="inline-flex shrink-0 items-center gap-1 text-body text-muted-foreground transition-colors hover:text-foreground focus-visible:text-foreground"
+      <button
+        type="button"
+        onClick={() => void download(asset)}
+        className="inline-flex shrink-0 items-center gap-1 text-body text-muted-foreground transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-none"
       >
         <Download aria-hidden="true" className="size-3.5" />
         {t(($) => $.works.download)}
-      </a>
+      </button>
       <Button
         type="button"
         variant="ghost"
