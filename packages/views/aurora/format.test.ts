@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   MICRO_CREDITS_PER_CREDIT,
   formatCredits,
+  formatElapsed,
   formatMicroCredits,
   microToCredits,
 } from "./format";
@@ -45,5 +46,27 @@ describe("formatMicroCredits", () => {
     expect(formatMicroCredits(1234 * MICRO_CREDITS_PER_CREDIT, "en")).toBe(
       "1,234",
     );
+  });
+});
+
+describe("formatElapsed", () => {
+  it("reports a sub-minute duration in seconds", () => {
+    expect(formatElapsed(30_000, "en")).toBe("30s");
+  });
+
+  it("joins the units a duration actually has", () => {
+    expect(formatElapsed(150_000, "en")).toBe("2m 30s");
+  });
+
+  it("adds hours only once the duration reaches one", () => {
+    expect(formatElapsed(3_900_000, "en")).toBe("1h 5m");
+  });
+
+  it("localizes the unit names through Intl", () => {
+    expect(formatElapsed(150_000, "zh-Hans")).toBe("2分钟 30秒");
+  });
+
+  it("describes an empty duration as zero seconds rather than nothing", () => {
+    expect(formatElapsed(0, "en")).toBe("0s");
   });
 });

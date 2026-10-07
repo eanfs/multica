@@ -12,6 +12,7 @@ import {
   getAuroraSubscription,
   isAuroraCheckoutConflictError,
   isAuroraDegraded,
+  isAuroraGenerationNotFoundError,
   isAuroraInsufficientCreditsError,
   isAuroraPaymentsUnavailableError,
   isAuroraRateLimitError,
@@ -136,6 +137,18 @@ describe("parseAuroraGenerations", () => {
       degraded: true,
     });
   });
+
+  it("passes the exposed task id through, defaulting an older server to empty", () => {
+    const parsed = parseAuroraGenerations({
+      generations: [
+        { id: "gen-1", skillId: "poster", prompt: "a cat", status: "running", taskId: "task-1" },
+        { id: "gen-2", skillId: "poster", prompt: "a dog", status: "queued" },
+      ],
+    });
+
+    expect(parsed.value[0]?.taskId).toBe("task-1");
+    expect(parsed.value[1]?.taskId).toBe("");
+  });
 });
 
 describe("parseAuroraGeneration", () => {
@@ -179,6 +192,7 @@ describe("parseAuroraGenerationDetail", () => {
         prompt: "a cat",
         status: "completed",
         creditsReserved: 76,
+        taskId: "task-1",
         assets: [
           {
             id: "asset-1",
@@ -194,6 +208,7 @@ describe("parseAuroraGenerationDetail", () => {
 
     expect(detail.degraded).toBe(false);
     expect(detail.value?.status).toBe("completed");
+    expect(detail.value?.taskId).toBe("task-1");
     expect(detail.value?.assets).toHaveLength(1);
     expect(detail.value?.assets[0]?.mediaUrl).toBe("https://cdn.example/a.png");
   });
@@ -551,6 +566,18 @@ describe("error classification", () => {
         new ApiError("payments not configured", 503, "Unavailable"),
       ),
     ).toBe(true);
+  });
+
+  it("reads 404 as a generation that is gone", () => {
+    expect(
+      isAuroraGenerationNotFoundError(
+        new ApiError("generation not found", 404, "Not Found"),
+      ),
+    ).toBe(true);
+    expect(isAuroraGenerationNotFoundError(new ApiError("boom", 500, "Server"))).toBe(
+      false,
+    );
+    expect(isAuroraGenerationNotFoundError(new Error("network"))).toBe(false);
   });
 
   it("does not claim unrelated failures", () => {

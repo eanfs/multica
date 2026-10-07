@@ -1,22 +1,28 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type {
   AuroraAsset,
   AuroraGeneration,
   AuroraSkill,
 } from "@multica/core/aurora";
+import { NavigationProvider } from "../navigation";
 import { renderWithI18n } from "../test/i18n";
+import { stubNavigationAdapter } from "../test/navigation";
 
-// `auroraAssetDownloadPath` is deliberately left real: the href a row points at
-// is part of the contract with the download route, not of the query layer being
-// replaced here.
+// The download helper is deliberately left real: a row must fetch the asset
+// through the api client (which carries the bearer token), not point a bare
+// navigation at the route. Only the transport is mocked, at the documented
+// `@multica/core/api` layer.
+
+const SIGNED = "https://cdn.example.test/asset.png?Signature=s";
 
 const mocks = vi.hoisted(() => ({
   generations: vi.fn(),
   assets: vi.fn(),
   skills: vi.fn(),
   remove: vi.fn(),
+  requestResponse: vi.fn(),
 }));
 
 vi.mock("@multica/core/aurora", async (importOriginal) => {
@@ -33,7 +39,31 @@ vi.mock("@multica/core/aurora", async (importOriginal) => {
   };
 });
 
+vi.mock("@multica/core/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@multica/core/api")>();
+  return {
+    ...actual,
+    api: { requestResponse: mocks.requestResponse },
+  } as unknown as typeof actual;
+});
+
+vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
+
+/** A 302 to a signed URL, the shape the endpoint answers for CloudFront/presign. */
+function redirectResponse(): Response {
+  return {
+    status: 302,
+    ok: false,
+    redirected: false,
+    url: "",
+    headers: new Headers({ Location: SIGNED }),
+    body: null,
+    blob: async () => new Blob(),
+  } as unknown as Response;
+}
+
 import { WorksList } from "./works-list";
+import { toast } from "sonner";
 
 const MICRO = 1_000_000;
 
@@ -46,6 +76,10 @@ function generation(
     prompt: "a launch poster",
     status: "completed",
     creditsReserved: 76 * MICRO,
+    creditsCharged: 76 * MICRO,
+    error: null,
+    createdAt: "2026-09-23T00:00:00Z",
+    taskId: "",
     ...overrides,
   };
 }
@@ -128,22 +162,48 @@ describe("WorksList", () => {
     expect(screen.getByText("Unknown skill")).toBeInTheDocument();
   });
 
-  it("links every asset to its download route", () => {
+  it("downloads every asset through the authenticated endpoint, not a bare link", async () => {
+    const user = userEvent.setup();
     mocks.assets.mockReturnValue(
       read([asset(), asset({ id: "asset-2", kind: "video", format: "mp4" })]),
     );
+    mocks.requestResponse.mockResolvedValue(redirectResponse());
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
 
-    renderWorks();
+    const { container } = renderWorks();
 
-    const links = screen.getAllByRole("link", { name: "Download" });
-    expect(links).toHaveLength(2);
-    expect(links[0]).toHaveAttribute(
-      "href",
+    // A bare anchor to the route 401s in the browser: navigation cannot carry
+    // the bearer token. The control must not exist.
+    expect(
+      container.querySelector('a[href="/api/aurora/assets/asset-1/download"]'),
+    ).toBeNull();
+
+    const buttons = screen.getAllByRole("button", { name: "Download" });
+    expect(buttons).toHaveLength(2);
+
+    await user.click(buttons[0]!);
+    expect(mocks.requestResponse).toHaveBeenCalledWith(
       "/api/aurora/assets/asset-1/download",
     );
-    expect(links[1]).toHaveAttribute(
-      "href",
+    expect(open).toHaveBeenCalledWith(SIGNED, "_blank", "noopener,noreferrer");
+
+    await user.click(buttons[1]!);
+    expect(mocks.requestResponse).toHaveBeenLastCalledWith(
       "/api/aurora/assets/asset-2/download",
+    );
+  });
+
+  it("reports a refused download instead of leaving the row silent", async () => {
+    const user = userEvent.setup();
+    mocks.requestResponse.mockRejectedValue(new Error("missing authorization"));
+
+    renderWorks();
+    await user.click(screen.getByRole("button", { name: "Download" }));
+
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        "Could not download the file. Try again.",
+      ),
     );
   });
 
@@ -268,5 +328,22 @@ describe("WorksList", () => {
 
     expect(screen.getByText("Could not load your works")).toBeInTheDocument();
     expect(screen.queryByText("a launch poster")).not.toBeInTheDocument();
+  });
+
+  it("links each generation row to the app's detail route and navigates there", async () => {
+    const user = userEvent.setup();
+    const push = vi.fn();
+
+    renderWithI18n(
+      <NavigationProvider value={stubNavigationAdapter({ push })}>
+        <WorksList generationHref={(id) => "/acme/works/" + id} />
+      </NavigationProvider>,
+    );
+
+    const row = screen.getByRole("link", { name: "a launch poster" });
+    expect(row).toHaveAttribute("href", "/acme/works/gen-1");
+
+    await user.click(row);
+    expect(push).toHaveBeenCalledWith("/acme/works/gen-1");
   });
 });

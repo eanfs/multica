@@ -1,6 +1,6 @@
 "use client";
 
-import { Coins, Images, LogOut, Server, Sparkles } from "lucide-react";
+import { Coins, History, Images, LogOut, Server, Sparkles } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { cn } from "@multica/ui/lib/utils";
 import { AppLink, useNavigation } from "@multica/views/navigation";
@@ -9,7 +9,7 @@ import { useLogout } from "@multica/views/auth";
 import { auroraRoutes } from "@/lib/routes";
 
 /**
- * The app's own chrome: four destinations, one account action.
+ * The app's own chrome: five destinations, one account action.
  *
  * A destination is a link, never a button — the shell is the only navigator in
  * Aurora, and a plain anchor keeps middle-click, "copy link" and the browser's
@@ -32,9 +32,11 @@ export function AuroraShell({
   const items = [
     { href: routes.skills(), icon: Sparkles, label: t(($) => $.directory.title) },
     { href: routes.works(), icon: Images, label: t(($) => $.works.title) },
+    { href: routes.history(), icon: History, label: t(($) => $.history.title) },
     { href: routes.runtime(), icon: Server, label: t(($) => $.runtime.title) },
     { href: routes.billing(), icon: Coins, label: t(($) => $.billing.title) },
   ];
+  const worksHref = routes.works();
   // Trailing slashes are the same destination, and Next keeps the URL the user
   // typed. Comparing raw strings would drop the selected state for `…/works/`.
   const current = pathname.replace(/\/+$/, "");
@@ -50,7 +52,12 @@ export function AuroraShell({
         </p>
         <ul className="flex flex-col gap-0.5 px-2">
           {items.map(({ href, icon: Icon, label }) => {
-            const selected = current === href;
+            // The works destination owns the per-generation detail route below
+            // it (…/works/{generationId}), so it stays selected while one is
+            // open; every other destination matches its own path exactly.
+            const selected =
+              current === href ||
+              (href === worksHref && current.startsWith(`${href}/`));
             return (
               <li key={href}>
                 <AppLink

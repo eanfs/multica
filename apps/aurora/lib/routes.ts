@@ -29,6 +29,9 @@ export function auroraRoutes(slug: string) {
   return {
     skills: () => `${ws}/skills`,
     works: () => `${ws}/works`,
+    // One generation, under the works destination it belongs to.
+    work: (generationId: string) => `${ws}/works/${encode(generationId)}`,
+    history: () => `${ws}/history`,
     runtime: () => `${ws}/runtimes`,
     billing: () => `${ws}/billing`,
   };

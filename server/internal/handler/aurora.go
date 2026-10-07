@@ -616,8 +616,8 @@ func auroraListOffset(raw string) int32 {
 
 // AuroraGenerationSummaryResponse is the consumer-facing shape of a generation
 // row in the list and detail endpoints. It extends the create response with the
-// fields the progress screen reads: charged credits, an optional error, and the
-// creation timestamp.
+// fields the progress screen reads: charged credits, an optional error, the
+// creation timestamp, and the enqueued agent task the generation runs as.
 type AuroraGenerationSummaryResponse struct {
 	ID              string  `json:"id"`
 	SkillID         string  `json:"skillId"`
@@ -627,6 +627,10 @@ type AuroraGenerationSummaryResponse struct {
 	CreditsCharged  int64   `json:"creditsCharged"`
 	Error           *string `json:"error"`
 	CreatedAt       string  `json:"createdAt"`
+	// The enqueued agent task, or "" for a generation that never enqueued one.
+	// The client uses it to link to the task; the wire stays a plain string so
+	// an absent value is unambiguous.
+	TaskID string `json:"taskId"`
 }
 
 // AuroraAssetResponse is one content asset a generation produced. The library
@@ -672,6 +676,7 @@ func generationSummary(row db.AuroraGeneration) AuroraGenerationSummaryResponse 
 		CreditsCharged:  row.CreditsCharged,
 		Error:           textToPtr(row.Error),
 		CreatedAt:       row.CreatedAt.Time.UTC().Format(time.RFC3339Nano),
+		TaskID:          uuidToString(row.TaskID),
 	}
 }
 

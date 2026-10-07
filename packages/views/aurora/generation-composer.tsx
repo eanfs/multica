@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { CircleAlert, CreditCard, Sparkles, X } from "lucide-react";
+import { CircleAlert, CreditCard, FileDown, Sparkles, X } from "lucide-react";
 import {
   Alert,
   AlertAction,
@@ -22,7 +22,6 @@ import {
 import { Spinner } from "@multica/ui/components/ui/spinner";
 import { Textarea } from "@multica/ui/components/ui/textarea";
 import {
-  auroraAssetDownloadPath,
   isAuroraDegraded,
   isAuroraGenerationTerminal,
   isAuroraInsufficientCreditsError,
@@ -38,6 +37,7 @@ import { AppLink } from "../navigation";
 import { useLocale, useT } from "../i18n";
 import { formatCredits, formatMicroCredits } from "./format";
 import { generationStatusLabel, skillDisplayName } from "./labels";
+import { useAuroraAssetDownload } from "./use-aurora-asset-download";
 
 // The attachment kinds the composer can accept and the tokens the file dialog
 // filters on. Both derive from the parsed policy, so a new server-side rule
@@ -178,6 +178,7 @@ function ComposerBody({
   topUpHref?: string;
 }) {
   const { t } = useT("aurora");
+  const download = useAuroraAssetDownload();
   const locale = useLocale();
   const create = useCreateAuroraGeneration();
   const { upload } = useFileUpload(api);
@@ -544,14 +545,16 @@ function ComposerBody({
             <ul className="flex flex-col gap-1">
               {assets.map((asset) => (
                 <li key={asset.id}>
-                  <a
-                    href={auroraAssetDownloadPath(asset.id)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-body underline decoration-muted-foreground/30 underline-offset-4 transition-colors hover:text-foreground"
+                  <button
+                    type="button"
+                    onClick={() => void download(asset)}
+                    aria-label={`${asset.format ?? asset.kind} ${t(($) => $.works.download)}`}
+                    className="inline-flex w-fit items-center gap-1.5 text-body underline decoration-muted-foreground/30 underline-offset-4 transition-colors hover:text-foreground focus-visible:outline-none"
                   >
-                    {asset.format ?? asset.kind}
-                  </a>
+                    <FileDown aria-hidden="true" className="size-3.5 shrink-0" />
+                    <span>{asset.format ?? asset.kind}</span>
+                    <span>{t(($) => $.works.download)}</span>
+                  </button>
                 </li>
               ))}
             </ul>

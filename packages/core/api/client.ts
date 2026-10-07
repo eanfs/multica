@@ -994,6 +994,27 @@ export class ApiClient {
     return this.fetch<unknown>(path, init);
   }
 
+  /**
+   * Sends a request over the shared transport (auth + CSRF headers, the CSRF
+   * retry, 401 handling, structured `ApiError`) and returns the raw Response
+   * instead of decoding it. A download needs the pieces `requestJson` throws
+   * away: the redirect target the server answers with, the streamed body, and
+   * the Content-Disposition name the endpoint sets.
+   *
+   * Redirect handling is deliberately left to the caller's `redirect` mode.
+   * The default `follow` is what works in a browser: a `redirect: "manual"`
+   * response is an opaque redirect (status 0, no headers), so the Location is
+   * unreadable there and the followed response's `redirected` / `url` is the
+   * only place the signed target is visible.
+   *
+   * A response that is not ok (a 401, a 5xx, an unfollowed 3xx) rejects with
+   * `ApiError`, exactly as `requestJson` does; a success returns the final
+   * Response with its body still unread for the caller to consume.
+   */
+  async requestResponse(path: string, init?: RequestInit): Promise<Response> {
+    return this.fetchRaw(path, init);
+  }
+
   // Auth
   async sendCode(email: string): Promise<void> {
     await this.fetch("/auth/send-code", {

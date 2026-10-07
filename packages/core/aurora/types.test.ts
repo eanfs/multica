@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
+import { auroraGenerationSchema, type AuroraGeneration } from "./schema";
 import { isAuroraGenerationTerminal } from "./types";
 
 describe("isAuroraGenerationTerminal", () => {
@@ -23,5 +24,21 @@ describe("isAuroraGenerationTerminal", () => {
   it("keeps polling when the detail body could not be read", () => {
     expect(isAuroraGenerationTerminal(undefined)).toBe(false);
     expect(isAuroraGenerationTerminal("")).toBe(false);
+  });
+});
+
+describe("AuroraGeneration", () => {
+  it("types the exposed task id alongside the settled fields", () => {
+    // The entity type is inferred from the schema; this pins that the task id
+    // the list and detail endpoints expose survives into the typed value.
+    const generation: AuroraGeneration = auroraGenerationSchema.parse({
+      id: "gen-1",
+      skillId: "poster",
+      prompt: "a cat",
+      status: "queued",
+      taskId: "task-1",
+    });
+
+    expect(generation.taskId).toBe("task-1");
   });
 });

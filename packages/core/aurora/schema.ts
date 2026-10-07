@@ -81,6 +81,28 @@ export const auroraGenerationSchema = z.object({
    */
   status: z.string(),
   creditsReserved: z.number().default(0),
+  /**
+   * The amount settlement actually charged. Zero until the generation settles,
+   * and zero again once a failed generation is refunded — which is why the
+   * history view falls back to `creditsReserved` only while one is still in
+   * flight, and shows nothing at all once it has failed.
+   */
+  creditsCharged: z.number().default(0),
+  /**
+   * The failure reason the execution layer wrote back, or null. A plain
+   * nullable string on purpose: the server owns its wording, and a newer server
+   * may send a reason this build has never seen.
+   */
+  error: z.string().nullable().default(null),
+  /** RFC 3339 creation timestamp; empty when an older server omits it. */
+  createdAt: z.string().default(""),
+  /**
+   * The enqueued agent task this generation runs as, or "" when the server does
+   * not expose one — an older server that predates the field, or a row that
+   * never enqueued. The empty-string default is deliberate: the detail view
+   * treats "" as "no task link to offer", which is the same state as absent.
+   */
+  taskId: z.string().default(""),
 });
 export type AuroraGeneration = z.infer<typeof auroraGenerationSchema>;
 
