@@ -448,16 +448,22 @@ func (e *sdkEngine) RemoveVolume(ctx context.Context, r Resource) error {
 		if n.DataVolume != r.ID || !validRef(n, ref) || ref.Action != model.Delete || !n.Revoked || n.Desired != "terminating" {
 			return model.ErrForbidden
 		}
-		raw, proofErr := e.FixedOfflineReports(ctx, n, ref)
-		if proofErr != nil {
-			return proofErr
-		}
-		o, proofErr := parseOffline(raw, n, e.cfg)
-		if proofErr != nil || !o.ReportStatsKnown {
-			return model.ErrUnknownHealth
-		}
-		if o.PendingReports != 0 || o.FailedReports != 0 {
-			return model.ErrBusy
+		// A container-less node has no report queue to drain; Delete already ran
+		// reclaimContainerlessData to prove there is no writer, and the ownership
+		// and noWriter checks below still apply. A node that ever confirmed a
+		// container keeps the full offline-report re-proof.
+		if n.ContainerID != "" {
+			raw, proofErr := e.FixedOfflineReports(ctx, n, ref)
+			if proofErr != nil {
+				return proofErr
+			}
+			o, proofErr := parseOffline(raw, n, e.cfg)
+			if proofErr != nil || !o.ReportStatsKnown {
+				return model.ErrUnknownHealth
+			}
+			if o.PendingReports != 0 || o.FailedReports != 0 {
+				return model.ErrBusy
+			}
 		}
 	}
 	err = e.client.VolumeRemove(ctx, r.ID, false)

@@ -127,6 +127,23 @@ func requireAuroraRebootstrapReset(t *testing.T, f *testutil.Fixture, ns string,
 
 // confirmAuroraRebootstrap drives the reset generation through the real claim,
 // mark, and confirm fence, proving the node is a live bootstrap again.
+// claimAuroraRebootstrap proves a re-armed create intent is claimable and
+// minted at its new generation. It deliberately stops before ConfirmBootstrap,
+// which compares a local observation to the SQL clock; claim/mark already prove
+// the SQL fence admitted the reset operation.
+func claimAuroraRebootstrap(t *testing.T, s *Store, ns string, owner, nodeID pgtype.UUID, node model.Node, op model.Operation) {
+	t.Helper()
+	ctx := context.Background()
+	ref := model.OperationRef{Namespace: ns, NodeID: node.ID, OperationID: op.ID, Generation: op.Generation, Action: model.Create}
+	claim, err := s.ClaimBootstrap(ctx, owner, ref)
+	if err != nil {
+		t.Fatalf("re-bootstrap claim: %v", err)
+	}
+	if err = s.MarkBootstrapMinted(ctx, claim); err != nil {
+		t.Fatalf("re-bootstrap mark: %v", err)
+	}
+}
+
 func confirmAuroraRebootstrap(t *testing.T, s *Store, ns string, owner, nodeID pgtype.UUID, node model.Node, op model.Operation) {
 	t.Helper()
 	ctx := context.Background()
@@ -231,4 +248,128 @@ func TestFleetAuroraReplayResetsReapedNode(t *testing.T) {
 	}
 	requireAuroraRebootstrapReset(t, f, ns, dead, deadOp, after, afterOp)
 	confirmAuroraRebootstrap(t, s, ns, owner, nodeID, after, afterOp)
+}
+
+// auroraStoreWithImage builds a second store over the same test database and
+// namespace with a different administrator-approved image, modelling a redeploy.
+func auroraStoreWithImage(s *Store, ns, image string) *Store {
+	return New(s.pool, ns, WithProvisioningConfig(model.Config{
+		Namespace: ns,
+		Image:     image,
+		Specs:     map[string]model.Spec{"sandbox": {CPUs: 2, MemoryBytes: 4294967296, Pids: 256, MaxRuns: 1}},
+		Aurora:    &model.AuroraConfig{ServerURL: "http://api.test"},
+	}), WithMaxNodes(2))
+}
+
+// TestFleetAuroraImageChangeReArmsSameIdentity is the Task 27 regression for the
+// fingerprint-change half of the deadlock. A redeploy changes only the
+// deployment-scoped image digest; the Aurora owner replays the same stable
+// idempotency key, so Fleet must re-arm the one create intent instead of
+// returning ErrConflict forever. Durable identity (node/daemon UUIDs and the
+// data/secrets volume names) is preserved and no second node or create
+// operation appears.
+func TestFleetAuroraImageChangeReArmsSameIdentity(t *testing.T) {
+	s, f, ns := auroraStoreFixture(t, 2)
+	ctx := context.Background()
+	owner := uuid(t, f.UserID)
+	nodeID := uuid(t, guuid.NewString())
+	req := auroraRebootstrapRequest(t, f, "aurora-image-change")
+	before, beforeOp, replayed, err := s.CreateAuroraIntent(ctx, owner, nodeID, req)
+	if err != nil || replayed {
+		t.Fatalf("create node=%+v replayed=%v err=%v", before, replayed, err)
+	}
+
+	next := auroraStoreWithImage(s, ns, "aurora-test-image-v2")
+	req2 := req
+	req2.ImageDigest = "aurora-test-image-v2"
+	after, afterOp, replayed, err := next.CreateAuroraIntent(ctx, owner, nodeID, req2)
+	if err != nil || !replayed {
+		t.Fatalf("image-change replay after=%+v replayed=%v err=%v", after, replayed, err)
+	}
+	if after.ID != before.ID || after.OwnerID != before.OwnerID || after.DaemonID != before.DaemonID || after.DataVolume != before.DataVolume || after.SecretsVolume != before.SecretsVolume {
+		t.Fatalf("image change altered durable identity: before=%+v after=%+v", before, after)
+	}
+	if after.Image != req2.ImageDigest || after.Generation != before.Generation+1 || after.Revoked || after.Maintenance || after.Desired != "running" || after.ContainerID != "" {
+		t.Fatalf("image change did not re-arm the same identity: %+v", after)
+	}
+	if afterOp.ID != beforeOp.ID || afterOp.Generation != after.Generation || afterOp.Phase != "queued" || afterOp.RequestHash == beforeOp.RequestHash {
+		t.Fatalf("image change did not rewind the one create intent: %+v", afterOp)
+	}
+	if n := f.Count(t, "SELECT count(*) FROM fleet_nodes WHERE namespace=$1 AND owner_id=$2 AND id=$3", ns, f.UserID, util.UUIDToString(nodeID)); n != 1 {
+		t.Fatalf("image change created a second node row: %d", n)
+	}
+	if n := f.Count(t, "SELECT count(*) FROM fleet_node_operations WHERE namespace=$1 AND owner_id=$2 AND idempotency_key=$3", ns, f.UserID, req.IdempotencyKey); n != 1 {
+		t.Fatalf("image change created a second create operation: %d", n)
+	}
+
+	// A different durable identity under the same key is still a hard conflict
+	// even when the request also changes the approved image.
+	foreign := req2
+	foreign.RuntimeID = uuid(t, guuid.NewString())
+	if _, _, _, err := next.CreateAuroraIntent(ctx, owner, nodeID, foreign); !errors.Is(err, model.ErrConflict) {
+		t.Fatalf("foreign identity reuse err=%v, want conflict", err)
+	}
+
+	claimAuroraRebootstrap(t, next, ns, owner, nodeID, after, afterOp)
+}
+
+// TestFleetAuroraImageChangeRetiresQueuedDelete is the Task 27 regression for the
+// admission half of the second deadlock: an unfinished destroy from an earlier
+// teardown left the identity un-re-armable. A later deployment image change must
+// retire that stale non-create intent deterministically, so the same create
+// intent can bootstrap again and the retired delete can never fire.
+func TestFleetAuroraImageChangeRetiresQueuedDelete(t *testing.T) {
+	s, f, ns := auroraStoreFixture(t, 2)
+	ctx := context.Background()
+	owner := uuid(t, f.UserID)
+	nodeID := uuid(t, guuid.NewString())
+	req := auroraRebootstrapRequest(t, f, "aurora-queued-delete")
+	node, op, _, err := s.CreateAuroraIntent(ctx, owner, nodeID, req)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	ref := model.OperationRef{Namespace: ns, NodeID: node.ID, OperationID: op.ID, Generation: op.Generation, Action: model.Create}
+	claim, err := s.ClaimBootstrap(ctx, owner, ref)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err = s.MarkBootstrapMinted(ctx, claim); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	if err = s.FailBootstrap(ctx, claim, "unavailable"); err != nil {
+		t.Fatalf("fail: %v", err)
+	}
+	if err = s.DeleteAuroraIntent(ctx, owner, nodeID); err != nil {
+		t.Fatalf("delete intent: %v", err)
+	}
+	var deleteOpText string
+	f.QueryRow(t, "SELECT id::text FROM fleet_node_operations WHERE namespace=$1 AND owner_id=$2 AND node_id=$3 AND action='delete'", ns, f.UserID, util.UUIDToString(nodeID)).Scan(&deleteOpText)
+
+	next := auroraStoreWithImage(s, ns, "aurora-test-image-v2")
+	req2 := req
+	req2.ImageDigest = "aurora-test-image-v2"
+	after, afterOp, replayed, err := next.CreateAuroraIntent(ctx, owner, nodeID, req2)
+	if err != nil || !replayed {
+		t.Fatalf("replay with queued delete after=%+v replayed=%v err=%v", after, replayed, err)
+	}
+	if after.Revoked || after.Maintenance || after.Desired != "running" || after.Image != req2.ImageDigest {
+		t.Fatalf("queued delete not superseded: %+v", after)
+	}
+	stale, err := next.GetOperation(ctx, owner, uuid(t, deleteOpText))
+	if err != nil || stale.Phase != "failed" || !stale.NonRetryable {
+		t.Fatalf("stale delete not retired: %+v err=%v", stale, err)
+	}
+	ops, err := next.ListRecoverable(ctx, pgtype.UUID{})
+	if err != nil {
+		t.Fatalf("list recoverable: %v", err)
+	}
+	for _, o := range ops {
+		if util.UUIDToString(o.NodeID) == util.UUIDToString(nodeID) && o.Action == model.Delete {
+			t.Fatalf("retired delete still recoverable: %+v", o)
+		}
+	}
+	if n := f.Count(t, "SELECT count(*) FROM fleet_node_operations WHERE namespace=$1 AND owner_id=$2 AND idempotency_key=$3", ns, f.UserID, req.IdempotencyKey); n != 1 {
+		t.Fatalf("replay created a second create operation: %d", n)
+	}
+	claimAuroraRebootstrap(t, next, ns, owner, nodeID, after, afterOp)
 }

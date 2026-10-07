@@ -58,15 +58,26 @@ func auroraBootstrapDead(node model.Node, op model.Operation) bool {
 }
 
 // resetAuroraIntent re-arms the same node identity for a fresh bootstrap. It
-// advances the control generation and clears the failed/revoked state, leaving
-// volumes, daemon id, image, owner and workspace/runtime untouched, and rewinds
-// the original create operation onto the new generation so it is claimable
-// again. The idempotency key and request hash stay unchanged: this is still one
-// create intent, never a second node or operation.
-func (s *Store) resetAuroraIntent(ctx context.Context, q *db.Queries, owner, nodeID pgtype.UUID, node model.Node, op model.Operation) (model.Node, model.Operation, error) {
+// advances the control generation, applies the current deployment image, clears
+// the failed/revoked state, and rewinds the original create operation onto the
+// new generation so it is claimable again. The idempotency key stays unchanged:
+// this is still one create intent, never a second node or operation. Any
+// unfinished non-create intent for the old generation (for example a queued
+// destroy) is retired first so it cannot strand or later fire against the
+// re-created identity.
+func (s *Store) resetAuroraIntent(ctx context.Context, q *db.Queries, owner, nodeID pgtype.UUID, node model.Node, op model.Operation, req model.AuroraNodeRequest, fingerprint string) (model.Node, model.Operation, error) {
 	next := node.Generation + 1
+	if _, err := q.FleetRetireAuroraLifecycleOperations(ctx, db.FleetRetireAuroraLifecycleOperationsParams{
+		Namespace:  s.namespace,
+		OwnerID:    owner,
+		NodeID:     nodeID,
+		Generation: node.Generation,
+	}); err != nil {
+		return model.Node{}, model.Operation{}, err
+	}
 	row, err := q.FleetResetAuroraNode(ctx, db.FleetResetAuroraNodeParams{
 		NextGeneration: next,
+		Image:          req.ImageDigest,
 		Namespace:      s.namespace,
 		OwnerID:        owner,
 		NodeID:         nodeID,
@@ -85,6 +96,7 @@ func (s *Store) resetAuroraIntent(ctx context.Context, q *db.Queries, owner, nod
 	}
 	opRow, err := q.FleetResetAuroraCreateOperation(ctx, db.FleetResetAuroraCreateOperationParams{
 		NextGeneration: next,
+		RequestHash:    fingerprint,
 		Namespace:      s.namespace,
 		OwnerID:        owner,
 		NodeID:         nodeID,
@@ -100,6 +112,18 @@ func (s *Store) resetAuroraIntent(ctx context.Context, q *db.Queries, owner, nod
 	return resetNode, operationFromRow(opRow), nil
 }
 
+// auroraSameIdentity reports whether an existing Aurora node row was created
+// for the same durable identity as req. The approved image is deliberately
+// excluded: it is deployment-scoped, not identity.
+func auroraSameIdentity(row db.FleetNode, req model.AuroraNodeRequest) bool {
+	daemon, err := util.ParseUUID(req.DaemonID)
+	if err != nil {
+		return false
+	}
+	return row.WorkspaceID == req.WorkspaceID && row.RuntimeID == req.RuntimeID &&
+		row.DaemonID == daemon && row.Name == req.Name && row.Spec == req.Spec
+}
+
 func (s *Store) lookupAuroraIntent(ctx context.Context, q *db.Queries, owner, nodeID pgtype.UUID, req model.AuroraNodeRequest, fingerprint string) (model.Node, model.Operation, bool, error) {
 	existing, err := q.GetFleetIntentByKey(ctx, db.GetFleetIntentByKeyParams{Namespace: s.namespace, OwnerID: owner, IdempotencyKey: req.IdempotencyKey})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -108,8 +132,8 @@ func (s *Store) lookupAuroraIntent(ctx context.Context, q *db.Queries, owner, no
 	if err != nil {
 		return model.Node{}, model.Operation{}, false, err
 	}
-	// The key must not have been used for another node, action or payload.
-	if existing.RequestHash != fingerprint || existing.Action != "create" || existing.NodeID != nodeID {
+	// The key must not have been used for another node or action.
+	if existing.Action != "create" || existing.NodeID != nodeID {
 		return model.Node{}, model.Operation{}, false, model.ErrConflict
 	}
 	row, err := q.GetFleetNode(ctx, db.GetFleetNodeParams{Namespace: s.namespace, OwnerID: owner, NodeID: existing.NodeID})
@@ -121,10 +145,25 @@ func (s *Store) lookupAuroraIntent(ctx context.Context, q *db.Queries, owner, no
 		return model.Node{}, model.Operation{}, false, err
 	}
 	op := operationFromRow(existing)
-	if !auroraBootstrapDead(node, op) {
+	if existing.RequestHash == fingerprint {
+		if !auroraBootstrapDead(node, op) {
+			return node, op, true, nil
+		}
+		node, op, err = s.resetAuroraIntent(ctx, q, owner, nodeID, node, op, req, fingerprint)
+		if err != nil {
+			return model.Node{}, model.Operation{}, false, err
+		}
 		return node, op, true, nil
 	}
-	node, op, err = s.resetAuroraIntent(ctx, q, owner, nodeID, node, op)
+	// The hash differs. A deployment-scoped image change on the same durable
+	// identity re-arms the single create intent; every other difference means the
+	// key is being reused for a different caller payload and stays a hard
+	// conflict. The requested image must still be the administrator-approved one,
+	// so a replay cannot smuggle an arbitrary image onto an existing node.
+	if !auroraSameIdentity(row, req) || req.ImageDigest != s.provisioning.Image {
+		return model.Node{}, model.Operation{}, false, model.ErrConflict
+	}
+	node, op, err = s.resetAuroraIntent(ctx, q, owner, nodeID, node, op, req, fingerprint)
 	if err != nil {
 		return model.Node{}, model.Operation{}, false, err
 	}

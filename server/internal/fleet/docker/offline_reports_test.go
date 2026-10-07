@@ -55,6 +55,7 @@ type offlineHTTP struct {
 	t                                                                                *testing.T
 	nodeMount                                                                        string
 	nodeLabels                                                                       map[string]string
+	containerless                                                                    bool
 	volumeMissing, writer, createTimeout, helperMissing, cleanupForeign, waitBlocked bool
 	output                                                                           string
 	exit                                                                             int
@@ -90,6 +91,9 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 			s.recovered = append(s.recovered, id)
 			return response(204, ""), nil
 		}
+	}
+	if s.containerless && r.Method == "GET" && strings.HasPrefix(path, "/containers/multica-fleet-") && strings.HasSuffix(path, "/json") {
+		return response(404, `{"message":"no such node container"}`), nil
 	}
 	if s.accumulateBootstrap {
 		if s.helperID != "" {
@@ -1236,5 +1240,33 @@ func TestProviderSDKConfigCopiesAreIsolated(t *testing.T) {
 	p, q := New(e, a), New(e, b)
 	if p.engine == q.engine || p.engine == e || q.engine == e || p.engine.(*sdkEngine).cfg.FleetID != "fleet" || q.engine.(*sdkEngine).cfg.FleetID != "other" || e.(*sdkEngine).cfg.FleetID != "" {
 		t.Fatal("shared adapter config mutated")
+	}
+}
+
+// TestOfflineDeleteContainerlessFailedBootstrapCompletes is the Task 27
+// regression for the second deadlock half: a queued destroy for a failed
+// bootstrap whose container never existed must still complete. There is no
+// report queue to drain, so a missing/garbled offline report must not make the
+// delete unknown forever (the reconciler would only defer it, leaving attempts at
+// zero and the identity un-re-armable). Volumes still follow the ownership and
+// no-writer checks.
+func TestOfflineDeleteContainerlessFailedBootstrapCompletes(t *testing.T) {
+	s := &offlineHTTP{containerless: true, output: "{}"}
+	p := offlineProvider(t, s)
+	n := fixtureNode()
+	n.ContainerID = ""
+	n.Revoked = true
+	n.Desired = "terminating"
+	if e := p.Delete(context.Background(), n, fixtureRef()); e != nil {
+		t.Fatalf("containerless delete = %v, want nil", e)
+	}
+	if strings.Join(s.removalOrder, ",") != "secrets,data" {
+		t.Fatalf("containerless delete removal order = %v", s.removalOrder)
+	}
+	if !s.secretsRemoved || !s.volumeMissing {
+		t.Fatalf("containerless volumes not removed: secrets=%v data=%v", s.secretsRemoved, s.volumeMissing)
+	}
+	if s.nodeRemoved {
+		t.Fatal("containerless delete removed a node container that never existed")
 	}
 }

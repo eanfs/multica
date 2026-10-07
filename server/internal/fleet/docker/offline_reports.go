@@ -118,20 +118,35 @@ func (p *Provider) Delete(ctx context.Context, n model.Node, ref model.Operation
 	if o.Status != "stopped" && o.Status != "missing" {
 		return model.ErrUnknownHealth
 	}
-	copy := n
-	copy.Status = o.Status
-	c, cancel := context.WithTimeout(ctx, 5*time.Second)
-	raw, e := p.engine.FixedOfflineReports(c, copy, ref)
-	cancel()
-	if e != nil {
-		return safeError(e)
-	}
-	fresh, e := parseOffline(raw, copy, p.cfg)
-	if e != nil || !fresh.ReportStatsKnown {
-		return model.ErrUnknownHealth
-	}
-	if fresh.PendingReports != 0 || fresh.FailedReports != 0 {
-		return model.ErrBusy
+	if n.ContainerID == "" {
+		// A node with no confirmed container never ran a daemon, so there is no
+		// report queue to drain and an absent bootstrap layout must not block
+		// teardown forever. Reclaim owned helpers and prove the data volume has no
+		// writer; the queued destroy of a failed bootstrap can then complete.
+		if sdk, ok := p.engine.(*sdkEngine); ok {
+			c, cancel := context.WithTimeout(ctx, 30*time.Second)
+			e := sdk.reclaimContainerlessData(c, n)
+			cancel()
+			if e != nil {
+				return safeError(e)
+			}
+		}
+	} else {
+		copy := n
+		copy.Status = o.Status
+		c, cancel := context.WithTimeout(ctx, 5*time.Second)
+		raw, e := p.engine.FixedOfflineReports(c, copy, ref)
+		cancel()
+		if e != nil {
+			return safeError(e)
+		}
+		fresh, e := parseOffline(raw, copy, p.cfg)
+		if e != nil || !fresh.ReportStatsKnown {
+			return model.ErrUnknownHealth
+		}
+		if fresh.PendingReports != 0 || fresh.FailedReports != 0 {
+			return model.ErrBusy
+		}
 	}
 	if n.ContainerID != "" {
 		i, e := p.inspectOwned(ctx, n, n.ContainerID)
@@ -505,6 +520,19 @@ func (e *sdkEngine) validateRecoveryHelper(ctx context.Context, actual container
 	c := &container.Config{Image: e.cfg.Image, User: helperUser, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{cmd}, Labels: labels(n.Namespace, e.cfg.FleetID, nodeID(n), r.Role), NetworkDisabled: true}
 	return validateHelper(actual, c, &h)
 }
+
+// reclaimContainerlessData is the teardown proof for a node that never confirmed
+// a container. It reclaims crashed bootstrap/diagnostic helpers and proves the
+// data volume has no foreign writer, but it deliberately does not require an
+// offline report: a bootstrap that failed before any report existed has no queue
+// to drain, and demanding one would retry the delete forever.
+func (e *sdkEngine) reclaimContainerlessData(ctx context.Context, n model.Node) error {
+	if err := e.recoverHelpers(ctx, n); err != nil {
+		return err
+	}
+	return e.offlineRoot(ctx, n)
+}
+
 func (e *sdkEngine) noWriter(ctx context.Context, name string) error {
 	// No label filter: a foreign container may be writing this volume.
 	list, err := e.client.ContainerList(ctx, container.ListOptions{All: true})
