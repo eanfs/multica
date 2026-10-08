@@ -10,6 +10,8 @@ node provides. Do the work yourself.
 - `prompt`: the user's request (required). It is the generation prompt in your
   task message; use it verbatim.
 - This skill takes no attachments. Use text only.
+- `ANTHROPIC_API_KEY` is the Ark Agent Plan key and `ANTHROPIC_BASE_URL`
+  names the Ark endpoint; the image endpoint is built from that base.
 
 ## Steps
 
@@ -31,8 +33,8 @@ node provides. Do the work yourself.
    appears in your task message, then run:
 
    ```bash
-   curl -fsS -X POST "https://ark.cn-beijing.volces.com/api/plan/v3/images/generations" \
-     -H "Authorization: Bearer $ARK_API_KEY" -H 'content-type: application/json' \
+   curl -fsS -X POST "${ANTHROPIC_BASE_URL:-https://ark.cn-beijing.volces.com/api/plan}/v3/images/generations" \
+     -H "Authorization: Bearer $ANTHROPIC_API_KEY" -H 'content-type: application/json' \
      -d "$(jq -n --arg p "$PROMPT" '{model:"doubao-seedream-5.0-lite",prompt:$p,size:"2K",response_format:"url",output_format:"png",watermark:false}')" \
      -o /tmp/seedream.json
    ```

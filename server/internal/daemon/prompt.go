@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 )
 
@@ -213,9 +212,9 @@ func BuildPrompt(task Task, provider string, options ...PromptOption) string {
 func buildPromptBody(task Task, provider string) string {
 	// An Aurora generation is enqueued through the quick-create carrier, so
 	// isAuroraTask must be checked before the QuickCreatePrompt branch below.
-	// Otherwise the generic quick-create prompt tells the sandbox agent to run
-	// `multica issue create` — a command its narrowed surface cannot run — and
-	// never names the reviewed broker tool it must call (task-20).
+	// Otherwise the generic quick-create prompt tells the agent to run
+	// `multica issue create`, and the generation's output would land on a new
+	// issue instead of the run's artifact manifest.
 	if isAuroraTask(task) {
 		return buildAuroraPrompt(task)
 	}
@@ -376,60 +375,43 @@ func buildQuickCreatePrompt(task Task) string {
 	return b.String()
 }
 
-// buildAuroraPrompt constructs the per-turn prompt for a managed Aurora
-// generation.
+// buildAuroraPrompt constructs the per-turn prompt for an Aurora generation.
 //
-// An Aurora generation is enqueued through the quick-create carrier, so before
-// this function existed it received buildQuickCreatePrompt: the model was told
-// to run `multica issue create`, which its reviewed surface deliberately does
-// not allow (no Bash, no CLI), while the brokered MCP tool it had to call was
-// never named. The run then produced prose instead of an artifact, the broker
-// never created its output root, and the daemon failed the task at manifest
-// collection (task-20).
+// An Aurora run is an ordinary agent run: the same workdir, the same provider
+// CLI, a shell, and the Multica CLI. This prompt therefore carries only what
+// changes every run — the trusted skill identity, the user's generation prompt,
+// and the attachments this run was given. The procedure itself lives in the
+// skill document the daemon delivers into the project's skills directory
+// (execenv.writeSkillFiles), which is the channel every other agent uses.
 //
-// This prompt is the fix: it names the qualified broker tool(s) derived from
-// the trusted skill policy, states the broker's argument contract, and says
-// explicitly that artifact production and manifest writing belong to the
-// broker. The trusted skill id comes from the claim's "aurora:<skillID>"
-// system key, never from the untrusted generation prompt, so a prompt cannot
-// widen the surface.
+// An Aurora generation is enqueued through the quick-create carrier, so without
+// this branch the model would receive the generic quick-create prompt and try
+// to run `multica issue create`. A generation is not an issue: its output
+// belongs to the run's artifact manifest.
+//
+// The trusted skill id comes from the claim's "aurora:<skillID>" system key,
+// never from the untrusted generation prompt.
 func buildAuroraPrompt(task Task) string {
 	skillID, _ := auroraSkillID(task)
 	var b strings.Builder
-	b.WriteString("You are running as an Aurora creation agent for a Multica workspace. This run produces one generation with the brokered Aurora skill tool. It is NOT an issue or quick-create run: there is no Multica issue, no shell, and no `multica` CLI in this runtime.\n\n")
+	b.WriteString("You are running as an Aurora creation agent for a Multica workspace. This run produces one generation. It is NOT an issue run: do not create, update, or comment on issues.\n\n")
 	fmt.Fprintf(&b, "Skill: `%s`\n\n", skillID)
+	b.WriteString("Your working directory carries this skill's document in the project skills directory (for Claude: `.claude/skills/`). Read it and follow its steps: it names the inputs, the commands or provider calls to use, the output paths, the artifact manifest to write, and the failure rules.\n\n")
 	if prompt := strings.TrimSpace(task.QuickCreatePrompt); prompt != "" {
 		b.WriteString("The user's generation prompt:\n\n")
 		fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(prompt, "\n", "\n> "))
 	}
-	if workflow, ok := aurora.Workflow(skillID); ok {
-		b.WriteString("Canonical skill workflow:\n\n")
-		b.WriteString(workflow)
-		b.WriteString("\n\n")
-	}
-	if policy, ok := aurora.ExecutionPolicy(skillID); ok {
-		b.WriteString("Call exactly these brokered MCP tools, using their qualified Claude tool names:\n\n")
-		for _, method := range policy.RequiredTools {
-			qualified := auroraBrokerMCPToolName(method)
-			if hint := auroraToolArgumentHints[method]; hint != "" {
-				fmt.Fprintf(&b, "- `%s` — arguments: %s\n", qualified, hint)
-			} else {
-				fmt.Fprintf(&b, "- `%s`\n", qualified)
-			}
-		}
-		b.WriteString("\n")
-	}
 	if len(task.QuickCreateAttachmentIDs) > 0 {
-		fmt.Fprintf(&b, "Staged input attachment ids for this run (pass these exact ids): %s\n\n", strings.Join(task.QuickCreateAttachmentIDs, ", "))
+		fmt.Fprintf(&b, "Attachments for this run: %s\n", strings.Join(task.QuickCreateAttachmentIDs, ", "))
+		b.WriteString("Fetch each one with `multica attachment download <id>` before you refer to it.\n\n")
 	} else {
-		b.WriteString("This run has no staged input attachments.\n\n")
+		b.WriteString("This run has no attachments.\n\n")
 	}
 	b.WriteString("Hard rules:\n")
-	b.WriteString("- The brokered MCP tools named above are the ONLY tools you may call. Do not run shell commands, do not call the `multica` CLI, and do not create, read, or comment on issues.\n")
-	b.WriteString("- If your runtime defers tool definitions behind a tool-search step, search for the exact qualified names above, then call them; use that search for nothing else.\n")
-	b.WriteString("- Call each required tool once, in the order the workflow gives. Never retry a tool that creates an artifact; if a tool fails, stop and report its message.\n")
-	b.WriteString("- Do not write artifact files or a manifest yourself, and do not write or link a runtime-local path: the broker writes the artifact and its manifest into the run's output root, and the platform collects them.\n")
-	b.WriteString("- When the tools have returned successfully, print one short line naming the produced artifact and stop.\n")
+	b.WriteString("- Do the work yourself with the tools you have. There is no broker and no other execution path.\n")
+	b.WriteString("- Write the generation's artifacts and their manifest exactly as the skill document specifies. The platform collects them from there, and the generation fails if the manifest is missing or does not match this run.\n")
+	b.WriteString("- Never submit a second billable provider request for this run. If a provider call fails, stop and report its message.\n")
+	b.WriteString("- When you are done, print one short line naming the produced artifact and stop.\n")
 	return b.String()
 }
 

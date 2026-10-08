@@ -22,12 +22,18 @@ import (
 	"github.com/multica-ai/multica/server/pkg/dbid"
 )
 
-// Aurora provider-run states. A run starts in creating (the create lease is
-// open), moves to submitted once the provider returned an external id, and ends
-// in succeeded or failed. ambiguous is the server's frozen verdict when a
-// retry of a live create lease finds no external id: the first create may have
-// reached the provider, so the run must be failed/refunded, never submitted
-// twice.
+// Aurora provider-run bookkeeping.
+//
+// A run starts in creating (the create lease is open), moves to submitted once
+// the provider returned an external id, and ends in succeeded or failed.
+// ambiguous is the server's verdict when a retry of a live create lease finds no
+// external id: the first create may have reached the provider, so the run is
+// failed/refunded rather than submitted twice.
+//
+// These routes are bookkeeping and observability only. The model now calls the
+// provider directly, so nothing here can stop a second billable create — the
+// create lease is advisory. Treat the recorded state as a record of what the run
+// reported, not as a guarantee that no duplicate request was made.
 const (
 	auroraProviderRunStateCreating  = "creating"
 	auroraProviderRunStateSucceeded = "succeeded"

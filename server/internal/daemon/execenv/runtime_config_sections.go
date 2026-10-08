@@ -673,17 +673,19 @@ func writeWorkflowAutopilot(b *strings.Builder) {
 	b.WriteString("- " + AutopilotIssueCommandsGuard + "\n\n")
 }
 
-// writeWorkflowAurora emits the workflow for a managed Aurora generation.
+// writeWorkflowAurora emits the workflow for an Aurora generation.
 //
-// The concrete tool names and argument shapes are per-run, so they stay in the
-// per-turn user message (daemon.buildAuroraPrompt); this cached section states
-// only the invariant: the reviewed broker MCP tool is the single execution
-// path, and the tool writes the artifact itself.
+// The procedure for the run lives in the skill document the daemon writes into
+// the project skills directory, not in this cached brief: the brief is rendered
+// once per session, while the skill document is delivered per task and is the
+// same channel every other agent uses. This section therefore states only the
+// invariant — a generation is not an issue, and its output belongs to the run's
+// artifact manifest.
 func writeWorkflowAurora(b *strings.Builder) {
-	b.WriteString("**This is a managed Aurora generation run.** There is no Multica issue. The per-turn user message carries the skill workflow and the exact brokered MCP tool name(s) to call.\n\n")
-	b.WriteString("- There is **no shell and no `multica` CLI**. Never attempt a command, an issue create/update, or a comment; those tools are not present.\n")
-	b.WriteString("- Call exactly the brokered MCP tool(s) the per-turn message names, in the order it gives, then stop. The broker writes the artifact and its manifest into the run's output root; the platform collects them — do not write the files or the manifest yourself.\n")
-	b.WriteString("- Never retry a tool that creates an artifact. If a tool returns an error, stop and report its message; do not fall back to another tool or to a command.\n\n")
+	b.WriteString("**This is an Aurora generation run.** There is no Multica issue.\n\n")
+	b.WriteString("- The skill document for this run is in your working directory's project skills directory. Follow it: it names the inputs, the steps, the output paths and the artifact manifest to write.\n")
+	b.WriteString("- Do not create, update, or comment on issues. Your output belongs to this run's artifact manifest, not to a new issue.\n")
+	b.WriteString("- The platform collects the artifacts the manifest names, and fails the generation if the manifest is missing or does not match this run.\n\n")
 }
 
 // writeWorkflowIssue emits the single issue workflow used by every
