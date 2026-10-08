@@ -61,7 +61,7 @@ func (d *auroraDeleteEngine) FixedOfflineReports(context.Context, model.Node, mo
 // node create and start. The node proxy target is dead unless the sidecar is
 // started first.
 func TestProviderEnsureAuroraEgressOrdering(t *testing.T) {
-	cfg := auroraConfigWithSeccomp(t)
+	cfg := auroraConfig()
 	n := auroraNode()
 	base := New(fakeCalls{}, cfg)
 	egressName := base.egressName(n)
@@ -123,7 +123,7 @@ func TestProviderEnsureAuroraEgressOrdering(t *testing.T) {
 // TestProviderEnsureEgressDoesNotStartRunningSidecar proves a re-adopted,
 // already-running sidecar is not restarted while the node is still started.
 func TestProviderEnsureEgressDoesNotStartRunningSidecar(t *testing.T) {
-	cfg := auroraConfigWithSeccomp(t)
+	cfg := auroraConfig()
 	n := auroraNode()
 	base := New(fakeCalls{}, cfg)
 	egressName := base.egressName(n)
@@ -175,7 +175,7 @@ func TestProviderEnsureEgressConnectIdempotency(t *testing.T) {
 		{name: "other failure fails closed", connect: errors.New("Error response from daemon: network multica-fleet-ws-1234 not found"), wantErr: model.ErrUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := auroraConfigWithSeccomp(t)
+			cfg := auroraConfig()
 			n := auroraNode()
 			base := New(fakeCalls{}, cfg)
 			egressName := base.egressName(n)

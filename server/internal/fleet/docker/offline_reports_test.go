@@ -169,7 +169,7 @@ func (s *offlineHTTP) roundTrip(r *http.Request) (*http.Response, error) {
 		}
 		n := fixtureNode()
 		net := (&Provider{cfg: fixtureConfig()}).networkName()
-		h := NodeHostConfig(n.Resources, true, nil, "")
+		h := NodeHostConfig(n.Resources, true, nil)
 		h.NetworkMode = container.NetworkMode(net)
 		snapshot := container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "cid", State: &container.State{Status: "exited"}, HostConfig: &h}, Config: &container.Config{Image: n.Image, Labels: l, User: "10001:10001", Env: []string{"HOME=/data/home", "FLEET_NODE_MAX_RUNS=1"}, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"run"}}, NetworkSettings: &container.NetworkSettings{Networks: map[string]*network.EndpointSettings{net: {}}}, Mounts: []container.MountPoint{{Type: mount.TypeVolume, Name: name, Destination: "/data", RW: true}, {Type: mount.TypeVolume, Name: n.SecretsVolume, Destination: "/secrets"}}}
 		s.nodeInspectCount++

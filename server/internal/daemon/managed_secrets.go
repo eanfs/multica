@@ -10,60 +10,31 @@ import (
 	"strings"
 )
 
-// Fixed runtime secret destinations inside the managed sandbox image. The plan
-// locks these paths; the fleet mounts read-only host files at exactly these
-// destinations and the daemon never accepts a caller-supplied path.
+// Environment variable names the managed node carries its provider credentials
+// in. The Fleet writes them into the node container env at deploy time (the
+// Fleet config's claude_env, stored in an owner-only file), and "fleet-node
+// run" hands its own environment to the managed daemon unchanged. The values
+// are therefore readable by every process in the container and by docker
+// inspect; that is the posture this direction explicitly accepts.
 const (
-	managedAnthropicAPIKeyPath = "/run/secrets/anthropic-api-key"
-	managedArkAPIKeyPath       = "/run/secrets/ark-api-key"
-	managedVolcASRAPIKeyPath   = "/run/secrets/volc-asr-api-key"
+	// managedAnthropicAPIKeyEnvName is the credential the managed Claude child
+	// authenticates with. The Aurora plan reuses it as the Volcengine Ark Agent
+	// Plan key: ARK's key is Anthropic-Messages-compatible, so the image, video
+	// and text skills authenticate with this one value instead of a second
+	// variable (decision 5).
+	managedAnthropicAPIKeyEnvName = "ANTHROPIC_API_KEY"
+	// managedVolcASRAPIKeyEnvName is the Volcengine speech credential. The
+	// speech endpoint is the only provider that is not Anthropic-compatible, so
+	// it is the single separate provider variable.
+	managedVolcASRAPIKeyEnvName = "VOLC_ASR_API_KEY"
 )
 
-// managedSecretMaxBytes bounds any managed provider secret file so a
-// compromised mount cannot feed the daemon an unbounded blob.
-const managedSecretMaxBytes = 16 * 1024
-
-// Managed provider secret file errors. They deliberately never name the path or
-// the value so a startup failure cannot leak either into logs or an error
-// surface.
+// Managed provider environment errors. They deliberately never name the value,
+// so a startup failure cannot leak a credential into logs or an error surface.
 var (
-	errManagedSecretMissing     = errors.New("secret file is missing")
-	errManagedSecretSymlink     = errors.New("secret file must not be a symlink")
-	errManagedSecretNotRegular  = errors.New("secret file must be a regular file")
-	errManagedSecretPermissions = errors.New("secret file must not be group- or world-accessible")
-	errManagedSecretNotReadable = errors.New("secret file must be owner-readable")
-	errManagedSecretTooLarge    = errors.New("secret file exceeds the size limit")
-	errManagedSecretEmpty       = errors.New("secret file must not be empty")
+	errManagedEnvValueEmpty = errors.New("environment credential must not be empty")
+	errManagedEnvMissing    = errors.New("environment credential is missing")
 )
-
-// managedSecretPaths are the host-visible paths of the fixed provider secret
-// files. They are process configuration owned by the operator; the fleet
-// control API can never supply or override them.
-type managedSecretPaths struct {
-	AnthropicAPIKey string
-	ArkAPIKey       string
-	VolcASRAPIKey   string
-}
-
-// defaultManagedSecretPaths returns the fixed in-image destinations.
-func defaultManagedSecretPaths() managedSecretPaths {
-	return managedSecretPaths{
-		AnthropicAPIKey: managedAnthropicAPIKeyPath,
-		ArkAPIKey:       managedArkAPIKeyPath,
-		VolcASRAPIKey:   managedVolcASRAPIKeyPath,
-	}
-}
-
-// managedSecretPathsFromEnv layers the documented *_API_KEY_FILE overrides on
-// top of the fixed destinations. The variable carries a path, never a value.
-func managedSecretPathsFromEnv() managedSecretPaths {
-	defaults := defaultManagedSecretPaths()
-	return managedSecretPaths{
-		AnthropicAPIKey: envOrDefault("ANTHROPIC_API_KEY_FILE", defaults.AnthropicAPIKey),
-		ArkAPIKey:       envOrDefault("ARK_API_KEY_FILE", defaults.ArkAPIKey),
-		VolcASRAPIKey:   envOrDefault("VOLC_ASR_API_KEY_FILE", defaults.VolcASRAPIKey),
-	}
-}
 
 // managedClaudeEndpoint is the optional operator-configured Anthropic-compatible
 // endpoint for the managed Claude child. Both fields are process configuration
@@ -148,23 +119,15 @@ func (s managedSecret) LogValue() slog.Value { return slog.StringValue("[redacte
 func (s managedSecret) MarshalJSON() ([]byte, error) { return []byte(`"[redacted]"`), nil }
 
 // managedProviderSecrets holds the validated managed provider configuration.
-// The Anthropic value is a secret value scoped to the Claude child, together
-// with the optional operator endpoint overrides. It is both the credential the
-// model authenticates with and the one an Aurora skill's own shell steps call
-// the provider with: the Ark key is Anthropic-Messages-compatible, so it is
-// configured here rather than as a separate provider variable (decision 5).
-//
-// The two file paths are the deployed provider-secret mounts. They were read by
-// the MCP broker, which no longer exists (ticket #198); they are still loaded
-// and reported for presence so managed startup keeps validating that the
-// deployment staged them. Removing them belongs to the change that retires the
-// mounts (ticket #201).
+// Both credentials are values read from the node's own environment at startup;
+// no credential file and no read-only secret mount remains. The Anthropic value
+// is both the credential the model authenticates with and the one an Aurora
+// skill's shell steps call the Ark provider with (decision 5).
 type managedProviderSecrets struct {
-	AnthropicAPIKey   managedSecret
-	AnthropicBaseURL  string
-	AnthropicModel    string
-	ArkAPIKeyFile     string
-	VolcASRAPIKeyFile string
+	AnthropicAPIKey  managedSecret
+	AnthropicBaseURL string
+	AnthropicModel   string
+	VolcASRAPIKey    managedSecret
 }
 
 // claudeChildEnv returns the environment additions for the Claude child process
@@ -185,7 +148,7 @@ type managedProviderSecrets struct {
 // custom endpoint is configured, so the daemon does not paper over a
 // first-party misconfiguration.
 func (s managedProviderSecrets) claudeChildEnv() map[string]string {
-	env := map[string]string{"ANTHROPIC_API_KEY": s.AnthropicAPIKey.Value()}
+	env := map[string]string{managedAnthropicAPIKeyEnvName: s.AnthropicAPIKey.Value()}
 	if s.AnthropicBaseURL != "" {
 		env["ANTHROPIC_BASE_URL"] = s.AnthropicBaseURL
 	}
@@ -195,7 +158,19 @@ func (s managedProviderSecrets) claudeChildEnv() map[string]string {
 	return env
 }
 
-// String redacts the whole set so fmt never prints a value or a path.
+// agentChildEnv returns the extra provider values the ordinary agent child's
+// own shell steps read. The Volcengine speech key is the only one: the Ark key
+// is already present as ANTHROPIC_API_KEY in claudeChildEnv, so an image or
+// video step authenticates with that same variable (decision 5). An absent ASR
+// key adds nothing; the route that needs it fails closed when it is invoked.
+func (s managedProviderSecrets) agentChildEnv() map[string]string {
+	if s.VolcASRAPIKey.Value() == "" {
+		return nil
+	}
+	return map[string]string{managedVolcASRAPIKeyEnvName: s.VolcASRAPIKey.Value()}
+}
+
+// String redacts the whole set so fmt never prints a value.
 func (s managedProviderSecrets) String() string { return "[managed provider secrets redacted]" }
 
 // LogValue records presence only.
@@ -204,66 +179,39 @@ func (s managedProviderSecrets) LogValue() slog.Value {
 		slog.Bool("anthropic_api_key", s.AnthropicAPIKey.Value() != ""),
 		slog.Bool("anthropic_base_url", s.AnthropicBaseURL != ""),
 		slog.Bool("anthropic_model", s.AnthropicModel != ""),
-		slog.Bool("ark_api_key_file", s.ArkAPIKeyFile != ""),
-		slog.Bool("volc_asr_api_key_file", s.VolcASRAPIKeyFile != ""),
+		slog.Bool("volc_asr_api_key", s.VolcASRAPIKey.Value() != ""),
 	)
 }
 
-// MarshalJSON redacts the Anthropic value; the endpoint overrides and file
-// paths are not secret.
+// MarshalJSON redacts both credential values; the endpoint overrides are not
+// secret.
 func (s managedProviderSecrets) MarshalJSON() ([]byte, error) {
 	type wire struct {
-		AnthropicAPIKey   string `json:"anthropic_api_key"`
-		AnthropicBaseURL  string `json:"anthropic_base_url"`
-		AnthropicModel    string `json:"anthropic_model"`
-		ArkAPIKeyFile     string `json:"ark_api_key_file"`
-		VolcASRAPIKeyFile string `json:"volc_asr_api_key_file"`
+		AnthropicAPIKey  string `json:"anthropic_api_key"`
+		AnthropicBaseURL string `json:"anthropic_base_url"`
+		AnthropicModel   string `json:"anthropic_model"`
+		VolcASRAPIKey    string `json:"volc_asr_api_key"`
 	}
 	return json.Marshal(wire{
-		AnthropicAPIKey:   s.AnthropicAPIKey.String(),
-		AnthropicBaseURL:  s.AnthropicBaseURL,
-		AnthropicModel:    s.AnthropicModel,
-		ArkAPIKeyFile:     s.ArkAPIKeyFile,
-		VolcASRAPIKeyFile: s.VolcASRAPIKeyFile,
+		AnthropicAPIKey:  s.AnthropicAPIKey.String(),
+		AnthropicBaseURL: s.AnthropicBaseURL,
+		AnthropicModel:   s.AnthropicModel,
+		VolcASRAPIKey:    s.VolcASRAPIKey.String(),
 	})
 }
 
-// readManagedSecretFile reads one owner-only credential file. It fails closed
-// on any path, permission, size, or shape surprise and never echoes the path or
-// the value in its error.
-func readManagedSecretFile(path string, maxBytes int64) (string, error) {
-	if strings.TrimSpace(path) == "" {
-		return "", errManagedSecretMissing
+// readManagedProviderEnvValue reads one provider credential from the node's own
+// environment. An unset variable is missing, while a variable that is set and
+// empty is an operator typo; the reader owns that distinction so the required
+// caller treats both as fatal and the optional caller tolerates only missing.
+func readManagedProviderEnvValue(name string) (string, error) {
+	raw, ok := os.LookupEnv(name)
+	if !ok {
+		return "", errManagedEnvMissing
 	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", errManagedSecretMissing
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return "", errManagedSecretSymlink
-	}
-	if !info.Mode().IsRegular() {
-		return "", errManagedSecretNotRegular
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return "", errManagedSecretPermissions
-	}
-	if info.Mode().Perm()&0o400 == 0 {
-		return "", errManagedSecretNotReadable
-	}
-	if info.Size() > maxBytes {
-		return "", errManagedSecretTooLarge
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", errManagedSecretMissing
-	}
-	if int64(len(data)) > maxBytes {
-		return "", errManagedSecretTooLarge
-	}
-	value := strings.TrimSpace(string(data))
+	value := strings.TrimSpace(raw)
 	if value == "" {
-		return "", errManagedSecretEmpty
+		return "", errManagedEnvValueEmpty
 	}
 	return value, nil
 }
@@ -272,32 +220,23 @@ func readManagedSecretFile(path string, maxBytes int64) (string, error) {
 // applies the already-validated Claude endpoint overrides. Only the Anthropic
 // value is required at startup: the managed daemon is the Claude agent and
 // cannot start without its own credential, and that same credential is what an
-// Aurora skill's shell steps call the provider with (decision 5). The two
-// retired-broker file paths are read lazily, so a missing file is tolerated —
-// the tool that needed it fails closed when it is invoked — while a supplied
-// file that is not a safe owner-only regular file still fails startup. Every
-// error names only the provider, never the path or the value.
-func loadManagedProviderSecrets(paths managedSecretPaths, endpoint managedClaudeEndpoint) (managedProviderSecrets, error) {
-	anthropic, err := readManagedSecretFile(paths.AnthropicAPIKey, managedSecretMaxBytes)
+// Aurora skill's shell steps call the Ark provider with (decision 5). The
+// Volcengine speech key is optional, so an absent variable is tolerated - the
+// route that needs it fails closed when it is invoked - while a set-but-empty
+// value is rejected. Every error names only the provider, never the value.
+func loadManagedProviderSecrets(endpoint managedClaudeEndpoint) (managedProviderSecrets, error) {
+	anthropic, err := readManagedProviderEnvValue(managedAnthropicAPIKeyEnvName)
 	if err != nil {
 		return managedProviderSecrets{}, fmt.Errorf("managed mode requires the anthropic provider credential: %w", err)
 	}
-	for _, optional := range []struct {
-		provider string
-		path     string
-	}{
-		{"ark", paths.ArkAPIKey},
-		{"volc-asr", paths.VolcASRAPIKey},
-	} {
-		if _, err := readManagedSecretFile(optional.path, managedSecretMaxBytes); err != nil && !errors.Is(err, errManagedSecretMissing) {
-			return managedProviderSecrets{}, fmt.Errorf("managed mode provider credential %s is invalid: %w", optional.provider, err)
-		}
+	volcASR, err := readManagedProviderEnvValue(managedVolcASRAPIKeyEnvName)
+	if err != nil && !errors.Is(err, errManagedEnvMissing) {
+		return managedProviderSecrets{}, fmt.Errorf("managed mode provider credential volc-asr is invalid: %w", err)
 	}
 	return managedProviderSecrets{
-		AnthropicAPIKey:   managedSecret{value: anthropic},
-		AnthropicBaseURL:  endpoint.BaseURL,
-		AnthropicModel:    endpoint.Model,
-		ArkAPIKeyFile:     paths.ArkAPIKey,
-		VolcASRAPIKeyFile: paths.VolcASRAPIKey,
+		AnthropicAPIKey:  managedSecret{value: anthropic},
+		AnthropicBaseURL: endpoint.BaseURL,
+		AnthropicModel:   endpoint.Model,
+		VolcASRAPIKey:    managedSecret{value: volcASR},
 	}, nil
 }

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -279,30 +280,6 @@ func newAuroraEngineEnv(ctx context.Context, t *testing.T) *auroraEngineEnv {
 		cli.Close()
 		t.Skipf("Aurora test node image unavailable: %v", err)
 	}
-	proxyImage, err := resolveImageDigestRef(ctx, cli, firstNonEmpty(os.Getenv("MULTICA_AURORA_TEST_PROXY_IMAGE"), "multica-aurora-egress-fixture:arm64"))
-	if err != nil {
-		cli.Close()
-		t.Skipf("Aurora egress fixture image unavailable: %v", err)
-	}
-	// The Docker daemon reads a seccomp=/<path> option itself, and Docker Desktop
-	// only shares the host workspace tree into its VM, so the profile must live
-	// under the checkout, not under the host temp directory.
-	seccompDir, err := os.MkdirTemp(".", ".aurora-it-seccomp-")
-	if err != nil {
-		cli.Close()
-		t.Fatalf("create seccomp dir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(seccompDir) })
-	absSeccompDir, err := filepath.Abs(seccompDir)
-	if err != nil {
-		cli.Close()
-		t.Fatalf("resolve seccomp dir: %v", err)
-	}
-	seccompPath := filepath.Join(absSeccompDir, "seccomp.json")
-	if err := os.WriteFile(seccompPath, []byte(`{"defaultAction":"SCMP_ACT_ALLOW","architectures":["SCMP_ARCH_AARCH64","SCMP_ARCH_X86_64"],"syscalls":[]}`), 0o600); err != nil {
-		cli.Close()
-		t.Fatalf("write seccomp profile: %v", err)
-	}
 
 	// A real server origin is required by the profile and by the egress policy.
 	// The proxy authorizes exactly this origin, so the live-egress test can use a
@@ -324,13 +301,9 @@ func newAuroraEngineEnv(ctx context.Context, t *testing.T) *auroraEngineEnv {
 		MaxNodes:  2,
 		Specs:     map[string]model.Spec{"sandbox": {CPUs: 2, MemoryBytes: 4 << 30, Pids: 256, MaxRuns: 1}},
 		Aurora: &model.AuroraConfig{
-			ServerURL:           serverOrigin,
-			ProxyImage:          proxyImage,
-			SeccompProfile:      seccompPath,
-			AppArmorProfile:     "multica-aurora-sandbox",
-			ProviderSecretFiles: map[string]string{},
-			ReadonlyRootfs:      true,
-			UplinkNetwork:       env.uplink,
+			ServerURL:      serverOrigin,
+			ReadonlyRootfs: true,
+			UplinkNetwork:  env.uplink,
 		},
 	}
 	if err := env.cfg.Aurora.Validate(); err != nil {
@@ -432,18 +405,13 @@ func testEnsureNodeStartsRealEngine(ctx context.Context, t *testing.T) {
 	if info.State == nil || !info.State.Running || info.State.Error != "" {
 		t.Fatalf("node container did not start: state=%+v", info.State)
 	}
-	// The wire form must be inline JSON, never the operator file path.
-	inline := ""
-	for _, opt := range info.HostConfig.SecurityOpt {
-		if strings.HasPrefix(opt, "seccomp=") {
-			inline = strings.TrimPrefix(opt, "seccomp=")
-		}
+	// The node runs with Docker's default security options: no seccomp profile
+	// and no AppArmor reference.
+	if !reflect.DeepEqual(info.HostConfig.SecurityOpt, []string{"no-new-privileges:true"}) {
+		t.Fatalf("security opt = %v, want only no-new-privileges", info.HostConfig.SecurityOpt)
 	}
-	if !strings.HasPrefix(inline, "{") || strings.Contains(inline, env.cfg.Aurora.SeccompProfile) {
-		t.Fatalf("seccomp security opt = %q, want inline JSON carrying no host path", inline)
-	}
-	// Adoption: the inspection authority recomputes the inlined profile from the
-	// operator file, so a replay over the real container must be admitted.
+	// Adoption: the inspection authority recomputes the HostConfig from the
+	// configuration, so a replay over the real container must be admitted.
 	if _, err := p.Ensure(ctx, node, bootstrap); err != nil {
 		t.Fatalf("replayed Ensure over the running node: %v", err)
 	}
@@ -463,7 +431,7 @@ func testLiveEgressRealEngine(ctx context.Context, t *testing.T) {
 	proxyName := "aurora-it-egress-" + suffix
 	proxyLabels := map[string]string{"aurora.it": env.namespace}
 	proxy, err := env.cli.ContainerCreate(ctx, &container.Config{
-		Image:  env.cfg.Aurora.ProxyImage,
+		Image:  env.cfg.Image,
 		User:   "10001:10001",
 		Env:    []string{"MULTICA_EGRESS_SERVER_ORIGIN=" + env.cfg.Aurora.ServerURL, "MULTICA_EGRESS_ALLOWED_HOSTS="},
 		Labels: proxyLabels,

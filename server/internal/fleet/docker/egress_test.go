@@ -15,11 +15,11 @@ import (
 func TestAuroraNodeHostConfigRestricted(t *testing.T) {
 	spec := model.Spec{CPUs: 2, MemoryBytes: 4 << 30, Pids: 256, MaxRuns: 1}
 	aurora := auroraConfig().Aurora
-	h := NodeHostConfig(spec, true, aurora, testSeccompProfileJSON)
+	h := NodeHostConfig(spec, true, aurora)
 	if !h.ReadonlyRootfs || h.Privileged || h.PidMode != "" || len(h.PortBindings) != 0 || h.PublishAllPorts || h.NetworkMode == "host" {
 		t.Fatalf("unsafe aurora isolation: %+v", h)
 	}
-	if !reflect.DeepEqual(h.SecurityOpt, []string{"no-new-privileges:true", "seccomp=" + testSeccompProfileJSON, "apparmor=" + aurora.AppArmorProfile}) {
+	if !reflect.DeepEqual(h.SecurityOpt, []string{"no-new-privileges:true"}) {
 		t.Fatalf("security opt = %v", h.SecurityOpt)
 	}
 	wantTmpfs := map[string]string{
@@ -38,7 +38,7 @@ func TestAuroraNodeHostConfigRestricted(t *testing.T) {
 		}
 	}
 	// The Claude profile must be byte-for-byte identical to the pre-Aurora builder.
-	claude := NodeHostConfig(spec, true, nil, "")
+	claude := NodeHostConfig(spec, true, nil)
 	if claude.ReadonlyRootfs || len(claude.Tmpfs) != 0 || !reflect.DeepEqual(claude.SecurityOpt, []string{"no-new-privileges:true"}) {
 		t.Fatalf("claude hostconfig changed: %+v", claude)
 	}
@@ -60,7 +60,7 @@ func TestEgressSidecarPolicy(t *testing.T) {
 	if strings.Contains(joined, "mount") || strings.Contains(joined, "API_KEY") || strings.Contains(joined, "enrollment") {
 		t.Fatalf("sidecar mounts a credential: %v", args)
 	}
-	if args[len(args)-1] != cfg.Aurora.ProxyImage {
+	if args[len(args)-1] != cfg.Image {
 		t.Fatalf("sidecar image not final: %v", args)
 	}
 	if got := EgressNetworkConnectArgs(proxyName, workspace); !reflect.DeepEqual(got, []string{"network", "connect", "--alias", model.AuroraEgressAlias, workspace, proxyName}) {
@@ -116,32 +116,6 @@ func TestEgressEnvMatchesToleratesImagePATH(t *testing.T) {
 	}
 }
 
-func TestAuroraProviderSecretMountsAreReadOnly(t *testing.T) {
-	cfg := auroraConfig()
-	cfg.Aurora.ProviderSecretFiles = map[string]string{
-		"anthropic-api-key": "/etc/multica/aurora/anthropic-api-key",
-		"ark-api-key":       "/etc/multica/aurora/ark-api-key",
-		"volc-asr-api-key":  "/etc/multica/aurora/volc-asr-api-key",
-	}
-	mounts := providerSecretMounts(cfg.Aurora)
-	if len(mounts) != 3 {
-		t.Fatalf("mounts = %d", len(mounts))
-	}
-	want := map[string]string{
-		"/etc/multica/aurora/anthropic-api-key": model.AuroraAnthropicAPIKeyTarget,
-		"/etc/multica/aurora/ark-api-key":       model.AuroraArkAPIKeyTarget,
-		"/etc/multica/aurora/volc-asr-api-key":  model.AuroraVolcASRAPIKeyTarget,
-	}
-	for _, m := range mounts {
-		if m.Type != mount.TypeBind || !m.ReadOnly || want[m.Source] != m.Target {
-			t.Fatalf("unsafe provider mount: %+v", m)
-		}
-	}
-	if providerSecretMounts(nil) != nil {
-		t.Fatal("claude profile must mount nothing")
-	}
-}
-
 func TestClaudeProfileEnvUnchanged(t *testing.T) {
 	p := &Provider{cfg: fixtureConfig()}
 	n := fixtureNode()
@@ -155,7 +129,7 @@ func TestClaudeProfileEnvUnchanged(t *testing.T) {
 		t.Fatal("claude profile accepted managed env")
 	}
 	// Build a valid Claude snapshot exactly as the builder does and adopt it.
-	h := NodeHostConfig(n.Resources, true, nil, "")
+	h := NodeHostConfig(n.Resources, true, nil)
 	h.NetworkMode = "node-net"
 	r := container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "cid", HostConfig: &h}, Config: &container.Config{Image: n.Image, User: "10001:10001", Env: []string{"HOME=/data/home", "FLEET_NODE_MAX_RUNS=1"}, Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"run"}}, NetworkSettings: &container.NetworkSettings{Networks: map[string]*network.EndpointSettings{"node-net": {}}}, Mounts: []container.MountPoint{{Type: mount.TypeVolume, Name: n.DataVolume, Destination: model.DataMount, RW: true}, {Type: mount.TypeVolume, Name: n.SecretsVolume, Destination: "/secrets", RW: false}}}
 	if err := validateNodeInspection(r, n, "node-net", fixtureConfig()); err != nil {
@@ -294,7 +268,7 @@ func TestValidateEgressSidecarHostGateway(t *testing.T) {
 		host := wantHost
 		return container.InspectResponse{
 			ContainerJSONBase: &container.ContainerJSONBase{ID: "egress-id", HostConfig: &host},
-			Config:            &container.Config{Image: want.Image, User: want.User, Labels: want.Labels, Env: append([]string(nil), want.Env...)},
+			Config:            &container.Config{Image: want.Image, User: want.User, Entrypoint: append([]string(nil), want.Entrypoint...), Labels: want.Labels, Env: append([]string(nil), want.Env...)},
 		}
 	}
 	if err := validateEgressSidecar(cfg, n, proxyName, base()); err != nil {
@@ -314,5 +288,12 @@ func TestValidateEgressSidecarHostGateway(t *testing.T) {
 	extra.HostConfig.ExtraHosts = []string{"host.docker.internal:host-gateway", "other:1.2.3.4"}
 	if err := validateEgressSidecar(cfg, n, proxyName, extra); !errors.Is(err, model.ErrForbidden) {
 		t.Fatalf("sidecar with an extra mapping accepted: %v", err)
+	}
+	// The sidecar must carry its own entrypoint: a container left on the shared
+	// image's fleet-node entrypoint would start a second node.
+	nodeEntrypoint := base()
+	nodeEntrypoint.Config.Entrypoint = []string{"/usr/local/bin/fleet-node", "run"}
+	if err := validateEgressSidecar(cfg, n, proxyName, nodeEntrypoint); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("sidecar on the node entrypoint accepted: %v", err)
 	}
 }

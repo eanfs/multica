@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/mount"
 	"github.com/multica-ai/multica/server/internal/fleet/model"
 )
 
@@ -14,12 +13,17 @@ import (
 // sandbox reaches it by the fixed Docker alias "egress". It never mounts an
 // enrollment or provider credential.
 const (
-	egressProxyUser      = "10001:10001"
-	egressTmpfs          = "rw,nosuid,nodev,noexec,size=33554432,uid=10001,gid=10001,mode=0700"
-	egressProxyRole      = "egress-proxy"
-	egressServerOriginEn = "MULTICA_EGRESS_SERVER_ORIGIN"
-	egressAllowedHostsEn = "MULTICA_EGRESS_ALLOWED_HOSTS"
-	egressPinsEn         = "MULTICA_EGRESS_PINS"
+	egressProxyUser = "10001:10001"
+	// egressProxyEntrypoint is the sidecar's fixed entrypoint inside the shared
+	// node image. The node and the sidecar run the same image with different
+	// entrypoints; without this the sidecar would inherit the image's fleet-node
+	// entrypoint and start a second node.
+	egressProxyEntrypoint = "/usr/local/bin/aurora-egress-proxy"
+	egressTmpfs           = "rw,nosuid,nodev,noexec,size=33554432,uid=10001,gid=10001,mode=0700"
+	egressProxyRole       = "egress-proxy"
+	egressServerOriginEn  = "MULTICA_EGRESS_SERVER_ORIGIN"
+	egressAllowedHostsEn  = "MULTICA_EGRESS_ALLOWED_HOSTS"
+	egressPinsEn          = "MULTICA_EGRESS_PINS"
 )
 
 // Aurora node tmpfs surfaces. Every writable directory is nosuid, nodev and
@@ -65,8 +69,9 @@ func EgressProxyArgs(cfg model.Config, proxyName, workspaceNetwork string, linux
 		"-e", egressServerOriginEn+"="+a.ServerURL,
 		"-e", egressAllowedHostsEn+"="+strings.Join(a.EgressHosts, ","),
 		"-e", egressPinsEn+"="+a.EgressPinsEnv(),
+		"--entrypoint", egressProxyEntrypoint,
 		// The image is final so nothing can follow it as a command.
-		a.ProxyImage,
+		cfg.Image,
 	), nil
 }
 
@@ -90,9 +95,10 @@ func egressProxySpec(cfg model.Config, n model.Node, proxyName string, linuxHost
 	}
 	pids := int64(64)
 	return &container.Config{
-			Image:  a.ProxyImage,
-			User:   egressProxyUser,
-			Labels: labels(n.Namespace, cfg.FleetID, nodeID(n), egressProxyRole),
+			Image:      cfg.Image,
+			User:       egressProxyUser,
+			Entrypoint: []string{egressProxyEntrypoint},
+			Labels:     labels(n.Namespace, cfg.FleetID, nodeID(n), egressProxyRole),
 			Env: []string{
 				egressServerOriginEn + "=" + a.ServerURL,
 				egressAllowedHostsEn + "=" + strings.Join(a.EgressHosts, ","),
@@ -108,21 +114,6 @@ func egressProxySpec(cfg model.Config, n model.Node, proxyName string, linuxHost
 			ExtraHosts:     hostGatewayExtraHosts(linuxHostGateway),
 			Tmpfs:          map[string]string{model.AuroraTmpMount: egressTmpfs},
 		}, nil
-}
-
-// providerSecretMounts renders the operator-staged credential files as
-// read-only bind mounts at the four fixed destinations. Empty entries are
-// omitted.
-func providerSecretMounts(a *model.AuroraConfig) []mount.Mount {
-	if a == nil {
-		return nil
-	}
-	mounts := a.ProviderSecretMounts()
-	out := make([]mount.Mount, 0, len(mounts))
-	for _, m := range mounts {
-		out = append(out, mount.Mount{Type: mount.TypeBind, Source: m.Source, Target: m.Target, ReadOnly: true})
-	}
-	return out
 }
 
 // defaultImagePATH is the OCI default environment every image carries. It is the
@@ -179,7 +170,7 @@ func validateEgressSidecar(cfg model.Config, n model.Node, proxyName string, i c
 		return model.ErrForbidden
 	}
 	c, h := i.Config, i.HostConfig
-	if c.Image != want.Image || c.User != want.User || !sameLabels(c.Labels, want.Labels) || c.Tty || c.OpenStdin || len(c.ExposedPorts) != 0 {
+	if c.Image != want.Image || c.User != want.User || !reflect.DeepEqual([]string(c.Entrypoint), []string(want.Entrypoint)) || !sameLabels(c.Labels, want.Labels) || c.Tty || c.OpenStdin || len(c.ExposedPorts) != 0 {
 		return model.ErrForbidden
 	}
 	// The image's default PATH is merged into the container env by the daemon;

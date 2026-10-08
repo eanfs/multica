@@ -3,7 +3,6 @@ package daemon
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,238 +13,147 @@ import (
 
 const (
 	testAnthropicSecret = "sk-ant-managed-test-anthropic-value"
-	testArkSecret       = "ark-managed-test-value"
 	testVolcASRSecret   = "asr-managed-test-value"
 )
 
-// writeManagedSecretFile stages one owner-only secret file, creating its
-// directory with the same restrictive mode the controller uses.
-func writeManagedSecretFile(t *testing.T, path, content string, mode os.FileMode) {
+// stageManagedProviderSecrets puts the two provider credentials the managed
+// daemon reads into the process environment, the way the Fleet injects them at
+// deploy time, and loads them through the production loader.
+func stageManagedProviderSecrets(t *testing.T) managedProviderSecrets {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
-	}
-	if err := os.WriteFile(path, []byte(content), mode); err != nil {
-		t.Fatalf("write secret %s: %v", path, err)
-	}
-	if err := os.Chmod(path, mode); err != nil {
-		t.Fatalf("chmod secret %s: %v", path, err)
-	}
-}
-
-// managedSecretTestPaths returns four distinct secret file paths in one temp
-// directory without creating the files.
-func managedSecretTestPaths(t *testing.T) managedSecretPaths {
-	t.Helper()
-	dir := t.TempDir()
-	return managedSecretPaths{
-		AnthropicAPIKey: filepath.Join(dir, "anthropic-api-key"),
-		ArkAPIKey:       filepath.Join(dir, "ark-api-key"),
-		VolcASRAPIKey:   filepath.Join(dir, "volc-asr-api-key"),
-	}
-}
-
-// setManagedSecretPathEnv points the documented *_API_KEY_FILE overrides at
-// the supplied paths.
-func setManagedSecretPathEnv(t *testing.T, paths managedSecretPaths) {
-	t.Helper()
-	t.Setenv("ANTHROPIC_API_KEY_FILE", paths.AnthropicAPIKey)
-	t.Setenv("ARK_API_KEY_FILE", paths.ArkAPIKey)
-	t.Setenv("VOLC_ASR_API_KEY_FILE", paths.VolcASRAPIKey)
-}
-
-// stageManagedProviderSecrets writes the three valid provider secret files,
-// points the env overrides at them, and loads them through the production
-// loader.
-func stageManagedProviderSecrets(t *testing.T) (managedSecretPaths, managedProviderSecrets) {
-	t.Helper()
-	paths := managedSecretTestPaths(t)
-	writeManagedSecretFile(t, paths.AnthropicAPIKey, testAnthropicSecret+"\n", 0o400)
-	writeManagedSecretFile(t, paths.ArkAPIKey, testArkSecret+"\n", 0o400)
-	writeManagedSecretFile(t, paths.VolcASRAPIKey, testVolcASRSecret+"\n", 0o400)
-	setManagedSecretPathEnv(t, paths)
-	secrets, err := loadManagedProviderSecrets(paths, managedClaudeEndpoint{})
+	t.Setenv(managedAnthropicAPIKeyEnvName, testAnthropicSecret)
+	t.Setenv(managedVolcASRAPIKeyEnvName, testVolcASRSecret)
+	secrets, err := loadManagedProviderSecrets(managedClaudeEndpoint{})
 	if err != nil {
 		t.Fatalf("loadManagedProviderSecrets: %v", err)
 	}
-	return paths, secrets
+	return secrets
 }
 
-// TestManagedSecretFileValidation pins the fail-closed file contract shared by
-// every managed credential: a regular, non-symlink, owner-only file of bounded
-// size whose errors never echo the path or the secret.
-func TestManagedSecretFileValidation(t *testing.T) {
-	dir := t.TempDir()
-	write := func(name, content string, mode os.FileMode) string {
-		path := filepath.Join(dir, name)
-		writeManagedSecretFile(t, path, content, mode)
-		return path
-	}
-	valid := write("valid", "value\n", 0o400)
-	groupReadable := write("group-readable", "value", 0o440)
-	worldReadable := write("world-readable", "value", 0o404)
-	notOwnerReadable := write("not-owner-readable", "value", 0o000)
-	oversized := write("oversized", strings.Repeat("a", managedSecretMaxBytes+1), 0o400)
-	empty := write("empty", "", 0o400)
-	symlinkTarget := write("symlink-target", "value", 0o400)
-	symlink := filepath.Join(dir, "symlink")
-	if err := os.Symlink(symlinkTarget, symlink); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
-	directory := filepath.Join(dir, "as-directory")
-	if err := os.Mkdir(directory, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
+// TestProviderSecretsReadTheAsrKeyFromTheEnvironment pins the deployment
+// contract for the one provider credential that is not Anthropic-compatible:
+// its value arrives in the node environment, and no *_API_KEY_FILE path exists
+// any more.
+func TestProviderSecretsReadTheAsrKeyFromTheEnvironment(t *testing.T) {
+	t.Setenv(managedAnthropicAPIKeyEnvName, testAnthropicSecret)
+	t.Setenv(managedVolcASRAPIKeyEnvName, "volc-from-env")
 
-	cases := []struct {
-		name     string
-		path     string
-		sentinel error
-	}{
-		{"missing path", "", errManagedSecretMissing},
-		{"absent file", filepath.Join(dir, "absent"), errManagedSecretMissing},
-		{"directory", directory, errManagedSecretNotRegular},
-		{"symlink", symlink, errManagedSecretSymlink},
-		{"group readable", groupReadable, errManagedSecretPermissions},
-		{"world readable", worldReadable, errManagedSecretPermissions},
-		{"not owner readable", notOwnerReadable, errManagedSecretNotReadable},
-		{"oversized", oversized, errManagedSecretTooLarge},
-		{"empty", empty, errManagedSecretEmpty},
+	secrets, err := loadManagedProviderSecrets(managedClaudeEndpoint{})
+	if err != nil {
+		t.Fatalf("loadManagedProviderSecrets: %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := readManagedSecretFile(tc.path, managedSecretMaxBytes)
-			if !errors.Is(err, tc.sentinel) {
-				t.Fatalf("readManagedSecretFile(%s) = %v, want %v", tc.name, err, tc.sentinel)
-			}
-			if tc.path != "" && strings.Contains(err.Error(), tc.path) {
-				t.Fatalf("error leaks the secret path: %v", err)
-			}
-		})
+	env := secrets.agentChildEnv()
+	if env[managedVolcASRAPIKeyEnvName] != "volc-from-env" {
+		t.Fatalf("agent child env = %v, want the Volcengine ASR value", env)
 	}
-
-	t.Run("newline trimmed", func(t *testing.T) {
-		got, err := readManagedSecretFile(valid, managedSecretMaxBytes)
-		if err != nil {
-			t.Fatalf("readManagedSecretFile(valid) = %v", err)
+	for name := range env {
+		if strings.HasSuffix(name, "_API_KEY_FILE") || name == "ARK_API_KEY" {
+			t.Fatalf("a retired provider variable survived: %v", env)
 		}
-		if got != "value" {
-			t.Fatalf("readManagedSecretFile(valid) = %q, want %q", got, "value")
-		}
-	})
-
-	t.Run("error never leaks the value", func(t *testing.T) {
-		leaky := write("leaky", "super-secret-leak-value", 0o644)
-		_, err := readManagedSecretFile(leaky, managedSecretMaxBytes)
-		if err == nil {
-			t.Fatal("expected a permissions error")
-		}
-		if strings.Contains(err.Error(), "super-secret-leak-value") {
-			t.Fatalf("error leaks the secret value: %v", err)
-		}
-	})
+	}
+	claude := secrets.claudeChildEnv()
+	if claude[managedAnthropicAPIKeyEnvName] != testAnthropicSecret {
+		t.Fatalf("claude child env = %v, want the Anthropic value", claude)
+	}
+	if _, ok := claude[managedVolcASRAPIKeyEnvName]; ok {
+		t.Fatalf("claude child env carries the ASR key: %v", claude)
+	}
 }
 
-// TestManagedSecretLoaderRequiresOnlyAnthropic pins the startup requirement:
-// the managed daemon is the Claude agent, so its Anthropic value is required,
-// while the other three provider tools read their credential files lazily and
-// fail closed at call time. Those three may therefore be absent at startup, and
-// their configured paths are still handed to the MCP broker.
-func TestManagedSecretLoaderRequiresOnlyAnthropic(t *testing.T) {
-	t.Run("optional providers absent", func(t *testing.T) {
-		paths := managedSecretTestPaths(t)
-		writeManagedSecretFile(t, paths.AnthropicAPIKey, testAnthropicSecret, 0o400)
-
-		secrets, err := loadManagedProviderSecrets(paths, managedClaudeEndpoint{})
-		if err != nil {
-			t.Fatalf("loadManagedProviderSecrets with optional files absent: %v", err)
-		}
-		if got := secrets.AnthropicAPIKey.Value(); got != testAnthropicSecret {
-			t.Errorf("anthropic value = %q, want the staged secret", got)
-		}
-		if secrets.ArkAPIKeyFile != paths.ArkAPIKey ||
-			secrets.VolcASRAPIKeyFile != paths.VolcASRAPIKey {
-			t.Errorf("optional provider paths were not preserved: %+v", secrets)
-		}
-	})
-
+// TestProviderSecretsRejectMissingValues pins the fail-closed half: the
+// required credential must be present, and a variable that is set but empty is
+// an operator typo rather than an absent key.
+func TestProviderSecretsRejectMissingValues(t *testing.T) {
 	t.Run("anthropic absent", func(t *testing.T) {
-		paths := managedSecretTestPaths(t)
-		writeManagedSecretFile(t, paths.ArkAPIKey, testArkSecret, 0o400)
-
-		_, err := loadManagedProviderSecrets(paths, managedClaudeEndpoint{})
+		t.Setenv(managedAnthropicAPIKeyEnvName, "placeholder")
+		if err := os.Unsetenv(managedAnthropicAPIKeyEnvName); err != nil {
+			t.Fatalf("unset %s: %v", managedAnthropicAPIKeyEnvName, err)
+		}
+		_, err := loadManagedProviderSecrets(managedClaudeEndpoint{})
 		if err == nil {
 			t.Fatal("loadManagedProviderSecrets accepted a missing Anthropic credential")
 		}
 		if !strings.Contains(err.Error(), "anthropic") {
 			t.Fatalf("error is not provider-specific: %v", err)
 		}
-		if strings.Contains(err.Error(), paths.AnthropicAPIKey) {
-			t.Fatalf("error leaks the missing path: %v", err)
+	})
+
+	t.Run("anthropic set but empty", func(t *testing.T) {
+		t.Setenv(managedAnthropicAPIKeyEnvName, "   ")
+		_, err := loadManagedProviderSecrets(managedClaudeEndpoint{})
+		if err == nil {
+			t.Fatal("loadManagedProviderSecrets accepted a set-but-empty Anthropic credential")
 		}
-		if strings.Contains(err.Error(), testArkSecret) {
+		if !strings.Contains(err.Error(), "anthropic") {
+			t.Fatalf("error is not provider-specific: %v", err)
+		}
+	})
+
+	t.Run("asr set but empty", func(t *testing.T) {
+		t.Setenv(managedAnthropicAPIKeyEnvName, testAnthropicSecret)
+		t.Setenv(managedVolcASRAPIKeyEnvName, "  ")
+		_, err := loadManagedProviderSecrets(managedClaudeEndpoint{})
+		if err == nil {
+			t.Fatal("loadManagedProviderSecrets accepted a set-but-empty ASR credential")
+		}
+		if !strings.Contains(err.Error(), "volc-asr") {
+			t.Fatalf("error is not provider-specific: %v", err)
+		}
+		if strings.Contains(err.Error(), testAnthropicSecret) {
 			t.Fatalf("error leaks a secret value: %v", err)
 		}
 	})
 }
 
-// TestManagedSecretLoaderRejectsUnsafeOptionalProvider keeps the file safety
-// checks for provider files that are present: a supplied file that is not an
-// owner-only regular file still fails startup.
-func TestManagedSecretLoaderRejectsUnsafeOptionalProvider(t *testing.T) {
-	paths := managedSecretTestPaths(t)
-	writeManagedSecretFile(t, paths.AnthropicAPIKey, testAnthropicSecret, 0o400)
-	writeManagedSecretFile(t, paths.ArkAPIKey, testArkSecret, 0o440)
-
-	_, err := loadManagedProviderSecrets(paths, managedClaudeEndpoint{})
-	if err == nil {
-		t.Fatal("loadManagedProviderSecrets accepted a group-readable optional provider file")
-	}
-	if !strings.Contains(err.Error(), "ark") {
-		t.Fatalf("error is not provider-specific: %v", err)
-	}
-	if strings.Contains(err.Error(), paths.ArkAPIKey) {
-		t.Fatalf("error leaks the path: %v", err)
-	}
-}
-
-// TestManagedSecretLoaderReadsFixedProviders pins the mapping from file to
-// struct field and that only the Anthropic value is retained as a value.
-func TestManagedSecretLoaderReadsFixedProviders(t *testing.T) {
-	paths, secrets := stageManagedProviderSecrets(t)
-	if got := secrets.AnthropicAPIKey.Value(); got != testAnthropicSecret {
-		t.Errorf("anthropic value = %q, want %q", got, testAnthropicSecret)
-	}
-	if secrets.ArkAPIKeyFile != paths.ArkAPIKey {
-		t.Errorf("ark file = %q, want %q", secrets.ArkAPIKeyFile, paths.ArkAPIKey)
-	}
-	if secrets.VolcASRAPIKeyFile != paths.VolcASRAPIKey {
-		t.Errorf("asr file = %q, want %q", secrets.VolcASRAPIKeyFile, paths.VolcASRAPIKey)
-	}
-}
-
-// TestManagedSecretChildEnvScoping proves the Anthropic value reaches only the
-// Claude child, and the two provider file paths reach only the MCP broker.
-func TestManagedSecretChildEnvScoping(t *testing.T) {
-	_, secrets := stageManagedProviderSecrets(t)
+// TestManagedProviderEnvScoping proves each credential reaches only the child
+// that needs it: the Anthropic value goes to the Claude child, the Volcengine
+// ASR value to the ordinary agent child, and neither value reaches the other.
+func TestManagedProviderEnvScoping(t *testing.T) {
+	secrets := stageManagedProviderSecrets(t)
 
 	claude := secrets.claudeChildEnv()
 	if len(claude) != 1 {
 		t.Fatalf("claude child env = %v, want only ANTHROPIC_API_KEY", claude)
 	}
-	if claude["ANTHROPIC_API_KEY"] != testAnthropicSecret {
-		t.Fatalf("claude child env value = %q, want the anthropic secret", claude["ANTHROPIC_API_KEY"])
+	if claude[managedAnthropicAPIKeyEnvName] != testAnthropicSecret {
+		t.Fatalf("claude child env value = %q, want the anthropic secret", claude[managedAnthropicAPIKeyEnvName])
 	}
-	for _, name := range []string{"ARK_API_KEY_FILE", "VOLC_ASR_API_KEY_FILE"} {
-		if _, ok := claude[name]; ok {
-			t.Errorf("claude child env carries broker name %s", name)
+	if _, ok := claude[managedVolcASRAPIKeyEnvName]; ok {
+		t.Error("claude child env carries the ASR key")
+	}
+
+	agent := secrets.agentChildEnv()
+	if len(agent) != 1 || agent[managedVolcASRAPIKeyEnvName] != testVolcASRSecret {
+		t.Fatalf("agent child env = %v, want only the ASR value", agent)
+	}
+	for _, name := range []string{"ARK_API_KEY", "ANTHROPIC_API_KEY", "ARK_API_KEY_FILE", "VOLC_ASR_API_KEY_FILE"} {
+		if _, ok := agent[name]; ok {
+			t.Errorf("agent child env carries retired name %s", name)
 		}
 	}
 }
 
+// TestAgentChildEnvOmitsAnAbsentAsrKey pins the lazy half: a deployment without
+// the speech credential adds nothing, and the transcription route fails closed
+// at call time instead of shipping an empty value.
+func TestAgentChildEnvOmitsAnAbsentAsrKey(t *testing.T) {
+	t.Setenv(managedAnthropicAPIKeyEnvName, testAnthropicSecret)
+	t.Setenv(managedVolcASRAPIKeyEnvName, "placeholder")
+	if err := os.Unsetenv(managedVolcASRAPIKeyEnvName); err != nil {
+		t.Fatalf("unset %s: %v", managedVolcASRAPIKeyEnvName, err)
+	}
+	secrets, err := loadManagedProviderSecrets(managedClaudeEndpoint{})
+	if err != nil {
+		t.Fatalf("loadManagedProviderSecrets: %v", err)
+	}
+	if env := secrets.agentChildEnv(); len(env) != 0 {
+		t.Fatalf("agent child env = %v, want nothing with an absent ASR key", env)
+	}
+}
+
 // managedClaudeTestOverrides prepares a minimal valid managed startup so a test
-// can drive LoadConfig with its own ANTHROPIC_* environment. It stages the four
-// provider secret files and returns the required overrides.
+// can drive LoadConfig with its own ANTHROPIC_* environment. It stages the two
+// provider credentials and returns the required overrides.
 func managedClaudeTestOverrides(t *testing.T) Overrides {
 	t.Helper()
 	fakeClaude := filepath.Join(t.TempDir(), "claude")
@@ -271,14 +179,14 @@ func managedClaudeTestOverrides(t *testing.T) Overrides {
 func TestManagedClaudeChildEnvUnsetKeepsOnlyCredential(t *testing.T) {
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 	t.Setenv("ANTHROPIC_MODEL", "")
-	_, secrets := stageManagedProviderSecrets(t)
+	secrets := stageManagedProviderSecrets(t)
 
 	claude := secrets.claudeChildEnv()
 	if len(claude) != 1 {
 		t.Fatalf("claude child env = %v, want only ANTHROPIC_API_KEY", claude)
 	}
-	if claude["ANTHROPIC_API_KEY"] != testAnthropicSecret {
-		t.Fatalf("claude child env value = %q, want the anthropic secret", claude["ANTHROPIC_API_KEY"])
+	if claude[managedAnthropicAPIKeyEnvName] != testAnthropicSecret {
+		t.Fatalf("claude child env value = %q, want the anthropic secret", claude[managedAnthropicAPIKeyEnvName])
 	}
 	if _, ok := claude["ANTHROPIC_BASE_URL"]; ok {
 		t.Error("claude child env carries ANTHROPIC_BASE_URL while it is unset")
@@ -304,8 +212,8 @@ func TestManagedClaudeConfigForwardsOperatorEndpoint(t *testing.T) {
 	if len(claude) != 3 {
 		t.Fatalf("claude child env = %v, want the credential, base URL, and model", claude)
 	}
-	if claude["ANTHROPIC_API_KEY"] != testAnthropicSecret {
-		t.Errorf("claude child env credential = %q, want the staged secret", claude["ANTHROPIC_API_KEY"])
+	if claude[managedAnthropicAPIKeyEnvName] != testAnthropicSecret {
+		t.Errorf("claude child env credential = %q, want the staged secret", claude[managedAnthropicAPIKeyEnvName])
 	}
 	if claude["ANTHROPIC_BASE_URL"] != baseURL {
 		t.Errorf("claude child env base URL = %q, want %q", claude["ANTHROPIC_BASE_URL"], baseURL)
@@ -374,14 +282,14 @@ func TestManagedClaudeConfigRejectsInvalidBaseURL(t *testing.T) {
 	}
 }
 
-// TestManagedSecretRedaction proves the credential value cannot render through
+// TestManagedSecretRedaction proves the credential values cannot render through
 // fmt, slog, or JSON.
 func TestManagedSecretRedaction(t *testing.T) {
-	_, secrets := stageManagedProviderSecrets(t)
+	secrets := stageManagedProviderSecrets(t)
 
 	for _, rendered := range []string{fmt.Sprint(secrets), fmt.Sprintf("%+v", secrets)} {
-		if strings.Contains(rendered, testAnthropicSecret) {
-			t.Fatalf("fmt rendering leaks the anthropic secret: %s", rendered)
+		if strings.Contains(rendered, testAnthropicSecret) || strings.Contains(rendered, testVolcASRSecret) {
+			t.Fatalf("fmt rendering leaks a provider secret: %s", rendered)
 		}
 	}
 
@@ -389,55 +297,37 @@ func TestManagedSecretRedaction(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	logger.Info("managed secrets", "secrets", secrets)
 	logged := buf.String()
-	if strings.Contains(logged, testAnthropicSecret) {
-		t.Fatalf("log output leaks the anthropic secret: %s", logged)
-	}
-	if strings.Contains(logged, secrets.ArkAPIKeyFile) {
-		t.Fatalf("log output leaks a provider secret path: %s", logged)
+	if strings.Contains(logged, testAnthropicSecret) || strings.Contains(logged, testVolcASRSecret) {
+		t.Fatalf("log output leaks a provider secret: %s", logged)
 	}
 
 	encoded, err := json.Marshal(secrets)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
-	if strings.Contains(string(encoded), testAnthropicSecret) {
-		t.Fatalf("json output leaks the anthropic secret: %s", encoded)
+	if strings.Contains(string(encoded), testAnthropicSecret) || strings.Contains(string(encoded), testVolcASRSecret) {
+		t.Fatalf("json output leaks a provider secret: %s", encoded)
 	}
 }
 
-// TestManagedSecretConfigLoadsProviderFiles proves managed startup loads and
-// scopes the four provider files through LoadConfig.
-func TestManagedSecretConfigLoadsProviderFiles(t *testing.T) {
-	fakeClaude := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write fake claude: %v", err)
-	}
-	t.Setenv("MULTICA_CLAUDE_PATH", fakeClaude)
-	t.Setenv("MULTICA_DAEMON_ID", "")
-	t.Setenv("MULTICA_LAUNCHED_BY", "")
-	paths, _ := stageManagedProviderSecrets(t)
-
-	cfg, err := LoadConfig(Overrides{
-		Managed:                    true,
-		ManagedEnrollmentTokenFile: writeManagedTokenFile(t, testManagedEnrollmentToken),
-		Foreground:                 true,
-		ServerURL:                  "http://localhost:0",
-		WorkspacesRoot:             t.TempDir(),
-	})
+// TestManagedSecretConfigLoadsProviderEnv proves managed startup loads both
+// provider credentials from the process environment through LoadConfig.
+func TestManagedSecretConfigLoadsProviderEnv(t *testing.T) {
+	cfg, err := LoadConfig(managedClaudeTestOverrides(t))
 	if err != nil {
 		t.Fatalf("LoadConfig(managed) = %v", err)
 	}
 	if got := cfg.Managed.ProviderSecrets.AnthropicAPIKey.Value(); got != testAnthropicSecret {
 		t.Errorf("loaded anthropic value = %q, want the staged secret", got)
 	}
-	if cfg.Managed.ProviderSecrets.ArkAPIKeyFile != paths.ArkAPIKey {
-		t.Errorf("loaded ark file = %q, want %q", cfg.Managed.ProviderSecrets.ArkAPIKeyFile, paths.ArkAPIKey)
+	if got := cfg.Managed.ProviderSecrets.VolcASRAPIKey.Value(); got != testVolcASRSecret {
+		t.Errorf("loaded ASR value = %q, want the staged secret", got)
 	}
 }
 
 // TestManagedSecretConfigReportsAnthropicFailure proves managed startup fails
 // without the credential the Claude agent itself needs, without echoing the
-// path or the value.
+// value.
 func TestManagedSecretConfigReportsAnthropicFailure(t *testing.T) {
 	fakeClaude := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
@@ -446,16 +336,11 @@ func TestManagedSecretConfigReportsAnthropicFailure(t *testing.T) {
 	t.Setenv("MULTICA_CLAUDE_PATH", fakeClaude)
 	t.Setenv("MULTICA_DAEMON_ID", "")
 	t.Setenv("MULTICA_LAUNCHED_BY", "")
-
-	paths := managedSecretTestPaths(t)
-	missing := filepath.Join(filepath.Dir(paths.AnthropicAPIKey), "absent-anthropic-api-key")
-	writeManagedSecretFile(t, paths.ArkAPIKey, testArkSecret, 0o400)
-	writeManagedSecretFile(t, paths.VolcASRAPIKey, testVolcASRSecret, 0o400)
-	setManagedSecretPathEnv(t, managedSecretPaths{
-		AnthropicAPIKey: missing,
-		ArkAPIKey:       paths.ArkAPIKey,
-		VolcASRAPIKey:   paths.VolcASRAPIKey,
-	})
+	t.Setenv(managedAnthropicAPIKeyEnvName, "placeholder")
+	if err := os.Unsetenv(managedAnthropicAPIKeyEnvName); err != nil {
+		t.Fatalf("unset %s: %v", managedAnthropicAPIKeyEnvName, err)
+	}
+	t.Setenv(managedVolcASRAPIKeyEnvName, testVolcASRSecret)
 
 	_, err := LoadConfig(Overrides{
 		Managed:                    true,
@@ -470,17 +355,14 @@ func TestManagedSecretConfigReportsAnthropicFailure(t *testing.T) {
 	if !strings.Contains(err.Error(), "anthropic") {
 		t.Fatalf("error is not provider-specific: %v", err)
 	}
-	if strings.Contains(err.Error(), missing) {
-		t.Fatalf("error leaks the missing provider path: %v", err)
-	}
-	if strings.Contains(err.Error(), testAnthropicSecret) {
+	if strings.Contains(err.Error(), testVolcASRSecret) {
 		t.Fatalf("error leaks a provider secret: %v", err)
 	}
 }
 
 // TestManagedSecretConfigAllowsMissingOptionalProviders proves a single-route
 // deployment starts when only the Claude credential is staged: the absent
-// provider files do not fail managed startup.
+// speech credential does not fail managed startup.
 func TestManagedSecretConfigAllowsMissingOptionalProviders(t *testing.T) {
 	fakeClaude := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
@@ -489,15 +371,11 @@ func TestManagedSecretConfigAllowsMissingOptionalProviders(t *testing.T) {
 	t.Setenv("MULTICA_CLAUDE_PATH", fakeClaude)
 	t.Setenv("MULTICA_DAEMON_ID", "")
 	t.Setenv("MULTICA_LAUNCHED_BY", "")
-
-	paths := managedSecretTestPaths(t)
-	writeManagedSecretFile(t, paths.AnthropicAPIKey, testAnthropicSecret, 0o400)
-	dir := filepath.Dir(paths.ArkAPIKey)
-	setManagedSecretPathEnv(t, managedSecretPaths{
-		AnthropicAPIKey: paths.AnthropicAPIKey,
-		ArkAPIKey:       filepath.Join(dir, "absent-ark-api-key"),
-		VolcASRAPIKey:   filepath.Join(dir, "absent-volc-asr-api-key"),
-	})
+	t.Setenv(managedAnthropicAPIKeyEnvName, testAnthropicSecret)
+	t.Setenv(managedVolcASRAPIKeyEnvName, "placeholder")
+	if err := os.Unsetenv(managedVolcASRAPIKeyEnvName); err != nil {
+		t.Fatalf("unset %s: %v", managedVolcASRAPIKeyEnvName, err)
+	}
 
 	cfg, err := LoadConfig(Overrides{
 		Managed:                    true,
@@ -507,7 +385,7 @@ func TestManagedSecretConfigAllowsMissingOptionalProviders(t *testing.T) {
 		WorkspacesRoot:             t.TempDir(),
 	})
 	if err != nil {
-		t.Fatalf("LoadConfig(managed) with optional provider files absent: %v", err)
+		t.Fatalf("LoadConfig(managed) with the optional provider absent: %v", err)
 	}
 	if got := cfg.Managed.ProviderSecrets.AnthropicAPIKey.Value(); got != testAnthropicSecret {
 		t.Errorf("loaded anthropic value = %q, want the staged secret", got)

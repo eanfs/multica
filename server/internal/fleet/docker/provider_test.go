@@ -241,7 +241,7 @@ func TestProviderEnsureTimeoutAfterCreateAdoptsWithoutDuplicate(t *testing.T) {
 }
 
 func TestNodeHostConfigIsRestricted(t *testing.T) {
-	h := NodeHostConfig(model.Spec{CPUs: 2, MemoryBytes: 4 << 30, Pids: 256, MaxRuns: 1}, true, nil, "")
+	h := NodeHostConfig(model.Spec{CPUs: 2, MemoryBytes: 4 << 30, Pids: 256, MaxRuns: 1}, true, nil)
 	if h.Privileged || h.NetworkMode == "host" || h.PidMode == "host" || len(h.PortBindings) != 0 || h.PublishAllPorts {
 		t.Fatal("unsafe isolation")
 	}
@@ -254,56 +254,8 @@ func TestNodeHostConfigIsRestricted(t *testing.T) {
 	if !reflect.DeepEqual(h.ExtraHosts, []string{"host.docker.internal:host-gateway"}) {
 		t.Fatal("Linux gateway missing")
 	}
-	if len(NodeHostConfig(model.Spec{}, false, nil, "").ExtraHosts) != 0 {
+	if len(NodeHostConfig(model.Spec{}, false, nil).ExtraHosts) != 0 {
 		t.Fatal("unrequested gateway")
-	}
-}
-
-// TestNodeHostConfigAppArmorSemantics pins the provider's apparmor option in
-// both directions: an empty profile emits no apparmor= SecurityOpt at all, while
-// a configured profile emits exactly apparmor=<name> after the seccomp option.
-func TestNodeHostConfigAppArmorSemantics(t *testing.T) {
-	spec := model.Spec{CPUs: 2, MemoryBytes: 4 << 30, Pids: 256, MaxRuns: 1}
-	base := []string{"no-new-privileges:true", "seccomp=" + testSeccompProfileJSON}
-
-	empty := auroraConfig().Aurora
-	empty.AppArmorProfile = ""
-	if got := NodeHostConfig(spec, true, empty, testSeccompProfileJSON).SecurityOpt; !reflect.DeepEqual(got, base) {
-		t.Fatalf("empty apparmor emitted an option: %v", got)
-	}
-
-	configured := auroraConfig().Aurora
-	want := append(append([]string{}, base...), "apparmor="+configured.AppArmorProfile)
-	if got := NodeHostConfig(spec, true, configured, testSeccompProfileJSON).SecurityOpt; !reflect.DeepEqual(got, want) {
-		t.Fatalf("configured apparmor = %v, want %v", got, want)
-	}
-}
-
-// TestAppArmorSecurityOptions pins the daemon capability parser against what
-// docker info reports: an option naming apparmor is support, selinux/seccomp
-// alone is not.
-func TestAppArmorSecurityOptions(t *testing.T) {
-	supported := [][]string{
-		{"name=apparmor"},
-		{"name=seccomp,profile=builtin", "name=apparmor", "name=cgroupns"},
-		{"name=AppArmor"},
-	}
-	for _, options := range supported {
-		if !appArmorInSecurityOptions(options) {
-			t.Fatalf("apparmor support missed: %v", options)
-		}
-	}
-	unsupported := [][]string{
-		nil,
-		{},
-		{"name=selinux"},
-		{"name=seccomp,profile=builtin"},
-		{"name=cgroupns"},
-	}
-	for _, options := range unsupported {
-		if appArmorInSecurityOptions(options) {
-			t.Fatalf("apparmor support invented: %v", options)
-		}
 	}
 }
 
