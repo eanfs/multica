@@ -64,6 +64,9 @@ func stageManagedProviderSecrets(t *testing.T) (managedSecretPaths, managedProvi
 	writeManagedSecretFile(t, paths.ArkAPIKey, testArkSecret+"\n", 0o400)
 	writeManagedSecretFile(t, paths.VolcASRAPIKey, testVolcASRSecret+"\n", 0o400)
 	setManagedSecretPathEnv(t, paths)
+	// Pin the provider-value environment too: an ARK_API_KEY exported on the
+	// developer's machine must not change what these tests load.
+	t.Setenv(managedArkAPIKeyEnvName, testArkSecret)
 	secrets, err := loadManagedProviderSecrets(paths, managedClaudeEndpoint{})
 	if err != nil {
 		t.Fatalf("loadManagedProviderSecrets: %v", err)
@@ -261,6 +264,55 @@ func TestManagedSecretChildEnvScoping(t *testing.T) {
 		if value == testAnthropicSecret {
 			t.Error("mcp broker env carries the Anthropic credential value")
 		}
+	}
+}
+
+// TestAgentEnvCarriesTheProviderKeys pins the ordinary-agent credential shape:
+// the managed agent child receives the provider VALUE its own shell steps read,
+// and never the broker's ARK_API_KEY_FILE path. The value comes from the node's
+// environment, which the Fleet injects at deploy time.
+func TestAgentEnvCarriesTheProviderKeys(t *testing.T) {
+	paths := managedSecretTestPaths(t)
+	writeManagedSecretFile(t, paths.AnthropicAPIKey, testAnthropicSecret, 0o400)
+	t.Setenv(managedArkAPIKeyEnvName, "ark-from-env")
+
+	secrets, err := loadManagedProviderSecrets(paths, managedClaudeEndpoint{})
+	if err != nil {
+		t.Fatalf("loadManagedProviderSecrets: %v", err)
+	}
+
+	env := managedAgentCredentialEnv(secrets, auroraExecutionProvider)
+	if env["ARK_API_KEY"] != "ark-from-env" {
+		t.Fatalf("agent child env ARK_API_KEY = %q, want the environment value", env["ARK_API_KEY"])
+	}
+	if _, ok := env["ARK_API_KEY_FILE"]; ok {
+		t.Fatalf("agent child env still carries ARK_API_KEY_FILE: %v", env)
+	}
+	if env["ANTHROPIC_API_KEY"] != testAnthropicSecret {
+		t.Fatalf("agent child env lost the Anthropic credential: %v", env)
+	}
+	if other := managedAgentCredentialEnv(secrets, "codex"); len(other) != 0 {
+		t.Fatalf("a non-Aurora provider received managed credentials: %v", other)
+	}
+}
+
+// TestProviderEnvValueRejectsEmpty pins the fail-closed half of the environment
+// credential read: a variable that is set but empty is an operator typo, not an
+// absent key, and must stop the load instead of shipping an empty credential.
+func TestProviderEnvValueRejectsEmpty(t *testing.T) {
+	paths := managedSecretTestPaths(t)
+	writeManagedSecretFile(t, paths.AnthropicAPIKey, testAnthropicSecret, 0o400)
+	t.Setenv(managedArkAPIKeyEnvName, "  ")
+
+	_, err := loadManagedProviderSecrets(paths, managedClaudeEndpoint{})
+	if err == nil {
+		t.Fatal("loadManagedProviderSecrets accepted a set-but-empty ARK_API_KEY")
+	}
+	if !strings.Contains(err.Error(), "ark") {
+		t.Fatalf("error is not provider-specific: %v", err)
+	}
+	if strings.Contains(err.Error(), testAnthropicSecret) {
+		t.Fatalf("error leaks a secret value: %v", err)
 	}
 }
 
