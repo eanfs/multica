@@ -168,8 +168,6 @@ var auroraArtifactRoles = map[string]bool{"primary": true, "supporting": true, "
 var auroraManifestProducersByRoute = map[string]string{
 	"volcengine-seedream":        "byted-ark-seedream-skill",
 	"volcengine-seedance":        "byted-ark-seedance-skill",
-	"openai-images":              "openai-images",
-	"openai-images-edit":         "openai-images",
 	"volcengine-asr":             "volcengine-asr",
 	"volcengine-asr-hyperframes": "volcengine-asr",
 	"local-id-photo":             "multica-aurora-runtime",

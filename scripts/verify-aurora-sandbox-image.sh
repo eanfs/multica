@@ -328,7 +328,7 @@ generated="$(find /workspace /opt/aurora -xdev -name 'aurora-artifacts.v1.json' 
 if [ -e /run/secrets ]; then fail "image contains /run/secrets"; fi
 echo "GENERATED ok"
 
-for pkg in @anthropic-ai/claude-code @modelcontextprotocol/sdk hyperframes openai; do
+for pkg in @anthropic-ai/claude-code @modelcontextprotocol/sdk hyperframes; do
   v="$(node -e "process.stdout.write(require('/opt/aurora/runtime/node_modules/$pkg/package.json').version)" 2>/dev/null || echo MISSING)"
   echo "PKG $pkg $v"
 done
@@ -348,7 +348,7 @@ echo "VENDOR_TREE_HASH $stored"
 
 node -e "const {createRequire}=require('node:module');const r=createRequire('/opt/aurora/vendor/volcengine/');const m=r('/opt/aurora/vendor/volcengine/byted-ark-seedream-skill/scripts/seedream-broker.js');if(typeof m.generate!=='function'){console.error('seedream-broker generate missing');process.exit(3);}console.log('SELFTEST seedream-broker ok');"
 node -e "const {createRequire}=require('node:module');const r=createRequire('/opt/aurora/vendor/volcengine/');const m=r('/opt/aurora/vendor/volcengine/byted-ark-seedance-skill/scripts/seedance-broker.js');if(typeof m.createTask!=='function'||typeof m.pollTask!=='function'){console.error('seedance-broker createTask/pollTask missing');process.exit(3);}console.log('SELFTEST seedance-broker ok');"
-node --input-type=module -e "const m=await import('/opt/aurora/runtime/deploy/aurora-sandbox/runtime/src/server.mjs');if(!Array.isArray(m.TOOL_NAMES)||m.TOOL_NAMES.length!==9){console.error('broker tool count',m.TOOL_NAMES&&m.TOOL_NAMES.length);process.exit(4);}console.log('SELFTEST broker tools='+m.TOOL_NAMES.length);"
+node --input-type=module -e "const m=await import('/opt/aurora/runtime/deploy/aurora-sandbox/runtime/src/server.mjs');if(!Array.isArray(m.TOOL_NAMES)||m.TOOL_NAMES.length!==8){console.error('broker tool count',m.TOOL_NAMES&&m.TOOL_NAMES.length);process.exit(4);}console.log('SELFTEST broker tools='+m.TOOL_NAMES.length);"
 echo "SELFTEST ok"
 INSPECT
 

@@ -20,7 +20,7 @@ function fakeSeedreamThatFails(seen) {
   };
 }
 
-test('a Seedream provider failure never calls OpenAI, ASR, or the importer', async () => {
+test('a Seedream provider failure never calls a second provider, ASR, or the importer', async () => {
   const ws = makeWorkspace();
   const imageBytes = pngBytes(20);
   writeInput(ws, 'ref.png', imageBytes);
@@ -48,7 +48,6 @@ test('a Seedream provider failure never calls OpenAI, ASR, or the importer', asy
     serverOrigin: 'https://multica.test',
     secretPaths: {
       ark: path.join(ws.secrets, 'ark-api-key'),
-      openai: path.join(ws.secrets, 'openai-api-key'),
       volcAsr: path.join(ws.secrets, 'volc-asr-api-key'),
       taskToken: path.join(ws.secrets, 'task-token'),
     },

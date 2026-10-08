@@ -57,7 +57,6 @@ const (
 	// files there read-only and never passes a credential value.
 	AuroraAnthropicAPIKeyTarget = "/run/secrets/anthropic-api-key"
 	AuroraArkAPIKeyTarget       = "/run/secrets/ark-api-key"
-	AuroraOpenAIAPIKeyTarget    = "/run/secrets/openai-api-key"
 	AuroraVolcASRAPIKeyTarget   = "/run/secrets/volc-asr-api-key"
 
 	// AuroraWorkspaceMount, AuroraTmpMount and AuroraRunMount are the fixed
@@ -75,7 +74,7 @@ var enrollmentTokenPattern = regexp.MustCompile("^mse_[0-9a-f]{40}$")
 
 // providerSecretOrder fixes the mount order so one configuration always yields
 // one deterministic container specification.
-var providerSecretOrder = []string{"anthropic-api-key", "ark-api-key", "openai-api-key", "volc-asr-api-key"}
+var providerSecretOrder = []string{"anthropic-api-key", "ark-api-key", "volc-asr-api-key"}
 
 // ProviderSecretTargets maps each accepted ProviderSecretFiles key to its fixed
 // in-container destination. Keys outside this map are rejected by Validate, so a
@@ -83,7 +82,6 @@ var providerSecretOrder = []string{"anthropic-api-key", "ark-api-key", "openai-a
 var ProviderSecretTargets = map[string]string{
 	"anthropic-api-key": AuroraAnthropicAPIKeyTarget,
 	"ark-api-key":       AuroraArkAPIKeyTarget,
-	"openai-api-key":    AuroraOpenAIAPIKeyTarget,
 	"volc-asr-api-key":  AuroraVolcASRAPIKeyTarget,
 }
 

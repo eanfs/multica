@@ -68,10 +68,6 @@ on:
         description: Run the real Volcengine ASR smoke (spends provider quota)
         type: boolean
         default: false
-      real_smoke_openai_images:
-        description: Run the real OpenAI generation and edit smoke (spends provider quota)
-        type: boolean
-        default: false
       real_smoke_hyperframes_captions:
         description: Run the real HyperFrames caption smoke (spends provider quota)
         type: boolean
@@ -678,57 +674,6 @@ jobs:
         with:
           name: aurora-real-smoke-smoke-volc-asr
           path: ${{ runner.temp }}/aurora-smoke-smoke-volc-asr.log
-          retention-days: 30
-          if-no-files-found: warn
-
-  smoke-openai-images:
-    name: Real smoke (OpenAI generation and edit)
-    if: github.event_name == 'workflow_dispatch' && inputs.real_smoke_openai_images
-    needs: verify
-    runs-on: ubuntu-latest
-    environment: aurora-provider-smoke
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - name: Setup Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: "1.26.x"
-          check-latest: true
-          cache-dependency-path: server/go.sum
-      - name: Materialize the provider credential file
-        env:
-          PROVIDER_API_KEY: ${{ secrets.AURORA_SMOKE_OPENAI_API_KEY }}
-        run: |
-          set -euo pipefail
-          credential="$RUNNER_TEMP/openai-api-key"
-          umask 077
-          printf '%s' "$PROVIDER_API_KEY" > "$credential"
-          test -s "$credential"
-          chmod 0400 "$credential"
-      - name: Run the gated OpenAI generation and edit smoke
-        env:
-          AURORA_SMOKE_BASE_URL: ${{ vars.AURORA_SMOKE_BASE_URL }}
-          AURORA_SMOKE_API_TOKEN: ${{ secrets.AURORA_SMOKE_API_TOKEN }}
-          AURORA_SANDBOX_IMAGE: ${{ vars.AURORA_SANDBOX_IMAGE }}
-          AURORA_SMOKE_WORKSPACE_ID: ${{ vars.AURORA_SMOKE_WORKSPACE_ID }}
-          AURORA_RUN_OPENAI_IMAGE_SMOKE: "1"
-          AURORA_SMOKE_OPENAI_KEY_FILE: ${{ runner.temp }}/openai-api-key
-        run: |
-          set -euo pipefail
-          report="$RUNNER_TEMP/aurora-smoke-smoke-openai-images.log"
-          cd server
-          MULTICA_RUN_REAL_AGENT_SMOKE=1 go test -tags=agentintegration ./pkg/agent -run '^TestAuroraSandboxRealProviderSmoke$' -count=1 -v 2>&1 | tee "$report"
-      - name: Upload sanitized smoke report
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: aurora-real-smoke-smoke-openai-images
-          path: ${{ runner.temp }}/aurora-smoke-smoke-openai-images.log
           retention-days: 30
           if-no-files-found: warn
 

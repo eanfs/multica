@@ -1,6 +1,6 @@
 // MCP entry point for the narrow Aurora sandbox broker.
 //
-// The broker exposes exactly nine named tools. There is no Bash, browser, or
+// The broker exposes exactly eight named tools. There is no Bash, browser, or
 // arbitrary-file tool, and no tool may name a provider, model, origin, or
 // callback.
 
@@ -30,7 +30,6 @@ import { createHttpProxyFetch, createProviderFetch, createProcessRunner } from '
 import { createHttpImporter, normalizeImporter } from './importer.mjs';
 import { seedreamGenerate } from './tools/seedream.mjs';
 import { seedanceGenerate } from './tools/seedance.mjs';
-import { openaiImage } from './tools/openai-images.mjs';
 import { volcAsrTranscribe } from './tools/volc-asr.mjs';
 import { readDocument } from './tools/documents.mjs';
 import { idPhoto } from './tools/id-photo.mjs';
@@ -43,7 +42,6 @@ const require = createRequire(import.meta.url);
 export const TOOL_NAMES = Object.freeze([
   'aurora.seedream_generate',
   'aurora.seedance_generate',
-  'aurora.openai_image',
   'aurora.volc_asr_transcribe',
   'aurora.read_document',
   'aurora.id_photo',
@@ -55,7 +53,6 @@ export const TOOL_NAMES = Object.freeze([
 const TOOL_ARGUMENTS = Object.freeze({
   'aurora.seedream_generate': ['prompt', 'attachment_ids', 'output_name'],
   'aurora.seedance_generate': ['prompt', 'attachment_ids', 'output_name'],
-  'aurora.openai_image': ['prompt', 'attachment_ids', 'output_name'],
   'aurora.volc_asr_transcribe': ['attachment_id', 'output_name'],
   'aurora.read_document': ['attachment_id'],
   'aurora.id_photo': ['attachment_id', 'output_name'],
@@ -67,7 +64,6 @@ const TOOL_ARGUMENTS = Object.freeze({
 const TOOL_HANDLERS = Object.freeze({
   'aurora.seedream_generate': seedreamGenerate,
   'aurora.seedance_generate': seedanceGenerate,
-  'aurora.openai_image': openaiImage,
   'aurora.volc_asr_transcribe': volcAsrTranscribe,
   'aurora.read_document': readDocument,
   'aurora.id_photo': idPhoto,
@@ -184,7 +180,6 @@ export function createBroker(options = {}) {
     transport: { providerFetch },
     secrets: {
       ark: secretReader('ark', 'ARK'),
-      openai: secretReader('openai', 'OpenAI'),
       volcAsr: secretReader('volcAsr', 'Volcengine ASR'),
     },
     models: { ...DEFAULT_MODELS, ...(options.models || {}) },
@@ -221,7 +216,6 @@ export function createBroker(options = {}) {
 const TOOL_SCHEMAS = {
   'aurora.seedream_generate': { prompt: z.string().optional(), attachment_ids: z.array(z.string()).optional(), output_name: z.string().optional() },
   'aurora.seedance_generate': { prompt: z.string().optional(), attachment_ids: z.array(z.string()).optional(), output_name: z.string().optional() },
-  'aurora.openai_image': { prompt: z.string().optional(), attachment_ids: z.array(z.string()).optional(), output_name: z.string().optional() },
   'aurora.volc_asr_transcribe': { attachment_id: z.string(), output_name: z.string().optional() },
   'aurora.read_document': { attachment_id: z.string() },
   'aurora.id_photo': { attachment_id: z.string(), output_name: z.string().optional() },
@@ -265,7 +259,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     importerPath: process.env.AURORA_ARTIFACT_IMPORT_PATH,
     secretPaths: {
       ark: process.env.ARK_API_KEY_FILE || DEFAULT_SECRET_PATHS.ark,
-      openai: process.env.OPENAI_API_KEY_FILE || DEFAULT_SECRET_PATHS.openai,
       volcAsr: process.env.VOLC_ASR_API_KEY_FILE || DEFAULT_SECRET_PATHS.volcAsr,
       taskToken: process.env.AURORA_TASK_TOKEN_FILE || DEFAULT_SECRET_PATHS.taskToken,
     },

@@ -121,17 +121,15 @@ func TestAuroraProviderSecretMountsAreReadOnly(t *testing.T) {
 	cfg.Aurora.ProviderSecretFiles = map[string]string{
 		"anthropic-api-key": "/etc/multica/aurora/anthropic-api-key",
 		"ark-api-key":       "/etc/multica/aurora/ark-api-key",
-		"openai-api-key":    "/etc/multica/aurora/openai-api-key",
 		"volc-asr-api-key":  "/etc/multica/aurora/volc-asr-api-key",
 	}
 	mounts := providerSecretMounts(cfg.Aurora)
-	if len(mounts) != 4 {
+	if len(mounts) != 3 {
 		t.Fatalf("mounts = %d", len(mounts))
 	}
 	want := map[string]string{
 		"/etc/multica/aurora/anthropic-api-key": model.AuroraAnthropicAPIKeyTarget,
 		"/etc/multica/aurora/ark-api-key":       model.AuroraArkAPIKeyTarget,
-		"/etc/multica/aurora/openai-api-key":    model.AuroraOpenAIAPIKeyTarget,
 		"/etc/multica/aurora/volc-asr-api-key":  model.AuroraVolcASRAPIKeyTarget,
 	}
 	for _, m := range mounts {

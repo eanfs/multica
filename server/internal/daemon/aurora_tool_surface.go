@@ -65,7 +65,6 @@ var auroraDisallowedTools = []string{
 var auroraToolArgumentHints = map[string]string{
 	"aurora.seedream_generate":     `{"prompt": <optional; omit to use this run's prompt>, "attachment_ids": [<staged image ids to use as references>], "output_name": <optional>}`,
 	"aurora.seedance_generate":     `{"prompt": <optional; omit to use this run's prompt>, "attachment_ids": [<staged image ids to use as references>], "output_name": <optional>}`,
-	"aurora.openai_image":          `{"prompt": <optional; omit to use this run's prompt>, "attachment_ids": [<staged image ids to use as references>], "output_name": <optional>}`,
 	"aurora.id_photo":              `{"attachment_id": "<the staged image id>", "output_name": <optional>}`,
 	"aurora.volc_asr_transcribe":   `{"attachment_id": "<the staged audio or video id>", "output_name": <optional>}`,
 	"aurora.read_document":         `{"attachment_id": "<the staged document id>"}`,

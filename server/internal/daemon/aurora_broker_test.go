@@ -167,7 +167,6 @@ func TestAuroraBrokerMcpConfigShape(t *testing.T) {
 		ContextPath:    "/data/workspaces/abc/workdir/.multica/aurora-broker/task-context.json",
 		TaskTokenPath:  "/data/workspaces/abc/workdir/.multica/aurora-broker/task-token",
 		ArkKeyFile:     auroraBrokerArkKeyFile,
-		OpenAIKeyFile:  auroraBrokerOpenAIKeyFile,
 		VolcASRKeyFile: auroraBrokerVolcASRKeyFile,
 	}
 
@@ -206,7 +205,6 @@ func TestAuroraBrokerMcpConfigShape(t *testing.T) {
 		"AURORA_OUTPUT_ROOT":          auroraSandboxOutputRoot,
 		"AURORA_ARTIFACT_IMPORT_PATH": "/api/agent/tasks/" + bc.TaskID + "/aurora-artifacts/import",
 		"ARK_API_KEY_FILE":            auroraBrokerArkKeyFile,
-		"OPENAI_API_KEY_FILE":         auroraBrokerOpenAIKeyFile,
 		"VOLC_ASR_API_KEY_FILE":       auroraBrokerVolcASRKeyFile,
 		"AURORA_TASK_TOKEN_FILE":      bc.TaskTokenPath,
 	}
@@ -260,7 +258,6 @@ func TestAuroraBrokerProxyEnv(t *testing.T) {
 		ContextPath:    "/data/workspaces/abc/workdir/.multica/aurora-broker/task-context.json",
 		TaskTokenPath:  "/data/workspaces/abc/workdir/.multica/aurora-broker/task-token",
 		ArkKeyFile:     auroraBrokerArkKeyFile,
-		OpenAIKeyFile:  auroraBrokerOpenAIKeyFile,
 		VolcASRKeyFile: auroraBrokerVolcASRKeyFile,
 	}
 	raw, err := auroraBrokerMcpConfig(bc, want)
@@ -305,7 +302,6 @@ func TestAuroraBrokerMcpConfigFailsClosed(t *testing.T) {
 		ContextPath:    "/data/workspaces/abc/workdir/.multica/aurora-broker/task-context.json",
 		TaskTokenPath:  "/data/workspaces/abc/workdir/.multica/aurora-broker/task-token",
 		ArkKeyFile:     auroraBrokerArkKeyFile,
-		OpenAIKeyFile:  auroraBrokerOpenAIKeyFile,
 		VolcASRKeyFile: auroraBrokerVolcASRKeyFile,
 	}
 

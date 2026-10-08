@@ -65,7 +65,6 @@ export const LOCKED = {
     "@anthropic-ai/claude-code": "2.1.282",
     "@modelcontextprotocol/sdk": "1.30.1",
     hyperframes: "0.8.75",
-    openai: "7.23.0",
   },
   runtime_workspace_dependencies: { zod: "catalog:" },
   esbuild_source: {

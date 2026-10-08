@@ -9,10 +9,7 @@ export const POLICY_VERSION = 'aurora-sandbox-skill-runtime/v1';
 export const PROVIDER_ORIGINS = Object.freeze({
   ark: 'https://ark.cn-beijing.volces.com',
   volcAsr: 'https://openspeech.bytedance.com',
-  openai: 'https://api.openai.com',
 });
-
-export const OPENAI_BASE_URL = 'https://api.openai.com/v1';
 
 export const ARK_PATHS = Object.freeze({
   seedreamGenerate: '/api/plan/v3/images/generations',
@@ -27,23 +24,15 @@ export const ASR = Object.freeze({
   successStatus: '20000000',
 });
 
-export const OPENAI_PATHS = Object.freeze({
-  generate: '/v1/images/generations',
-  edit: '/v1/images/edits',
-});
-
 export const PROVIDER_RUN_OPERATIONS = Object.freeze({
   seedream: 'seedream.generate',
   seedance: 'seedance.create',
-  openaiGenerate: 'images.generate',
-  openaiEdit: 'images.edit',
   asr: 'asr.recognize',
 });
 
 export const ALLOWED_MODELS = Object.freeze({
   seedream: Object.freeze(['doubao-seedream-5.0-lite', 'doubao-seedream-5.0-pro']),
   seedance: Object.freeze(['doubao-seedance-2.0', 'doubao-seedance-2.0-fast', 'doubao-seedance-2.0-mini', 'doubao-seedance-2.5']),
-  openai: Object.freeze(['gpt-image-2.5-sunburst', 'gpt-image-2.5-flare']),
   asr: Object.freeze(['bigmodel']),
 });
 
@@ -51,7 +40,6 @@ export const ALLOWED_MODELS = Object.freeze({
 export const DEFAULT_MODELS = Object.freeze({
   seedream: 'doubao-seedream-5.0-pro',
   seedance: 'doubao-seedance-2.0',
-  openai: 'gpt-image-2.5-sunburst',
   asr: 'bigmodel',
 });
 
@@ -107,9 +95,9 @@ const KIND_TYPES = Object.freeze({
 export const SKILL_ROUTES = Object.freeze({
   poster: { route: 'seedream', tools: ['aurora.seedream_generate'], prompt: [1, 3000], attachments: { min: 0, max: 4, kinds: ['image'] } },
   'xhs-image': { route: 'seedream', tools: ['aurora.seedream_generate'], prompt: [1, 3000], attachments: { min: 0, max: 4, kinds: ['image'] } },
-  'product-image': { route: 'openai-images', tools: ['aurora.openai_image'], prompt: [1, 3000], attachments: { min: 0, max: 4, kinds: ['image'] } },
+  'product-image': { route: 'seedream', tools: ['aurora.seedream_generate'], prompt: [1, 3000], attachments: { min: 0, max: 4, kinds: ['image'] } },
   'text-image': { route: 'seedream', tools: ['aurora.seedream_generate'], prompt: [1, 3000], attachments: { min: 0, max: 0, kinds: [] } },
-  'image-edit': { route: 'openai-images-edit', tools: ['aurora.openai_image'], prompt: [1, 3000], attachments: { min: 1, max: 4, kinds: ['image'] } },
+  'image-edit': { route: 'seedream', tools: ['aurora.seedream_generate'], prompt: [1, 3000], attachments: { min: 1, max: 4, kinds: ['image'] } },
   'id-photo': { route: 'local-id-photo', tools: ['aurora.id_photo'], prompt: [1, 3000], attachments: { min: 1, max: 1, kinds: ['image'] } },
   'image-video': { route: 'seedance', tools: ['aurora.seedance_generate'], prompt: [1, 3000], attachments: { min: 1, max: 1, kinds: ['image'] } },
   'text-video': { route: 'seedance', tools: ['aurora.seedance_generate'], prompt: [1, 3000], attachments: { min: 0, max: 0, kinds: [] } },
@@ -125,7 +113,6 @@ export const AVAILABLE_SKILLS = Object.freeze(Object.keys(SKILL_ROUTES));
 export const VENDOR_PRODUCERS = Object.freeze({
   seedream: Object.freeze({ id: 'byted-ark-seedream-skill', version: '4.0.0', tree_sha256: 'sha256:aac297142496fe2f07f3c4d9a8d792110c5bad871a515f72b1374bbde3a1fc0d' }),
   seedance: Object.freeze({ id: 'byted-ark-seedance-skill', version: '5.0.0', tree_sha256: null }),
-  openai: Object.freeze({ id: 'openai-images', version: '7.23.0', tree_sha256: null }),
   asr: Object.freeze({ id: 'volcengine-asr', version: '1.0.0', tree_sha256: null }),
   local: Object.freeze({ id: 'multica-aurora-runtime', version: '1.0.0', tree_sha256: null }),
 });
@@ -177,7 +164,6 @@ export function producerForSkill(skillId) {
   if (!policy) return VENDOR_PRODUCERS.local;
   if (policy.route === 'seedream') return VENDOR_PRODUCERS.seedream;
   if (policy.route === 'seedance') return VENDOR_PRODUCERS.seedance;
-  if (policy.route === 'openai-images' || policy.route === 'openai-images-edit') return VENDOR_PRODUCERS.openai;
   if (policy.route === 'volcengine-asr' || policy.route === 'volcengine-asr-hyperframes') return VENDOR_PRODUCERS.asr;
   return VENDOR_PRODUCERS.local;
 }

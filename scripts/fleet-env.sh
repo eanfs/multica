@@ -52,7 +52,7 @@ need(Array.isArray(aurora.egress_hosts)&&aurora.egress_hosts.every(h=>typeof h==
 // Operator pins: a bare lowercase DNS host already in the compiled or configured
 // allowlist, mapped to 1..8 public bare IP addresses. A pin narrows DNS for one
 // already-allowed host and can never add a host, port or IP-literal target.
-const compiledProviderHosts=['api.anthropic.com:443','ark.cn-beijing.volces.com:443','api.openai.com:443','openspeech.bytedance.com:443'];
+const compiledProviderHosts=['api.anthropic.com:443','ark.cn-beijing.volces.com:443','openspeech.bytedance.com:443'];
 const egressPins=aurora.egress_pins;need(egressPins&&typeof egressPins==='object'&&!Array.isArray(egressPins));
 const pinnedHosts=new Set([...compiledProviderHosts,...aurora.egress_hosts]);
 for(const [host,addresses] of Object.entries(egressPins)){
@@ -76,7 +76,7 @@ for(const [key,value] of Object.entries(claudeEnv)){
  if(key==='API_TIMEOUT_MS')need(/^[0-9]+$/.test(value));
 }
 const secretFiles=aurora.provider_secret_files;need(secretFiles&&typeof secretFiles==='object'&&!Array.isArray(secretFiles));
-const secretTargets=['anthropic-api-key','ark-api-key','openai-api-key','volc-asr-api-key'];need(Object.keys(secretFiles).every(k=>secretTargets.includes(k)));
+const secretTargets=['anthropic-api-key','ark-api-key','volc-asr-api-key'];need(Object.keys(secretFiles).every(k=>secretTargets.includes(k)));
 for(const source of Object.values(secretFiles)){need(typeof source==='string');if(source!=='')need(path.isAbsolute(source)&&path.normalize(source)===source&&!/[\x00-\x20\x7f-\x9f]/.test(source));}
  const api=new URL(input.api_url);need(api.protocol==='http:'&&api.hostname==='host.docker.internal'&&Number(api.port)===apiPort&&!api.username&&!api.password&&!api.search&&!api.hash&&api.pathname==='/');
  const key=readPrivate(input.service_key_file);need(key.trim().length>=32&&key.trim().length<=4096&&!/[\x00-\x20\x7f]/.test(key.trim()));

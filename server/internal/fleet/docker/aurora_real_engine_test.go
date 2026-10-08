@@ -308,7 +308,7 @@ func TestAuroraNodeAdmissionRealEngineDesktopBindSources(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	secretSources := map[string]string{}
-	for _, key := range []string{"anthropic-api-key", "ark-api-key", "openai-api-key", "volc-asr-api-key"} {
+	for _, key := range []string{"anthropic-api-key", "ark-api-key", "volc-asr-api-key"} {
 		hostPath := filepath.Join(dir, key)
 		if err := os.WriteFile(hostPath, []byte("fixture-"+key), 0o600); err != nil {
 			cli.Close()
