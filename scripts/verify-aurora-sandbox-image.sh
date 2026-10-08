@@ -328,7 +328,7 @@ generated="$(find /workspace /opt/aurora -xdev -name 'aurora-artifacts.v1.json' 
 if [ -e /run/secrets ]; then fail "image contains /run/secrets"; fi
 echo "GENERATED ok"
 
-for pkg in @anthropic-ai/claude-code @modelcontextprotocol/sdk hyperframes openai; do
+for pkg in @anthropic-ai/claude-code @modelcontextprotocol/sdk hyperframes; do
   v="$(node -e "process.stdout.write(require('/opt/aurora/runtime/node_modules/$pkg/package.json').version)" 2>/dev/null || echo MISSING)"
   echo "PKG $pkg $v"
 done

@@ -41,7 +41,6 @@ const (
 	// The provider key files are the read-only binds the Fleet node mounts at
 	// the fixed /run/secrets paths (see the Runtime source defaults).
 	auroraBrokerArkKeyFile     = "/run/secrets/ark-api-key"
-	auroraBrokerOpenAIKeyFile  = "/run/secrets/openai-api-key"
 	auroraBrokerVolcASRKeyFile = "/run/secrets/volc-asr-api-key"
 
 	// The context and token files the daemon writes under the task workdir. The
@@ -183,7 +182,6 @@ type auroraBrokerContext struct {
 	ContextPath    string
 	TaskTokenPath  string
 	ArkKeyFile     string
-	OpenAIKeyFile  string
 	VolcASRKeyFile string
 }
 
@@ -253,7 +251,6 @@ func auroraBrokerEnv(bc auroraBrokerContext, proxyEnv map[string]string) map[str
 		"AURORA_OUTPUT_ROOT":          bc.OutputRoot,
 		"AURORA_ARTIFACT_IMPORT_PATH": auroraBrokerImportPath(bc.TaskID),
 		"ARK_API_KEY_FILE":            bc.ArkKeyFile,
-		"OPENAI_API_KEY_FILE":         bc.OpenAIKeyFile,
 		"VOLC_ASR_API_KEY_FILE":       bc.VolcASRKeyFile,
 		"AURORA_TASK_TOKEN_FILE":      bc.TaskTokenPath,
 	}
@@ -281,7 +278,6 @@ func auroraBrokerMcpConfig(bc auroraBrokerContext, proxyEnv map[string]string) (
 		{"input root", bc.InputRoot},
 		{"output root", bc.OutputRoot},
 		{"ark key file", bc.ArkKeyFile},
-		{"openai key file", bc.OpenAIKeyFile},
 		{"volc asr key file", bc.VolcASRKeyFile},
 	}
 	for _, field := range required {
@@ -426,7 +422,6 @@ func (d *Daemon) writeAuroraBrokerContext(ctx context.Context, task Task, env ex
 		ContextPath:    contextPath,
 		TaskTokenPath:  tokenPath,
 		ArkKeyFile:     auroraBrokerArkKeyFile,
-		OpenAIKeyFile:  auroraBrokerOpenAIKeyFile,
 		VolcASRKeyFile: auroraBrokerVolcASRKeyFile,
 	}, nil
 }

@@ -16,7 +16,6 @@ import (
 const (
 	managedAnthropicAPIKeyPath = "/run/secrets/anthropic-api-key"
 	managedArkAPIKeyPath       = "/run/secrets/ark-api-key"
-	managedOpenAIAPIKeyPath    = "/run/secrets/openai-api-key"
 	managedVolcASRAPIKeyPath   = "/run/secrets/volc-asr-api-key"
 )
 
@@ -43,7 +42,6 @@ var (
 type managedSecretPaths struct {
 	AnthropicAPIKey string
 	ArkAPIKey       string
-	OpenAIAPIKey    string
 	VolcASRAPIKey   string
 }
 
@@ -52,7 +50,6 @@ func defaultManagedSecretPaths() managedSecretPaths {
 	return managedSecretPaths{
 		AnthropicAPIKey: managedAnthropicAPIKeyPath,
 		ArkAPIKey:       managedArkAPIKeyPath,
-		OpenAIAPIKey:    managedOpenAIAPIKeyPath,
 		VolcASRAPIKey:   managedVolcASRAPIKeyPath,
 	}
 }
@@ -64,7 +61,6 @@ func managedSecretPathsFromEnv() managedSecretPaths {
 	return managedSecretPaths{
 		AnthropicAPIKey: envOrDefault("ANTHROPIC_API_KEY_FILE", defaults.AnthropicAPIKey),
 		ArkAPIKey:       envOrDefault("ARK_API_KEY_FILE", defaults.ArkAPIKey),
-		OpenAIAPIKey:    envOrDefault("OPENAI_API_KEY_FILE", defaults.OpenAIAPIKey),
 		VolcASRAPIKey:   envOrDefault("VOLC_ASR_API_KEY_FILE", defaults.VolcASRAPIKey),
 	}
 }
@@ -161,7 +157,6 @@ type managedProviderSecrets struct {
 	AnthropicBaseURL  string
 	AnthropicModel    string
 	ArkAPIKeyFile     string
-	OpenAIAPIKeyFile  string
 	VolcASRAPIKeyFile string
 }
 
@@ -194,11 +189,10 @@ func (s managedProviderSecrets) claudeChildEnv() map[string]string {
 }
 
 // mcpBrokerChildEnv returns the environment additions for the MCP broker only:
-// the three fixed provider file paths, never the values.
+// the two fixed provider file paths, never the values.
 func (s managedProviderSecrets) mcpBrokerChildEnv() map[string]string {
 	return map[string]string{
 		"ARK_API_KEY_FILE":      s.ArkAPIKeyFile,
-		"OPENAI_API_KEY_FILE":   s.OpenAIAPIKeyFile,
 		"VOLC_ASR_API_KEY_FILE": s.VolcASRAPIKeyFile,
 	}
 }
@@ -213,7 +207,6 @@ func (s managedProviderSecrets) LogValue() slog.Value {
 		slog.Bool("anthropic_base_url", s.AnthropicBaseURL != ""),
 		slog.Bool("anthropic_model", s.AnthropicModel != ""),
 		slog.Bool("ark_api_key_file", s.ArkAPIKeyFile != ""),
-		slog.Bool("openai_api_key_file", s.OpenAIAPIKeyFile != ""),
 		slog.Bool("volc_asr_api_key_file", s.VolcASRAPIKeyFile != ""),
 	)
 }
@@ -226,7 +219,6 @@ func (s managedProviderSecrets) MarshalJSON() ([]byte, error) {
 		AnthropicBaseURL  string `json:"anthropic_base_url"`
 		AnthropicModel    string `json:"anthropic_model"`
 		ArkAPIKeyFile     string `json:"ark_api_key_file"`
-		OpenAIAPIKeyFile  string `json:"openai_api_key_file"`
 		VolcASRAPIKeyFile string `json:"volc_asr_api_key_file"`
 	}
 	return json.Marshal(wire{
@@ -234,7 +226,6 @@ func (s managedProviderSecrets) MarshalJSON() ([]byte, error) {
 		AnthropicBaseURL:  s.AnthropicBaseURL,
 		AnthropicModel:    s.AnthropicModel,
 		ArkAPIKeyFile:     s.ArkAPIKeyFile,
-		OpenAIAPIKeyFile:  s.OpenAIAPIKeyFile,
 		VolcASRAPIKeyFile: s.VolcASRAPIKeyFile,
 	})
 }
@@ -297,7 +288,6 @@ func loadManagedProviderSecrets(paths managedSecretPaths, endpoint managedClaude
 		path     string
 	}{
 		{"ark", paths.ArkAPIKey},
-		{"openai", paths.OpenAIAPIKey},
 		{"volc-asr", paths.VolcASRAPIKey},
 	} {
 		if _, err := readManagedSecretFile(optional.path, managedSecretMaxBytes); err != nil && !errors.Is(err, errManagedSecretMissing) {
@@ -309,7 +299,6 @@ func loadManagedProviderSecrets(paths managedSecretPaths, endpoint managedClaude
 		AnthropicBaseURL:  endpoint.BaseURL,
 		AnthropicModel:    endpoint.Model,
 		ArkAPIKeyFile:     paths.ArkAPIKey,
-		OpenAIAPIKeyFile:  paths.OpenAIAPIKey,
 		VolcASRAPIKeyFile: paths.VolcASRAPIKey,
 	}, nil
 }

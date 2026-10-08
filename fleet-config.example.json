@@ -20,7 +20,6 @@
     "egress_hosts": [
       "api.anthropic.com:443",
       "ark.cn-beijing.volces.com:443",
-      "api.openai.com:443",
       "openspeech.bytedance.com:443"
     ],
     "egress_pins": {},
@@ -30,7 +29,6 @@
     "provider_secret_files": {
       "anthropic-api-key": "/etc/multica/aurora/anthropic-api-key",
       "ark-api-key": "/etc/multica/aurora/ark-api-key",
-      "openai-api-key": "/etc/multica/aurora/openai-api-key",
       "volc-asr-api-key": "/etc/multica/aurora/volc-asr-api-key"
     },
     "readonly_rootfs": true,

@@ -66,18 +66,18 @@ var executionPolicies = map[string]SkillExecutionPolicy{
 		RequiredTools: []string{"aurora.seedream_generate"},
 	},
 	"product-image": {
-		Route:         "openai-images",
+		Route:         "volcengine-seedream",
 		Attachments:   imageConstraint(0, 4),
-		RequiredTools: []string{"aurora.openai_image"},
+		RequiredTools: []string{"aurora.seedream_generate"},
 	},
 	"text-image": {
 		Route:         "volcengine-seedream",
 		RequiredTools: []string{"aurora.seedream_generate"},
 	},
 	"image-edit": {
-		Route:         "openai-images-edit",
+		Route:         "volcengine-seedream",
 		Attachments:   imageConstraint(1, 4),
-		RequiredTools: []string{"aurora.openai_image"},
+		RequiredTools: []string{"aurora.seedream_generate"},
 	},
 	"id-photo": {
 		Route:         "local-id-photo",

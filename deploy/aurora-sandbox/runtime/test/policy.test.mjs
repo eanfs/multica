@@ -33,8 +33,8 @@ test('each skill maps to exactly its fixed provider tool route', () => {
   assert.deepEqual(allowedToolsForSkill('poster'), ['aurora.seedream_generate']);
   assert.deepEqual(allowedToolsForSkill('xhs-image'), ['aurora.seedream_generate']);
   assert.deepEqual(allowedToolsForSkill('text-image'), ['aurora.seedream_generate']);
-  assert.deepEqual(allowedToolsForSkill('product-image'), ['aurora.openai_image']);
-  assert.deepEqual(allowedToolsForSkill('image-edit'), ['aurora.openai_image']);
+  assert.deepEqual(allowedToolsForSkill('product-image'), ['aurora.seedream_generate']);
+  assert.deepEqual(allowedToolsForSkill('image-edit'), ['aurora.seedream_generate']);
   assert.deepEqual(allowedToolsForSkill('id-photo'), ['aurora.id_photo']);
   assert.deepEqual(allowedToolsForSkill('image-video'), ['aurora.seedance_generate']);
   assert.deepEqual(allowedToolsForSkill('text-video'), ['aurora.seedance_generate']);
@@ -46,7 +46,7 @@ test('each skill maps to exactly its fixed provider tool route', () => {
 });
 
 test('provider choice is not substitutable', () => {
-  assert.throws(() => assertToolAllowed('poster', 'aurora.openai_image'), /not allowed/);
+  assert.throws(() => assertToolAllowed('poster', 'aurora.volc_asr_transcribe'), /not allowed/);
   assert.throws(() => assertToolAllowed('id-photo', 'aurora.seedream_generate'), /not allowed/);
   assert.throws(() => assertToolAllowed('not-a-skill', 'aurora.seedream_generate'), /not allowed/);
   assert.equal(assertToolAllowed('poster', 'aurora.seedream_generate'), true);
@@ -55,14 +55,11 @@ test('provider choice is not substitutable', () => {
 test('provider origins, endpoints, and models are compiled fixed values', () => {
   assert.equal(PROVIDER_ORIGINS.ark, 'https://ark.cn-beijing.volces.com');
   assert.equal(PROVIDER_ORIGINS.volcAsr, 'https://openspeech.bytedance.com');
-  assert.equal(PROVIDER_ORIGINS.openai, 'https://api.openai.com');
   assert.deepEqual(ALLOWED_MODELS.seedream, ['doubao-seedream-5.0-lite', 'doubao-seedream-5.0-pro']);
   assert.ok(ALLOWED_MODELS.seedance.includes('doubao-seedance-2.0'));
   assert.ok(!ALLOWED_MODELS.seedance.some((m) => /1\.5/.test(m)));
-  assert.equal(ALLOWED_MODELS.openai.includes('gpt-image-2.5-sunburst'), true);
   assert.ok(ALLOWED_MODELS.seedream.includes(DEFAULT_MODELS.seedream));
   assert.ok(ALLOWED_MODELS.seedance.includes(DEFAULT_MODELS.seedance));
-  assert.ok(ALLOWED_MODELS.openai.includes(DEFAULT_MODELS.openai));
 });
 
 test('attachment kinds are derived from extension and MIME only', () => {

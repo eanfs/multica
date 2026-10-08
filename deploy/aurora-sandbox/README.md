@@ -18,9 +18,9 @@ evaluates the security boundary (AppArmor, seccomp, cgroups, and the kernel
 gates). Docker Desktop on macOS is a functional developer smoke only: it can
 run the fake-provider pipelines but it cannot assert the Linux isolation
 guarantees. The managed image never runs with provider credentials baked in;
-the four provider secrets are host files mounted read-only at
+the three provider secrets are host files mounted read-only at
 `/run/secrets/anthropic-api-key`, `/run/secrets/ark-api-key`,
-`/run/secrets/openai-api-key`, and `/run/secrets/volc-asr-api-key`.
+and `/run/secrets/volc-asr-api-key`.
 
 ## Locked inputs
 
@@ -195,7 +195,7 @@ and never run by default:
 2. each subtest checks its own opt-in before reading its credential file:
    `AURORA_RUN_CLAUDE_SMOKE`, `AURORA_RUN_SEEDREAM_SMOKE`,
    `AURORA_RUN_SEEDANCE_SMOKE`, `AURORA_RUN_VOLC_ASR_SMOKE`,
-   `AURORA_RUN_OPENAI_IMAGE_SMOKE`, `AURORA_RUN_HYPERFRAMES_SMOKE`, and
+   `AURORA_RUN_HYPERFRAMES_SMOKE`, and
    `AURORA_RUN_CHROMIUM_SMOKE`.
 
 There is no run-everything switch: a missing opt-in skips its subtest before
@@ -221,7 +221,6 @@ Configuration:
 | `AURORA_SMOKE_ANTHROPIC_KEY_FILE` | Mode-0400 Anthropic credential file |
 | `AURORA_SMOKE_ARK_KEY_FILE` | Mode-0400 Volcengine ARK credential file |
 | `AURORA_SMOKE_VOLC_ASR_KEY_FILE` | Mode-0400 Volcengine ASR credential file |
-| `AURORA_SMOKE_OPENAI_KEY_FILE` | Mode-0400 OpenAI credential file |
 
 Run one subtest directly only when authorized and when the credential and live
 stack exist:

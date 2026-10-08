@@ -20,7 +20,6 @@ export const DEFAULT_OUTPUT_ROOT = '/workspace/output';
 
 export const DEFAULT_SECRET_PATHS = Object.freeze({
   ark: '/run/secrets/ark-api-key',
-  openai: '/run/secrets/openai-api-key',
   volcAsr: '/run/secrets/volc-asr-api-key',
   taskToken: '/run/secrets/task-token',
 });

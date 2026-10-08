@@ -8,8 +8,8 @@
 //
 // The per-skill chain this suite proves:
 //   poster/xhs-image/text-image -> Ark Seedream only
-//   product-image               -> OpenAI generation with no image, edit with image
-//   image-edit                  -> OpenAI edit only
+//   product-image               -> Ark Seedream, with reference images when supplied
+//   image-edit                  -> Ark Seedream with reference images only
 //   id-photo                    -> local tool only
 //   image-video/text-video      -> Ark Seedance create once + poll only
 //   video-captions              -> Volc ASR then HyperFrames
@@ -39,7 +39,10 @@ import {
 } from './helpers.mjs';
 
 const ARK = PROVIDER_ORIGINS.ark;
-const OPENAI = PROVIDER_ORIGINS.openai;
+// The OpenAI route was removed: provenance, request shape, and provider counts
+// are only asserted for the two live image/video providers, and any call to the
+// retired OpenAI origin is counted into its own group so it cannot hide.
+const OPENAI = 'https://api.openai.com';
 const ASR = PROVIDER_ORIGINS.volcAsr;
 const EXTERNAL_ID = 'cgt-20260926120000-matrix1';
 const B64 = Buffer.from('matrix-png-output').toString('base64');
@@ -152,7 +155,6 @@ function defaultHandlers() {
 function writeSecrets(ws) {
   const secrets = {
     'ark-api-key': 'ark-matrix-key-abcdef',
-    'openai-api-key': 'sk-matrix-openai',
     'volc-asr-api-key': 'asr-matrix-key',
     'task-token': 'mat-matrix-task-token',
   };
@@ -166,7 +168,6 @@ function writeSecrets(ws) {
 function secretPaths(ws) {
   return {
     ark: path.join(ws.secrets, 'ark-api-key'),
-    openai: path.join(ws.secrets, 'openai-api-key'),
     volcAsr: path.join(ws.secrets, 'volc-asr-api-key'),
     taskToken: path.join(ws.secrets, 'task-token'),
   };
@@ -248,11 +249,11 @@ function skillScenario(ws, skillId, options = {}) {
       return { attachments: {}, run: (broker) => broker.dispatch('aurora.seedream_generate', { prompt: 'matrix text to image' }) };
     case 'product-image':
       if (options.mode === 'edit') {
-        return { attachments: image(), run: (broker) => broker.dispatch('aurora.openai_image', { prompt: 'matrix product edit', attachment_ids: [IMAGE_ID] }) };
+        return { attachments: image(), run: (broker) => broker.dispatch('aurora.seedream_generate', { prompt: 'matrix product edit', attachment_ids: [IMAGE_ID] }) };
       }
-      return { attachments: {}, run: (broker) => broker.dispatch('aurora.openai_image', { prompt: 'matrix product generation' }) };
+      return { attachments: {}, run: (broker) => broker.dispatch('aurora.seedream_generate', { prompt: 'matrix product generation' }) };
     case 'image-edit':
-      return { attachments: image(), run: (broker) => broker.dispatch('aurora.openai_image', { prompt: 'matrix edit', attachment_ids: [IMAGE_ID] }) };
+      return { attachments: image(), run: (broker) => broker.dispatch('aurora.seedream_generate', { prompt: 'matrix edit', attachment_ids: [IMAGE_ID] }) };
     case 'id-photo':
       return { attachments: image(), run: (broker) => broker.dispatch('aurora.id_photo', { attachment_id: IMAGE_ID, output_name: 'id.png' }) };
     case 'image-video':
@@ -338,8 +339,8 @@ const ROUTE = {
   poster: 'seedream',
   'xhs-image': 'seedream',
   'text-image': 'seedream',
-  'product-image': 'openai',
-  'image-edit': 'openai',
+  'product-image': 'seedream',
+  'image-edit': 'seedream',
   'id-photo': 'local',
   'image-video': 'seedance',
   'text-video': 'seedance',
@@ -354,7 +355,6 @@ const ROUTE = {
 // every other route makes exactly one call to exactly one provider.
 const ROUTE_COUNTS = {
   seedream: { ark: 1, openai: 0, asr: 0 },
-  openai: { ark: 0, openai: 1, asr: 0 },
   seedance: { ark: 2, openai: 0, asr: 0 },
   asr: { ark: 0, openai: 0, asr: 1 },
   local: { ark: 0, openai: 0, asr: 0 },
@@ -364,8 +364,8 @@ const MANIFEST = {
   poster: { producer: 'byted-ark-seedream-skill', kinds: ['image'] },
   'xhs-image': { producer: 'byted-ark-seedream-skill', kinds: ['image'] },
   'text-image': { producer: 'byted-ark-seedream-skill', kinds: ['image'] },
-  'product-image': { producer: 'openai-images', kinds: ['image'] },
-  'image-edit': { producer: 'openai-images', kinds: ['image'] },
+  'product-image': { producer: 'byted-ark-seedream-skill', kinds: ['image'] },
+  'image-edit': { producer: 'byted-ark-seedream-skill', kinds: ['image'] },
   'id-photo': { producer: 'multica-aurora-runtime', kinds: ['image'] },
   'image-video': { producer: 'byted-ark-seedance-skill', kinds: ['video'] },
   'text-video': { producer: 'byted-ark-seedance-skill', kinds: ['video'] },
@@ -423,8 +423,8 @@ test('the fixed route table covers exactly the thirteen available skills with re
   }
 });
 
-test('the MCP broker exposes exactly nine named tools, none general purpose', () => {
-  assert.equal(TOOL_NAMES.length, 9);
+test('the MCP broker exposes exactly eight named tools, none general purpose', () => {
+  assert.equal(TOOL_NAMES.length, 8);
   for (const tool of TOOL_NAMES) {
     assert.match(tool, /^aurora\.[a-z_]+$/);
   }
@@ -520,7 +520,6 @@ test('video-captions chains the ASR transcript into the caption renderer without
 
 const FAILURE_ROUTES = [
   { route: 'seedream', group: 'ark', skill: 'poster' },
-  { route: 'openai', group: 'openai', skill: 'product-image' },
   { route: 'seedance', group: 'ark', skill: 'image-video' },
   { route: 'asr', group: 'asr', skill: 'transcription' },
 ];
@@ -544,12 +543,6 @@ function failureHandler(group, mode) {
     if (group === 'asr') {
       return () => jsonResponse({ result: { text: 'x'.repeat(MAX_PROVIDER_BYTES + 128) } }, 200, { 'x-api-status-code': '20000000' });
     }
-    if (group === 'openai') {
-      // Base64 decodes to ~3/4 of its length, so this is just over the 25 MiB
-      // per-artifact image cap the manifest contract defines.
-      const oversizedBase64 = 'A'.repeat(36 * 1024 * 1024);
-      return () => jsonResponse({ created: 1, data: [{ b64_json: oversizedBase64 }] });
-    }
     return () => jsonResponse({ data: 'x'.repeat(MAX_PROVIDER_BYTES + 128) });
   }
   const status = Number(mode);
@@ -557,10 +550,6 @@ function failureHandler(group, mode) {
     return () => jsonResponse({ message: 'provider failure' }, status);
   }
   return () => jsonResponse({ error: 'provider failure', status }, status);
-}
-
-function isSelectedGroup(route, group) {
-  return route === 'openai' ? group === 'openai' : group === 'ark' || group === 'asr';
 }
 
 for (const failure of FAILURE_ROUTES) {
@@ -582,19 +571,6 @@ for (const failure of FAILURE_ROUTES) {
         }
       }
       assert.ok(counts[failure.group] >= 1, 'the selected provider was never contacted');
-      assert.equal(isSelectedGroup(failure.route, failure.group), true);
     });
   }
 }
-
-// The OpenAI route returns base64 output, so its response is not bounded by the
-// small descriptor cap. The adapter bounds each decoded image at the manifest
-// contract's 25 MiB per-artifact image limit; just over that must fail closed.
-test('an OpenAI image above the 25 MiB per-artifact cap fails closed', async () => {
-  const ws = makeWorkspace();
-  const router = createRouter({ openai: failureHandler('openai', 'oversized') });
-  const scenario = prepareScenario(ws, 'product-image', { router });
-  await assert.rejects(scenario.run(scenario.broker), /25 MiB|artifact cap|exceeds/i);
-  assert.deepEqual(scenario.router.counts(), { ark: 0, openai: 1, asr: 0 });
-  assert.equal(scenario.router.groups.other.length, 0);
-});

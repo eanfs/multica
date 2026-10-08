@@ -15,7 +15,6 @@ import (
 const (
 	testAnthropicSecret = "sk-ant-managed-test-anthropic-value"
 	testArkSecret       = "ark-managed-test-value"
-	testOpenAISecret    = "sk-openai-managed-test-value"
 	testVolcASRSecret   = "asr-managed-test-value"
 )
 
@@ -42,7 +41,6 @@ func managedSecretTestPaths(t *testing.T) managedSecretPaths {
 	return managedSecretPaths{
 		AnthropicAPIKey: filepath.Join(dir, "anthropic-api-key"),
 		ArkAPIKey:       filepath.Join(dir, "ark-api-key"),
-		OpenAIAPIKey:    filepath.Join(dir, "openai-api-key"),
 		VolcASRAPIKey:   filepath.Join(dir, "volc-asr-api-key"),
 	}
 }
@@ -53,11 +51,10 @@ func setManagedSecretPathEnv(t *testing.T, paths managedSecretPaths) {
 	t.Helper()
 	t.Setenv("ANTHROPIC_API_KEY_FILE", paths.AnthropicAPIKey)
 	t.Setenv("ARK_API_KEY_FILE", paths.ArkAPIKey)
-	t.Setenv("OPENAI_API_KEY_FILE", paths.OpenAIAPIKey)
 	t.Setenv("VOLC_ASR_API_KEY_FILE", paths.VolcASRAPIKey)
 }
 
-// stageManagedProviderSecrets writes the four valid provider secret files,
+// stageManagedProviderSecrets writes the three valid provider secret files,
 // points the env overrides at them, and loads them through the production
 // loader.
 func stageManagedProviderSecrets(t *testing.T) (managedSecretPaths, managedProviderSecrets) {
@@ -65,7 +62,6 @@ func stageManagedProviderSecrets(t *testing.T) (managedSecretPaths, managedProvi
 	paths := managedSecretTestPaths(t)
 	writeManagedSecretFile(t, paths.AnthropicAPIKey, testAnthropicSecret+"\n", 0o400)
 	writeManagedSecretFile(t, paths.ArkAPIKey, testArkSecret+"\n", 0o400)
-	writeManagedSecretFile(t, paths.OpenAIAPIKey, testOpenAISecret+"\n", 0o400)
 	writeManagedSecretFile(t, paths.VolcASRAPIKey, testVolcASRSecret+"\n", 0o400)
 	setManagedSecretPathEnv(t, paths)
 	secrets, err := loadManagedProviderSecrets(paths, managedClaudeEndpoint{})
@@ -168,7 +164,6 @@ func TestManagedSecretLoaderRequiresOnlyAnthropic(t *testing.T) {
 			t.Errorf("anthropic value = %q, want the staged secret", got)
 		}
 		if secrets.ArkAPIKeyFile != paths.ArkAPIKey ||
-			secrets.OpenAIAPIKeyFile != paths.OpenAIAPIKey ||
 			secrets.VolcASRAPIKeyFile != paths.VolcASRAPIKey {
 			t.Errorf("optional provider paths were not preserved: %+v", secrets)
 		}
@@ -224,16 +219,13 @@ func TestManagedSecretLoaderReadsFixedProviders(t *testing.T) {
 	if secrets.ArkAPIKeyFile != paths.ArkAPIKey {
 		t.Errorf("ark file = %q, want %q", secrets.ArkAPIKeyFile, paths.ArkAPIKey)
 	}
-	if secrets.OpenAIAPIKeyFile != paths.OpenAIAPIKey {
-		t.Errorf("openai file = %q, want %q", secrets.OpenAIAPIKeyFile, paths.OpenAIAPIKey)
-	}
 	if secrets.VolcASRAPIKeyFile != paths.VolcASRAPIKey {
 		t.Errorf("asr file = %q, want %q", secrets.VolcASRAPIKeyFile, paths.VolcASRAPIKey)
 	}
 }
 
 // TestManagedSecretChildEnvScoping proves the Anthropic value reaches only the
-// Claude child, and the three provider file paths reach only the MCP broker.
+// Claude child, and the two provider file paths reach only the MCP broker.
 func TestManagedSecretChildEnvScoping(t *testing.T) {
 	_, secrets := stageManagedProviderSecrets(t)
 
@@ -244,19 +236,18 @@ func TestManagedSecretChildEnvScoping(t *testing.T) {
 	if claude["ANTHROPIC_API_KEY"] != testAnthropicSecret {
 		t.Fatalf("claude child env value = %q, want the anthropic secret", claude["ANTHROPIC_API_KEY"])
 	}
-	for _, name := range []string{"ARK_API_KEY_FILE", "OPENAI_API_KEY_FILE", "VOLC_ASR_API_KEY_FILE"} {
+	for _, name := range []string{"ARK_API_KEY_FILE", "VOLC_ASR_API_KEY_FILE"} {
 		if _, ok := claude[name]; ok {
 			t.Errorf("claude child env carries broker name %s", name)
 		}
 	}
 
 	broker := secrets.mcpBrokerChildEnv()
-	if len(broker) != 3 {
-		t.Fatalf("mcp broker env = %v, want the three provider file paths", broker)
+	if len(broker) != 2 {
+		t.Fatalf("mcp broker env = %v, want the two provider file paths", broker)
 	}
 	for name, want := range map[string]string{
 		"ARK_API_KEY_FILE":      secrets.ArkAPIKeyFile,
-		"OPENAI_API_KEY_FILE":   secrets.OpenAIAPIKeyFile,
 		"VOLC_ASR_API_KEY_FILE": secrets.VolcASRAPIKeyFile,
 	} {
 		if broker[name] != want {
@@ -379,8 +370,8 @@ func TestManagedMcpBrokerChildEnvIgnoresOperatorEndpoint(t *testing.T) {
 		t.Fatalf("LoadConfig(managed) = %v", err)
 	}
 	broker := cfg.Managed.ProviderSecrets.mcpBrokerChildEnv()
-	if len(broker) != 3 {
-		t.Fatalf("mcp broker env = %v, want the three provider file paths", broker)
+	if len(broker) != 2 {
+		t.Fatalf("mcp broker env = %v, want the two provider file paths", broker)
 	}
 	for _, name := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"} {
 		if _, ok := broker[name]; ok {
@@ -501,12 +492,10 @@ func TestManagedSecretConfigReportsAnthropicFailure(t *testing.T) {
 	paths := managedSecretTestPaths(t)
 	missing := filepath.Join(filepath.Dir(paths.AnthropicAPIKey), "absent-anthropic-api-key")
 	writeManagedSecretFile(t, paths.ArkAPIKey, testArkSecret, 0o400)
-	writeManagedSecretFile(t, paths.OpenAIAPIKey, testOpenAISecret, 0o400)
 	writeManagedSecretFile(t, paths.VolcASRAPIKey, testVolcASRSecret, 0o400)
 	setManagedSecretPathEnv(t, managedSecretPaths{
 		AnthropicAPIKey: missing,
 		ArkAPIKey:       paths.ArkAPIKey,
-		OpenAIAPIKey:    paths.OpenAIAPIKey,
 		VolcASRAPIKey:   paths.VolcASRAPIKey,
 	})
 
@@ -549,7 +538,6 @@ func TestManagedSecretConfigAllowsMissingOptionalProviders(t *testing.T) {
 	setManagedSecretPathEnv(t, managedSecretPaths{
 		AnthropicAPIKey: paths.AnthropicAPIKey,
 		ArkAPIKey:       filepath.Join(dir, "absent-ark-api-key"),
-		OpenAIAPIKey:    filepath.Join(dir, "absent-openai-api-key"),
 		VolcASRAPIKey:   filepath.Join(dir, "absent-volc-asr-api-key"),
 	})
 

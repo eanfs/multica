@@ -79,16 +79,6 @@ var auroraProviderRunPolicies = map[string]auroraProviderRunPolicy{
 			"doubao-seedance-2.5",
 		},
 	},
-	"openai-images": {
-		Provider:   "openai",
-		Operations: []string{"images.generate", "images.edit"},
-		Models:     []string{"gpt-image-2.5-sunburst", "gpt-image-2.5-flare"},
-	},
-	"openai-images-edit": {
-		Provider:   "openai",
-		Operations: []string{"images.edit"},
-		Models:     []string{"gpt-image-2.5-sunburst", "gpt-image-2.5-flare"},
-	},
 	"volcengine-asr": {
 		Provider:   "volcengine-asr",
 		Operations: []string{"asr.recognize"},

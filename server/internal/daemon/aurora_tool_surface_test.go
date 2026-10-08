@@ -309,7 +309,6 @@ func TestAuroraBrokerMCPToolNameMirrorsClaudeSanitizer(t *testing.T) {
 var auroraCanonicalBrokerMethods = []string{
 	"aurora.seedream_generate",
 	"aurora.seedance_generate",
-	"aurora.openai_image",
 	"aurora.volc_asr_transcribe",
 	"aurora.read_document",
 	"aurora.id_photo",

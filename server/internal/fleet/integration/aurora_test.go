@@ -570,7 +570,7 @@ func testRealBrokerAllowedTools(ctx context.Context, t *testing.T) {
 			t.Fatalf("mkdir %s: %v", d, err)
 		}
 	}
-	secretValues := map[string]string{"ark": "ark-fixture", "openai": "openai-fixture", "volc": "volc-fixture"}
+	secretValues := map[string]string{"ark": "ark-fixture", "volc": "volc-fixture"}
 	secretPaths := map[string]string{}
 	for key, value := range secretValues {
 		p := filepath.Join(secretsDir, key)
@@ -611,7 +611,6 @@ func testRealBrokerAllowedTools(ctx context.Context, t *testing.T) {
 		"AURORA_OUTPUT_ROOT="+outputRoot,
 		"AURORA_ARTIFACT_IMPORT_PATH=/api/agent/tasks/44444444-4444-4444-8444-444444444444/aurora-artifacts/import",
 		"ARK_API_KEY_FILE="+secretPaths["ark"],
-		"OPENAI_API_KEY_FILE="+secretPaths["openai"],
 		"VOLC_ASR_API_KEY_FILE="+secretPaths["volc"],
 		"AURORA_TASK_TOKEN_FILE="+tokenPath,
 		"HOME="+dir,
@@ -689,7 +688,6 @@ func testRealBrokerAllowedTools(ctx context.Context, t *testing.T) {
 	sort.Strings(got)
 	want := []string{
 		"aurora.id_photo",
-		"aurora.openai_image",
 		"aurora.read_document",
 		"aurora.render_resume",
 		"aurora.render_video_captions",

@@ -46,7 +46,6 @@ function setup(ws) {
     contextPath,
     secretPaths: {
       ark: path.join(ws.secrets, 'ark-api-key'),
-      openai: path.join(ws.secrets, 'openai-api-key'),
       volcAsr: path.join(ws.secrets, 'volc-asr-api-key'),
       taskToken: path.join(ws.secrets, 'task-token'),
     },

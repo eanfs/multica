@@ -1,4 +1,4 @@
-// MCP surface contract: exactly the nine named tools are registered and callable.
+// MCP surface contract: exactly the eight named tools are registered and callable.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -22,7 +22,6 @@ async function connectedClient() {
     serverOrigin: 'https://multica.test',
     secretPaths: {
       ark: path.join(ws.secrets, 'ark-api-key'),
-      openai: path.join(ws.secrets, 'openai-api-key'),
       volcAsr: path.join(ws.secrets, 'volc-asr-api-key'),
       taskToken: path.join(ws.secrets, 'task-token'),
     },
@@ -40,7 +39,7 @@ async function connectedClient() {
   return { client, broker, ws };
 }
 
-test('the MCP server exposes exactly the nine Aurora methods', async () => {
+test('the MCP server exposes exactly the eight Aurora methods', async () => {
   const { client } = await connectedClient();
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [...TOOL_NAMES].sort());

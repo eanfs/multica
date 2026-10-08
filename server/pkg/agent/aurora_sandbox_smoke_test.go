@@ -155,12 +155,27 @@ func auroraSmokeProviders() []auroraSmokeProvider {
 			secretEnv: "AURORA_SMOKE_ARK_KEY_FILE",
 			provider:  "volcengine-ark",
 			model:     "doubao-seedream-5.0-pro",
-			operations: []auroraSmokeOperation{{
-				skillID: "xhs-image",
-				kind:    "image",
-				formats: []string{"png", "jpg", "jpeg", "webp"},
-				prompt:  "One low-count 2K image of a single reusable water bottle on a plain background.",
-			}},
+			operations: []auroraSmokeOperation{
+				{
+					skillID: "xhs-image",
+					kind:    "image",
+					formats: []string{"png", "jpg", "jpeg", "webp"},
+					prompt:  "One low-count 2K image of a single reusable water bottle on a plain background.",
+				},
+				{
+					skillID: "product-image",
+					kind:    "image",
+					formats: []string{"png", "jpg", "jpeg", "webp"},
+					prompt:  "One low-count image of a reusable water bottle on a plain background.",
+				},
+				{
+					skillID:     "image-edit",
+					kind:        "image",
+					formats:     []string{"png", "jpg", "jpeg", "webp"},
+					attachments: []string{auroraSmokeImageFixture},
+					prompt:      "Recolor the object in the reference image to a single flat color.",
+				},
+			},
 		},
 		{
 			name:      "seedance-video",
@@ -192,28 +207,6 @@ func auroraSmokeProviders() []auroraSmokeProvider {
 				attachments: []string{auroraSmokeWAVFixture},
 				prompt:      "Transcribe this short audio clip.",
 			}},
-		},
-		{
-			name:      "openai-images",
-			optIn:     "AURORA_RUN_OPENAI_IMAGE_SMOKE",
-			secretEnv: "AURORA_SMOKE_OPENAI_KEY_FILE",
-			provider:  "openai",
-			model:     "gpt-image-2.5-sunburst",
-			operations: []auroraSmokeOperation{
-				{
-					skillID: "product-image",
-					kind:    "image",
-					formats: []string{"png", "jpg", "jpeg", "webp"},
-					prompt:  "One low-count image of a reusable water bottle on a plain background.",
-				},
-				{
-					skillID:     "image-edit",
-					kind:        "image",
-					formats:     []string{"png", "jpg", "jpeg", "webp"},
-					attachments: []string{auroraSmokeImageFixture},
-					prompt:      "Recolor the object in the reference image to a single flat color.",
-				},
-			},
 		},
 		{
 			name:      "hyperframes-captions",
