@@ -156,10 +156,11 @@ func (a AuroraConfig) Validate() error {
 	// ordinary agent that calls the providers directly; their values are
 	// supplied at deploy time and must never reach the image, SQL, logs, or Git.
 	for key, value := range a.ClaudeEnv {
-		if isSecretClaudeEnvKey(key) && !providerEnvNames[key] {
+		provider := providerEnvNames[key]
+		if !provider && isSecretClaudeEnvKey(key) {
 			return fmt.Errorf("%w: aurora claude_env must never carry a credential", ErrInvalidRequest)
 		}
-		if !claudeCodeEnvAllowlist[key] && !providerEnvNames[key] {
+		if !provider && !claudeCodeEnvAllowlist[key] {
 			return fmt.Errorf("%w: aurora claude_env key is not in the fixed allowlist", ErrInvalidRequest)
 		}
 		if !validClaudeEnvValue(key, value) {
@@ -208,7 +209,7 @@ var claudeCodeEnvAllowlist = map[string]bool{
 // the image, SQL, logs, or Git.
 //
 // ANTHROPIC_API_KEY is the Ark Agent Plan key: the Ark key is
-// Anthropic-Messages-compatible, so the image and video skills reuse it
+// Anthropic-Messages-compatible, so the image, video and text skills reuse it
 // (decision 5) instead of a separate ARK_API_KEY. OPENAI_API_KEY is deliberately
 // absent: the OpenAI route is gone (decision 10). Only the Volcengine speech
 // endpoint is not Anthropic-compatible, so VOLC_ASR_API_KEY is the single
@@ -273,7 +274,7 @@ func ValidAnthropicBaseURL(raw string) bool {
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.User != nil ||
-		u.Host == "" || u.Hostname() == "" || strings.ContainsAny(u.Host, ", 	") || u.Port() != "" {
+		u.Host == "" || u.Hostname() == "" || strings.ContainsAny(u.Host, ", \t") || u.Port() != "" {
 		return false
 	}
 	if u.Opaque != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.RawPath != "" && u.RawPath != u.Path) {

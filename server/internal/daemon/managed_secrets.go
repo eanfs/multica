@@ -90,7 +90,7 @@ func validateManagedAnthropicBaseURL(raw string) error {
 	if parsed.User != nil {
 		return errManagedBaseURLUserInfo
 	}
-	if parsed.Host == "" || parsed.Hostname() == "" || strings.ContainsAny(parsed.Host, ", 	") {
+	if parsed.Host == "" || parsed.Hostname() == "" || strings.ContainsAny(parsed.Host, ", \t") {
 		return errManagedBaseURLHost
 	}
 	if parsed.RawQuery != "" {
@@ -201,13 +201,13 @@ func (s managedProviderSecrets) MarshalJSON() ([]byte, error) {
 }
 
 // readManagedProviderEnvValue reads one provider credential from the node's own
-// environment. An unset variable is absent - the route that needs it fails
-// closed at call time - while a variable that is set and empty is an operator
-// typo and stops the load instead of shipping an empty credential.
+// environment. An unset variable is missing, while a variable that is set and
+// empty is an operator typo; the reader owns that distinction so the required
+// caller treats both as fatal and the optional caller tolerates only missing.
 func readManagedProviderEnvValue(name string) (string, error) {
 	raw, ok := os.LookupEnv(name)
 	if !ok {
-		return "", nil
+		return "", errManagedEnvMissing
 	}
 	value := strings.TrimSpace(raw)
 	if value == "" {
@@ -221,19 +221,16 @@ func readManagedProviderEnvValue(name string) (string, error) {
 // value is required at startup: the managed daemon is the Claude agent and
 // cannot start without its own credential, and that same credential is what an
 // Aurora skill's shell steps call the Ark provider with (decision 5). The
-// Volcengine speech key is read lazily, so an absent variable is tolerated -
-// the route that needs it fails closed when it is invoked - while a set-but-
-// empty value is rejected. Every error names only the provider, never the value.
+// Volcengine speech key is optional, so an absent variable is tolerated - the
+// route that needs it fails closed when it is invoked - while a set-but-empty
+// value is rejected. Every error names only the provider, never the value.
 func loadManagedProviderSecrets(endpoint managedClaudeEndpoint) (managedProviderSecrets, error) {
 	anthropic, err := readManagedProviderEnvValue(managedAnthropicAPIKeyEnvName)
 	if err != nil {
 		return managedProviderSecrets{}, fmt.Errorf("managed mode requires the anthropic provider credential: %w", err)
 	}
-	if anthropic == "" {
-		return managedProviderSecrets{}, fmt.Errorf("managed mode requires the anthropic provider credential: %w", errManagedEnvMissing)
-	}
 	volcASR, err := readManagedProviderEnvValue(managedVolcASRAPIKeyEnvName)
-	if err != nil {
+	if err != nil && !errors.Is(err, errManagedEnvMissing) {
 		return managedProviderSecrets{}, fmt.Errorf("managed mode provider credential volc-asr is invalid: %w", err)
 	}
 	return managedProviderSecrets{

@@ -268,7 +268,7 @@ func TestValidateEgressSidecarHostGateway(t *testing.T) {
 		host := wantHost
 		return container.InspectResponse{
 			ContainerJSONBase: &container.ContainerJSONBase{ID: "egress-id", HostConfig: &host},
-			Config:            &container.Config{Image: want.Image, User: want.User, Labels: want.Labels, Env: append([]string(nil), want.Env...)},
+			Config:            &container.Config{Image: want.Image, User: want.User, Entrypoint: append([]string(nil), want.Entrypoint...), Labels: want.Labels, Env: append([]string(nil), want.Env...)},
 		}
 	}
 	if err := validateEgressSidecar(cfg, n, proxyName, base()); err != nil {
@@ -288,5 +288,12 @@ func TestValidateEgressSidecarHostGateway(t *testing.T) {
 	extra.HostConfig.ExtraHosts = []string{"host.docker.internal:host-gateway", "other:1.2.3.4"}
 	if err := validateEgressSidecar(cfg, n, proxyName, extra); !errors.Is(err, model.ErrForbidden) {
 		t.Fatalf("sidecar with an extra mapping accepted: %v", err)
+	}
+	// The sidecar must carry its own entrypoint: a container left on the shared
+	// image's fleet-node entrypoint would start a second node.
+	nodeEntrypoint := base()
+	nodeEntrypoint.Config.Entrypoint = []string{"/usr/local/bin/fleet-node", "run"}
+	if err := validateEgressSidecar(cfg, n, proxyName, nodeEntrypoint); !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("sidecar on the node entrypoint accepted: %v", err)
 	}
 }
