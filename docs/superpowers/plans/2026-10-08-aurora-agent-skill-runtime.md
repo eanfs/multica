@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让 Aurora 的 13 个 skill 通过 multica 既有的「agent 加载 skill」机制执行 —— 每个 skill 一个预置 system agent、一份可执行的 skill 文档,模型用普通工具(Bash / Read / Write)按文档完成任务;删掉 Aurora 专有的 MCP broker 执行面、`deploy/aurora-sandbox/` 全部内容与全部自定义隔离策略,节点密钥改由容器 env 在部署时注入。
+**Goal:** 让 Aurora 的 13 个 skill 通过 multica 既有的「agent 加载 skill」机制执行 —— 每个 skill 一个预置 system agent、一份可执行的 skill 文档,模型用普通工具(Bash / Read / Write)按文档完成任务;删掉 Aurora 专有的 MCP broker 执行面、`deploy/aurora-sandbox/` 全部内容与全部自定义隔离策略,节点密钥**复用既有的 Anthropic 凭据通道**(ARK 的 key 兼容 Anthropic 协议,直接作 `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL` 使用,不新增密钥变量)。
 
 **Architecture:** Aurora 不再拥有独立执行通道。`daemon.isAuroraTask` 分支被删除后,Aurora 任务与普通 issue 任务逐字节同路径:入队写入 `agent_task_queue` 并绑定 agent 的 `runtime_id` → 节点领取 → daemon 把该 agent 启用的 skill 物化到 `<workdir>/.claude/skills/<slug>/SKILL.md` → `BuildPrompt` → 拉起 Claude(`bypassPermissions`,无工具白名单,无 MaxTurns)→ 产物落盘 → 回传结算。13 个 system agent、13 个 skill 行、13 条 `agent_skill` 关联**今天已经存在**(`aurora.EnsureSystemAgents`),本计划改的是它们的内容与执行面,不是重新搭建。节点镜像是 `docker/runtime/Dockerfile` 的单一产物,内含 daemon(`multica` + `fleet-node`)与 Claude。**计费不在本计划范围内** —— 见「用户已确认的决策」第 8 条。
 
@@ -20,7 +20,7 @@
 2. **完全复用 issue 的干活流程** —— Aurora 任务就是普通 agent 任务。
 3. **`deploy/aurora-sandbox/` 完全删除**,包括 `seccomp.json` 与 `vendor/`。
 4. **不使用 AppArmor**,自定义 seccomp 也一起去掉,容器按 Docker 默认安全设置执行;安全问题本阶段忽略。
-5. **provider 密钥通过 `.env` 写入容器环境变量**,部署时解决,**不经服务端**。
+5. **provider 密钥复用既有的 `ANTHROPIC_*` 通道**,部署时解决,**不经服务端,也不新增密钥变量**(2026-10-08 订正):ARK 的 key 与 Anthropic Messages 协议兼容,直接作为 `ANTHROPIC_API_KEY` 使用、`ANTHROPIC_BASE_URL` 指向 Ark Agent Plan 端点(`https://ark.cn-beijing.volces.com/api/plan`)。skill 文档因此用 `$ANTHROPIC_API_KEY` 与 `${ANTHROPIC_BASE_URL}/v3/images/generations`,不引入 `ARK_API_KEY`。火山语音 ASR 不兼容该协议,它的凭据仍是一个独立变量(Task 3)。
 6. **不做**「skill 脚本调 Multica 服务端、由服务端持密钥调 provider」这种代理。
 7. **omp 暂不安装**(2026-10-08),统一镜像先只保留 Claude。
 8. **credits 计费本次不处理。** 本计划照现状保留 `Credit.Reserve` / `settleAurora*`,但**不把它当作验证的门**:部署时遇到计费问题先记录、先绕过,继续验证执行链路。后续**另立计划**,把计费改为**用 multica web 既有的 token 用量统计来算 credits**(`task_usage` 表与 `POST /api/daemon/tasks/{taskId}/usage` 已经在收 input/output/cache token 与 `CostUsdTicks`),不再按 skill 固定积分数预留。
@@ -93,20 +93,20 @@
 
 1. 把 `server/internal/aurora/workflows/text-image.md` 改写成可执行步骤(Task 1)。
 2. 删除 Aurora 专有执行分支,否则 broker 执行面仍然生效、模型拿不到 Bash(Task 4)。
-3. **把 ARK 密钥送进 agent 进程的 env** —— 今天它只进 broker 子进程,而且只给文件路径(`mcpBrokerChildEnv` 的三个 `*_API_KEY_FILE`),删掉 broker 后模型会拿不到密钥。这一步从 Task 3 提前(Task 1 的 Step 6)。
+3. **确认凭据通道够用** —— 删掉 broker 后,模型侧凭据只剩 `claudeChildEnv()` 注入的 `ANTHROPIC_API_KEY`(加可选的 `ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`)。按决策 5,ARK 的 key 就是这一把,所以**不新增任何变量**;这一步只是在 Task 1 里补一条断言把它钉住(Task 1 的 Step 5)。
 4. 在**现有的**沙箱镜像上跑一次往返:提交 → 领取 → 模型调 ARK 出图 → 服务端导入 → 产物入库(Task 7 的第 2 步)。
 
 **三个必须先满足的前提,缺一个就跑不出结果:**
 
 | 前提 | 为什么 | 不满足时会怎样 |
 | --- | --- | --- |
-| 一把**真实可用的 ARK API Key** | 要真的调 Seedream | 401,任务失败 |
+| 一把**真实可用的 ARK API Key**(按决策 5 作为 `ANTHROPIC_API_KEY` 注入) | 要真的调 Seedream | 401,任务失败 |
 | 该 Key 的**额度/预算** | 每次出图都计费 | 429 `AccountQuotaExceeded`,任务失败 |
 | `LOCAL_UPLOAD_BASE_URL` 指向**审核方能抓到的地址** | 图片产物要先过内容审核,审核器要能按 URL 取到对象;纯本地对象存储在图片这一路走不通(文本产物没有这个问题) | 生成卡在审核,`status` 到不了 `completed` |
 
 第三条是既有约束,不是本次改动引入的。若只卡在审核,按 Task 7 第 2 步的判定口径处理:记下现象、判执行链路通过(模型确实调通了 ARK 并拿到图),但**不要**声称端到端 completed。
 
-通过之后再做其余 4 个图片 skill、其余 8 份文档、镜像统一、密钥全量改 env 与目录删除。**删目录(Task 5)必须等 13 份全部抽取完**,这一点不因为首个切片通过而放宽。
+通过之后再做其余 4 个图片 skill、其余 8 份文档、镜像统一、剩余凭据(火山语音 ASR)归位与目录删除。**删目录(Task 5)必须等 13 份全部抽取完**,这一点不因为首个切片通过而放宽。
 
 ---
 
@@ -117,7 +117,7 @@
 | **M0 单 skill 验证** | 1(仅 `text-image`,含 Step 5)、4、7(第 2 步) | 一次完整往返:提交 → 领取 → 模型调 ARK 出图 → 服务端导入 → 产物入库。**不改镜像、不删目录**;需要一把可用的 ARK Key | 无 |
 | **M1a 图片 skill** | 1b(4 个图片 skill) | `poster`、`xhs-image`、`product-image`、`image-edit` 各跑通一次 | M0 通过 |
 | **M1b 其余内容** | 1b(其余 8 份) | 13 份文档全部可执行,每份通过"无工具名"检查 | M1a |
-| **M2 执行面** | 2、3 | 统一节点镜像构建成功;**omp 本阶段不安装**;密钥全量走 env | M1b |
+| **M2 执行面** | 2、3 | 统一节点镜像构建成功;**omp 本阶段不安装**;凭据复用 `ANTHROPIC_*`,火山语音 ASR 单独一个变量 | M1b |
 | **M3 清理** | 5、6 | `deploy/aurora-sandbox/` 与全部引用消失;仓库测试全绿 | M2 |
 | **M4 打通与验收** | 6b、7 | `apps/web` 里同时看到 13 个 agent、各自的 skill、Aurora 下发的全部任务;13 个 skill 各跑一次 + 端到端记录 | M3 |
 
@@ -130,7 +130,7 @@
 ### 新增
 
 - `scripts/check-runtime-image.sh` — 统一镜像的入口、属主与"env 里无密钥"断言(Task 2)。
-- `.env.example` 的 Aurora 段 — provider 密钥的变量名与说明(值留空)。
+- `.env.example` 的 Aurora 段 — 火山语音 ASR 的变量名与说明(值留空);ARK 不需要新变量(决策 5)。
 - `docs/superpowers/plans/2026-10-08-aurora-agent-skill-runtime-acceptance.md` — Task 7 的验收记录。
 
 ### 修改
@@ -143,7 +143,7 @@
 - `server/internal/aurora/execution_policy.go` — 保留 `Route`(产物校验用),`RequiredTools` 不再作为工具白名单。
 - `server/internal/fleet/model/aurora.go` — 删除 seccomp / AppArmor / provider 密钥文件 / 代理镜像字段,放宽 `claude_env` 的密钥关键字禁令。
 - `server/internal/fleet/docker/provider.go`、`inspect.go` — 删除 SecurityOpt 与 secret 挂载,改为注入 provider env。
-- `server/internal/daemon/managed_secrets.go` — 从 env 读取 provider 密钥。
+- `server/internal/daemon/managed_secrets.go` — 只新增火山语音 ASR 的环境变量读取;Anthropic(即 ARK)沿用既有的 `claudeChildEnv()`。
 - `packages/views/aurora/runtime-status.tsx`、`packages/core/aurora/*`、`packages/views/locales/*/aurora.json` — 节点未就绪时的原因与重试。
 - `AGENTS.md` — 记录本方向,并把 create-once 的降级写清。
 
@@ -172,13 +172,13 @@
 **Files:**
 - Modify: `server/internal/aurora/workflows/text-image.md`
 - Modify: `server/internal/aurora/workflows_test.go`(新增守卫测试与 `rewrittenSkills` 清单)
-- Modify: `server/internal/daemon/managed_secrets.go`(Step 5:把 ARK 密钥送进 agent env)
+- Modify: `server/internal/daemon/managed_secrets_test.go`(Step 5:钉住凭据通道,不新增变量)
 - Read(只读,不修改):`deploy/aurora-sandbox/runtime/src/{policy,provider-run,importer,manifest}.mjs`、`runtime/src/tools/seedream.mjs`、`vendor/volcengine/byted-ark-seedream-skill/{SKILL.md,references/MODELS.md}`
 
 **Interfaces:**
 - Produces: 5 段固定结构 —— `## Inputs`、`## Steps`、`## Required outputs`、`## Artifact manifest`、`## Failure behavior`。
 - Produces: `var rewrittenSkills = []string{"text-image"}` —— 已完成改写的清单,Task 1b 逐项往里加。
-- Produces: agent 子进程 env 里出现 `ARK_API_KEY`(值,不是文件路径)。
+- Produces: agent 子进程 env 里出现 `ANTHROPIC_API_KEY`(取值即 ARK 的那把 key,是值不是文件路径),并且**不出现** `ARK_API_KEY` 或任何 `*_API_KEY_FILE`。
 - Consumes: `aurora.Workflow(skillID)` 内嵌读取(`server/internal/aurora/workflows.go:13-33`);文件名与 skill ID 一一对应,不新增文件。
 
 - [ ] **Step 1: 写"无工具名"守卫测试(红)**
@@ -277,8 +277,8 @@ node provides. Do the work yourself.
 2. Ask Seedream for the image:
 
    ```bash
-   curl -fsS -X POST "https://ark.cn-beijing.volces.com/api/plan/v3/images/generations" \
-     -H "Authorization: Bearer $ARK_API_KEY" -H 'content-type: application/json' \
+   curl -fsS -X POST "${ANTHROPIC_BASE_URL:-https://ark.cn-beijing.volces.com/api/plan}/v3/images/generations" \
+     -H "Authorization: Bearer $ANTHROPIC_API_KEY" -H 'content-type: application/json' \
      -d "$(jq -n --arg p "$PROMPT" '{model:"doubao-seedream-5.0-lite",prompt:$p,size:"<size>",response_format:"url",watermark:false}')" \
      -o /tmp/seedream.json
    ```
@@ -368,26 +368,21 @@ Expected: PASS
 Run: `(cd server && go test ./internal/aurora -count=1)`
 Expected: PASS
 
-- [ ] **Step 5: 把 ARK 密钥送进 agent 进程的 env**
+- [ ] **Step 5: 钉住凭据通道(不新增变量)**
 
-今天 `mcpBrokerChildEnv`(`server/internal/daemon/managed_secrets.go:198`)只把 ARK / OpenAI / 火山语音的**文件路径**给 broker 子进程,Claude 进程拿不到。删掉 broker 后,模型自己调 provider,所以值必须进 agent 的 env。
-
-先写失败测试:
+删掉 broker 后,模型侧凭据只剩 `claudeChildEnv()`(`server/internal/daemon/managed_secrets.go`)注入的 `ANTHROPIC_API_KEY`,加可选的 `ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`。按决策 5,ARK 的 key 就是这一把,所以这一步**不新增 `ARK_API_KEY`,也不改任何生产代码** —— 只是把「执行提供者拿得到这三把值、且拿不到 broker 的文件路径」钉成断言,免得后来者以为还要再铺一条通道。
 
 ```go
-func TestAgentEnvCarriesTheProviderKeys(t *testing.T) {
-	t.Setenv("ARK_API_KEY", "ark-from-env")
-	// 断言 agent 子进程 env 里出现 "ARK_API_KEY=ark-from-env",
-	// 并且不再出现 "ARK_API_KEY_FILE"
+func TestManagedAgentEnvCarriesTheAnthropicCredentialOnly(t *testing.T) {
+	// 断言执行提供者的 env 里有 ANTHROPIC_API_KEY(值),
+	// 且没有 ARK_API_KEY,也没有 ARK_API_KEY_FILE / VOLC_ASR_API_KEY_FILE。
 }
 ```
 
-Run: `(cd server && go test ./internal/daemon -run TestAgentEnvCarriesTheProviderKeys -count=1)`
-Expected: FAIL
+Run: `(cd server && go test ./internal/daemon -run TestManagedAgentEnvCarriesTheAnthropicCredentialOnly -count=1)`
+Expected: PASS。这是**特征化断言**,不是红-绿:实现已由 #198 落地,断言应当一次即过。若为红,说明 #198 的凭据面被改坏了。
 
-实现:`managed_secrets` 增加一个供 agent 子进程使用的 env 方法,把 ARK(以及 Task 3 里的其余两个)以**值**的形式返回;`daemon.go` 在组装 `agentEnv` 时并入。保留"缺一个就报错、不静默降级"的行为。**注意**:这一步只做 ARK 就够首个切片跑通,其余两个键在 Task 3 一并处理。
-
-Run: `(cd server && go test ./internal/daemon -run 'TestAgentEnvCarriesTheProviderKeys|TestManagedSecret|TestProviderSecretMount' -count=1)`
+Run: `(cd server && go test ./internal/daemon -run 'TestManagedAgentEnvCarriesTheAnthropicCredentialOnly|TestManagedSecret|TestProviderSecretMount' -count=1)`
 Expected: PASS
 
 - [ ] **Step 6: Commit**
@@ -448,7 +443,7 @@ git commit -m "feat(aurora): convert the remaining skill documents to ordinary-a
 
 **Interfaces:**
 - Produces: 单一镜像 —— `ENTRYPOINT ["/usr/local/bin/fleet-node","run"]`、`HEALTHCHECK fleet-node health`、`USER 10001:10001`、`/data` + `/secrets` 布局;可用入口 `/usr/local/bin/multica`、`/usr/local/bin/claude`。
-- Consumes: Task 3 的环境变量名(密钥经 env 注入)。
+- Consumes: Task 3 的变量名(火山语音 ASR);Anthropic/ARK 复用既有通道。
 - **omp 本阶段不安装**(用户 2026-10-08 决定)。镜像里先只保留 Claude;加第二个 agent CLI 是后续独立改动,`scripts/agent-cli-command-names.txt` 里已有 `omp` 名字,不影响现在的解析与探测逻辑。
 
 - [ ] **Step 1: 写镜像契约测试**
@@ -471,7 +466,7 @@ docker build -f docker/runtime/Dockerfile -t multica-runtime-node:dev .
 bash scripts/check-runtime-image.sh multica-runtime-node:dev
 ```
 
-Expected: 全部检查通过;`docker inspect` 的 `Config.Env` 里没有 `ARK_API_KEY`、`OPENAI_API_KEY`、`VOLC_ASR_API_KEY`。
+Expected: 全部检查通过;`docker inspect` 的 `Config.Env` 里没有 `ANTHROPIC_API_KEY`、`ARK_API_KEY`、`VOLC_ASR_API_KEY`。
 
 - [ ] **Step 4: 删除两个独立构建入口与 bake**
 
@@ -490,7 +485,7 @@ git commit -m "feat(runtime): build one node image with the daemon and Claude"
 
 ---
 
-## Task 3: provider 密钥改由容器 env 注入
+## Task 3: 归位剩余凭据(火山语音 ASR)
 
 **Files:**
 - Modify: `server/internal/fleet/model/aurora.go`、`server/internal/fleet/docker/provider.go`、`server/internal/fleet/docker/inspect.go`
@@ -501,8 +496,8 @@ git commit -m "feat(runtime): build one node image with the daemon and Claude"
 - Modify: `server/internal/daemon/managed_secrets_test.go`、`server/internal/fleet/model/aurora_test.go`、`server/internal/fleet/docker/aurora_test.go`
 
 **Interfaces:**
-- Produces: **三个**固定的环境变量名 `ARK_API_KEY`、`VOLC_ASR_API_KEY`、`ANTHROPIC_API_KEY`,由 Fleet 写进节点容器 env,由 daemon 直接读取。**`OPENAI_API_KEY` 不再存在**(决策 10)。
-- **注意顺序:** `ARK_API_KEY` 已在 Task 1 Step 5 提前接进 agent env(首个图片切片要用),本任务补齐 `VOLC_ASR_API_KEY`,并把两者的取值从"读文件"整体改为"读 env"。
+- Produces: **一个**固定的环境变量名 `VOLC_ASR_API_KEY`,由 Fleet 写进节点容器 env,由 daemon 读取。**`ARK_API_KEY` 不存在**(决策 5:ARK 复用 `ANTHROPIC_API_KEY`),**`OPENAI_API_KEY` 不存在**(决策 10)。
+- **顺序说明:** Anthropic(即 ARK)那条通道已经可用,本任务只处理火山语音 ASR —— 它不兼容 Anthropic 协议,必须有自己的变量。取值同样从"读文件"改为"读 env"。
 - Produces: `model.AuroraConfig` 删除 `SeccompProfile`、`AppArmorProfile`、`ProviderSecretFiles`、`ProxyImage` 四个字段。
 - Produces: OpenAI 相关的东西一并消失 —— `model.AuroraOpenAIAPIKeyTarget`、`ProviderSecretTargets` 里的 `openai-api-key`、`providerSecretOrder` 的该项、`auroraegress.CompiledProviderHosts` 里的 `api.openai.com:443`、以及 `execution_policy.go` 里两个 skill 的 OpenAI 路由。
 - Consumes: `docker/runtime/Dockerfile` 的镜像契约(Task 2)。
@@ -512,24 +507,19 @@ git commit -m "feat(runtime): build one node image with the daemon and Claude"
 在 `server/internal/daemon/managed_secrets_test.go` 追加:
 
 ```go
-func TestProviderSecretsComeFromTheEnvironment(t *testing.T) {
-	t.Setenv("ARK_API_KEY", "ark-from-env")
+func TestProviderSecretsReadTheAsrKeyFromTheEnvironment(t *testing.T) {
 	t.Setenv("VOLC_ASR_API_KEY", "volc-from-env")
-	secrets, err := loadManagedProviderSecrets()
+	secrets, err := loadManagedProviderSecrets(paths, endpoint)
 	if err != nil {
 		t.Fatalf("loadManagedProviderSecrets: %v", err)
 	}
 	env := secrets.agentChildEnv()
-	if !slices.Contains(env, "ARK_API_KEY=ark-from-env") {
-		t.Fatalf("provider key did not come from the environment: %v", env)
-	}
-	if slices.ContainsFunc(env, func(v string) bool { return strings.HasPrefix(v, "OPENAI_") }) {
-		t.Fatalf("an OpenAI variable survived the removal: %v", env)
-	}
+	// 断言 env 里有 VOLC_ASR_API_KEY=volc-from-env,
+	// 且既没有 ARK_API_KEY,也没有任何 *_API_KEY_FILE。
 }
 
 func TestProviderSecretsRejectMissingValues(t *testing.T) {
-	// 两个键里缺一个 → 返回错误,不静默降级成空字符串
+	// 该变量设置了但为空 → 返回错误,不静默降级成空字符串
 }
 ```
 
@@ -538,14 +528,14 @@ Expected: FAIL —— 现有实现从 `/run/secrets/*` 读文件
 
 - [ ] **Step 2: 改 daemon 侧的读取**
 
-`server/internal/daemon/managed_secrets.go`:把 `readManagedSecretFile` 的固定路径读取改为读环境变量;保留"缺一个就报错、不静默降级"的行为。`claudeChildEnv` 继续提供 `ANTHROPIC_API_KEY`,其余两把按 skill 需要注入**同一进程**的环境(模型与脚本同进程,这是本方向接受的形态)。删掉 `mcpBrokerChildEnv` 与三个 `*_API_KEY_FILE` 常量、以及 `String`/`LogValue` 里对应的字段。
+`server/internal/daemon/managed_secrets.go`:只把**火山语音 ASR** 的取值从"读文件"改为读环境变量(设置了但为空即报错,未设置则留空、由调用方 fail closed)。Anthropic(即 ARK)沿用既有的 `claudeChildEnv()`,本任务不动它。`mcpBrokerChildEnv` 与三个 `*_API_KEY_FILE` 常量已由 #198 删除。
 
 - [ ] **Step 3: 删掉配置里的密集字段并放宽 env 禁令**
 
 `server/internal/fleet/model/aurora.go`:
 
 - 删除 `ProxyImage`、`SeccompProfile`、`AppArmorProfile`、`ProviderSecretFiles` 四个字段与 `Validate()` 里对应四段校验;`egressProxySpec` 改为取 `Config.Image`(节点与 sidecar 同镜像,入口不同)。
-- **放宽 `claude_env` 的密钥关键字禁令**:现在任何含 `API_KEY`/`TOKEN`/`SECRET`/`PASSWORD` 的键一律被拒(`claudeEnvSecretMarkers`)。改为只放行三个固定名字,其余仍拒:
+- **放宽 `claude_env` 的密钥关键字禁令**:现在任何含 `API_KEY`/`TOKEN`/`SECRET`/`PASSWORD` 的键一律被拒(`claudeEnvSecretMarkers`)。改为只放行这一个固定名字,其余仍拒:
 
 ```go
 // providerEnvNames are the only secret-bearing keys the operator may inject
@@ -553,10 +543,13 @@ Expected: FAIL —— 现有实现从 `/run/secrets/*` 读文件
 // that calls the providers directly; the values must be supplied at deploy time
 // from a 0600 file and must never reach the image, SQL, logs, or Git.
 //
-// OPENAI_API_KEY is deliberately absent: Aurora uses only the Volcengine Ark
-// endpoints (Seedream for images, Seedance for video, ASR for transcription).
+// ARK_API_KEY and OPENAI_API_KEY are deliberately absent. The Ark key is
+// Anthropic-Messages-compatible, so the image and video calls reuse the
+// credential that already arrives as ANTHROPIC_API_KEY (decision 5), and the
+// OpenAI route is gone (decision 10). Only the Volcengine speech endpoint is
+// not Anthropic-compatible, so it is the single separate variable.
 var providerEnvNames = map[string]bool{
-	"ARK_API_KEY": true, "VOLC_ASR_API_KEY": true, "ANTHROPIC_API_KEY": true,
+	"VOLC_ASR_API_KEY": true,
 }
 ```
 
@@ -567,13 +560,13 @@ var providerEnvNames = map[string]bool{
 `server/internal/fleet/docker/provider.go`:
 
 - `NodeHostConfig` 删除 `seccomp=` 与 `apparmor=` 两个 SecurityOpt(Aurora 分支只剩 `ReadonlyRootfs` 与三处 tmpfs);保留 `CapDrop: ["ALL"]` 与 `no-new-privileges`。
-- `nodeEnv` 增加四个 provider 变量(从配置取),删除 `providerSecretMounts` 与 `/run/secrets` 挂载。
+- `nodeEnv` 增加一个 provider 变量 `VOLC_ASR_API_KEY`(从配置取),删除 `providerSecretMounts` 与 `/run/secrets` 挂载。Anthropic/ARK 的槽位不变。
 
 `server/internal/fleet/docker/inspect.go` 的 adoption 校验按同一组期望值重算;`reflect.DeepEqual` 的 `SecurityOpt` 与 `Mounts` 期望随之上移。
 
 - [ ] **Step 5: 文档与样例**
 
-`.env.example` 增加三个变量(值留空,注释写明"部署时注入;容器 env 对容器内进程可读"),并删除 `OPENAI_API_KEY` 条目;`fleet-config.example.json` 删除 `proxy_image` / `seccomp_profile` / `apparmor_profile` / `provider_secret_files`,增加 `claude_env` 里的三个键。
+`.env.example` 增加 `VOLC_ASR_API_KEY`(值留空,注释写明"部署时注入;容器 env 对容器内进程可读"),并写明 **ARK 的 key 走既有的 `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL`**(决策 5),删除 `OPENAI_API_KEY` 条目;`fleet-config.example.json` 删除 `proxy_image` / `seccomp_profile` / `apparmor_profile` / `provider_secret_files`,在 `claude_env` 里增加 `VOLC_ASR_API_KEY`。
 
 - [ ] **Step 6: 运行测试**
 
@@ -897,11 +890,11 @@ Expected: PASS。`settleAuroraOnCompleted` 仍要求至少一个已提交资产,
 
 - [ ] **Step 2: 在 Docker Desktop 上跑一次真实往返**
 
-**M0 阶段先跑一次,用现有的沙箱镜像,不构建新镜像。** 首个切片的改动就是 Task 1 的文档与密钥 env、Task 4 的删分支,加上这一次运行。
+**M0 阶段先跑一次,用现有的沙箱镜像,不构建新镜像。** 首个切片的改动就是 Task 1 的文档与凭据断言、Task 4 的删分支,加上这一次运行。
 
 ```bash
 make up C=api,fleet
-# 需要:ARK_API_KEY(真实可用且有额度)、LOCAL_UPLOAD_BASE_URL 指向审核方能抓到的地址
+# 需要:一把真实可用且有额度的 ARK Key(按决策 5 作为 ANTHROPIC_API_KEY 注入,ANTHROPIC_BASE_URL 指向 Ark Agent Plan)、LOCAL_UPLOAD_BASE_URL 指向审核方能抓到的地址
 # 在 Aurora 应用里对 skill「文字生成图片」提交一次生成,只填 prompt
 ```
 
@@ -918,7 +911,7 @@ Expected: 提交 → 节点领取 → 模型走 `begin` → 调 ARK 出图 → �
 | **只有**审核卡住(`LOCAL_UPLOAD_BASE_URL` 抓不到) | 环境问题,不是本次改动引入的 | 记下现象,**判执行链路通过**(模型确实调通了 ARK 拿到图并成功导入),但不要声称端到端 `completed` |
 | credits 相关(预留失败、余额不足、结算写不进账本) | 计费不在本计划范围内 | 记下现象,**判本切片通过** |
 
-反过来,**模型拿不到 Bash、或拿不到 `ARK_API_KEY`,都不算通过** —— 那说明 Task 4 或 Task 1 Step 5 没做对。
+反过来,**模型拿不到 Bash、或拿不到 `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`,都不算通过** —— 那说明 Task 4 做漏了,或凭据通道没配好。
 
 **M4 阶段用统一镜像重跑一次**(Task 2 构建的镜像已由 `AURORA_SANDBOX_IMAGE` 指向):
 
@@ -967,7 +960,7 @@ gh pr create --repo eanfs/multica --fill
 | --- | --- | --- |
 | 容器隔离 | AppArmor 进程策略 + 自定义 seccomp + 只读根 + cap drop | **Docker 默认**。AppArmor 与自定义 seccomp 都不再使用;只读根与 `no-new-privileges` 保留(零代码改动,不挡任何步骤) |
 | 隔离验证 | Linux 安全验收矩阵 + 冒烟,CI 每次跑 | **无**。删掉的验收脚本没有替代品;不得声称容器被验证过 |
-| provider 密钥 | 只读文件挂载,只有 broker 子进程拿到路径 | **容器 env**,对容器内任何进程可读,`docker inspect` 亦可见 |
+| provider 密钥 | 只读文件挂载,只有 broker 子进程拿到路径 | **复用 `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL`**(ARK 的 key 兼容 Anthropic 协议,决策 5),注入 agent 进程 env,对容器内任何进程可读、`docker inspect` 亦可见。火山语音 ASR 是唯一的独立变量 |
 | 计费 create-once | broker 强制:重试不会第二次提交 create | **仅记账**。模型直连 provider,`ambiguous` 冻结不再有强制力;重复提交计费请求成为可能 |
 | 产物 manifest 的作者 | broker(`manifest.mjs`) | **模型**。契约不变:daemon 只当路径清单,自行重算 size/SHA/MIME 并按 `Route` 校验 |
 | manifest 的 `producer.id` | broker 声明的固定 producer,代表"这份 manifest 来自哪个受控实现" | **模型自述的字符串**。daemon 仍要求它等于 `auroraManifestProducersByRoute[route]`(例如 `text-image` 必须是 `byted-ark-seedream-skill`),但填写者是模型 —— 这个字段从此只是形状检查,不是来源证明 |
