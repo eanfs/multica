@@ -74,8 +74,8 @@ type GetAuroraManagedRuntimeParams struct {
 }
 
 // Aurora system-agent seeding (Plan 3 Task 1). These queries back
-// aurora.EnsureSystemAgents, which lazily materialises a workspace's 16 skill
-// system agents — one managed runtime row, and per catalog skill one
+// aurora.EnsureSystemAgents, which lazily materialises a workspace's 13 available
+// skill agents — one managed runtime row, and per available catalog skill one
 // kind='user' agent, one skill row, and the agent_skill junction — on first
 // generation creation.
 // The workspace's server-hosted (managed) runtime, the idempotency anchor for

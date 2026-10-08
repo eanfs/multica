@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -112,11 +113,12 @@ func TestSystemAgentsMatchCatalog(t *testing.T) {
 	}
 }
 
-// Run only after the controller authorizes an explicit isolated DATABASE_URL.
+// Uses the same fixture availability gate as the existing DB tests.
 func TestAuroraAgentsAreVisibleToMembers(t *testing.T) {
-	if os.Getenv("MULTICA_RUN_AURORA_DB_TESTS") != "1" || agentsTestPool == nil {
-		t.Skip("requires explicitly authorized Aurora database tests")
+	if agentsTestPool == nil {
+		t.Skip("database not available")
 	}
+	placeholders := seedUnavailableAgents(t)
 	ctx := context.Background()
 	tx, err := agentsTestPool.Begin(ctx)
 	if err != nil {
@@ -134,11 +136,22 @@ func TestAuroraAgentsAreVisibleToMembers(t *testing.T) {
 	}
 	byKey := map[string]db.Agent{}
 	for _, agent := range agents {
-		byKey[agent.SystemKey.String] = agent
+		if strings.HasPrefix(agent.SystemKey.String, "aurora:") {
+			byKey[agent.SystemKey.String] = agent
+		}
+	}
+	if len(byKey) != 13 {
+		t.Fatalf("visible Aurora agents = %d, want 13", len(byKey))
 	}
 	available := 0
 	for _, entry := range aurora.Catalog() {
 		agent, ok := byKey["aurora:"+entry.ID]
+		if !entry.Available {
+			if ok {
+				t.Fatalf("unavailable agent %s is visible", entry.ID)
+			}
+			continue
+		}
 		if !ok || agent.Kind != "user" || agent.Name != entry.Name {
 			t.Fatalf("catalog agent %s not visible: %+v", entry.ID, agent)
 		}
@@ -173,19 +186,30 @@ func TestAuroraAgentsAreVisibleToMembers(t *testing.T) {
 		if err != nil || got.ArchivedAt.Valid || got.ArchivedBy.Valid || got.RuntimeID != original.RuntimeID || got.SystemKey != original.SystemKey {
 			t.Fatalf("seed did not restore identity: %+v %v", got, err)
 		}
+		for id, before := range placeholders {
+			var after string
+			if err := tx.QueryRow(ctx, "SELECT to_jsonb(agent)::text FROM agent WHERE id = $1", id).Scan(&after); err != nil {
+				t.Fatal(err)
+			}
+			if after != before {
+				t.Fatalf("unavailable agent %s changed: before %s after %s", id, before, after)
+			}
+		}
 	}
 }
 
 func TestAuroraAgentVisibilityMigrationIsIdempotent(t *testing.T) {
-	if os.Getenv("MULTICA_RUN_AURORA_DB_TESTS") != "1" || agentsTestPool == nil {
-		t.Skip("requires explicitly authorized Aurora database tests")
+	if agentsTestPool == nil {
+		t.Skip("database not available")
 	}
 	dbfx := testutil.New(agentsTestPool, agentsTestWorkspaceID, agentsTestUserID)
 	ordinaryID := dbfx.Insert(t, "agent", testutil.Cols{
 		"workspace_id": agentsTestWorkspaceID, "owner_id": agentsTestUserID,
 		"name": "Ordinary member agent", "kind": "user", "runtime_mode": "cloud",
+		"system_key":     "aurora:future-unlisted",
 		"runtime_config": testutil.Raw("'{}'::jsonb"), "visibility": "workspace",
 	})
+	placeholders := seedUnavailableAgents(t)
 	ctx := context.Background()
 	tx, err := agentsTestPool.Begin(ctx)
 	if err != nil {
@@ -201,7 +225,7 @@ func TestAuroraAgentVisibilityMigrationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, "UPDATE agent SET kind = 'system' WHERE id = $1", before.ID); err != nil {
+	if _, err := tx.Exec(ctx, "UPDATE agent SET kind = 'system' WHERE workspace_id = $1 AND kind = 'user' AND system_key LIKE 'aurora:%' AND id != $2", ws, util.MustParseUUID(ordinaryID)); err != nil {
 		t.Fatal(err)
 	}
 	up, err := os.ReadFile("../../migrations/585_aurora_agents_visible.up.sql")
@@ -213,6 +237,15 @@ func TestAuroraAgentVisibilityMigrationIsIdempotent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		for id, before := range placeholders {
+			var after string
+			if err := tx.QueryRow(ctx, "SELECT to_jsonb(agent)::text FROM agent WHERE id = $1", id).Scan(&after); err != nil {
+				t.Fatal(err)
+			}
+			if after != before {
+				t.Fatalf("unavailable agent %s changed: before %s after %s", id, before, after)
+			}
+		}
 		if i == 1 && tag.RowsAffected() != 0 {
 			t.Fatalf("second migration changed %d rows", tag.RowsAffected())
 		}
@@ -220,6 +253,19 @@ func TestAuroraAgentVisibilityMigrationIsIdempotent(t *testing.T) {
 	after, err := q.GetAgentBySystemKey(ctx, db.GetAgentBySystemKeyParams{WorkspaceID: ws, SystemKey: before.SystemKey})
 	if err != nil || after.ID != before.ID || after.RuntimeID != before.RuntimeID || after.Kind != "user" {
 		t.Fatalf("migration changed identity or hid agent: %+v %v", after, err)
+	}
+	visible, err := q.ListAgents(ctx, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, agent := range visible {
+		if strings.HasPrefix(agent.SystemKey.String, "aurora:") && agent.ID != util.MustParseUUID(ordinaryID) {
+			count++
+		}
+	}
+	if count != 13 {
+		t.Fatalf("migration exposed %d catalog agents, want 13", count)
 	}
 	down, err := os.ReadFile("../../migrations/585_aurora_agents_visible.down.sql")
 	if err != nil {
@@ -229,6 +275,15 @@ func TestAuroraAgentVisibilityMigrationIsIdempotent(t *testing.T) {
 		tag, err := tx.Exec(ctx, string(down))
 		if err != nil {
 			t.Fatal(err)
+		}
+		for id, before := range placeholders {
+			var after string
+			if err := tx.QueryRow(ctx, "SELECT to_jsonb(agent)::text FROM agent WHERE id = $1", id).Scan(&after); err != nil {
+				t.Fatal(err)
+			}
+			if after != before {
+				t.Fatalf("unavailable agent %s changed: before %s after %s", id, before, after)
+			}
 		}
 		if i == 1 && tag.RowsAffected() != 0 {
 			t.Fatal("down migration is not idempotent")
@@ -267,12 +322,14 @@ func TestEnsureSystemAgents(t *testing.T) {
 }
 
 // assertSkillContentMatchesWorkflow proves the seed writes each available
-// skill's embedded brief to the skill row, and keeps the phase-2 placeholder
-// for unavailable skills, without ever reading a vendor SKILL.md.
+// skill's embedded brief to the skill row without reading a vendor SKILL.md.
 func assertSkillContentMatchesWorkflow(t *testing.T, ws pgtype.UUID) {
 	t.Helper()
 	ctx := context.Background()
 	for _, entry := range aurora.Catalog() {
+		if !entry.Available {
+			continue
+		}
 		var content string
 		if err := agentsTestPool.QueryRow(ctx,
 			`SELECT content FROM skill WHERE workspace_id = $1 AND name = $2`, ws, entry.Name).Scan(&content); err != nil {
@@ -326,8 +383,8 @@ func assertSeeded(t *testing.T, ws pgtype.UUID) {
 		`SELECT count(*) FROM agent WHERE workspace_id = $1 AND kind = 'user' AND system_key LIKE 'aurora:%'`, ws).Scan(&agentCount); err != nil {
 		t.Fatalf("count system agents: %v", err)
 	}
-	if agentCount != 16 {
-		t.Errorf("system agent rows = %d, want 16", agentCount)
+	if agentCount != 13 {
+		t.Errorf("system agent rows = %d, want 13", agentCount)
 	}
 
 	var skillCount int
@@ -335,8 +392,8 @@ func assertSeeded(t *testing.T, ws pgtype.UUID) {
 		`SELECT count(*) FROM skill WHERE workspace_id = $1`, ws).Scan(&skillCount); err != nil {
 		t.Fatalf("count skills: %v", err)
 	}
-	if skillCount != 16 {
-		t.Errorf("skill rows = %d, want 16", skillCount)
+	if skillCount != 13 {
+		t.Errorf("skill rows = %d, want 13", skillCount)
 	}
 
 	var junctionCount int
@@ -346,7 +403,27 @@ func assertSeeded(t *testing.T, ws pgtype.UUID) {
 		ws).Scan(&junctionCount); err != nil {
 		t.Fatalf("count agent_skill: %v", err)
 	}
-	if junctionCount != 16 {
-		t.Errorf("agent_skill rows = %d, want 16", junctionCount)
+	if junctionCount != 13 {
+		t.Errorf("agent_skill rows = %d, want 13", junctionCount)
 	}
+}
+
+// Seed legacy hidden placeholders and capture their complete row state.
+func seedUnavailableAgents(t *testing.T) map[string]string {
+	t.Helper()
+	dbfx := testutil.New(agentsTestPool, agentsTestWorkspaceID, agentsTestUserID)
+	snapshots := map[string]string{}
+	for _, key := range []string{"aurora:avatar-video", "aurora:ppt", "aurora:excel"} {
+		id := dbfx.Insert(t, "agent", testutil.Cols{
+			"workspace_id": agentsTestWorkspaceID, "owner_id": agentsTestUserID,
+			"name": "Preserved " + key, "kind": "system", "system_key": key,
+			"runtime_mode": "cloud", "runtime_config": testutil.Raw("'{}'::jsonb"), "visibility": "workspace",
+		})
+		var snapshot string
+		if err := agentsTestPool.QueryRow(context.Background(), "SELECT to_jsonb(agent)::text FROM agent WHERE id = $1", id).Scan(&snapshot); err != nil {
+			t.Fatal(err)
+		}
+		snapshots[id] = snapshot
+	}
+	return snapshots
 }

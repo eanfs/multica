@@ -11,8 +11,9 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
-// SystemAgentDef is one member-visible, assignable product agent carrying an Aurora
-// skill. The 16 definitions correspond one-to-one with the 16 catalog entries;
+// SystemAgentDef describes an Aurora skill carrier. Available carriers are
+// member-visible and assignable; unavailable placeholders remain hidden.
+// The 16 definitions correspond one-to-one with the 16 catalog entries;
 // SystemKey is the agent's stable identity ("aurora:"+skillID), never its
 // display name.
 type SystemAgentDef struct {
@@ -75,8 +76,8 @@ func ManagedRuntimeID(ctx context.Context, q *db.Queries, workspaceID pgtype.UUI
 	return rt.ID, nil
 }
 
-// EnsureSystemAgents lazily materialises Aurora's 16 workspace-level system
-// agents: one managed runtime row, and per catalog skill one kind='user'
+// EnsureSystemAgents lazily materialises Aurora's 13 available workspace-level
+// agents: one managed runtime row, and per available catalog skill one kind='user'
 // agent, one skill row, and the agent_skill junction. It is idempotent —
 // calling it twice against the same workspace leaves the same rows — so the
 // generation-creation path (Plan 3 Task 2) can seed every workspace without
@@ -93,6 +94,10 @@ func EnsureSystemAgents(ctx context.Context, q *db.Queries, workspaceID, ownerID
 		return err
 	}
 	for _, e := range Catalog() {
+		// Preserve existing unavailable placeholders without exposing or repairing them.
+		if !e.Available {
+			continue
+		}
 		skill, err := q.UpsertAuroraSkill(ctx, db.UpsertAuroraSkillParams{
 			WorkspaceID: workspaceID,
 			Name:        e.Name,

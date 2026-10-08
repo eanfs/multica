@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -145,16 +146,25 @@ func TestIsAuroraTask(t *testing.T) {
 
 // Missing required skill documents fail before any provider CLI is launched.
 func TestAuroraTaskMissingDocumentDoesNotLaunchCLI(t *testing.T) {
-	d, argsFile, _, cleanup := newAuroraTaskTestDaemon(t)
-	defer cleanup()
-	task := auroraTaskTestTask()
-	task.Agent.Skills = nil
-	_, err := d.runTask(context.Background(), task, "claude", 0, d.logger)
-	if err == nil || !strings.Contains(err.Error(), "required Aurora skill document") {
-		t.Fatalf("expected readable missing-document error, got %v", err)
-	}
-	if _, err := os.Stat(argsFile); !os.IsNotExist(err) {
-		t.Fatalf("CLI launched without required document: %v", err)
+	for _, ordinaryIssue := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ordinary_issue=%v", ordinaryIssue), func(t *testing.T) {
+			d, argsFile, _, cleanup := newAuroraTaskTestDaemon(t)
+			defer cleanup()
+			task := auroraTaskTestTask()
+			if ordinaryIssue {
+				task.GenerationID = ""
+				task.QuickCreatePrompt = ""
+				task.IssueID = "ordinary-assigned-issue"
+			}
+			task.Agent.Skills = nil
+			_, err := d.runTask(context.Background(), task, "claude", 0, d.logger)
+			if err == nil || !strings.Contains(err.Error(), "required Aurora skill document") {
+				t.Fatalf("expected readable missing-document error, got %v", err)
+			}
+			if _, err := os.Stat(argsFile); !os.IsNotExist(err) {
+				t.Fatalf("CLI launched without required document: %v", err)
+			}
+		})
 	}
 }
 
