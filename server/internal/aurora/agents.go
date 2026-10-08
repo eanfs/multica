@@ -11,7 +11,7 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
-// SystemAgentDef is one workspace-level system agent carrying a single Aurora
+// SystemAgentDef is one member-visible, assignable product agent carrying an Aurora
 // skill. The 16 definitions correspond one-to-one with the 16 catalog entries;
 // SystemKey is the agent's stable identity ("aurora:"+skillID), never its
 // display name.
@@ -76,11 +76,12 @@ func ManagedRuntimeID(ctx context.Context, q *db.Queries, workspaceID pgtype.UUI
 }
 
 // EnsureSystemAgents lazily materialises Aurora's 16 workspace-level system
-// agents: one managed runtime row, and per catalog skill one kind='system'
+// agents: one managed runtime row, and per catalog skill one kind='user'
 // agent, one skill row, and the agent_skill junction. It is idempotent —
 // calling it twice against the same workspace leaves the same rows — so the
 // generation-creation path (Plan 3 Task 2) can seed every workspace without
-// counting rows first.
+// counting rows first. Reseeding restores archived carriers in place so a user
+// archive cannot leave generation lookup permanently broken.
 //
 // ownerID must be a real user id (agent.owner_id references "user"): the
 // caller passes the workspace owner. No transaction is taken on purpose: each

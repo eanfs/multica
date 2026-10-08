@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/aurora"
+	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -111,6 +112,138 @@ func TestSystemAgentsMatchCatalog(t *testing.T) {
 	}
 }
 
+// Run only after the controller authorizes an explicit isolated DATABASE_URL.
+func TestAuroraAgentsAreVisibleToMembers(t *testing.T) {
+	if os.Getenv("MULTICA_RUN_AURORA_DB_TESTS") != "1" || agentsTestPool == nil {
+		t.Skip("requires explicitly authorized Aurora database tests")
+	}
+	ctx := context.Background()
+	tx, err := agentsTestPool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	q := db.New(tx)
+	ws, owner := util.MustParseUUID(agentsTestWorkspaceID), util.MustParseUUID(agentsTestUserID)
+	if err := aurora.EnsureSystemAgents(ctx, q, ws, owner); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := q.ListAgents(ctx, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byKey := map[string]db.Agent{}
+	for _, agent := range agents {
+		byKey[agent.SystemKey.String] = agent
+	}
+	available := 0
+	for _, entry := range aurora.Catalog() {
+		agent, ok := byKey["aurora:"+entry.ID]
+		if !ok || agent.Kind != "user" || agent.Name != entry.Name {
+			t.Fatalf("catalog agent %s not visible: %+v", entry.ID, agent)
+		}
+		if entry.Available {
+			available++
+		}
+		if _, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: agent.ID, WorkspaceID: ws}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: agent.ID, WorkspaceID: owner}); err == nil {
+			t.Fatal("cross-workspace agent leaked")
+		}
+		skills, err := q.ListAgentSkills(ctx, agent.ID)
+		if err != nil || len(skills) != 1 || skills[0].Name != entry.Name {
+			t.Fatalf("catalog skill not linked: %v %v", skills, err)
+		}
+	}
+	if available != 13 {
+		t.Fatalf("available visible agents = %d, want 13", available)
+	}
+	// Simulate a previously seeded hidden, archived agent. Reseeding must repair
+	// it in place, preserving the identity used by generation lookup.
+	original := byKey["aurora:text-image"]
+	if _, err := tx.Exec(ctx, "UPDATE agent SET kind = 'system', archived_at = now(), archived_by = $2 WHERE id = $1", original.ID, owner); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := aurora.EnsureSystemAgents(ctx, q, ws, owner); err != nil {
+			t.Fatal(err)
+		}
+		got, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: original.ID, WorkspaceID: ws})
+		if err != nil || got.ArchivedAt.Valid || got.ArchivedBy.Valid || got.RuntimeID != original.RuntimeID || got.SystemKey != original.SystemKey {
+			t.Fatalf("seed did not restore identity: %+v %v", got, err)
+		}
+	}
+}
+
+func TestAuroraAgentVisibilityMigrationIsIdempotent(t *testing.T) {
+	if os.Getenv("MULTICA_RUN_AURORA_DB_TESTS") != "1" || agentsTestPool == nil {
+		t.Skip("requires explicitly authorized Aurora database tests")
+	}
+	dbfx := testutil.New(agentsTestPool, agentsTestWorkspaceID, agentsTestUserID)
+	ordinaryID := dbfx.Insert(t, "agent", testutil.Cols{
+		"workspace_id": agentsTestWorkspaceID, "owner_id": agentsTestUserID,
+		"name": "Ordinary member agent", "kind": "user", "runtime_mode": "cloud",
+		"runtime_config": testutil.Raw("'{}'::jsonb"), "visibility": "workspace",
+	})
+	ctx := context.Background()
+	tx, err := agentsTestPool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	q := db.New(tx)
+	ws, owner := util.MustParseUUID(agentsTestWorkspaceID), util.MustParseUUID(agentsTestUserID)
+	if err := aurora.EnsureSystemAgents(ctx, q, ws, owner); err != nil {
+		t.Fatal(err)
+	}
+	before, err := q.GetAgentBySystemKey(ctx, db.GetAgentBySystemKeyParams{WorkspaceID: ws, SystemKey: pgtype.Text{String: "aurora:text-image", Valid: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, "UPDATE agent SET kind = 'system' WHERE id = $1", before.ID); err != nil {
+		t.Fatal(err)
+	}
+	up, err := os.ReadFile("../../migrations/585_aurora_agents_visible.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		tag, err := tx.Exec(ctx, string(up))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 && tag.RowsAffected() != 0 {
+			t.Fatalf("second migration changed %d rows", tag.RowsAffected())
+		}
+	}
+	after, err := q.GetAgentBySystemKey(ctx, db.GetAgentBySystemKeyParams{WorkspaceID: ws, SystemKey: before.SystemKey})
+	if err != nil || after.ID != before.ID || after.RuntimeID != before.RuntimeID || after.Kind != "user" {
+		t.Fatalf("migration changed identity or hid agent: %+v %v", after, err)
+	}
+	down, err := os.ReadFile("../../migrations/585_aurora_agents_visible.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		tag, err := tx.Exec(ctx, string(down))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 && tag.RowsAffected() != 0 {
+			t.Fatal("down migration is not idempotent")
+		}
+	}
+	after, err = q.GetAgentBySystemKey(ctx, db.GetAgentBySystemKeyParams{WorkspaceID: ws, SystemKey: before.SystemKey})
+	if err != nil || after.ID != before.ID || after.Kind != "system" {
+		t.Fatalf("down migration: %+v %v", after, err)
+	}
+	ordinary, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: util.MustParseUUID(ordinaryID), WorkspaceID: ws})
+	if err != nil || ordinary.Kind != "user" || ordinary.Name != "Ordinary member agent" {
+		t.Fatalf("ordinary agent changed: %+v %v", ordinary, err)
+	}
+}
+
 func TestEnsureSystemAgents(t *testing.T) {
 	if agentsTestPool == nil {
 		t.Skip("database not available")
@@ -190,7 +323,7 @@ func assertSeeded(t *testing.T, ws pgtype.UUID) {
 
 	var agentCount int
 	if err := agentsTestPool.QueryRow(ctx,
-		`SELECT count(*) FROM agent WHERE workspace_id = $1 AND kind = 'system'`, ws).Scan(&agentCount); err != nil {
+		`SELECT count(*) FROM agent WHERE workspace_id = $1 AND kind = 'user' AND system_key LIKE 'aurora:%'`, ws).Scan(&agentCount); err != nil {
 		t.Fatalf("count system agents: %v", err)
 	}
 	if agentCount != 16 {
@@ -209,7 +342,7 @@ func assertSeeded(t *testing.T, ws pgtype.UUID) {
 	var junctionCount int
 	if err := agentsTestPool.QueryRow(ctx, `
 		SELECT count(*) FROM agent_skill
-		WHERE agent_id IN (SELECT id FROM agent WHERE workspace_id = $1 AND kind = 'system')`,
+		WHERE agent_id IN (SELECT id FROM agent WHERE workspace_id = $1 AND kind = 'user' AND system_key LIKE 'aurora:%')`,
 		ws).Scan(&junctionCount); err != nil {
 		t.Fatalf("count agent_skill: %v", err)
 	}

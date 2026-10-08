@@ -76,7 +76,7 @@ type GetAuroraManagedRuntimeParams struct {
 // Aurora system-agent seeding (Plan 3 Task 1). These queries back
 // aurora.EnsureSystemAgents, which lazily materialises a workspace's 16 skill
 // system agents — one managed runtime row, and per catalog skill one
-// kind='system' agent, one skill row, and the agent_skill junction — on first
+// kind='user' agent, one skill row, and the agent_skill junction — on first
 // generation creation.
 // The workspace's server-hosted (managed) runtime, the idempotency anchor for
 // seeding. It may be unbound (daemon_id still NULL) or already bound to the
@@ -156,10 +156,11 @@ INSERT INTO agent (
     workspace_id, owner_id, runtime_id, kind, system_key, name, instructions,
     runtime_mode, visibility, permission_mode, runtime_config
 ) VALUES (
-    $1, $2, $3, 'system', $4, $5, $6, 'cloud', 'workspace', 'private', '{}'::jsonb
+    $1, $2, $3, 'user', $4, $5, $6, 'cloud', 'workspace', 'private', '{}'::jsonb
 )
 ON CONFLICT (workspace_id, owner_id, runtime_id, system_key) WHERE system_key IS NOT NULL
-DO UPDATE SET name = EXCLUDED.name, instructions = EXCLUDED.instructions
+DO UPDATE SET name = EXCLUDED.name, instructions = EXCLUDED.instructions,
+    kind = EXCLUDED.kind, archived_at = NULL, archived_by = NULL
 RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, disabled_runtime_skills, service_tier, conversation_starters
 `
 
@@ -172,15 +173,17 @@ type UpsertAuroraSystemAgentParams struct {
 	Instructions string      `json:"instructions"`
 }
 
-// Inserts or refreshes one Aurora system agent. kind='system' marks it an
-// invisible execution carrier (hidden from agent lists and hard-deleted with
-// its runtime), exactly like the Agent Builder's carriers. Idempotency rides
+// Like Mika's CreateSystemUserAgent, this product-defined agent is deliberately
+// kind='user': members can see it, chat with it and assign issues to it.
+// Idempotency rides
 // migration 172's partial unique index on
 // (workspace_id, owner_id, runtime_id, system_key) WHERE system_key IS NOT
 // NULL; the arbiter must name all four columns and repeat the predicate, or
 // Postgres will not match the partial index. DO UPDATE refreshes
 // name/instructions so a later seed enriches the prompt without creating a
 // second row.
+// Recover archived carriers in place on generation's pre-enqueue seed. Both
+// archive fields are cleared; system_key/runtime identity is unchanged.
 func (q *Queries) UpsertAuroraSystemAgent(ctx context.Context, arg UpsertAuroraSystemAgentParams) (Agent, error) {
 	row := q.db.QueryRow(ctx, upsertAuroraSystemAgent,
 		arg.WorkspaceID,

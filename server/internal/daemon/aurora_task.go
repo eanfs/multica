@@ -1,11 +1,35 @@
 package daemon
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/multica-ai/multica/server/internal/aurora"
+)
 
 // auroraSystemKeyPrefix marks Aurora's workspace-level system agents. Their
 // stable identity is "aurora:<skillID>" (see server/internal/aurora), which the
 // claim endpoint forwards to the daemon as AgentData.SystemKey.
 const auroraSystemKeyPrefix = "aurora:"
+
+// Required links remain editable. Fail delivery before launching the model if
+// removal, disabling, deletion or an empty document leaves the skill unavailable.
+// Match the workspace seed's catalog name, not the editable agent display name.
+func requireAuroraSkillDocument(task Task) error {
+	if !isAuroraTask(task) {
+		return nil
+	}
+	skillID, _ := auroraSkillID(task)
+	entry, ok := aurora.Lookup(skillID)
+	if ok {
+		for _, skill := range task.Agent.Skills {
+			if skill.Source == "workspace" && skill.Name == entry.Name && strings.TrimSpace(skill.Content) != "" {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("required Aurora skill document for %q is missing or empty; restore and enable the agent's catalog skill before retrying", skillID)
+}
 
 // auroraExecutionProvider is the only execution identity a managed enrollment
 // may install. The persisted runtime keeps its carrier identity
