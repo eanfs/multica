@@ -34,7 +34,6 @@ var (
 	errManagedSecretNotReadable = errors.New("secret file must be owner-readable")
 	errManagedSecretTooLarge    = errors.New("secret file exceeds the size limit")
 	errManagedSecretEmpty       = errors.New("secret file must not be empty")
-	errManagedEnvValueEmpty     = errors.New("environment credential must not be empty")
 )
 
 // managedSecretPaths are the host-visible paths of the fixed provider secret
@@ -150,15 +149,20 @@ func (s managedSecret) MarshalJSON() ([]byte, error) { return []byte(`"[redacted
 
 // managedProviderSecrets holds the validated managed provider configuration.
 // The Anthropic value is a secret value scoped to the Claude child, together
-// with the optional operator endpoint overrides. ArkAPIKey is the value the
-// ordinary agent child's own shell steps call Seedream with. The two remaining
-// fields are the read-only file paths the MCP broker still reads itself while
-// it exists.
+// with the optional operator endpoint overrides. It is both the credential the
+// model authenticates with and the one an Aurora skill's own shell steps call
+// the provider with: the Ark key is Anthropic-Messages-compatible, so it is
+// configured here rather than as a separate provider variable (decision 5).
+//
+// The two file paths are the deployed provider-secret mounts. They were read by
+// the MCP broker, which no longer exists (ticket #198); they are still loaded
+// and reported for presence so managed startup keeps validating that the
+// deployment staged them. Removing them belongs to the change that retires the
+// mounts (ticket #201).
 type managedProviderSecrets struct {
 	AnthropicAPIKey   managedSecret
 	AnthropicBaseURL  string
 	AnthropicModel    string
-	ArkAPIKey         managedSecret
 	ArkAPIKeyFile     string
 	VolcASRAPIKeyFile string
 }
@@ -191,32 +195,6 @@ func (s managedProviderSecrets) claudeChildEnv() map[string]string {
 	return env
 }
 
-// agentChildEnv returns the environment additions for the ordinary agent
-// child: the provider credential VALUES the model's own shell steps call the
-// provider with. A *_API_KEY_FILE path is deliberately absent — a model running
-// `curl -H 'Authorization: Bearer $ARK_API_KEY'` cannot dereference a path,
-// and the broker's file view stays in mcpBrokerChildEnv. ARK is wired here
-// first because the first executable image skill needs it; the Volcengine ASR
-// key follows in the change that retires the broker.
-func (s managedProviderSecrets) agentChildEnv() map[string]string {
-	if s.ArkAPIKey.Value() == "" {
-		return nil
-	}
-	return map[string]string{managedArkAPIKeyEnvName: s.ArkAPIKey.Value()}
-}
-
-// mcpBrokerChildEnv returns the broker's file-path view, never the values. The
-// daemon no longer merges it into the agent environment: the broker is a Claude
-// stdio child and receives these names through its own fixed MCP config env
-// (auroraBrokerEnv). It stays for that contract's tests until the broker itself
-// is deleted.
-func (s managedProviderSecrets) mcpBrokerChildEnv() map[string]string {
-	return map[string]string{
-		"ARK_API_KEY_FILE":      s.ArkAPIKeyFile,
-		"VOLC_ASR_API_KEY_FILE": s.VolcASRAPIKeyFile,
-	}
-}
-
 // String redacts the whole set so fmt never prints a value or a path.
 func (s managedProviderSecrets) String() string { return "[managed provider secrets redacted]" }
 
@@ -226,20 +204,18 @@ func (s managedProviderSecrets) LogValue() slog.Value {
 		slog.Bool("anthropic_api_key", s.AnthropicAPIKey.Value() != ""),
 		slog.Bool("anthropic_base_url", s.AnthropicBaseURL != ""),
 		slog.Bool("anthropic_model", s.AnthropicModel != ""),
-		slog.Bool("ark_api_key", s.ArkAPIKey.Value() != ""),
 		slog.Bool("ark_api_key_file", s.ArkAPIKeyFile != ""),
 		slog.Bool("volc_asr_api_key_file", s.VolcASRAPIKeyFile != ""),
 	)
 }
 
-// MarshalJSON redacts the secret values; the endpoint overrides and file paths
-// are not secret.
+// MarshalJSON redacts the Anthropic value; the endpoint overrides and file
+// paths are not secret.
 func (s managedProviderSecrets) MarshalJSON() ([]byte, error) {
 	type wire struct {
 		AnthropicAPIKey   string `json:"anthropic_api_key"`
 		AnthropicBaseURL  string `json:"anthropic_base_url"`
 		AnthropicModel    string `json:"anthropic_model"`
-		ArkAPIKey         string `json:"ark_api_key"`
 		ArkAPIKeyFile     string `json:"ark_api_key_file"`
 		VolcASRAPIKeyFile string `json:"volc_asr_api_key_file"`
 	}
@@ -247,7 +223,6 @@ func (s managedProviderSecrets) MarshalJSON() ([]byte, error) {
 		AnthropicAPIKey:   s.AnthropicAPIKey.String(),
 		AnthropicBaseURL:  s.AnthropicBaseURL,
 		AnthropicModel:    s.AnthropicModel,
-		ArkAPIKey:         s.ArkAPIKey.String(),
 		ArkAPIKeyFile:     s.ArkAPIKeyFile,
 		VolcASRAPIKeyFile: s.VolcASRAPIKeyFile,
 	})
@@ -293,39 +268,15 @@ func readManagedSecretFile(path string, maxBytes int64) (string, error) {
 	return value, nil
 }
 
-// managedArkAPIKeyEnvName is the node environment variable that carries the Ark
-// provider credential as a value. The Fleet node injects it at deploy time; the
-// daemon reads it from its own process environment and forwards it to the
-// ordinary agent child, whose skill documents name the same variable.
-const managedArkAPIKeyEnvName = "ARK_API_KEY"
-
-// readManagedProviderEnvValue reads one provider credential value from the
-// node's own environment. An unset variable is absent — the route that needs it
-// fails closed at call time — while a variable that is set and empty is an
-// error, so an operator typo cannot silently ship an empty credential.
-func readManagedProviderEnvValue(name string) (string, error) {
-	raw, ok := os.LookupEnv(name)
-	if !ok {
-		return "", nil
-	}
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return "", errManagedEnvValueEmpty
-	}
-	return value, nil
-}
-
 // loadManagedProviderSecrets validates the managed provider credentials and
 // applies the already-validated Claude endpoint overrides. Only the Anthropic
 // value is required at startup: the managed daemon is the Claude agent and
-// cannot start without its own credential. The Ark credential is read from the
-// node environment as a value for the ordinary agent child; an unset variable
-// is tolerated because the routes that need it fail closed at call time, while
-// a set-but-empty value is rejected. The two broker file paths are read lazily,
-// so a missing file is tolerated — the tool that needs it fails closed when it
-// is invoked — while a supplied file that is not a safe owner-only regular file
-// still fails startup. Every error names only the provider, never the path or
-// the value.
+// cannot start without its own credential, and that same credential is what an
+// Aurora skill's shell steps call the provider with (decision 5). The two
+// retired-broker file paths are read lazily, so a missing file is tolerated —
+// the tool that needed it fails closed when it is invoked — while a supplied
+// file that is not a safe owner-only regular file still fails startup. Every
+// error names only the provider, never the path or the value.
 func loadManagedProviderSecrets(paths managedSecretPaths, endpoint managedClaudeEndpoint) (managedProviderSecrets, error) {
 	anthropic, err := readManagedSecretFile(paths.AnthropicAPIKey, managedSecretMaxBytes)
 	if err != nil {
@@ -342,36 +293,11 @@ func loadManagedProviderSecrets(paths managedSecretPaths, endpoint managedClaude
 			return managedProviderSecrets{}, fmt.Errorf("managed mode provider credential %s is invalid: %w", optional.provider, err)
 		}
 	}
-	arkValue, err := readManagedProviderEnvValue(managedArkAPIKeyEnvName)
-	if err != nil {
-		return managedProviderSecrets{}, fmt.Errorf("managed mode provider credential ark is invalid: %w", err)
-	}
 	return managedProviderSecrets{
 		AnthropicAPIKey:   managedSecret{value: anthropic},
 		AnthropicBaseURL:  endpoint.BaseURL,
 		AnthropicModel:    endpoint.Model,
-		ArkAPIKey:         managedSecret{value: arkValue},
 		ArkAPIKeyFile:     paths.ArkAPIKey,
 		VolcASRAPIKeyFile: paths.VolcASRAPIKey,
 	}, nil
-}
-
-// managedAgentCredentialEnv is the credential overlay the daemon merges into
-// the assembled task environment of a managed node. Only the Aurora execution
-// provider runs the reviewed Aurora contract, so only it receives the managed
-// credentials. The ordinary agent child gets the provider values; the MCP
-// broker, while it still exists, gets its file paths through its own fixed MCP
-// config env (auroraBrokerEnv) instead of this overlay.
-func managedAgentCredentialEnv(secrets managedProviderSecrets, provider string) map[string]string {
-	if provider != auroraExecutionProvider {
-		return nil
-	}
-	env := map[string]string{}
-	for name, value := range secrets.agentChildEnv() {
-		env[name] = value
-	}
-	for name, value := range secrets.claudeChildEnv() {
-		env[name] = value
-	}
-	return env
 }

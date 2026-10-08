@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/service"
 )
@@ -2255,17 +2256,17 @@ func TestPromptCarriesJoinedWakeups(t *testing.T) {
 	}
 }
 
-// TestBuildAuroraPromptSelectsBrokerTool pins the task-20 fix: a managed
-// Aurora generation is enqueued through the quick-create carrier, so before
-// this fix it received the quick-create prompt that told it to run
-// `multica issue create` — a command its narrowed surface denies — while the
-// brokered MCP tool it had to call was never named. The Aurora per-turn prompt
-// must name the qualified tool, carry the generation prompt, and explicitly
-// forbid shell/CLI use.
-func TestBuildAuroraPromptSelectsBrokerTool(t *testing.T) {
+// TestBuildAuroraPromptPointsAtTheSkillDocument pins the per-turn prompt of an
+// Aurora generation: it carries the trusted skill identity, the user's prompt
+// and the run's attachments, points the model at the skill document the daemon
+// delivers, and keeps the run out of the issue workflow. The procedure itself
+// belongs to the skill document, not to this prompt.
+func TestBuildAuroraPromptPointsAtTheSkillDocument(t *testing.T) {
 	t.Parallel()
 
 	task := Task{
+		ID:                       "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		GenerationID:             "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
 		Agent:                    &AgentData{SystemKey: "aurora:poster"},
 		QuickCreatePrompt:        "橘猫窗台晒太阳图片生成（暖色调，生成一张高清图）",
 		QuickCreateAttachmentIDs: []string{"11111111-1111-4111-8111-111111111111"},
@@ -2273,13 +2274,17 @@ func TestBuildAuroraPromptSelectsBrokerTool(t *testing.T) {
 	out := BuildPrompt(task, "claude")
 
 	for _, want := range []string{
-		"mcp__aurora__aurora_seedream_generate",
 		"Skill: `poster`",
 		"橘猫窗台晒太阳",
 		"11111111-1111-4111-8111-111111111111",
-		"no shell",
-		"do not call the `multica` CLI",
-		"Canonical skill workflow",
+		"multica attachment download",
+		".claude/skills/",
+		"do not create, update, or comment on issues",
+		// The run must be able to find its own output root and manifest without
+		// guessing: the skill document and the platform have to agree on them.
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		auroraSandboxOutputRoot,
+		auroraManifestRelativePath,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Aurora prompt missing %q\n---\n%s", want, out)
@@ -2289,9 +2294,13 @@ func TestBuildAuroraPromptSelectsBrokerTool(t *testing.T) {
 		"quick-create assistant",
 		"multica issue create",
 		"Your assigned issue ID",
+		// The execution surface is gone, so the prompt must not describe it.
+		"mcp__aurora__",
+		"brokered",
+		"no shell",
 	} {
 		if strings.Contains(out, banned) {
-			t.Errorf("Aurora prompt must not carry %q (task-20 regression)\n---\n%s", banned, out)
+			t.Errorf("Aurora prompt must not carry %q\n---\n%s", banned, out)
 		}
 	}
 
@@ -2303,19 +2312,28 @@ func TestBuildAuroraPromptSelectsBrokerTool(t *testing.T) {
 	}
 }
 
-// TestBuildAuroraPromptNamesEveryRequiredTool proves the prompt derives the
-// qualified names from the trusted skill policy, not from a hardcoded list: a
-// two-tool skill names both.
-func TestBuildAuroraPromptNamesEveryRequiredTool(t *testing.T) {
+// TestBuildAuroraPromptNeverNamesBrokerTools is the regression guard for every
+// available skill: whatever a skill's policy requires, the per-turn prompt of an
+// Aurora run must never name a brokered MCP tool. The names are listed literally
+// because the assertion is that they appear nowhere, and the loop over the
+// catalog is what makes it cover all 13 skills rather than one.
+func TestBuildAuroraPromptNeverNamesBrokerTools(t *testing.T) {
 	t.Parallel()
 
-	out := BuildPrompt(Task{Agent: &AgentData{SystemKey: "aurora:video-captions"}}, "claude")
-	for _, want := range []string{
-		"mcp__aurora__aurora_volc_asr_transcribe",
-		"mcp__aurora__aurora_render_video_captions",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("video-captions prompt missing %q\n---\n%s", want, out)
+	for _, entry := range aurora.Catalog() {
+		if !entry.Available {
+			continue
+		}
+		out := BuildPrompt(Task{Agent: &AgentData{SystemKey: "aurora:" + entry.ID}}, "claude")
+		for _, banned := range []string{"mcp__aurora__", "aurora.seedream_generate", "aurora.seedance_generate",
+			"aurora.openai_image", "aurora.volc_asr_transcribe", "aurora.read_document", "aurora.id_photo",
+			"aurora.render_video_captions", "aurora.render_resume", "aurora.write_text_artifact"} {
+			if strings.Contains(out, banned) {
+				t.Errorf("skill %q prompt still names %q\n---\n%s", entry.ID, banned, out)
+			}
+		}
+		if !strings.Contains(out, "Skill: `"+entry.ID+"`") {
+			t.Errorf("skill %q prompt does not name its skill id\n---\n%s", entry.ID, out)
 		}
 	}
 }

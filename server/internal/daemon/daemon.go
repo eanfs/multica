@@ -7822,19 +7822,6 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		return TaskResult{}, fmt.Errorf("refusing to spawn agent: task has no workspace_id (task_id=%s)", task.ID)
 	}
 
-	// Aurora system agents run untrusted prompts on a server-hosted sandbox node
-	// and must execute under a reviewed narrow surface. Fail closed before any
-	// workdir preparation: a provider with no reviewed surface (only claude
-	// today) must not fall back to the default autonomous (bypass) mode.
-	var auroraSandbox *auroraSurface
-	if isAuroraTask(task) {
-		surface, err := auroraToolSurface(task, provider)
-		if err != nil {
-			return TaskResult{}, err
-		}
-		auroraSandbox = &surface
-	}
-
 	prepareTimeout := d.effectiveTaskPrepareTimeout()
 	prepareCtx, cancelPrepare := context.WithTimeoutCause(ctx, prepareTimeout, errTaskPrepareTimeout)
 	prepareComplete := false
@@ -8709,15 +8696,15 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		agentCustomEnv = task.Agent.CustomEnv
 	}
 	layerCustomEnvAndHermesHome(agentEnv, agentCustomEnv, env.HermesHome, d.logger)
-	// Managed sandbox credential scoping. The ordinary agent child calls the
-	// providers itself, so it receives the credential VALUES, never the broker's
-	// *_API_KEY_FILE paths; the MCP broker, while it still exists, gets its
-	// paths through its own fixed MCP config env. Only the Aurora execution
-	// provider runs that contract, so only it receives the managed credentials;
-	// the file-path overlay the other managed providers used to get existed
-	// solely for the Aurora broker, which never runs for them.
-	if d.cfg.Managed.Enabled {
-		for name, value := range managedAgentCredentialEnv(d.cfg.Managed.ProviderSecrets, provider) {
+	// Managed sandbox credential scoping. The Anthropic value reaches only the
+	// provider CLI child a managed node may launch, and only when that child is
+	// the enrolled execution provider. The provider keys an Aurora skill needs
+	// (ARK, Volcengine ASR) are NOT injected here yet: the managed set still
+	// holds them as read-only file paths for the broker that no longer exists.
+	// Wiring those values into this environment is the remaining half of ticket
+	// #197 / the plan's Task 3.
+	if d.cfg.Managed.Enabled && provider == auroraExecutionProvider {
+		for name, value := range d.cfg.Managed.ProviderSecrets.claudeChildEnv() {
 			agentEnv[name] = value
 		}
 	}
@@ -8874,42 +8861,6 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		OpenclawMode:           openclawMode,
 		ClaudeSettingsPath:     env.ClaudeSettingsPath,
 		QwenpawWorkspace:       env.QwenpawWorkspace,
-	}
-	// Apply the Aurora sandbox policy resolved up front: the turn cap and the
-	// narrowed surface. Non-Aurora tasks leave auroraSandbox nil, so this keeps
-	// the default autonomous surface and a zero MaxTurns for them.
-	if auroraSandbox != nil {
-		// The reviewed allowlist is the whole point of the narrowed surface: an
-		// empty one would silently fall back to Claude's own defaults, so fail
-		// the task instead of launching it.
-		if len(auroraSandbox.allowed) == 0 {
-			return TaskResult{}, errors.New("aurora task has no reviewed tool allowlist")
-		}
-		execOpts.MaxTurns = auroraMaxTurns
-		execOpts.PermissionMode = auroraSandbox.permissionMode
-		execOpts.DisallowedTools = auroraSandbox.disallowed
-		execOpts.AllowedTools = auroraSandbox.allowed
-		// Aurora tasks never inherit agent-, task-, or plugin-supplied MCP
-		// configuration: the reviewed broker is written into the workdir and
-		// injected as the only MCP server, and --strict-mcp-config (added for
-		// any managed config) keeps host-local MCP servers out. Any failure to
-		// resolve that context fails the task through the normal refund path
-		// rather than launching a wider surface.
-		brokerContext, contextErr := d.writeAuroraBrokerContext(ctx, task, *env)
-		if contextErr != nil {
-			return TaskResult{}, contextErr
-		}
-		brokerConfig, configErr := auroraBrokerMcpConfig(brokerContext, auroraBrokerProxyEnv())
-		if configErr != nil {
-			return TaskResult{}, configErr
-		}
-		execOpts.McpConfig = brokerConfig
-		taskLog.Info("aurora sandbox policy applied",
-			"max_turns", execOpts.MaxTurns,
-			"permission_mode", execOpts.PermissionMode,
-			"allowed_tools", execOpts.AllowedTools,
-			"disallowed_tools", execOpts.DisallowedTools,
-		)
 	}
 	// Some providers do not reliably load the per-task runtime config files we
 	// write into the task workdir:

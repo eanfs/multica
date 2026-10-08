@@ -41,19 +41,24 @@ type AttachmentConstraint struct {
 }
 
 // SkillExecutionPolicy is the fixed, server-owned contract for one skill: the
-// execution route, the input rules, the output kinds the skill may produce, and
-// the MCP tools its workflow is allowed to call.
+// execution route, the input rules, and the output kinds the skill may produce.
 type SkillExecutionPolicy struct {
-	SkillID       string
-	Route         string
-	Attachments   []AttachmentConstraint
-	OutputKinds   []string
+	SkillID     string
+	Route       string
+	Attachments []AttachmentConstraint
+	OutputKinds []string
+	// RequiredTools names the provider operations this skill performs. It is no
+	// longer a tool allowlist: Aurora runs execute on the ordinary agent surface,
+	// so nothing narrows the model's tools to this set. It documents what the
+	// skill's steps must produce, and the producer contract for the run's
+	// artifact manifest is derived from Route, not from here.
 	RequiredTools []string
 }
 
 // executionPolicies is the one policy table. The catalog projects its
-// attachments onto the wire; Task 2's tool surface derives from its route and
-// tools. It intentionally excludes avatar-video, ppt and excel.
+// attachments onto the wire; the run's artifact manifest is validated against
+// its route (see auroraManifestProducersByRoute). It intentionally excludes
+// avatar-video, ppt and excel.
 var executionPolicies = map[string]SkillExecutionPolicy{
 	"poster": {
 		Route:         "volcengine-seedream",

@@ -64,9 +64,6 @@ func stageManagedProviderSecrets(t *testing.T) (managedSecretPaths, managedProvi
 	writeManagedSecretFile(t, paths.ArkAPIKey, testArkSecret+"\n", 0o400)
 	writeManagedSecretFile(t, paths.VolcASRAPIKey, testVolcASRSecret+"\n", 0o400)
 	setManagedSecretPathEnv(t, paths)
-	// Pin the provider-value environment too: an ARK_API_KEY exported on the
-	// developer's machine must not change what these tests load.
-	t.Setenv(managedArkAPIKeyEnvName, testArkSecret)
 	secrets, err := loadManagedProviderSecrets(paths, managedClaudeEndpoint{})
 	if err != nil {
 		t.Fatalf("loadManagedProviderSecrets: %v", err)
@@ -244,76 +241,6 @@ func TestManagedSecretChildEnvScoping(t *testing.T) {
 			t.Errorf("claude child env carries broker name %s", name)
 		}
 	}
-
-	broker := secrets.mcpBrokerChildEnv()
-	if len(broker) != 2 {
-		t.Fatalf("mcp broker env = %v, want the two provider file paths", broker)
-	}
-	for name, want := range map[string]string{
-		"ARK_API_KEY_FILE":      secrets.ArkAPIKeyFile,
-		"VOLC_ASR_API_KEY_FILE": secrets.VolcASRAPIKeyFile,
-	} {
-		if broker[name] != want {
-			t.Errorf("mcp broker env[%s] = %q, want %q", name, broker[name], want)
-		}
-	}
-	if _, ok := broker["ANTHROPIC_API_KEY"]; ok {
-		t.Error("mcp broker env carries the Anthropic credential name")
-	}
-	for _, value := range broker {
-		if value == testAnthropicSecret {
-			t.Error("mcp broker env carries the Anthropic credential value")
-		}
-	}
-}
-
-// TestAgentEnvCarriesTheProviderKeys pins the ordinary-agent credential shape:
-// the managed agent child receives the provider VALUE its own shell steps read,
-// and never the broker's ARK_API_KEY_FILE path. The value comes from the node's
-// environment, which the Fleet injects at deploy time.
-func TestAgentEnvCarriesTheProviderKeys(t *testing.T) {
-	paths := managedSecretTestPaths(t)
-	writeManagedSecretFile(t, paths.AnthropicAPIKey, testAnthropicSecret, 0o400)
-	t.Setenv(managedArkAPIKeyEnvName, "ark-from-env")
-
-	secrets, err := loadManagedProviderSecrets(paths, managedClaudeEndpoint{})
-	if err != nil {
-		t.Fatalf("loadManagedProviderSecrets: %v", err)
-	}
-
-	env := managedAgentCredentialEnv(secrets, auroraExecutionProvider)
-	if env["ARK_API_KEY"] != "ark-from-env" {
-		t.Fatalf("agent child env ARK_API_KEY = %q, want the environment value", env["ARK_API_KEY"])
-	}
-	if _, ok := env["ARK_API_KEY_FILE"]; ok {
-		t.Fatalf("agent child env still carries ARK_API_KEY_FILE: %v", env)
-	}
-	if env["ANTHROPIC_API_KEY"] != testAnthropicSecret {
-		t.Fatalf("agent child env lost the Anthropic credential: %v", env)
-	}
-	if other := managedAgentCredentialEnv(secrets, "codex"); len(other) != 0 {
-		t.Fatalf("a non-Aurora provider received managed credentials: %v", other)
-	}
-}
-
-// TestProviderEnvValueRejectsEmpty pins the fail-closed half of the environment
-// credential read: a variable that is set but empty is an operator typo, not an
-// absent key, and must stop the load instead of shipping an empty credential.
-func TestProviderEnvValueRejectsEmpty(t *testing.T) {
-	paths := managedSecretTestPaths(t)
-	writeManagedSecretFile(t, paths.AnthropicAPIKey, testAnthropicSecret, 0o400)
-	t.Setenv(managedArkAPIKeyEnvName, "  ")
-
-	_, err := loadManagedProviderSecrets(paths, managedClaudeEndpoint{})
-	if err == nil {
-		t.Fatal("loadManagedProviderSecrets accepted a set-but-empty ARK_API_KEY")
-	}
-	if !strings.Contains(err.Error(), "ark") {
-		t.Fatalf("error is not provider-specific: %v", err)
-	}
-	if strings.Contains(err.Error(), testAnthropicSecret) {
-		t.Fatalf("error leaks a secret value: %v", err)
-	}
 }
 
 // managedClaudeTestOverrides prepares a minimal valid managed startup so a test
@@ -408,27 +335,6 @@ func TestManagedClaudeModelSurvivesVerbatim(t *testing.T) {
 	claude := cfg.Managed.ProviderSecrets.claudeChildEnv()
 	if claude["ANTHROPIC_MODEL"] != model {
 		t.Errorf("claude child env model = %q, want the verbatim %q", claude["ANTHROPIC_MODEL"], model)
-	}
-}
-
-// TestManagedMcpBrokerChildEnvIgnoresOperatorEndpoint keeps the broker scope
-// untouched: the Claude endpoint overrides never reach the MCP broker.
-func TestManagedMcpBrokerChildEnvIgnoresOperatorEndpoint(t *testing.T) {
-	t.Setenv("ANTHROPIC_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan")
-	t.Setenv("ANTHROPIC_MODEL", "ark-code-latest")
-
-	cfg, err := LoadConfig(managedClaudeTestOverrides(t))
-	if err != nil {
-		t.Fatalf("LoadConfig(managed) = %v", err)
-	}
-	broker := cfg.Managed.ProviderSecrets.mcpBrokerChildEnv()
-	if len(broker) != 2 {
-		t.Fatalf("mcp broker env = %v, want the two provider file paths", broker)
-	}
-	for _, name := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"} {
-		if _, ok := broker[name]; ok {
-			t.Errorf("mcp broker env carries Claude endpoint key %s", name)
-		}
 	}
 }
 
