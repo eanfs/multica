@@ -68,6 +68,8 @@ const claudeEnv=aurora.claude_env;need(claudeEnv&&typeof claudeEnv==='object'&&!
 // keys allowed through claude_env: the Ark key as ANTHROPIC_API_KEY and the
 // Volcengine speech key as VOLC_ASR_API_KEY. Every other credential key stays
 // refused, and the values are readable by any process in the container.
+// Keep equal to the daemon's managed*APIKeyEnvName constants and to
+// providerEnvNames in server/internal/fleet/model/aurora.go.
 const providerEnvKeys=['ANTHROPIC_API_KEY','VOLC_ASR_API_KEY'];
 for(const [key,value] of Object.entries(claudeEnv)){
  need(typeof value==='string');
