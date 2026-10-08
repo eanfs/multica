@@ -4,9 +4,9 @@
 
 **Goal:** 让 Aurora 的 13 个 skill 通过 multica 既有的「agent 加载 skill」机制执行 —— 每个 skill 一个预置 system agent、一份可执行的 skill 文档,模型用普通工具(Bash / Read / Write)按文档完成任务;删掉 Aurora 专有的 MCP broker 执行面、`deploy/aurora-sandbox/` 全部内容与全部自定义隔离策略,节点密钥改由容器 env 在部署时注入。
 
-**Architecture:** Aurora 不再拥有独立执行通道。`daemon.isAuroraTask` 分支被删除后,Aurora 任务与普通 issue 任务逐字节同路径:入队写入 `agent_task_queue` 并绑定 agent 的 `runtime_id` → 节点领取 → daemon 把该 agent 启用的 skill 物化到 `<workdir>/.claude/skills/<slug>/SKILL.md` → `BuildPrompt` → 拉起 Claude(`bypassPermissions`,无工具白名单,无 MaxTurns)→ 产物落盘 → 回传结算。13 个 system agent、13 个 skill 行、13 条 `agent_skill` 关联**今天已经存在**(`aurora.EnsureSystemAgents`),本计划改的是它们的内容与执行面,不是重新搭建。节点镜像是 `docker/runtime/Dockerfile` 的单一产物,内含 daemon(`multica` + `fleet-node`)、Claude 与 omp。
+**Architecture:** Aurora 不再拥有独立执行通道。`daemon.isAuroraTask` 分支被删除后,Aurora 任务与普通 issue 任务逐字节同路径:入队写入 `agent_task_queue` 并绑定 agent 的 `runtime_id` → 节点领取 → daemon 把该 agent 启用的 skill 物化到 `<workdir>/.claude/skills/<slug>/SKILL.md` → `BuildPrompt` → 拉起 Claude(`bypassPermissions`,无工具白名单,无 MaxTurns)→ 产物落盘 → 回传结算。13 个 system agent、13 个 skill 行、13 条 `agent_skill` 关联**今天已经存在**(`aurora.EnsureSystemAgents`),本计划改的是它们的内容与执行面,不是重新搭建。节点镜像是 `docker/runtime/Dockerfile` 的单一产物,内含 daemon(`multica` + `fleet-node`)与 Claude。**计费不在本计划范围内** —— 见「用户已确认的决策」第 8 条。
 
-**Tech Stack:** Go 1.26(Chi、pgx/v5、sqlc、Docker Engine SDK)、PostgreSQL 17、Node 22、Claude Code CLI、omp、TanStack Query + zod + Vitest、Playwright、Docker Desktop。
+**Tech Stack:** Go 1.26(Chi、pgx/v5、sqlc、Docker Engine SDK)、PostgreSQL 17、Node 22、Claude Code CLI、TanStack Query + zod + Vitest、Playwright、Docker Desktop。
 
 **Spec：** 本计划**取代** [统一 Cloud Runtime 与 Aurora skills 执行层设计](../specs/2026-10-06-unified-cloud-runtime-aurora-design.md)(r2)中关于隔离、单镜像多入口、broker 桥接与 G0–G5 门的部分。规格的书面内容保留为历史记录,不再是执行依据。审查记录 [2026-10-07-unified-cloud-runtime-aurora-review.md](../specs/2026-10-07-unified-cloud-runtime-aurora-review.md) 中 R1、R2、R6、R9 四条针对进程隔离与受控 fixture 的发现**在本方向下不再适用**(见「行为变化与已知代价」)。
 
@@ -22,6 +22,8 @@
 4. **不使用 AppArmor**,自定义 seccomp 也一起去掉,容器按 Docker 默认安全设置执行;安全问题本阶段忽略。
 5. **provider 密钥通过 `.env` 写入容器环境变量**,部署时解决,**不经服务端**。
 6. **不做**「skill 脚本调 Multica 服务端、由服务端持密钥调 provider」这种代理。
+7. **omp 暂不安装**(2026-10-08),统一镜像先只保留 Claude。
+8. **credits 计费本次不处理。** 本计划照现状保留 `Credit.Reserve` / `settleAurora*`,但**不把它当作验证的门**:部署时遇到计费问题先记录、先绕过,继续验证执行链路。后续**另立计划**,把计费改为**用 multica web 既有的 token 用量统计来算 credits**(`task_usage` 表与 `POST /api/daemon/tasks/{taskId}/usage` 已经在收 input/output/cache token 与 `CostUsdTicks`),不再按 skill 固定积分数预留。
 
 ---
 
@@ -73,16 +75,38 @@
 
 ---
 
+## 首个验证切片(先做这个,再谈其余)
+
+用户要求加速验证,所以先只打通**一个** skill。选 **`xhs-copy`**,理由是它的约束最少:
+
+| 条件 | `xhs-copy` 的取值 | 意义 |
+| --- | --- | --- |
+| 附件 | `documentConstraint(0, 1)` —— **允许 0 个** | 只给 prompt 就能跑,不依赖附件暂存 |
+| 产物 | `text`(`Output: []string{"text"}`) | 本地栈能走完审核与入库 —— **图片产物需要可公网抓取的 URL 才能到 `completed`**,本地跑不到 |
+| provider | 不调用 | 不需要密钥、不花钱、结果确定 |
+| 镜像依赖 | 只需 bash 与写文件 | 现有沙箱镜像已具备,**本次不动镜像** |
+
+因此首个切片的范围是三步,**不改镜像、不改密钥、不删目录**:
+
+1. 把 `server/internal/aurora/workflows/xhs-copy.md` 改写成可执行步骤(Task 1 的 Step 3)。
+2. 删除 Aurora 专有执行分支,否则 broker 执行面仍然生效、模型拿不到 Bash(Task 4)。
+3. 在**现有的**沙箱镜像上跑一次完整往返:生成 → 领取 → 模型用普通工具写文案 → 产物入库 → 结算(Task 7 的第 2 步)。
+
+通过之后再做其余 12 份文档、镜像统一、密钥改 env 与目录删除。**删目录(Task 5)必须等 13 份全部抽取完**,这一点不因为首个切片通过而放宽。
+
+---
+
 ## 范围、依赖与实施顺序
 
 | 里程碑 | 任务 | 可判定交付 | 依赖 |
 | --- | --- | --- | --- |
-| **M1 抽取与内容** | 1 | 13 份可执行 skill 文档写入 `server/internal/aurora/workflows/`,每份通过"无工具名"检查 | 无 |
-| **M2 执行面** | 2–4 | 统一节点镜像构建成功;Aurora 执行分支删除;密钥走 env | Task 1 |
-| **M3 清理** | 5–6 | `deploy/aurora-sandbox/` 与全部引用消失;仓库测试全绿 | Task 2–4 |
-| **M4 接线与验收** | 7–8 | 节点未就绪时 UI 可见原因;一次端到端往返在 Docker Desktop 上跑通 | Task 2–6 |
+| **M0 单 skill 验证** | 1(仅 `xhs-copy`)、4、7(第 2 步) | 一次完整往返:任务跑通、文本产物入库、账本结算。**不改镜像、不改密钥、不删目录** | 无 |
+| **M1 抽取与内容** | 1b(其余 12 份) | 13 份文档全部可执行,每份通过"无工具名"检查 | M0 通过 |
+| **M2 执行面** | 2、3 | 统一节点镜像构建成功;**omp 本阶段不安装**;密钥走 env | M1 |
+| **M3 清理** | 5、6 | `deploy/aurora-sandbox/` 与全部引用消失;仓库测试全绿 | M2 |
+| **M4 验收** | 7 | 13 个 skill 各跑一次 + 端到端记录 | M3 |
 
-**并行边界:** Task 1(文档内容)与 Task 2(镜像)互不依赖,可并行。Task 5(删除)必须等 Task 1 完成。Task 7/8 依赖 Task 2–4。
+**并行边界:** Task 1 的文档内容与 Task 2 的镜像互不依赖。Task 5(删除)必须等 13 份全部抽取完(Task 1 + 1b)。
 
 ---
 
@@ -90,14 +114,14 @@
 
 ### 新增
 
-- `docker/runtime/omp-version.txt` — omp 的锁定版本(与既有 `claude-version.txt` 同样式)。若 omp 不以 npm 分发,改为记录安装来源与校验和。
+- `scripts/check-runtime-image.sh` — 统一镜像的入口、属主与"env 里无密钥"断言(Task 2)。
 - `.env.example` 的 Aurora 段 — provider 密钥的变量名与说明(值留空)。
-- `docs/superpowers/plans/2026-10-08-aurora-agent-skill-runtime-acceptance.md` — Task 8 的验收记录。
+- `docs/superpowers/plans/2026-10-08-aurora-agent-skill-runtime-acceptance.md` — Task 7 的验收记录。
 
 ### 修改
 
 - `server/internal/aurora/workflows/*.md`(13 份)— 全部重写为可执行步骤。
-- `docker/runtime/Dockerfile` — 折叠为唯一节点镜像入口,增加 omp 与媒体工具。
+- `docker/runtime/Dockerfile` — 折叠为唯一节点镜像入口,增加媒体工具与 bash(不加 omp)。
 - `server/internal/daemon/daemon.go` — 删除 `isAuroraTask` 的两处分支。
 - `server/internal/daemon/prompt.go` — 删除 `buildAuroraPrompt` 的工具名与 workflow 内联。
 - `server/internal/aurora/execution_policy.go` — 保留 `Route`(产物校验用),`RequiredTools` 不再作为工具白名单。
@@ -121,122 +145,120 @@
 
 ---
 
-## Task 1: 抽取并重写 13 份 skill 文档
+## Task 1: 实现第一个 skill(`xhs-copy`)
+
+**本任务只落地一个 skill。** 其余 12 份见 Task 1b,排在首个端到端验证通过之后 —— 一次改一份,每份都能先跑通再动下一份。
 
 **Files:**
-- Modify: `server/internal/aurora/workflows/*.md`(13 份)
-- Create: `server/internal/aurora/workflows_test.go` 的追加用例(见 Step 5)
-- Read(只读,不修改):`deploy/aurora-sandbox/runtime/src/{policy,provider-run,importer,manifest}.mjs`、`runtime/src/tools/*.mjs`、`vendor/volcengine/*/SKILL.md` 与 `references/`、`runtime/test/*.test.mjs`
+- Modify: `server/internal/aurora/workflows/xhs-copy.md`
+- Modify: `server/internal/aurora/workflows_test.go`(新增守卫测试与 `rewrittenSkills` 清单)
+- Read(只读,不修改):`deploy/aurora-sandbox/runtime/src/tools/documents.mjs`、`text-artifact.mjs`、`policy.mjs`、`manifest.mjs`
 
 **Interfaces:**
-- Produces: 每份文档固定五段 —— `## Inputs`、`## Steps`、`## Required outputs`、`## Artifact manifest`、`## Failure behavior`。
-- Produces: 13 份文档里的每一步都是真实命令或 HTTP 调用;不得出现 `mcp__aurora__`、`aurora.<tool>` 或"调用 brokered tool"字样。
-- Consumes: 现有 `aurora.Workflow(skillID)` 内嵌读取(`server/internal/aurora/workflows.go:13-33`),路径与 skill ID 一一对应,不新增文件。
+- Produces: 5 段固定结构 —— `## Inputs`、`## Steps`、`## Required outputs`、`## Artifact manifest`、`## Failure behavior`。
+- Produces: `var rewrittenSkills = []string{"xhs-copy"}` —— 已完成改写的清单,Task 1b 逐项往里加。
+- Consumes: `aurora.Workflow(skillID)` 内嵌读取(`server/internal/aurora/workflows.go:13-33`);文件名与 skill ID 一一对应,不新增文件。
 
 - [ ] **Step 1: 写"无工具名"守卫测试(红)**
 
 在 `server/internal/aurora/workflows_test.go` 追加:
 
 ```go
-// TestWorkflowsDescribeRealStepsNotBrokerTools pins the direction of the
-// Aurora execution layer: the 13 skill documents drive an ordinary agent, so a
-// document that still tells the model to call a brokered MCP tool is a bug,
-// not a stale comment.
-func TestWorkflowsDescribeRealStepsNotBrokerTools(t *testing.T) {
-	for _, e := range Catalog() {
-		brief, ok := Workflow(e.ID)
+// rewrittenSkills lists the skill documents that have been converted to the
+// ordinary-agent form. It grows one skill at a time: each one is verified end
+// to end before the next is written, so a document that still tells the model
+// to call a brokered MCP tool is a bug, not a stale comment.
+var rewrittenSkills = []string{"xhs-copy"}
+
+func TestRewrittenWorkflowsDescribeRealSteps(t *testing.T) {
+	for _, id := range rewrittenSkills {
+		brief, ok := Workflow(id)
 		if !ok {
-			if e.Available {
-				t.Fatalf("available skill %q has no workflow document", e.ID)
-			}
-			continue
+			t.Fatalf("skill %q has no workflow document", id)
 		}
 		for _, banned := range []string{"mcp__aurora__", "aurora.seedream_generate", "aurora.seedance_generate",
 			"aurora.openai_image", "aurora.volc_asr_transcribe", "aurora.read_document", "aurora.id_photo",
 			"aurora.render_video_captions", "aurora.render_resume", "aurora.write_text_artifact",
-			"MCP broker", "brokered tool"} {
+			"MCP broker", "brokered tool", "no shell"} {
 			if strings.Contains(brief, banned) {
-				t.Errorf("skill %q still references %q", e.ID, banned)
+				t.Errorf("skill %q still references %q", id, banned)
 			}
 		}
 		for _, want := range []string{"## Inputs", "## Steps", "## Required outputs", "## Artifact manifest", "## Failure behavior"} {
 			if !strings.Contains(brief, want) {
-				t.Errorf("skill %q is missing the %q section", e.ID, want)
+				t.Errorf("skill %q is missing the %q section", id, want)
 			}
+		}
+	}
+}
+
+// TestEveryAvailableSkillHasADocument keeps the catalog and the embedded bundle
+// in step. It does not require the document to be rewritten yet.
+func TestEveryAvailableSkillHasADocument(t *testing.T) {
+	for _, e := range Catalog() {
+		if _, ok := Workflow(e.ID); e.Available && !ok {
+			t.Errorf("available skill %q has no workflow document", e.ID)
 		}
 	}
 }
 ```
 
-Run: `(cd server && go test ./internal/aurora -run TestWorkflowsDescribeRealStepsNotBrokerTools -count=1)`
-Expected: FAIL —— 13 份都命中 `mcp__aurora__`,且缺少两个新段落
+Run: `(cd server && go test ./internal/aurora -run 'TestRewrittenWorkflows|TestEveryAvailableSkill' -count=1)`
+Expected: `TestRewrittenWorkflowsDescribeRealSteps` FAIL —— `xhs-copy.md` 命中 `mcp__aurora__` 与 `no shell`;`TestEveryAvailableSkillHasADocument` PASS
 
-- [ ] **Step 2: 逐份抽取现有实现**
+- [ ] **Step 2: 抽取现有实现**
 
-对每个 skill 打开对应实现,把每一步抄成文字加命令。对照表:
+对 `xhs-copy` 打开两处实现,把事实抄下来,不要凭印象:
 
-| skill | 实现来源 | 要抽出的关键事实 |
-| --- | --- | --- |
-| `id-photo` | `runtime/src/tools/id-photo.mjs` | 固定 ImageMagick argv、输出尺寸与格式 |
-| `resume` | `runtime/src/tools/resume.mjs` | 转义 HTML 模板要点、无头 Chromium 打印参数、输出 PDF |
-| `video-captions` | `runtime/src/tools/hyperframes.mjs` | FFmpeg 抽音 → ASR → 固定模板合成字幕;cue 输入格式 |
-| `transcription` | `runtime/src/tools/volc-asr.mjs` | ASR 端点、认证头、有界 base64 流式、音频抽取命令 |
-| `document-summary`、`xhs-copy` | `runtime/src/tools/documents.mjs`、`text-artifact.mjs` | `pdftotext` / DOCX ZIP-XML 抽取的固定命令、文本产物命名规则 |
-| `poster`、`xhs-image`、`text-image` | `runtime/src/tools/seedream.mjs` + `vendor/volcengine/byted-ark-seedream-skill/SKILL.md` | ARK 端点、认证头、请求体、同步返回形状、参考图上传 |
-| `image-video`、`text-video` | `runtime/src/tools/seedance.mjs` + `vendor/volcengine/byted-ark-seedance-skill/SKILL.md` | ARK 异步创建 → 轮询 → 下载;`external_id` 语义 |
-| `product-image`、`image-edit` | `runtime/src/tools/openai-images.mjs` | OpenAI 端点、模型名、图片输入方式 |
+| 来源 | 要抽出的事实 |
+| --- | --- |
+| `runtime/src/tools/text-artifact.mjs` | 允许的文件名与扩展名、编码、大小上限、写入位置 |
+| `runtime/src/tools/documents.mjs` | 有文档时的读取方式(UTF-8/Markdown 直接读;PDF 用 `pdftotext`;DOCX 走固定 ZIP/XML 抽取) |
+| `runtime/src/policy.mjs` 的 `xhs-copy` 条目 | 附件规则(0–1 份文档)、输入输出类型 |
+| `runtime/src/manifest.mjs` | manifest 的字段、路径、上限 |
 
-每个 skill 同时读 `runtime/src/policy.mjs` 对应条目,把 provider / model / origin / 输入输出规则抄进 `## Inputs` 与 `## Required outputs`。
-
-- [ ] **Step 3: 写样例文档(先写一份,作为其余 12 份的模板)**
-
-`id-photo.md` 作为最简的一份,写出完整形态:
+- [ ] **Step 3: 改写 `xhs-copy.md`**
 
 ```markdown
-# ID Photo
+# Xiaohongshu Copy
 
-Turn one supplied portrait into an identification photo.
+Write social copy from a written request.
 
 You run on a normal Multica agent: you have a shell, the workspace files, and
-the media tools installed in this image. Do the work yourself.
+the tools installed in this image. Do the work yourself.
 
 ## Inputs
 
-- `prompt`: the user's instruction (required).
-- One attached image, materialised under the task input directory. Read the
-  exact path from the task context; do not guess it.
+- `prompt`: the user's request (required).
+- Zero or one attached document. When one is attached, read its path from the
+  task context. Markdown and plain text are read directly. A PDF is read with
+  `pdftotext -layout "<input>" -`. A DOCX is read by unzipping it and stripping
+  the XML tags — do not trust any library or external service for this.
 
 ## Steps
 
-1. Locate the single input image under the task input directory.
-2. Run the fixed transform:
-
-   ```bash
-   convert "<input>" -resize 600x800^ -gravity center -extent 600x800 -strip "<output>"
-   ```
-
-3. Write the result to `<outputRoot>/id-photo.png`. Resize and crop only by the
-   fixed geometry above; never crop to a face you chose yourself.
+1. When a document is attached, read it with the command for its type above.
+2. Write the copy from the run `prompt` and any document text.
+3. Write the result to `<outputRoot>/xhs-copy.md` as UTF-8 Markdown.
 
 ## Required outputs
 
-- `<outputRoot>/id-photo.png` — one image, PNG, at most 25 MiB.
+- `<outputRoot>/xhs-copy.md` — one text artifact.
 
 ## Artifact manifest
 
-Write `<outputRoot>/.multica/aurora-artifacts.v1.json` with the exact fields the
-daemon validates:
+Write `<outputRoot>/.multica/aurora-artifacts.v1.json`:
 
 ```json
 {
   "schema": "com.multica.aurora.artifacts",
   "version": 1,
   "task_id": "<the task id from your task context>",
-  "skill_id": "id-photo",
+  "skill_id": "xhs-copy",
   "artifacts": [
-    { "source": { "type": "file", "path": "id-photo.png" },
-      "kind": "image", "role": "primary", "name": "id-photo.png",
-      "format": "png" }
+    { "source": { "type": "file", "path": "xhs-copy.md" },
+      "kind": "text", "role": "primary", "name": "xhs-copy.md",
+      "format": "md" }
   ]
 }
 ```
@@ -247,44 +269,60 @@ than 600 MiB in total, is rejected and the generation fails.
 
 ## Failure behavior
 
-- If the input image is missing or unreadable, stop and report the failure. Do
-  not synthesise an image.
-- If the transform exits non-zero, report the failure with its stderr. Do not
-  retry more than once.
+- If an attached document cannot be read, stop and report the failure. Do not
+  invent its contents.
 - Never claim completion unless the output file exists and the manifest names it.
 ```
 
-（其余 12 份同样式;`## Steps` 里的命令必须来自 Step 2 的对照表,不得凭印象写。）
+Step 3 的命令与字段必须来自 Step 2 抽出的事实;凡在实现里找不到依据的,停下来问,不要补一个看起来合理的值。
 
-- [ ] **Step 4: 写完其余 12 份**
+- [ ] **Step 4: 运行守卫测试**
 
-逐份按 Step 3 的模板落地。硬性要求:
-
-- 每个会调用 provider 的 skill,Steps 里必须给出**完整端点、认证头、请求体字段、轮询方式**(异步的写清轮询间隔与超时),以及**先调用服务端记账路由再调 provider** 的顺序:
-
-```bash
-# Record the create attempt before spending a provider call. This route is
-# bookkeeping only now: nothing enforces it, so call it first anyway.
-curl -fsS -X POST "$MULTICA_SERVER_URL/api/agent/tasks/$MULTICA_TASK_ID/aurora-provider-runs/begin" \
-  -H "Authorization: Bearer $MULTICA_TOKEN" -d '{"provider":"ark","operation":"create","model":"..."}'
-```
-
-- 每个 skill 的 `## Artifact manifest` 段写明它产出的 artifact 数量与 `kind`(与 `aurora.ExecutionPolicy(skillID)` 的 `Route` 契约一致,否则 Task 5 的删除会连带删掉校验依据)。
-- 每一步都写清楚读哪个环境变量拿密钥(变量名在 Task 3 定);**不得**写"调用某个工具"。
-
-- [ ] **Step 5: 运行守卫测试**
-
-Run: `(cd server && go test ./internal/aurora -run TestWorkflowsDescribeRealStepsNotBrokerTools -count=1)`
+Run: `(cd server && go test ./internal/aurora -run 'TestRewrittenWorkflows|TestEveryAvailableSkill' -count=1)`
 Expected: PASS
 
 Run: `(cd server && go test ./internal/aurora -count=1)`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
+
+```bash
+git add server/internal/aurora/workflows/xhs-copy.md server/internal/aurora/workflows_test.go
+git commit -m "feat(aurora): make the xhs-copy skill document executable by an ordinary agent"
+```
+
+## Task 1b: 其余 12 份 skill 文档
+
+**前置:** M0 的单 skill 往返通过(否则不要把 12 份一起押上)。
+
+**Files:**
+- Modify: `server/internal/aurora/workflows/*.md`(12 份)
+- Modify: `server/internal/aurora/workflows_test.go` 的 `rewrittenSkills`
+
+**Interfaces:**
+- Consumes: Task 1 的模板与守卫测试。
+- Produces: `rewrittenSkills` 含全部 13 项;抽出的内容进入 Task 7 的验收。
+
+- [ ] **Step 1: 逐份抽取**(对照表见原「抽取与内容」小节;每份从 `runtime/src/tools/*.mjs`、`runtime/src/policy.mjs` 与 `vendor/volcengine/*/SKILL.md` 抽,顺序:先本地 4 份,再 provider 4 份,最后异步视频 2 份)
+
+- [ ] **Step 2: 每写完一份,把它的 id 加进 `rewrittenSkills` 并跑守卫测试**
+
+Run: `(cd server && go test ./internal/aurora -run TestRewrittenWorkflowsDescribeRealSteps -count=1)`
+Expected: PASS
+
+- [ ] **Step 3: 12 份全部完成后跑全量**
+
+Run: `(cd server && go test ./internal/aurora -count=1)`
+Expected: PASS
+
+Run: `grep -L "https://" server/internal/aurora/workflows/*.md`
+Expected: 只列出纯本地的 skill(`id-photo`、`resume` 等)。任何 provider skill 出现在列表里,说明它的端点还没写完。
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add server/internal/aurora/workflows server/internal/aurora/workflows_test.go
-git commit -m "feat(aurora): make the 13 skill documents executable by an ordinary agent"
+git commit -m "feat(aurora): convert the remaining skill documents to ordinary-agent steps"
 ```
 
 ---
@@ -293,25 +331,26 @@ git commit -m "feat(aurora): make the 13 skill documents executable by an ordina
 
 **Files:**
 - Modify: `docker/runtime/Dockerfile`
-- Create: `docker/runtime/omp-version.txt`
+- Create: `scripts/check-runtime-image.sh`
 - Delete: `deploy/aurora-sandbox/Dockerfile`、`deploy/aurora-sandbox/Dockerfile.egress`、`deploy/aurora-sandbox/docker-bake.hcl`
 
 **Interfaces:**
-- Produces: 单一镜像 —— `ENTRYPOINT ["/usr/local/bin/fleet-node","run"]`、`HEALTHCHECK fleet-node health`、`USER 10001:10001`、`/data` + `/secrets` 布局;可用入口 `/usr/local/bin/multica`、`/usr/local/bin/claude`、omp 的可执行入口。
+- Produces: 单一镜像 —— `ENTRYPOINT ["/usr/local/bin/fleet-node","run"]`、`HEALTHCHECK fleet-node health`、`USER 10001:10001`、`/data` + `/secrets` 布局;可用入口 `/usr/local/bin/multica`、`/usr/local/bin/claude`。
 - Consumes: Task 3 的环境变量名(密钥经 env 注入)。
+- **omp 本阶段不安装**(用户 2026-10-08 决定)。镜像里先只保留 Claude;加第二个 agent CLI 是后续独立改动,`scripts/agent-cli-command-names.txt` 里已有 `omp` 名字,不影响现在的解析与探测逻辑。
 
 - [ ] **Step 1: 写镜像契约测试**
 
-`docker/runtime/Dockerfile.test` 是既有的通用 fixture;新增一份断言脚本 `scripts/check-runtime-image.sh`,检查最终镜像里:四个入口存在且可执行、`/data` 与 `/secrets` 属 `10001:10001`、`Config.Env` 里**没有**密钥值、`/usr/local/bin/claude --version` 与 omp 的版本探测可运行。
+`docker/runtime/Dockerfile.test` 是既有的通用 fixture;新增一份断言脚本 `scripts/check-runtime-image.sh`,检查最终镜像里:三个入口(`multica`、`fleet-node`、`claude`)存在且可执行、`/data` 与 `/secrets` 属 `10001:10001`、`Config.Env` 里**没有**密钥值、`/usr/local/bin/claude --version` 可运行。
 
 Run: `bash scripts/check-runtime-image.sh`（首次失败,脚本不存在)
 Expected: FAIL
 
 - [ ] **Step 2: 扩充 `docker/runtime/Dockerfile`**
 
-在现有 31 行的基础上增加:omp 的安装(按 `docker/runtime/omp-version.txt` 锁定版本)、Aurora 需要的媒体工具(Chromium、FFmpeg、ImageMagick、poppler-utils、fonts-noto-cjk)、以及 bash(`bypassPermissions` 下的 skill 步骤要能在 shell 里跑)。保留 `git`、`ca-certificates`。
+在现有 31 行的基础上增加 Aurora 需要的媒体工具(Chromium、FFmpeg、ImageMagick、poppler-utils、fonts-noto-cjk)与 bash(`bypassPermissions` 下的 skill 步骤要能在 shell 里跑)。保留 `git`、`ca-certificates`。
 
-**不要**从这里安装 `deploy/aurora-sandbox/` 的任何东西:broker、vendor 树、`@anthropic-ai/claude-code` 的第二份来源。Claude 只保留一份(`docker/runtime/claude-version.txt`),并把它作为 `/usr/local/bin/claude` 的唯一来源。
+**不要**安装 omp。**不要**从这里安装 `deploy/aurora-sandbox/` 的任何东西:broker、vendor 树、`@anthropic-ai/claude-code` 的第二份来源。Claude 只保留一份(`docker/runtime/claude-version.txt`),并把它作为 `/usr/local/bin/claude` 的唯一来源。
 
 - [ ] **Step 3: 构建并核对**
 
@@ -334,7 +373,7 @@ git rm deploy/aurora-sandbox/Dockerfile deploy/aurora-sandbox/Dockerfile.egress 
 
 ```bash
 git add docker/runtime scripts/check-runtime-image.sh
-git commit -m "feat(runtime): build one node image with the daemon, Claude, and omp"
+git commit -m "feat(runtime): build one node image with the daemon and Claude"
 ```
 
 ---
@@ -510,13 +549,19 @@ git commit -m "refactor(aurora): run Aurora tasks on the ordinary agent surface"
 
 - [ ] **Step 1: 确认抽取已完成**
 
-Run: `(cd server && go test ./internal/aurora -run TestWorkflowsDescribeRealStepsNotBrokerTools -count=1)`
-Expected: PASS。**失败则停止本任务** —— 删除会让内容无法复原。
+Run: `(cd server && go test ./internal/aurora -run TestRewrittenWorkflowsDescribeRealSteps -count=1)`
+Expected: PASS,**且 `rewrittenSkills` 已含全部 13 项**(Task 1 + Task 1b 完成)。
+
+```bash
+grep -c '"' server/internal/aurora/workflows_test.go | head -1   # 人工确认 rewrittenSkills 是 13 项
+```
+
+**任一条不满足则停止本任务** —— 删除会让未抽取的内容无法复原。
 
 同时确认 13 份文档里每个 provider 调用都写全了端点、认证头、请求体与轮询方式:
 
 Run: `grep -L "https://" server/internal/aurora/workflows/*.md`
-Expected: 只列出纯本地的 skill(id-photo、resume 等)。任何出现在列表里的 provider skill 都还没写完。
+Expected: 只列出纯本地的 skill(`id-photo`、`resume`、`xhs-copy` 等)。任何 provider skill 出现在列表里,说明它还没写完。
 
 - [ ] **Step 2: 删除目录与文件**
 
@@ -626,7 +671,7 @@ git commit -m "feat(aurora): show why the runtime is not ready"
 - Consumes: Task 1–4 的全部改动。
 - Produces: 一次真实往返的证据记录。
 
-- [ ] **Step 1: 单元层面确认结算未变**
+- [ ] **Step 1: 单元层面确认结算未变(但结算不是本任务的门)**
 
 ```bash
 ( cd server && go test ./internal/service -run 'Aurora' -count=1 )
@@ -635,16 +680,29 @@ git commit -m "feat(aurora): show why the runtime is not ready"
 
 Expected: PASS。`settleAuroraOnCompleted` 仍要求至少一个已提交资产,否则走退款 —— 这条不变。
 
+**计费按现状保留,不修、不算、不验证。** 部署时遇到 credits 相关的问题(余额不足、预留失败、结算异常、账本对不上),**记录现象后绕过,继续验证执行链路**,不要为了让它跑通去改计费逻辑。计费要改成按 token 用量计算,那是后续独立计划的事(见「用户已确认的决策」第 8 条)。
+
 - [ ] **Step 2: 在 Docker Desktop 上跑一次真实往返**
 
+**M0 阶段先跑一次,用现有的沙箱镜像,不构建新镜像。** 这是首个验证切片的两条改动(文档 + 删分支)之外的唯一动作:
+
 ```bash
-docker build -f docker/runtime/Dockerfile -t multica-runtime-node:dev .
 make up C=api,fleet
-# 用 .env 注入四个 provider 密钥与 AURORA_SANDBOX_IMAGE=<上面的镜像>
+# AURORA_SANDBOX_IMAGE 指向现成的沙箱镜像;密钥不需要 —— xhs-copy 不调 provider
+# 在 Aurora 应用里对 skill「小红书文案」提交一次生成,只填 prompt
+```
+
+Expected: 生成 → 节点领取 → 模型用普通工具写文案 → 文本产物入库 → 结算;`aurora_generation.status` 变为 `completed`。**若卡在 `unknown staging artifact` 或产物为空**,说明 skill 文档里的 manifest 段与实际校验不一致 —— 改文档,不要改校验。
+
+**判定口径:** 这一步验证的是**执行链路**(skill 下发 → 模型用普通工具干活 → 产物入库)。如果唯一的失败点在 credits(预留失败、余额不足、结算写不进账本),把现象记进验收记录并**判本切片通过** —— 计费不在本计划范围内。反过来,产物没入库、或模型拿不到 Bash,都不算通过。
+
+**M4 阶段用统一镜像重跑一次**(Task 2 构建的镜像已由 `AURORA_SANDBOX_IMAGE` 指向):
+
+```bash
 MULTICA_RUN_DOCKER_INTEGRATION=1 make env-exec ARGS="-- pnpm exec playwright test --project=fleet-docker"
 ```
 
-Expected: 生成 → 节点领取 → 模型用普通工具执行 → 产物入库 → 结算;浏览器 trace 与账本断言齐全。
+Expected: 同样通过,且浏览器 trace 与账本断言齐全。
 
 - [ ] **Step 3: 逐个 skill 跑一遍**
 
@@ -686,10 +744,13 @@ gh pr create --repo eanfs/multica --fill
 
 | 项 | 状态 |
 | --- | --- |
-| 13 份 skill 文档的内容 | **未起草**。Task 1 是内容工作,若某一步缺少可对照的实现,必须停下来问,不得凭印象写 |
-| 统一节点镜像 | 未构建。omp 的安装方式与版本需要先确认(是否 npm 分发) |
+| `xhs-copy` 的单 skill 往返 | **未运行**。这是 M0,唯一能证明方向可行的一步 |
+| 其余 12 份 skill 文档 | 未起草(Task 1b,依赖 M0 通过) |
+| 统一节点镜像 | 未构建 |
+| omp | **本阶段不安装**(用户决定),不是欠账 |
 | Docker Desktop 上的端到端往返 | 未运行 |
 | 真实 provider 调用 | 未授权、未运行;需要三把真实密钥与预算 |
+| credits 计费 | **本计划不动**。按 skill 固定积分的预留/退款照旧保留,但不再是验证的门;改用 token 用量计算是后续独立计划 |
 | 隔离验证 | **本方向下不存在**。不要把它列为"待补",它已被明确放弃 |
 | `aws-deploy` 仓库的 `AURORA_SANDBOX_IMAGE` / `APPARMOR_PROFILE` / `AURORA_EGRESS_*` | 未处理(独立仓库) |
 
@@ -699,12 +760,14 @@ gh pr create --repo eanfs/multica --fill
 
 | 用户决策 | 任务 | 关键证据 |
 | --- | --- | --- |
-| 13 skill = 13 agent + 13 skill,不用 MCP tool | 1、4 | `TestWorkflowsDescribeRealStepsNotBrokerTools`;`TestAuroraTaskGetsTheOrdinaryExecutionSurface` |
+| 13 skill = 13 agent + 13 skill,不用 MCP tool | 1、1b、4 | `TestRewrittenWorkflowsDescribeRealSteps`;`TestAuroraTaskGetsTheOrdinaryExecutionSurface` |
 | 完全复用 issue 干活流程 | 4 | Aurora 分支删除后 `runTask` 无 Aurora 条件;skill 由既有 `ensureTaskSkillBundles` 下发 |
+| 先做一个 skill 加速验证 | 1、4、7 | `xhs-copy` 的端到端往返在**现有镜像**上通过,零镜像/密钥/目录改动 |
 | `deploy/aurora-sandbox/` 完全删除 | 5 | 全仓 grep 无残留;`git ls-files deploy/aurora-sandbox` 为空 |
 | 不用 AppArmor、不用自定义 seccomp | 3、5 | 字段删除;`seccomp.go` 删除;`NodeHostConfig` 只剩 tmpfs 与只读根 |
 | 密钥经 `.env` 进容器 env | 3 | `TestProviderSecretsComeFromTheEnvironment`;镜像 `Config.Env` 无密钥 |
-| 不做服务端 provider 代理 | 1、3 | skill 文档里是 provider 直连;没有新增服务端转发路由 |
+| 不做服务端 provider 代理 | 1b、3 | skill 文档里是 provider 直连;没有新增服务端转发路由 |
+| omp 暂不安装 | 2 | 镜像契约测试只断言三个入口 |
 
 ---
 
@@ -715,7 +778,10 @@ gh pr create --repo eanfs/multica --fill
 1. **Subagent-Driven(推荐)** —— 每个任务派一个新的子代理,任务之间由我审查。Task 1 是内容工作,适合逐份审。
 2. **Inline Execution** —— 在本会话内按 executing-plans 批量执行,带检查点。
 
-**必须先确认两件事:**
+**建议从 M0 开始**,它的范围只有两条改动加一次运行:
 
-- **omp 怎么装、装哪个版本。** 我只知道它在 `scripts/agent-cli-command-names.txt` 的名单里,没查过它的分发方式。这决定 Task 2 能否落地。
-- **13 份文档里的 provider 调用细节由谁提供。** 我可以从现有实现与 vendor 上游文档抽取(Task 1 的做法),但抽取出来的端点与参数需要你或熟悉 provider 的人过一遍 —— 写错了不会有测试拦住,只会表现为生成失败。
+1. 改 `server/internal/aurora/workflows/xhs-copy.md` 一份文档(Task 1)
+2. 删 Aurora 执行分支(Task 4)
+3. 在现有镜像上跑一次往返(Task 7 Step 2)
+
+**开始前需要确认的只有一件事:** `xhs-copy` 的文档里,有文档附件时的读取命令(`pdftotext`、DOCX 解包)与文本产物的文件名规则,是我从 `runtime/src/tools/{documents,text-artifact}.mjs` 抽出来的。抽出来之后请你或熟悉这块的人过一眼 —— 写错了不会有测试拦住,只会表现为生成失败。
