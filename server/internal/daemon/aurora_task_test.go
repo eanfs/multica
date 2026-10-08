@@ -85,8 +85,10 @@ func newAuroraTaskTestDaemon(t *testing.T) (*Daemon, string, string, func()) {
 		activeEnvRoots: make(map[string]int),
 		cfg: Config{
 			WorkspacesRoot: t.TempDir(),
-			AgentTimeout:   5 * time.Second,
-			ServerBaseURL:  "https://api.aurora.example.test",
+			// The fake CLI answers immediately; a tight budget only adds a
+			// timeout-shaped flake when the machine is busy.
+			AgentTimeout:  60 * time.Second,
+			ServerBaseURL: "https://api.aurora.example.test",
 			Agents: map[string]AgentEntry{
 				"claude": {Path: fakeBin},
 			},
@@ -182,15 +184,18 @@ func TestAuroraTaskGetsTheOrdinaryExecutionSurface(t *testing.T) {
 		t.Errorf("--permission-mode = %q, want the ordinary provider default", got)
 	}
 
-	// The broker no longer replaces the agent's MCP configuration. The fixture's
-	// agent carries an MCP server, so a merged config must reach the launch: a
-	// missing --mcp-config is a failure here, not a reason to skip the check.
+	// The broker no longer replaces the agent's MCP configuration. Assert on the
+	// broker's own markers rather than on a server key alone: the merged config
+	// also carries whatever the host machine has configured, so a key-name
+	// assertion would be host-dependent.
 	mcpRaw, err := os.ReadFile(mcpFile)
 	if err != nil {
 		t.Fatalf("no --mcp-config reached the launch: %v", err)
 	}
-	if strings.Contains(string(mcpRaw), `"aurora"`) {
-		t.Errorf("the broker MCP server is still injected:\n%s", mcpRaw)
+	for _, brokerMarker := range []string{"server.mjs", "AURORA_TASK_CONTEXT_FILE", "aurora-broker"} {
+		if strings.Contains(string(mcpRaw), brokerMarker) {
+			t.Errorf("the merged MCP config still carries the broker marker %q:\n%s", brokerMarker, mcpRaw)
+		}
 	}
 	if !strings.Contains(string(mcpRaw), `"team-tools"`) {
 		t.Errorf("the agent's own MCP server was dropped:\n%s", mcpRaw)

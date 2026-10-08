@@ -396,14 +396,20 @@ func buildAuroraPrompt(task Task) string {
 	var b strings.Builder
 	b.WriteString("You are running as an Aurora creation agent for a Multica workspace. This run produces one generation. It is NOT an issue run: do not create, update, or comment on issues.\n\n")
 	fmt.Fprintf(&b, "Skill: `%s`\n\n", skillID)
-	b.WriteString("Your working directory carries this skill's document in the project skills directory (for Claude: `.claude/skills/`). Read it and follow its steps: it names the inputs, the commands or provider calls to use, the output paths, the artifact manifest to write, and the failure rules.\n\n")
+	b.WriteString("Your working directory carries this skill's document in the project skills directory (for Claude: `.claude/skills/`). Read it and follow its steps: it names the inputs, the commands or provider calls to use, the artifact manifest to write, and the failure rules.\n\n")
+	fmt.Fprintf(&b, "Task id: `%s`\n", task.ID)
+	if task.GenerationID != "" {
+		fmt.Fprintf(&b, "Generation id: `%s`\n", task.GenerationID)
+	}
+	fmt.Fprintf(&b, "Write this run's artifacts under `%s`, and its manifest at `%s`. The manifest must name this task id and skill id; the platform reads it from there and fails the generation when it is missing or does not match this run.\n\n",
+		auroraSandboxOutputRoot, auroraSandboxOutputRoot+"/"+auroraManifestRelativePath)
 	if prompt := strings.TrimSpace(task.QuickCreatePrompt); prompt != "" {
 		b.WriteString("The user's generation prompt:\n\n")
 		fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(prompt, "\n", "\n> "))
 	}
 	if len(task.QuickCreateAttachmentIDs) > 0 {
 		fmt.Fprintf(&b, "Attachments for this run: %s\n", strings.Join(task.QuickCreateAttachmentIDs, ", "))
-		b.WriteString("Fetch each one with `multica attachment download <id>` before you refer to it.\n\n")
+		b.WriteString("Fetch each one with `multica attachment download <id>`, which writes it locally and prints the path.\n\n")
 	} else {
 		b.WriteString("This run has no attachments.\n\n")
 	}

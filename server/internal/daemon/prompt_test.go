@@ -2265,6 +2265,8 @@ func TestBuildAuroraPromptPointsAtTheSkillDocument(t *testing.T) {
 	t.Parallel()
 
 	task := Task{
+		ID:                       "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		GenerationID:             "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
 		Agent:                    &AgentData{SystemKey: "aurora:poster"},
 		QuickCreatePrompt:        "橘猫窗台晒太阳图片生成（暖色调，生成一张高清图）",
 		QuickCreateAttachmentIDs: []string{"11111111-1111-4111-8111-111111111111"},
@@ -2278,6 +2280,11 @@ func TestBuildAuroraPromptPointsAtTheSkillDocument(t *testing.T) {
 		"multica attachment download",
 		".claude/skills/",
 		"do not create, update, or comment on issues",
+		// The run must be able to find its own output root and manifest without
+		// guessing: the skill document and the platform have to agree on them.
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		auroraSandboxOutputRoot,
+		auroraManifestRelativePath,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Aurora prompt missing %q\n---\n%s", want, out)
