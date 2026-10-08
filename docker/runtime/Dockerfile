@@ -22,7 +22,7 @@ FROM debian:bookworm-slim AS runtime
 # Nothing with a build-time-only purpose enters the image, and the node keeps a
 # single launcher entrypoint.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ca-certificates bash jq unzip \
+      git ca-certificates bash curl jq unzip \
       libstdc++6 libgcc-s1 libatomic1 libnss3 \
       chromium ffmpeg imagemagick poppler-utils fonts-noto-cjk \
  && rm -rf /var/lib/apt/lists/* \

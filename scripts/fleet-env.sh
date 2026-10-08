@@ -36,7 +36,21 @@ const auroraKeys=['server_url','anthropic_base_url','anthropic_model','claude_en
 need(Object.keys(aurora).length===auroraKeys.length&&auroraKeys.every(k=>Object.hasOwn(aurora,k)));
 const serverOrigin=new URL(aurora.server_url);need(['http:','https:'].includes(serverOrigin.protocol)&&serverOrigin.hostname&&!serverOrigin.username&&!serverOrigin.password&&!serverOrigin.search&&!serverOrigin.hash&&serverOrigin.pathname==='/');
 need(typeof aurora.anthropic_base_url==='string'&&typeof aurora.anthropic_model==='string');
-if(aurora.anthropic_base_url!==''){const base=new URL(aurora.anthropic_base_url);need(base.protocol==='https:'&&base.hostname&&!base.port&&!base.username&&!base.password&&!base.search&&!base.hash&&(base.pathname===''||base.pathname==='/'));}
+if(aurora.anthropic_base_url!==''){
+ // Match model.ValidAnthropicBaseURL, including its unambiguous path prefix.
+ // Check the raw spelling before WHATWG URL can erase :443, whitespace or dots.
+ const raw=aurora.anthropic_base_url;
+ need(!/[\s\x00-\x1f\x7f?#\\]/.test(raw));
+ const parts=raw.match(/^https:\/\/([^/]+)(\/.*)?$/);need(parts);
+ const authority=parts[1],prefix=parts[2]||'',base=new URL(raw);
+ need(base.hostname&&!base.port&&!/[@,]/.test(authority)&&!/:\d+$/.test(authority));
+ if(prefix!==''){
+  const decoded=decodeURIComponent(prefix);
+  need(/^\/[A-Za-z0-9-._~/%!$&'()*+,;=]*$/.test(decoded)&&!decoded.includes('//')&&!decoded.endsWith('/')&&!decoded.slice(1).split('/').some(segment=>segment==='.'||segment==='..'));
+  // Of the permitted decoded characters, only percent needs canonical escaping.
+  need(prefix===decoded.replaceAll('%','%25'));
+ }
+}
 if(aurora.anthropic_model!=='')need(aurora.anthropic_model.trim()===aurora.anthropic_model&&!/[\s]/.test(aurora.anthropic_model));
 // Extra Claude Code variables: exact allowlist, operator config only, never a
 // credential value. API_TIMEOUT_MS is digits only; a model value may carry the

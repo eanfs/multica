@@ -54,7 +54,7 @@ fi
 # baking a name here would suggest the image expects one of its own.
 env_dump="$(inspect '{{range .Config.Env}}{{println .}}{{end}}')"
 if printf '%s\n' "$env_dump" | grep -qE '(API_KEY|TOKEN|SECRET|PASSWORD)='; then
-  fail env_has_no_credentials "$(printf '%s' "$env_dump" | tr '\n' ' ')"
+  fail env_has_no_credentials "credential variable present in image environment"
 else
   pass env_has_no_credentials
 fi
@@ -67,7 +67,7 @@ for bin in /usr/local/bin/multica /usr/local/bin/fleet-node /usr/local/bin/claud
 done
 
 # The shell and the media toolchain the skill documents call.
-for tool in bash jq unzip chromium ffmpeg convert pdftoppm pdfinfo; do
+for tool in bash curl jq unzip chromium ffmpeg convert pdftoppm pdfinfo; do
   if probe "command -v $tool >/dev/null"; then pass "tool_present $tool"; else fail "tool_present $tool" "not on PATH"; fi
 done
 
