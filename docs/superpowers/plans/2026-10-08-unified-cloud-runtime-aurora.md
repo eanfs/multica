@@ -51,7 +51,7 @@
 - **fail-closed，不静默降级。** 隔离策略无法生效时禁止执行并返回 `runtime_policy_unavailable`；不得退回继承宽权限，不得关闭 no-new-privileges，不得用「镜像里没有 Git」代替进程策略。
 - **不新建数据库、队列或状态机。** 复用 `fleet_nodes` / `fleet_node_operations` / `agent_runtime` / `aurora_*` 既有表；共享 PostgreSQL。
 - **迁移规则（仓库既有，强制执行）：** 无外键、无级联删除/更新；每个迁移创建的索引一律 `CREATE [UNIQUE] INDEX CONCURRENTLY`，且**单独一个单语句文件**；条件 DDL 用 `IF EXISTS`/`IF NOT EXISTS`；SQL 改完 `make sqlc`，不手改 generated。新增并发索引必须登记进 `server/cmd/migrate/main.go` 的 `concurrentIndexCleanups`。
-- **迁移编号以实施时仓库占用为准。** 本计划写 `6xx` 占位是禁止的：执行每个迁移任务时先 `ls server/migrations | sort -n | tail -1` 取当前最高号，再顺延。当前最高号为 `584`。
+- **迁移编号以实施时仓库占用为准。** 本计划写 `6xx` 占位是禁止的：执行每个迁移任务时先 `ls server/migrations | sed -n 's/^\([0-9]\+\)_.*/\1/p' | sort -n | tail -1` 取当前最高号，再顺延。当前最高号为 `584`。**编号在历史上不唯一**（同一个数字可以出现在两条无关系列的迁移里，例如 `520`–`529` 各自同时是 Aurora sandbox 与 wakeup 的迁移），所以必须按数字排序取最大值，不要按文件名排序。
 - **锁顺序不变量。** `fleetguard.lockBindings` 的顺序是：namespace（按前缀排序）→ node（按 UUID 排序）→ capacity → task/workspace → agent；`FleetOwnerExclusiveLock` 在每个 create/provision/delete 事务里最先取。新增的任何写作路径必须复用同一顺序；不得在持锁事务里调用会自行开事务的 `Credit.Reserve` 或 `EnqueueQuickCreateTask`。
 - **数据库事务不跨 Docker/网络 I/O。** 资源创建结果未知时先检查原资源身份，不因超时创建第二份资源。
 - **私密输入。** `mse_`/`mdt_`/provider 密钥不进 SQL 明文、不进日志、不进 argv、不进模型上下文、不进 `Config.Env`；只以 owner-only 文件（0600 / 目录 0700）或一次性内存交接。
