@@ -3,7 +3,7 @@ title: 本地 Docker Fleet
 description: 运行并恢复可选的本地 Docker Fleet、其私有输入与验证门。
 ---
 
-本地 Docker Fleet 是可选的组件，它把执行节点作为 Docker 容器管理，并与 API 共用当前 checkout 的 PostgreSQL 数据库。它复用现有的守护进程、运行时、任务队列和回传协议。本页说明本地 API 接入、可选托管环境组件、Aurora 受管沙箱、约束删除行为的安全规则、验证门，以及该方案不提供的能力。
+本地 Docker Fleet 是可选的组件，它把执行节点作为 Docker 容器管理，并与 API 共用当前 checkout 的 PostgreSQL 数据库。它复用现有的守护进程、运行时、任务队列和回传协议。本页说明本地 API 接入、可选托管环境组件、Aurora 受管智能体、约束删除行为的安全规则、验证门，以及该方案不提供的能力。
 
 ## 本地 API 接入
 
@@ -56,12 +56,12 @@ make down
 网络被刻意收窄：
 
 - Fleet 只加入已验证的共享 PostgreSQL Docker 网络和自己的节点网络。
-- 节点只加入节点网络，绝不加入 PostgreSQL 网络。
+- 普通节点加入节点网络；Aurora 节点加入自己可直接出站的每节点 bridge 网络。两者都不加入 PostgreSQL 网络。
 - 只发布 Fleet 端口，且只绑定回环。
 
 镜像必须使用以摘要固定的 `repository@sha256:...` 引用。`docker-compose.fleet.yml` 不发送 checkout 构建上下文，compose 创建使用 `--no-build`。
 
-version 1 描述文件声明这些字段：`version`、`database_name`、`database_lifecycle`、`context`、`engine_id`、`pg_container_id`、`pg_network_id`、`pg_alias`、`pg_port`、`pg_host_port`、`socket_path`、`uid`、`gid`、`socket_gid`、`node_image`、`fleet_image`、`api_url`、`profiles_file` 和 `service_key_file`。它必须指定确切的已注册数据库（`database_name` 必须等于 checkout 数据库），并且只有在单独的物理所有权预检之后才能声明 `database_lifecycle=exclusive-managed`。注册表成员身份不是所有权证明；任何托管的数据库使用前都要核实当前数据库身份。
+version 1 描述文件声明这些字段：`version`、`database_name`、`database_lifecycle`、`context`、`engine_id`、`pg_container_id`、`pg_network_id`、`pg_alias`、`pg_port`、`pg_host_port`、`socket_path`、`uid`、`gid`、`socket_gid`、`node_image`、`fleet_image`、`api_url`、`profiles_file`、`service_key_file` 和 `aurora`。它必须指定确切的已注册数据库（`database_name` 必须等于 checkout 数据库），并且只有在单独的物理所有权预检之后才能声明 `database_lifecycle=exclusive-managed`。注册表成员身份不是所有权证明；任何托管的数据库使用前都要核实当前数据库身份。
 
 凭据 profile 使用严格的私有映射：
 
@@ -71,21 +71,18 @@ version 1 描述文件声明这些字段：`version`、`database_name`、`databa
 
 owner 的值为空字符串表示禁用该 profile。凭据文件必须是普通、非符号链接的 `0600` 文件，由显式指定的非 root UID 拥有，其目录必须是 `0700`。`api_url` 是获准的 `host.docker.internal` API URL，会原样保留。
 
-## Aurora 受管沙箱
+## Aurora 受管智能体
 
-同一个 Fleet 可以运行 Aurora 的受管 skill 执行，而不只是默认的 Claude-only 节点。只有三个输入同时存在时，服务器才会构造 Aurora 的 fleet 客户端：`MULTICA_LOCAL_FLEET_URL`、`MULTICA_LOCAL_FLEET_SECRET_FILE`，以及指向 descriptor `image` 的、以摘要固定的 `AURORA_SANDBOX_IMAGE`。三者缺一时，`POST /api/aurora/generations` 仍在预留任何积分之前以 `aurora_runtime_unavailable` 失败关闭；catalog 和作品库端点不受影响。
+同一个 Fleet 可以运行 Aurora 的受管 skill 执行，而不只是默认的 Claude-only 节点。只有三个输入同时存在时，服务器才会构造 Aurora 的 fleet 客户端：`MULTICA_LOCAL_FLEET_URL`、`MULTICA_LOCAL_FLEET_SECRET_FILE`，以及指向 descriptor `image` 的、以摘要固定的 `AURORA_RUNTIME_IMAGE`。三者缺一时，`POST /api/aurora/generations` 仍在预留任何积分之前以 `aurora_runtime_unavailable` 失败关闭；catalog 和作品库端点不受影响。
 
-Fleet 配置的 `aurora` 块用于选择受管沙箱 profile（见 `fleet-config.example.json`）。每个字段都是管理员持有的公开配置，不是凭据：
+Fleet 配置的 `aurora` 块用于选择受管智能体 profile（见 `fleet-config.example.json`）。配置由管理员提供；`claude_env` 可含凭据：
 
 - `server_url` — 受管守护进程注册所针对的、容器可达的 Multica API origin。
-- `egress_hosts` — 追加到 sidecar 允许列表的精确 `host:443` 条目。
-- `egress_pins` — 可选映射：把已在允许列表中的供应商主机名（裸小写、不带端口）映射到一个或多个公网 IPv4/IPv6 地址，sidecar 直接拨号这些地址而不做 DNS 解析。
 - `anthropic_base_url` 和 `anthropic_model` — 可选的受管 Claude 端点覆盖；base URL 可带可选路径前缀（如 `/api/plan`），为空时保留供应商默认值。
 - `claude_env` — 传给受管子进程的额外节点变量映射（可选），其中包含下述两个供应商凭据。
 - `readonly_rootfs` — 必须显式为 `true`。
-- `uplink_network` — 只有出口 sidecar 加入的 operator 网络。
 
-节点与其出口 sidecar 使用同一个顶层 `image`：sidecar 以固定的 `/usr/local/bin/aurora-egress-proxy` entrypoint 启动，节点以 `fleet-node run` 启动。
+节点使用 `docker/runtime/Dockerfile`、`fleet-node run` 与 `/usr/local/bin/claude`。每节点自有的 bridge 网络支持直接出站，不再使用代理、供应商允许列表或 IP pin。
 
 `claude_env` 接受固定允许列表中的模型选择与工具路由变量：
 `ANTHROPIC_DEFAULT_{FABLE,HAIKU,OPUS,SONNET}_MODEL` 及其 `_NAME` 变体、
@@ -103,17 +100,15 @@ ARK 兼容 Anthropic Messages 协议，因此图片、视频与文字 skill 复�
 `docker inspect` 也能看到；这是本方向接受的形态。它们必须在部署时由权限为
 `0600` 的 Fleet 配置提供，绝不能进入镜像、SQL、日志或 Git。
 
-`egress_pins` 用于 DNS 被劫持或返回 fake-IP 的网络（例如 Clash 式透明代理把每个
-供应商主机都解析成 `198.18.x.x` 这样的 benchmark 地址）。把供应商主机固定为可信
-解析器报告的公网地址后，sidecar 会直接拨号这些地址、不做 DNS 查询。pin 只会收窄
-DNS：其主机必须已编译进代理镜像或列在 `egress_hosts` 中，因此 pin 永远不会新增
-主机；`https`/443、禁止 IP 字面量、公网地址与服务端 origin 规则都不变。
+受管节点以固定的 `fleet-node run` entrypoint 启动，并 `exec` 为 `multica daemon start --managed`。它的一次性注册密钥（`mse_`）写入节点只读 secrets 卷的 `/secrets/aurora-enrollment`；SQL 只存哈希，Fleet 只在进程内交接表中持有明文。沙箱以非 root（`10001:10001`）运行在只读根文件系统上，使用 `cap_drop: ALL` 与 `no-new-privileges`，并且只加入自己可直接出站的每节点网络。AppArmor 与自定义 seccomp 都不再使用：节点按 Docker 默认安全设置运行。供应商凭据是容器环境里的值，不再是挂载文件。
 
-受管节点以固定的 `fleet-node run` entrypoint 启动，并 `exec` 为 `multica daemon start --managed`。它的一次性注册密钥（`mse_`）写入节点只读 secrets 卷的 `/secrets/aurora-enrollment`；SQL 只存哈希，Fleet 只在进程内交接表中持有明文。沙箱以非 root（`10001:10001`）运行在只读根文件系统上，使用 `cap_drop: ALL` 与 `no-new-privileges`，并且只加入自己的工作区内网络。AppArmor 与自定义 seccomp 都不再使用：节点按 Docker 默认安全设置运行。供应商凭据是容器环境里的值，不再是挂载文件。
+Aurora 使用普通智能体的 shell、供应商 CLI 与 Multica CLI，由技能文档驱动。模型写入 `.multica/aurora-artifacts.v1.json`；守护进程独立校验路径、文件类型与链接数、大小、MIME 和 SHA-256。供应商调用记录仅用于记账，不再有防重复计费的强制力。
 
-经过审查的 MCP broker 是 Aurora 任务唯一的执行面。守护进程会暂存任务输入，把 mode-`0400` 的 context 和任务 token 写到任务 workdir 下，并把 broker 注入为唯一的 `mcpServers` 条目。模型可以调用的工具另行以带限定的 `mcp__aurora__<tool>` 标识符放进 `--allowedTools`。context、输入、token 或 skill policy 缺失时，任务在启动前失败并退款。
+目前只有 `text-image` 已重写为可执行步骤。用户明确跳过 #199（其余 12 份重写）；删除旧运行时不代表 13 个技能全部可运行。旧源码可从 `2a2cef75fa16ec893960118dd70844c1251cb973` 恢复。
 
 ### Aurora 崩溃语义与恢复
+
+新运行时不会接管旧代理 profile 的节点。升级前，使用旧控制面暂停并排空确切归属的 namespace，处理全部终态回传，再通过原有生命周期移除节点、sidecar 和内部网络。任何步骤失败时保留数据库与注册表恢复输入。随后同步更新私有 descriptor/config 和 API 镜像变量，以统一镜像创建新节点。本次源码变更不执行任何线上迁移。
 
 - 注册密钥只存在于 Fleet 进程的交接表中。协调器在节点 bootstrap 前崩溃即丢失，节点失败，Aurora 在其 5 分钟 TTL 后重新 arm。密钥绝不以明文写入 SQL，也绝不自动重试。
 - 回收器在节点空闲 15 分钟后停止它，在超过 8 小时后排空它，并删除其 Fleet 节点。节点删除是永久且有序的，在仍有排队工作或终态回传未解决时拒绝执行。

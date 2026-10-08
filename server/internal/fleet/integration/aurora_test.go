@@ -3,10 +3,7 @@
 package integration
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,8 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"regexp"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -33,18 +28,9 @@ import (
 	"github.com/multica-ai/multica/server/internal/fleet/model"
 )
 
-// This file is the Task 7 opt-in proof. The API half is one Aurora generation
-// completed on the real local Docker Fleet with a fake pipeline (no model, no
-// provider account). It can only run with a fake-capable dual-contract node
-// image, which this checkout does not have, so its prerequisite is a named,
-// documented skip and it never falls through to a real provider path. The
-// real-engine half is the idempotency/crash-replay/live-egress evidence Task 5's
-// review carried forward, the Aurora node admission and lifecycle coverage
-// (stop/start identity, the maintenance-approval crash boundary) and the real
-// MCP broker advertising mcp__aurora__* tool identifiers. Every subtest is under
-// the dockerintegration build tag and checks MULTICA_RUN_DOCKER_INTEGRATION=1
-// before any Docker client, CLI or database lookup, so a default run touches
-// nothing.
+// Gated Aurora API and Fleet lifecycle tests. No Docker, CLI or database
+// access occurs before MULTICA_RUN_DOCKER_INTEGRATION=1 is checked.
+// The API tests additionally require a fake-capable node image.
 
 // TestAuroraRoundTrip is the single gated entry point. The gate is the very
 // first action.
@@ -82,11 +68,8 @@ func TestAuroraRoundTrip(t *testing.T) {
 	t.Run("RealEngineEnsureCrashReplay", func(t *testing.T) {
 		testEnsureCrashReplayRealEngine(ctx, t)
 	})
-	t.Run("RealEngineConnectNetworkIsIdempotent", func(t *testing.T) {
-		testConnectNetworkIdempotentRealEngine(ctx, t)
-	})
 	// The D2 regression: a real dockerd creates AND starts the Aurora node built
-	// by Provider.Ensure with the seccomp profile inlined as JSON.
+	// by Provider.Ensure with the ordinary node configuration.
 	t.Run("RealEngineNodeStarts", func(t *testing.T) {
 		testEnsureNodeStartsRealEngine(ctx, t)
 	})
@@ -98,15 +81,6 @@ func TestAuroraRoundTrip(t *testing.T) {
 	})
 	t.Run("RealEngineMaintenanceBoundary", func(t *testing.T) {
 		testMaintenanceBoundaryRealEngine(ctx, t)
-	})
-	// The crash-replay of ensureEgress over a running sidecar is additionally
-	// proven in the docker package (TestAuroraRoundTripEgressReplay), where the
-	// unexported helper can be driven without Provider.Ensure's node admission.
-	t.Run("RealEngineLiveEgress", func(t *testing.T) {
-		testLiveEgressRealEngine(ctx, t)
-	})
-	t.Run("RealBrokerAllowedTools", func(t *testing.T) {
-		testRealBrokerAllowedTools(ctx, t)
 	})
 }
 
@@ -190,20 +164,12 @@ func RoundTripAuroraGeneration(ctx context.Context, t *testing.T) error {
 // image so the API half can never silently run a real provider.
 const auroraFakePipelineImageEnv = "MULTICA_AURORA_FAKE_PIPELINE_IMAGE"
 
-// requireFakePipelineNodeImage is the named, documented prerequisite of the API
-// half. No fake-capable dual-contract node image exists in this checkout: the
-// reviewed daemon/broker exposes no fake pipeline mode, and the smoke fake
-// (deploy/aurora-sandbox/fixtures/smoke/aurora-fake-pipelines.mjs) injects an
-// in-process fetch seam that the broker subprocess the daemon spawns does not
-// have, so selecting it would mean changing the reviewed daemon/broker. This
-// subtest is therefore a named skip and can never fall through to a real
-// provider path: it requires this dedicated image variable, never the general
-// release image.
+// requireFakePipelineNodeImage prevents the API test from using real providers.
 func requireFakePipelineNodeImage(t *testing.T) string {
 	t.Helper()
 	image := strings.TrimSpace(os.Getenv(auroraFakePipelineImageEnv))
 	if image == "" {
-		t.Skipf("no fake-capable dual-contract Aurora node image exists in this checkout (%s is unset): the reviewed daemon/broker exposes no fake pipeline mode and selecting the smoke fake would require changing the reviewed daemon/broker; this subtest must never fall through to a real provider path", auroraFakePipelineImageEnv)
+		t.Skipf("no fake-capable dual-contract Aurora node image exists in this checkout (%s is unset): ordinary agents require an explicitly fake-capable test image; this subtest must never fall through to a real provider path", auroraFakePipelineImageEnv)
 	}
 	if !approvedNodeImage.MatchString(image) {
 		t.Skipf("%s must be pinned to a digest (got %q)", auroraFakePipelineImageEnv, image)
@@ -248,11 +214,10 @@ type auroraEngineEnv struct {
 	cfg       model.Config
 	namespace string
 	fleetID   string
-	uplink    string
 }
 
 // newAuroraEngineEnv builds the real Docker client, an Aurora provider config,
-// and a temp seccomp profile. It registers cleanup that removes only the
+// and registers cleanup that removes only the
 // resources this test labelled; it never prunes.
 func newAuroraEngineEnv(ctx context.Context, t *testing.T) *auroraEngineEnv {
 	t.Helper()
@@ -272,7 +237,6 @@ func newAuroraEngineEnv(ctx context.Context, t *testing.T) *auroraEngineEnv {
 		engine:    docker.NewEngine(cli),
 		namespace: ns,
 		fleetID:   fleetID,
-		uplink:    "aurora-it-uplink-" + suffix,
 	}
 
 	nodeImage, err := auroraTestNodeImage(ctx, cli)
@@ -281,9 +245,7 @@ func newAuroraEngineEnv(ctx context.Context, t *testing.T) *auroraEngineEnv {
 		t.Skipf("Aurora test node image unavailable: %v", err)
 	}
 
-	// A real server origin is required by the profile and by the egress policy.
-	// The proxy authorizes exactly this origin, so the live-egress test can use a
-	// loopback control-plane stand-in instead of a public host.
+	// Use a local control-plane stand-in instead of a public host.
 	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "aurora-it-control-ok")
 	}))
@@ -303,7 +265,6 @@ func newAuroraEngineEnv(ctx context.Context, t *testing.T) *auroraEngineEnv {
 		Aurora: &model.AuroraConfig{
 			ServerURL:      serverOrigin,
 			ReadonlyRootfs: true,
-			UplinkNetwork:  env.uplink,
 		},
 	}
 	if err := env.cfg.Aurora.Validate(); err != nil {
@@ -311,52 +272,12 @@ func newAuroraEngineEnv(ctx context.Context, t *testing.T) *auroraEngineEnv {
 		t.Fatalf("test Aurora config invalid: %v", err)
 	}
 
-	// The uplink network is operator-provided, so the test creates it before the
-	// provider asks for the sidecar.
-	if _, err := cli.NetworkCreate(ctx, env.uplink, network.CreateOptions{Driver: "bridge", Labels: map[string]string{"aurora.it": ns}}); err != nil {
-		cli.Close()
-		t.Fatalf("create uplink network: %v", err)
-	}
 	t.Cleanup(func() {
 		cleanup := context.Background()
-		removeAuroraTestResources(t, cleanup, cli, ns, env.uplink)
+		removeAuroraTestResources(t, cleanup, cli, ns)
 		cli.Close()
 	})
 	return env
-}
-
-// testConnectNetworkIdempotentRealEngine proves, against the real dockerd, that
-// a second ConnectNetwork on an already-attached container is nil and that a
-// distinct failure (a network that does not exist) still fails.
-func testConnectNetworkIdempotentRealEngine(ctx context.Context, t *testing.T) {
-	env := newAuroraEngineEnv(ctx, t)
-
-	wsName := "aurora-it-ws-" + fmt.Sprintf("%d", time.Now().UnixNano())
-	if _, err := env.cli.NetworkCreate(ctx, wsName, network.CreateOptions{Driver: "bridge", Internal: true, Labels: map[string]string{"aurora.it": env.namespace}}); err != nil {
-		t.Fatalf("create workspace network: %v", err)
-	}
-	created, err := env.cli.ContainerCreate(ctx, &container.Config{
-		Image:      env.cfg.Image,
-		Entrypoint: []string{"/bin/sh"},
-		Cmd:        []string{"-c", "sleep 3600"},
-		Labels:     map[string]string{"aurora.it": env.namespace},
-	}, &container.HostConfig{}, nil, nil, "aurora-it-attach-"+fmt.Sprintf("%d", time.Now().UnixNano()))
-	if err != nil {
-		t.Fatalf("create probe container: %v", err)
-	}
-	if err := env.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
-		t.Fatalf("start probe container: %v", err)
-	}
-
-	if err := env.engine.ConnectNetwork(ctx, wsName, created.ID, []string{"egress"}); err != nil {
-		t.Fatalf("first ConnectNetwork: %v", err)
-	}
-	if err := env.engine.ConnectNetwork(ctx, wsName, created.ID, []string{"egress"}); err != nil {
-		t.Fatalf("second ConnectNetwork on an already-connected container: %v", err)
-	}
-	if err := env.engine.ConnectNetwork(ctx, wsName+"-missing", created.ID, []string{"egress"}); err == nil {
-		t.Fatal("ConnectNetwork on a missing network unexpectedly succeeded")
-	}
 }
 
 // testEnsureNodeStartsRealEngine drives the real Provider.Ensure for the Aurora
@@ -417,294 +338,6 @@ func testEnsureNodeStartsRealEngine(ctx context.Context, t *testing.T) {
 	}
 }
 
-// testLiveEgressRealEngine runs the real egress sidecar image on an internal
-// workspace network and proves a node resolves the fixed "egress" alias, that
-// the proxy reaches the configured origin, and that an unlisted host is refused.
-func testLiveEgressRealEngine(ctx context.Context, t *testing.T) {
-	env := newAuroraEngineEnv(ctx, t)
-
-	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	wsName := "aurora-it-ws-" + suffix
-	if _, err := env.cli.NetworkCreate(ctx, wsName, network.CreateOptions{Driver: "bridge", Internal: true, Labels: map[string]string{"aurora.it": env.namespace}}); err != nil {
-		t.Fatalf("create workspace network: %v", err)
-	}
-	proxyName := "aurora-it-egress-" + suffix
-	proxyLabels := map[string]string{"aurora.it": env.namespace}
-	proxy, err := env.cli.ContainerCreate(ctx, &container.Config{
-		Image:  env.cfg.Image,
-		User:   "10001:10001",
-		Env:    []string{"MULTICA_EGRESS_SERVER_ORIGIN=" + env.cfg.Aurora.ServerURL, "MULTICA_EGRESS_ALLOWED_HOSTS="},
-		Labels: proxyLabels,
-	}, &container.HostConfig{
-		NetworkMode:    container.NetworkMode(env.uplink),
-		ReadonlyRootfs: true,
-		CapDrop:        []string{"ALL"},
-		SecurityOpt:    []string{"no-new-privileges:true"},
-		RestartPolicy:  container.RestartPolicy{Name: container.RestartPolicyDisabled},
-	}, nil, nil, proxyName)
-	if err != nil {
-		t.Fatalf("create egress sidecar: %v", err)
-	}
-	if err := env.cli.ContainerStart(ctx, proxy.ID, container.StartOptions{}); err != nil {
-		t.Fatalf("start egress sidecar: %v", err)
-	}
-	if err := env.engine.ConnectNetwork(ctx, wsName, proxy.ID, []string{"egress"}); err != nil {
-		t.Fatalf("attach egress alias: %v", err)
-	}
-
-	nodeName := "aurora-it-node-" + suffix
-	nodeImage, err := resolveImageDigestRef(ctx, env.cli, firstNonEmpty(os.Getenv("MULTICA_AURORA_TEST_EGRESS_NODE_IMAGE"), os.Getenv("MULTICA_FLEET_TEST_NODE_IMAGE"), "multica-aurora-sandbox-fleet-fixture:local"))
-	if err != nil {
-		t.Skipf("node image with a shell is unavailable: %v", err)
-	}
-	node, err := env.cli.ContainerCreate(ctx, &container.Config{
-		Image:      nodeImage,
-		User:       "10001:10001",
-		Entrypoint: []string{"/bin/sh"},
-		Cmd:        []string{"-c", "sleep 3600"},
-		Env:        []string{"HOME=/data/home", "HTTP_PROXY=" + model.AuroraEgressProxyEndpoint, "HTTPS_PROXY=" + model.AuroraEgressProxyEndpoint, "NO_PROXY=" + model.AuroraNoProxyValue},
-		Labels:     proxyLabels,
-	}, &container.HostConfig{NetworkMode: container.NetworkMode(wsName)}, nil, nil, nodeName)
-	if err != nil {
-		t.Fatalf("create node container: %v", err)
-	}
-	if err := env.cli.ContainerStart(ctx, node.ID, container.StartOptions{}); err != nil {
-		t.Fatalf("start node container: %v", err)
-	}
-
-	allowed := env.cfg.Aurora.ServerURL + "/aurora-it"
-	allowedBody, err := execInContainer(ctx, env.cli, node.ID, proxyProbeCommand(allowed))
-	if err != nil {
-		t.Fatalf("allowed-host proxy request through egress: %v", err)
-	}
-	if !strings.Contains(allowedBody, "200") {
-		t.Fatalf("allowed-host proxy response = %q, want HTTP 200", allowedBody)
-	}
-	refusedBody, err := execInContainer(ctx, env.cli, node.ID, proxyProbeCommand("http://example.com/"))
-	if err != nil {
-		t.Fatalf("unlisted-host proxy request: %v", err)
-	}
-	if !strings.Contains(refusedBody, "403") {
-		t.Fatalf("unlisted-host proxy response = %q, want HTTP 403", refusedBody)
-	}
-	sidecar, err := env.cli.ContainerInspect(ctx, proxy.ID)
-	if err != nil {
-		t.Fatalf("inspect sidecar: %v", err)
-	}
-	if sidecar.State == nil || sidecar.State.Status != "running" {
-		t.Fatalf("sidecar state = %+v, want running", sidecar.State)
-	}
-}
-
-// proxyProbeCommand makes one plain-HTTP request through the fixed proxy. Node
-// is the only HTTP client in the fixture image; curl's "-x" semantics are the
-// same request line.
-func proxyProbeCommand(target string) []string {
-	script := `const http=require('http');const u=new URL(process.argv[1]);const req=http.request({host:'egress',port:3128,path:process.argv[1],method:'GET',headers:{host:u.host}},res=>{let d='';res.on('data',c=>d+=c);res.on('end',()=>{console.log(res.statusCode);});});req.on('error',e=>{console.error('ERR '+e.message);process.exit(3);});req.end();`
-	return []string{"node", "-e", script, target}
-}
-
-// --- real broker acceptance -------------------------------------------------
-
-var claudeMCPToolName = regexp.MustCompile(`^mcp__[A-Za-z0-9_-]+(?:__(?:[A-Za-z0-9_.-]+|[*]))?$`)
-
-// testRealBrokerAllowedTools starts the real Aurora MCP broker from the checked
-// out runtime under the injected environment and proves it advertises the nine
-// aurora.* tools and that the daemon's mcp__aurora__<tool> identifiers are the
-// broker's own tool names (Claude's validator accepts them).
-func testRealBrokerAllowedTools(ctx context.Context, t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is required to run the real Aurora broker")
-	}
-	repoRoot, err := filepath.Abs(filepath.Join("..", "..", "..", ".."))
-	if err != nil {
-		t.Fatalf("resolve repo root: %v", err)
-	}
-	entrypoint := filepath.Join(repoRoot, "deploy", "aurora-sandbox", "runtime", "src", "server.mjs")
-	if _, err := os.Stat(entrypoint); err != nil {
-		t.Skipf("real broker entrypoint unavailable: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(repoRoot, "deploy", "aurora-sandbox", "runtime", "node_modules")); err != nil {
-		t.Skipf("real broker dependencies unavailable: %v", err)
-	}
-
-	dir := t.TempDir()
-	inputRoot := filepath.Join(dir, "input")
-	outputRoot := filepath.Join(dir, "output")
-	secretsDir := filepath.Join(dir, "secrets")
-	for _, d := range []string{inputRoot, outputRoot, secretsDir} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			t.Fatalf("mkdir %s: %v", d, err)
-		}
-	}
-	secretValues := map[string]string{"ark": "ark-fixture", "volc": "volc-fixture"}
-	secretPaths := map[string]string{}
-	for key, value := range secretValues {
-		p := filepath.Join(secretsDir, key)
-		if err := os.WriteFile(p, []byte(value), 0o400); err != nil {
-			t.Fatalf("write secret %s: %v", key, err)
-		}
-		secretPaths[key] = p
-	}
-	tokenPath := filepath.Join(secretsDir, "task-token")
-	if err := os.WriteFile(tokenPath, []byte("mtt-fixture-token"), 0o400); err != nil {
-		t.Fatalf("write task token: %v", err)
-	}
-	serverOrigin := "http://127.0.0.1:1"
-	contextPath := filepath.Join(dir, "task-context.json")
-	contextJSON, _ := json.Marshal(map[string]any{
-		"schema":          "com.multica.aurora.task-context",
-		"version":         1,
-		"task_id":         "44444444-4444-4444-8444-444444444444",
-		"generation_id":   "55555555-5555-4555-8555-555555555555",
-		"workspace_id":    "66666666-6666-4666-8666-666666666666",
-		"skill_id":        "xhs-image",
-		"prompt":          "broker acceptance",
-		"attachments":     map[string]any{},
-		"output_root":     outputRoot,
-		"server_origin":   serverOrigin,
-		"task_token_file": tokenPath,
-	})
-	if err := os.WriteFile(contextPath, contextJSON, 0o400); err != nil {
-		t.Fatalf("write task context: %v", err)
-	}
-
-	cmd := exec.CommandContext(ctx, node, entrypoint)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"AURORA_SERVER_ORIGIN="+serverOrigin,
-		"AURORA_TASK_CONTEXT_FILE="+contextPath,
-		"AURORA_INPUT_ROOT="+inputRoot,
-		"AURORA_OUTPUT_ROOT="+outputRoot,
-		"AURORA_ARTIFACT_IMPORT_PATH=/api/agent/tasks/44444444-4444-4444-8444-444444444444/aurora-artifacts/import",
-		"ARK_API_KEY_FILE="+secretPaths["ark"],
-		"VOLC_ASR_API_KEY_FILE="+secretPaths["volc"],
-		"AURORA_TASK_TOKEN_FILE="+tokenPath,
-		"HOME="+dir,
-	)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatalf("broker stdin: %v", err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("broker stdout: %v", err)
-	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start real broker: %v", err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	t.Cleanup(func() {
-		_ = stdin.Close()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			_ = cmd.Process.Kill()
-		}
-	})
-
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	write := func(line string) {
-		if _, err := io.WriteString(stdin, line+string(byte(10))); err != nil {
-			t.Fatalf("write broker request: %v (stderr: %s)", err, stderr.String())
-		}
-	}
-	readResult := func(id int) map[string]json.RawMessage {
-		for scanner.Scan() {
-			var msg map[string]json.RawMessage
-			if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
-				continue
-			}
-			var gotID int
-			if raw, ok := msg["id"]; ok {
-				_ = json.Unmarshal(raw, &gotID)
-			}
-			if gotID == id {
-				return msg
-			}
-		}
-		t.Fatalf("broker produced no response for request %d (stderr: %s)", id, stderr.String())
-		return nil
-	}
-
-	write(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"aurora-it","version":"0"}}}`)
-	init := readResult(1)
-	if _, ok := init["result"]; !ok {
-		t.Fatalf("broker initialize failed: %s (stderr: %s)", string(init["error"]), stderr.String())
-	}
-	write(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
-	write(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
-	list := readResult(2)
-
-	var tools struct {
-		Tools []struct {
-			Name string `json:"name"`
-		} `json:"tools"`
-	}
-	if err := json.Unmarshal(list["result"], &tools); err != nil {
-		t.Fatalf("decode tools/list: %v", err)
-	}
-	got := make([]string, 0, len(tools.Tools))
-	for _, tool := range tools.Tools {
-		got = append(got, tool.Name)
-	}
-	sort.Strings(got)
-	want := []string{
-		"aurora.id_photo",
-		"aurora.read_document",
-		"aurora.render_resume",
-		"aurora.render_video_captions",
-		"aurora.seedance_generate",
-		"aurora.seedream_generate",
-		"aurora.volc_asr_transcribe",
-		"aurora.write_text_artifact",
-	}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("broker tools = %v, want %v (stderr: %s)", got, want, stderr.String())
-	}
-	// The daemon emits --allowedTools identifiers as mcp__aurora__<tool>. Claude
-	// Code qualifies each segment with vn(e) = e with every character outside
-	// [A-Za-z0-9_-] replaced by "_", so a dotted broker method (aurora.<verb>)
-	// reaches the CLI as mcp__aurora__aurora_<verb>. Prove the sanitized form is
-	// exactly this broker's tool name under Claude's validator.
-	for _, tool := range want {
-		identifier := "mcp__aurora__" + sanitizeMCPNameSegment(tool)
-		if !claudeMCPToolName.MatchString(identifier) {
-			t.Fatalf("identifier %q is not a valid Claude MCP tool name", identifier)
-		}
-	}
-}
-
-// sanitizeMCPNameSegment mirrors Claude Code's MCP name qualification for one
-// segment. It is duplicated here rather than shared with the daemon package
-// because this package must not import daemon internals.
-func sanitizeMCPNameSegment(segment string) string {
-	return strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
-			return r
-		default:
-			return '_'
-		}
-	}, segment)
-}
-
-// --- helpers ----------------------------------------------------------------
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if strings.TrimSpace(v) != "" {
-			return v
-		}
-	}
-	return ""
-}
-
 func resolveImageDigestRef(ctx context.Context, cli *client.Client, ref string) (string, error) {
 	if strings.Contains(ref, "@sha256:") {
 		if _, _, err := cli.ImageInspectWithRaw(ctx, ref); err != nil {
@@ -752,30 +385,9 @@ func auroraTestNodeImage(ctx context.Context, cli *client.Client) (string, error
 	return resolveImageDigestRef(ctx, cli, auroraNodeFixtureTag)
 }
 
-func execInContainer(ctx context.Context, cli *client.Client, id string, cmd []string) (string, error) {
-	exec, err := cli.ContainerExecCreate(ctx, id, container.ExecOptions{Cmd: cmd, AttachStdout: true, AttachStderr: true})
-	if err != nil {
-		return "", err
-	}
-	resp, err := cli.ContainerExecAttach(ctx, exec.ID, container.ExecAttachOptions{})
-	if err != nil {
-		return "", err
-	}
-	defer resp.Close()
-	out, _ := io.ReadAll(io.LimitReader(resp.Reader, 1<<20))
-	inspected, err := cli.ContainerExecInspect(ctx, exec.ID)
-	if err != nil {
-		return string(out), err
-	}
-	if inspected.ExitCode != 0 {
-		return string(out), fmt.Errorf("exec %v exited %d: %s", cmd, inspected.ExitCode, strings.TrimSpace(string(out)))
-	}
-	return string(out), nil
-}
-
 // removeAuroraTestResources removes only the resources this test labelled and
-// the explicit uplink network. It never prunes.
-func removeAuroraTestResources(t *testing.T, ctx context.Context, cli *client.Client, namespace, uplink string) {
+// their networks. It never prunes.
+func removeAuroraTestResources(t *testing.T, ctx context.Context, cli *client.Client, namespace string) {
 	t.Helper()
 	label := "multica.fleet.namespace=" + namespace
 	f := filters.NewArgs(filters.Arg("label", label))
@@ -808,7 +420,6 @@ func removeAuroraTestResources(t *testing.T, ctx context.Context, cli *client.Cl
 			}
 		}
 	}
-	_ = cli.NetworkRemove(contexts, uplink)
 	// Leave a receipt the report can quote: the owned inventory must be empty.
 	remaining, _ := cli.ContainerList(contexts, container.ListOptions{All: true, Filters: f})
 	if len(remaining) != 0 {

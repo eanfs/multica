@@ -30,8 +30,7 @@ type Resource struct {
 	deletion       *deletionContext
 	ID, Name, Role string
 	Labels         map[string]string
-	// Internal marks a workspace network that has no route off the host except
-	// through the egress sidecar.
+	// Internal is inspected exactly; node networks must support direct outbound access.
 	Internal bool
 }
 type Inspection struct {
@@ -44,7 +43,6 @@ type Engine interface {
 	Find(context.Context, map[string]string) ([]Resource, error)
 	Inspect(context.Context, string) (Inspection, error)
 	EnsureNetwork(context.Context, Resource) error
-	ConnectNetwork(context.Context, string, string, []string) error
 	RemoveNetwork(context.Context, Resource) error
 	EnsureVolume(context.Context, Resource) error
 	Create(context.Context, *container.Config, *container.HostConfig, string, string) (string, error)
@@ -203,9 +201,9 @@ func (e *sdkEngine) EnsureNetwork(ctx context.Context, r Resource) error {
 			return model.ErrForbidden
 		}
 	case "workspace-network":
-		// A workspace network is only ever an Aurora-internal bridge owned by
+		// A workspace network is an outbound-capable bridge owned by
 		// exactly one node.
-		if !r.Internal || !Owns(r.Labels, e.cfg.Namespace, e.cfg.FleetID, r.Labels["multica.fleet.node"], "workspace-network") {
+		if r.Internal || !Owns(r.Labels, e.cfg.Namespace, e.cfg.FleetID, r.Labels["multica.fleet.node"], "workspace-network") {
 			return model.ErrForbidden
 		}
 	default:
@@ -236,48 +234,6 @@ func (e *sdkEngine) EnsureNetwork(ctx context.Context, r Resource) error {
 		return createErr
 	}
 	return err
-}
-
-// ConnectNetwork attaches one owned container to one owned workspace network
-// under the supplied aliases. It never renames or re-creates either resource.
-// The call is idempotent: an attachment already present is success, and a
-// duplicate-endpoint response from Docker is treated the same way, because a
-// crash between an attach and the node create replays this step. Any other
-// failure is returned.
-func (e *sdkEngine) ConnectNetwork(ctx context.Context, networkName, containerID string, aliases []string) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	if e.client == nil {
-		return model.ErrUnavailable
-	}
-	if networkName == "" || containerID == "" {
-		return model.ErrInvalidRequest
-	}
-	n, err := e.client.NetworkInspect(ctx, networkName, network.InspectOptions{})
-	if err == nil {
-		if _, attached := n.Containers[containerID]; attached {
-			return nil
-		}
-	} else if !errdefs.IsNotFound(err) {
-		return err
-	}
-	if err = e.client.NetworkConnect(ctx, networkName, containerID, &network.EndpointSettings{Aliases: aliases}); err != nil {
-		if isAlreadyConnected(err) {
-			return nil
-		}
-		return err
-	}
-	return nil
-}
-
-// isAlreadyConnected reports Docker's duplicate network-endpoint response, which
-// is success for an idempotent attach and never for any other error.
-func isAlreadyConnected(err error) bool {
-	if err == nil {
-		return false
-	}
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "already exists in network") || strings.Contains(message, "already connected")
 }
 
 // RemoveNetwork removes one owned network. A missing network is already clean.

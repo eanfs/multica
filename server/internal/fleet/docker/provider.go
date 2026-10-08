@@ -62,7 +62,7 @@ func (p *Provider) networkName() string {
 }
 func (p *Provider) containerName(n model.Node) string { return p.networkName() + "-" + nodeID(n) }
 
-// workspaceNetwork is the per-node, --internal workspace network an Aurora node
+// workspaceNetwork is the per-node, outbound-capable workspace network an Aurora node
 // joins. It is derived deterministically from the namespace, Fleet and node, so
 // workspace-controlled input never reaches a Docker name or label.
 func (p *Provider) workspaceNetwork(n model.Node) Resource {
@@ -70,16 +70,11 @@ func (p *Provider) workspaceNetwork(n model.Node) Resource {
 	return Resource{
 		Name:     "multica-fleet-ws-" + hex.EncodeToString(sum[:9]),
 		Role:     "workspace-network",
-		Internal: true,
+		Internal: false,
 		Labels:   labels(n.Namespace, p.cfg.FleetID, nodeID(n), "workspace-network"),
 	}
 }
 
-// egressName is the deterministic name of one node's egress sidecar.
-func (p *Provider) egressName(n model.Node) string {
-	sum := sha256.Sum256([]byte(p.cfg.Namespace + "\x00" + p.cfg.FleetID + "\x00" + nodeID(n) + "\x00egress"))
-	return "multica-fleet-eg-" + hex.EncodeToString(sum[:9])
-}
 func (p *Provider) volume(n model.Node, role string) Resource {
 	name := n.DataVolume
 	if role == "secrets" {
@@ -133,9 +128,7 @@ func (p *Provider) Ensure(ctx context.Context, n model.Node, b model.Bootstrap) 
 	}
 	workspace := network
 	if p.cfg.Aurora != nil {
-		// Aurora nodes never join the namespace network. They join their own
-		// internal workspace network, whose only reachable peer is the egress
-		// sidecar attached under the fixed "egress" alias.
+		// Keep per-node ownership while allowing direct outbound traffic.
 		workspace = p.workspaceNetwork(n)
 		if e = bounded(ctx, func(c context.Context) error { return p.engine.EnsureNetwork(c, workspace) }); e != nil {
 			return model.Observation{}, safeError(e)
@@ -153,11 +146,6 @@ func (p *Provider) Ensure(ctx context.Context, n model.Node, b model.Bootstrap) 
 	}
 	if e = bounded(ctx, func(c context.Context) error { return p.engine.InstallBootstrap(c, vols, tar) }); e != nil {
 		return model.Observation{}, safeError(e)
-	}
-	if p.cfg.Aurora != nil {
-		if e = p.ensureEgress(ctx, n, workspace); e != nil {
-			return model.Observation{}, safeError(e)
-		}
 	}
 	h := NodeHostConfig(n.Resources, true, p.cfg.Aurora)
 	h.NetworkMode = container.NetworkMode(workspace.Name)
@@ -203,7 +191,7 @@ func (p *Provider) validBootstrap(n model.Node, b model.Bootstrap) error {
 }
 
 // nodeEnv is the exact container environment for a node. The managed Aurora
-// profile adds the fixed enrollment, egress-proxy and agent-path variables plus
+// profile adds the fixed enrollment and agent-path variables plus
 // the operator's claude_env pairs, which carry the provider credentials the
 // daemon reads from this environment. The image bakes neither the agent path nor
 // any Node version banner.
@@ -214,9 +202,6 @@ func (p *Provider) nodeEnv(n model.Node) []string {
 			model.AuroraManagedEnv+"=1",
 			model.AuroraServerURLEnv+"="+p.cfg.Aurora.ServerURL,
 			model.AuroraEnrollmentFileEnv+"="+model.AuroraEnrollmentFile,
-			model.AuroraHTTPProxyEnv+"="+model.AuroraEgressProxyEndpoint,
-			model.AuroraHTTPSProxyEnv+"="+model.AuroraEgressProxyEndpoint,
-			model.AuroraNoProxyEnv+"="+model.AuroraNoProxyValue,
 			model.AuroraClaudePathEnv+"="+model.AuroraClaudePath,
 		)
 		if p.cfg.Aurora.AnthropicBaseURL != "" {
@@ -233,80 +218,7 @@ func (p *Provider) nodeEnv(n model.Node) []string {
 	return env
 }
 
-// ensureEgress admits (or adopts) one node's egress sidecar on the uplink
-// network and attaches it to the workspace-internal network under the fixed
-// "egress" alias. It never holds a credential, and it is created before the node
-// so the sandbox can resolve the alias at startup.
-func (p *Provider) ensureEgress(ctx context.Context, n model.Node, workspace Resource) error {
-	proxyName := p.egressName(n)
-	c, h, err := egressProxySpec(p.cfg, n, proxyName, true)
-	if err != nil {
-		return err
-	}
-	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	created, createErr := p.engine.Create(callCtx, c, &h, p.cfg.Aurora.UplinkNetwork, proxyName)
-	cancel()
-	lookup := created
-	if lookup == "" {
-		lookup = proxyName
-	}
-	i, inspectErr := p.engine.Inspect(ctx, lookup)
-	if inspectErr != nil {
-		if createErr != nil {
-			return createErr
-		}
-		return inspectErr
-	}
-	if i.ID == "" || !Owns(i.Labels, n.Namespace, p.cfg.FleetID, nodeID(n), egressProxyRole) {
-		return model.ErrForbidden
-	}
-	if i.sdk != nil {
-		if err := validateEgressSidecar(p.cfg, n, proxyName, *i.sdk); err != nil {
-			return err
-		}
-	}
-	// The node's HTTP(S)_PROXY points at the fixed "egress" alias, and a created
-	// sidecar is not running because restart is disabled. Start it before the
-	// node is admitted; an already-running sidecar is left untouched.
-	if i.State != "running" {
-		if err := bounded(ctx, func(c context.Context) error { return p.engine.Start(c, i.ID) }); err != nil {
-			return err
-		}
-	}
-	// A crash between this attach and the node create replays ensureEgress on the
-	// adopted sidecar, so a duplicate attach is success rather than a permanent
-	// wedge. Any other engine failure still fails closed.
-	if err := bounded(ctx, func(c context.Context) error {
-		return p.engine.ConnectNetwork(c, workspace.Name, i.ID, []string{model.AuroraEgressAlias})
-	}); err != nil && !isAlreadyConnected(err) {
-		return err
-	}
-	return nil
-}
-
-// removeEgress removes one node's egress sidecar. It is idempotent and refuses a
-// container that does not carry this node's ownership labels. The per-node
-// workspace network is removed separately, after the volumes.
-func (p *Provider) removeEgress(ctx context.Context, n model.Node) error {
-	resources, err := p.engine.Find(ctx, map[string]string{"multica.fleet.node": nodeID(n)})
-	if err != nil {
-		return err
-	}
-	for _, r := range resources {
-		if r.Role != egressProxyRole {
-			continue
-		}
-		if !Owns(r.Labels, n.Namespace, p.cfg.FleetID, nodeID(n), egressProxyRole) {
-			return model.ErrForbidden
-		}
-		if err := bounded(ctx, func(c context.Context) error { return p.engine.Remove(c, r.ID) }); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// removeWorkspaceNetwork removes the per-node internal workspace network. The
+// removeWorkspaceNetwork removes the per-node workspace network. The
 // Engine validates the network's ownership labels, so a foreign network is never
 // removed. A missing network is already clean.
 func (p *Provider) removeWorkspaceNetwork(ctx context.Context, n model.Node) error {
@@ -375,7 +287,7 @@ func (p *Provider) Apply(ctx context.Context, n model.Node, action model.Action)
 }
 
 // hostGatewayExtraHosts is the one host-gateway mapping rule shared by every
-// Fleet container that must dial the host: the node and its egress sidecar both
+// Fleet container that must dial the host: nodes
 // need to resolve host.docker.internal, which on Linux Docker Engine only
 // resolves when the container carries the mapping. Docker Desktop resolves it
 // regardless, so the mapping is additive and never widens reachability.

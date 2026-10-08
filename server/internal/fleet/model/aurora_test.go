@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-const auroraConfig = `{"namespace":"local","fleet_id":"fleet-1","image":"trusted/image:dev","api_url":"http://127.0.0.1:8080","specs":{"small":{}},"aurora":{"server_url":"http://api.internal:8080","egress_hosts":["api.example.com:443"],"anthropic_base_url":"https://ark.example.com","anthropic_model":"ark-model","readonly_rootfs":true,"uplink_network":"aurora-egress-uplink"}}`
+const auroraConfig = `{"namespace":"local","fleet_id":"fleet-1","image":"trusted/image:dev","api_url":"http://127.0.0.1:8080","specs":{"small":{}},"aurora":{"server_url":"http://api.internal:8080","anthropic_base_url":"https://ark.example.com","anthropic_model":"ark-model","readonly_rootfs":true}}`
 
 func TestLoadConfigAuroraProfile(t *testing.T) {
 	cfg, err := loadTestConfig(t, auroraConfig)
@@ -15,7 +15,7 @@ func TestLoadConfigAuroraProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Aurora == nil || cfg.Aurora.ServerURL != "http://api.internal:8080" ||
-		!cfg.Aurora.ReadonlyRootfs || cfg.Aurora.UplinkNetwork != "aurora-egress-uplink" || len(cfg.Aurora.EgressHosts) != 1 {
+		!cfg.Aurora.ReadonlyRootfs {
 		t.Fatalf("aurora profile lost: %+v", cfg.Aurora)
 	}
 	// A configuration without the profile keeps the default Claude-only node.
@@ -51,18 +51,10 @@ func TestLoadConfigAuroraAnthropicBaseURL(t *testing.T) {
 }
 
 func TestLoadConfigRejectsUnsafeAuroraProfile(t *testing.T) {
-	pinAnchor := `"anthropic_model":"ark-model",`
-	withPins := func(raw string) string {
-		return strings.Replace(auroraConfig, pinAnchor, pinAnchor+`"egress_pins":`+raw+`,`, 1)
-	}
-	tooManyPins := `{"ark.cn-beijing.volces.com":[` + strings.TrimSuffix(strings.Repeat(`"93.184.216.34",`, 9), ",") + `]}`
 	cases := map[string]string{
 		"missing server url":          strings.Replace(auroraConfig, `"server_url":"http://api.internal:8080"`, "", 1),
 		"credentials in url":          strings.Replace(auroraConfig, "http://api.internal:8080", "http://user:pass@api.internal:8080", 1),
 		"path in url":                 strings.Replace(auroraConfig, "http://api.internal:8080", "http://api.internal:8080/api", 1),
-		"wildcard egress":             strings.Replace(auroraConfig, "api.example.com:443", "*.example.com:443", 1),
-		"non-443 egress":              strings.Replace(auroraConfig, "api.example.com:443", "api.example.com:8443", 1),
-		"egress without port":         strings.Replace(auroraConfig, "api.example.com:443", "api.example.com", 1),
 		"http anthropic base":         strings.Replace(auroraConfig, "https://ark.example.com", "http://ark.example.com", 1),
 		"anthropic port":              strings.Replace(auroraConfig, "https://ark.example.com", "https://ark.example.com:8443", 1),
 		"anthropic query":             strings.Replace(auroraConfig, "https://ark.example.com", "https://ark.example.com?x=1", 1),
@@ -79,23 +71,10 @@ func TestLoadConfigRejectsUnsafeAuroraProfile(t *testing.T) {
 		"claude env too long":         strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"ENABLE_TOOL_SEARCH":"`+strings.Repeat("a", 257)+`"},`, 1),
 		"claude env array":            strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":[],`, 1),
 		"readonly false":              strings.Replace(auroraConfig, `"readonly_rootfs":true`, `"readonly_rootfs":false`, 1),
-		"missing readonly":            strings.Replace(auroraConfig, `"readonly_rootfs":true,`, "", 1),
-		"empty uplink":                strings.Replace(auroraConfig, "aurora-egress-uplink", "", 1),
-		"unsafe uplink":               strings.Replace(auroraConfig, "aurora-egress-uplink", "uplink/evil", 1),
+		"missing readonly":            strings.Replace(auroraConfig, `"readonly_rootfs":true`, `"readonly_rootfs":false`, 1),
 		"unknown nested key":          strings.Replace(auroraConfig, `"aurora":{"server_url"`, `"aurora":{"image":"evil","server_url"`, 1),
 		"nested null":                 strings.Replace(auroraConfig, `"readonly_rootfs":true`, `"readonly_rootfs":null`, 1),
 		"server url type":             strings.Replace(auroraConfig, `"server_url":"http://api.internal:8080"`, `"server_url":7`, 1),
-		"egress pin unknown host":     withPins(`{"evil.example.com":["93.184.216.34"]}`),
-		"egress pin non public":       withPins(`{"ark.cn-beijing.volces.com":["198.18.0.5"]}`),
-		"egress pin private":          withPins(`{"ark.cn-beijing.volces.com":["10.0.0.1"]}`),
-		"egress pin host port":        withPins(`{"ark.cn-beijing.volces.com:443":["93.184.216.34"]}`),
-		"egress pin ip literal host":  withPins(`{"93.184.216.34":["93.184.216.34"]}`),
-		"egress pin uppercase host":   withPins(`{"ARK.cn-beijing.volces.com":["93.184.216.34"]}`),
-		"egress pin empty list":       withPins(`{"ark.cn-beijing.volces.com":[]}`),
-		"egress pin too many":         withPins(tooManyPins),
-		"egress pin malformed":        withPins(`{"ark.cn-beijing.volces.com":["not-an-ip"]}`),
-		"egress pin address port":     withPins(`{"ark.cn-beijing.volces.com":["93.184.216.34:443"]}`),
-		"egress pins as array":        withPins(`[]`),
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -163,33 +142,6 @@ func TestLoadConfigAuroraProviderEnvCredentials(t *testing.T) {
 	}
 }
 
-// TestLoadConfigAuroraEgressPins proves an operator pin map loads for both a
-// compiled provider host and an operator-added egress host, is deterministic,
-// and is absent by default (today's DNS behaviour).
-func TestLoadConfigAuroraEgressPins(t *testing.T) {
-	raw := strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`,
-		`"anthropic_model":"ark-model","egress_pins":{"ark.cn-beijing.volces.com":["180.184.47.154","2606:4700::1111"],"api.example.com":["93.184.216.34"]},`, 1)
-	cfg, err := loadTestConfig(t, raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := map[string][]string{
-		"ark.cn-beijing.volces.com": {"180.184.47.154", "2606:4700::1111"},
-		"api.example.com":           {"93.184.216.34"},
-	}
-	if !reflect.DeepEqual(cfg.Aurora.EgressPins, want) {
-		t.Fatalf("egress_pins = %+v", cfg.Aurora.EgressPins)
-	}
-	if got := cfg.Aurora.EgressPinsEnv(); got != "api.example.com=93.184.216.34;ark.cn-beijing.volces.com=180.184.47.154|2606:4700::1111" {
-		t.Fatalf("EgressPinsEnv = %q", got)
-	}
-	// An absent map is a no-op: nil pins and an empty sidecar value.
-	plain, err := loadTestConfig(t, auroraConfig)
-	if err != nil || plain.Aurora.EgressPins != nil || plain.Aurora.EgressPinsEnv() != "" {
-		t.Fatalf("absent egress_pins not a no-op: %+v err=%v", plain.Aurora.EgressPins, err)
-	}
-}
-
 // TestAuroraClaudeEnvPairsDeterministic pins the sorted KEY=value order and the
 // nil result for an empty map, so one configuration yields one node env.
 func TestAuroraClaudeEnvPairsDeterministic(t *testing.T) {
@@ -214,7 +166,7 @@ func TestAuroraClaudePathContract(t *testing.T) {
 	if AuroraClaudePathEnv != "MULTICA_CLAUDE_PATH" {
 		t.Fatalf("AuroraClaudePathEnv = %q", AuroraClaudePathEnv)
 	}
-	if AuroraClaudePath != "/opt/aurora/runtime/node_modules/.bin/claude" {
+	if AuroraClaudePath != "/usr/local/bin/claude" {
 		t.Fatalf("AuroraClaudePath = %q", AuroraClaudePath)
 	}
 }

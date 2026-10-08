@@ -14,19 +14,12 @@
   "max_nodes": 2,
   "aurora": {
     "server_url": "https://multica.example.com",
-    "egress_hosts": [
-      "api.anthropic.com:443",
-      "ark.cn-beijing.volces.com:443",
-      "openspeech.bytedance.com:443"
-    ],
-    "egress_pins": {},
     "anthropic_base_url": "https://ark.cn-beijing.volces.com/api/plan",
     "anthropic_model": "",
     "claude_env": {
       "ANTHROPIC_API_KEY": "<ark-agent-plan-key>",
       "VOLC_ASR_API_KEY": "<volcengine-speech-key>"
     },
-    "readonly_rootfs": true,
-    "uplink_network": "aurora-egress-uplink"
+    "readonly_rootfs": true
   }
 }
