@@ -24,6 +24,8 @@
 6. **不做**「skill 脚本调 Multica 服务端、由服务端持密钥调 provider」这种代理。
 7. **omp 暂不安装**(2026-10-08),统一镜像先只保留 Claude。
 8. **credits 计费本次不处理。** 本计划照现状保留 `Credit.Reserve` / `settleAurora*`,但**不把它当作验证的门**:部署时遇到计费问题先记录、先绕过,继续验证执行链路。后续**另立计划**,把计费改为**用 multica web 既有的 token 用量统计来算 credits**(`task_usage` 表与 `POST /api/daemon/tasks/{taskId}/usage` 已经在收 input/output/cache token 与 `CostUsdTicks`),不再按 skill 固定积分数预留。
+9. **最终验收口径(2026-10-08):在 `apps/web` 里能同时看到三样东西,才算两边完全打通** —— ① 由 Aurora 创建的 13 个 agent;② 每个 agent 下对应的 skill;③ 从 Aurora 下发的所有任务。三条任一不成立,不算打通。
+10. **删掉 `OPENAI_API_KEY`,只保留火山引擎的接口与 `byted-ark-seedream-skill`。** 图片一路全部走 Seedream(`poster`、`xhs-image`、`text-image`、`product-image`、`image-edit`);OpenAI 的密钥、目标挂载、出口允许列表条目与 `openai-images` 路由一并清掉。这与 PR #194 已做的路由迁移方向一致。
 
 ---
 
@@ -70,29 +72,41 @@
 | `.github/aurora-sandbox-vex.json` | 删除(只被上面的 workflow 读取) |
 | `scripts/verify-aurora-sandbox-image.sh`、`verify-aurora-sandbox-locks.mjs`(+`.test.mjs`)、`verify-aurora-sandbox-managed-agent.sh`(+`.test.sh`)、`verify-aurora-volc-skills.mjs`、`update-aurora-volc-skills.sh`、`update-aurora-sandbox-apt-lock.sh` | 删除(全部断言 `deploy/aurora-sandbox` 的路径与契约) |
 | `server/internal/fleet/docker/seccomp.go` | 删除(不再有配置 seccomp 的路径) |
-| `server/internal/fleet/model/aurora.go` 的 `SeccompProfile`、`AppArmorProfile`、`ProviderSecretFiles`、`ProxyImage` | 删除字段与校验(Task 3) |
+| `server/internal/fleet/model/aurora.go` 的 `SeccompProfile`、`AppArmorProfile`、`ProviderSecretFiles`、`ProxyImage`、`AuroraOpenAIAPIKeyTarget` 与 `ProviderSecretTargets`/`providerSecretOrder` 里的 `openai-api-key` | 删除字段与校验(Task 3) |
+| OpenAI 出口与路由:`auroraegress.CompiledProviderHosts` 的 `api.openai.com:443`、`execution_policy.go` 的 `openai-images`/`openai-images-edit` 两个路由、`runtime/src/tools/openai-images.mjs` 与它的测试、`runtime/test/provider-openai.test.mjs` | 删除(决策 10);两个 skill 改走 seedream。`auroraManifestProducersByRoute` 里的两条 OpenAI 条目随之成为死项,一并删除 |
 | `aws-deploy` 仓库的 `AURORA_SANDBOX_IMAGE`、`APPARMOR_PROFILE`、`AURORA_EGRESS_*` 部署变量 | 在独立仓库处理,本计划只列出 |
 
 ---
 
 ## 首个验证切片(先做这个,再谈其余)
 
-用户要求加速验证,所以先只打通**一个** skill。选 **`xhs-copy`**,理由是它的约束最少:
+用户要求先测**生成图片的 skill**,所以首个切片选 **`text-image`**(文字生成图片)。在 5 个图片 skill 里它的约束最少:
 
-| 条件 | `xhs-copy` 的取值 | 意义 |
+| 条件 | `text-image` 的取值 | 意义 |
 | --- | --- | --- |
-| 附件 | `documentConstraint(0, 1)` —— **允许 0 个** | 只给 prompt 就能跑,不依赖附件暂存 |
-| 产物 | `text`(`Output: []string{"text"}`) | 本地栈能走完审核与入库 —— **图片产物需要可公网抓取的 URL 才能到 `completed`**,本地跑不到 |
-| provider | 不调用 | 不需要密钥、不花钱、结果确定 |
-| 镜像依赖 | 只需 bash 与写文件 | 现有沙箱镜像已具备,**本次不动镜像** |
+| 附件 | **没有任何附件约束**(`executionPolicies["text-image"]` 不设 `Attachments`) | 只给 prompt 就能跑,不必先验证附件暂存 |
+| 产物 | `image`(1 张 PNG) | 图片产物走 provider 返回 URL + 服务端导入,不经过本地文件 |
+| provider | 火山方舟 Seedream(路由 `volcengine-seedream`) | **要真的调外部接口、真的出图、真的花钱** |
+| 镜像依赖 | 只需 bash 与 `curl` | 现有沙箱镜像已具备,**本次不动镜像** |
 
-因此首个切片的范围是三步,**不改镜像、不改密钥、不删目录**:
+因此首个切片的范围是**四步**:
 
-1. 把 `server/internal/aurora/workflows/xhs-copy.md` 改写成可执行步骤(Task 1 的 Step 3)。
+1. 把 `server/internal/aurora/workflows/text-image.md` 改写成可执行步骤(Task 1)。
 2. 删除 Aurora 专有执行分支,否则 broker 执行面仍然生效、模型拿不到 Bash(Task 4)。
-3. 在**现有的**沙箱镜像上跑一次完整往返:生成 → 领取 → 模型用普通工具写文案 → 产物入库 → 结算(Task 7 的第 2 步)。
+3. **把 ARK 密钥送进 agent 进程的 env** —— 今天它只进 broker 子进程,而且只给文件路径(`mcpBrokerChildEnv` 的三个 `*_API_KEY_FILE`),删掉 broker 后模型会拿不到密钥。这一步从 Task 3 提前(Task 1 的 Step 6)。
+4. 在**现有的**沙箱镜像上跑一次往返:提交 → 领取 → 模型调 ARK 出图 → 服务端导入 → 产物入库(Task 7 的第 2 步)。
 
-通过之后再做其余 12 份文档、镜像统一、密钥改 env 与目录删除。**删目录(Task 5)必须等 13 份全部抽取完**,这一点不因为首个切片通过而放宽。
+**三个必须先满足的前提,缺一个就跑不出结果:**
+
+| 前提 | 为什么 | 不满足时会怎样 |
+| --- | --- | --- |
+| 一把**真实可用的 ARK API Key** | 要真的调 Seedream | 401,任务失败 |
+| 该 Key 的**额度/预算** | 每次出图都计费 | 429 `AccountQuotaExceeded`,任务失败 |
+| `LOCAL_UPLOAD_BASE_URL` 指向**审核方能抓到的地址** | 图片产物要先过内容审核,审核器要能按 URL 取到对象;纯本地对象存储在图片这一路走不通(文本产物没有这个问题) | 生成卡在审核,`status` 到不了 `completed` |
+
+第三条是既有约束,不是本次改动引入的。若只卡在审核,按 Task 7 第 2 步的判定口径处理:记下现象、判执行链路通过(模型确实调通了 ARK 并拿到图),但**不要**声称端到端 completed。
+
+通过之后再做其余 4 个图片 skill、其余 8 份文档、镜像统一、密钥全量改 env 与目录删除。**删目录(Task 5)必须等 13 份全部抽取完**,这一点不因为首个切片通过而放宽。
 
 ---
 
@@ -100,13 +114,14 @@
 
 | 里程碑 | 任务 | 可判定交付 | 依赖 |
 | --- | --- | --- | --- |
-| **M0 单 skill 验证** | 1(仅 `xhs-copy`)、4、7(第 2 步) | 一次完整往返:任务跑通、文本产物入库、账本结算。**不改镜像、不改密钥、不删目录** | 无 |
-| **M1 抽取与内容** | 1b(其余 12 份) | 13 份文档全部可执行,每份通过"无工具名"检查 | M0 通过 |
-| **M2 执行面** | 2、3 | 统一节点镜像构建成功;**omp 本阶段不安装**;密钥走 env | M1 |
+| **M0 单 skill 验证** | 1(仅 `text-image`,含 Step 5)、4、7(第 2 步) | 一次完整往返:提交 → 领取 → 模型调 ARK 出图 → 服务端导入 → 产物入库。**不改镜像、不删目录**;需要一把可用的 ARK Key | 无 |
+| **M1a 图片 skill** | 1b(4 个图片 skill) | `poster`、`xhs-image`、`product-image`、`image-edit` 各跑通一次 | M0 通过 |
+| **M1b 其余内容** | 1b(其余 8 份) | 13 份文档全部可执行,每份通过"无工具名"检查 | M1a |
+| **M2 执行面** | 2、3 | 统一节点镜像构建成功;**omp 本阶段不安装**;密钥全量走 env | M1b |
 | **M3 清理** | 5、6 | `deploy/aurora-sandbox/` 与全部引用消失;仓库测试全绿 | M2 |
-| **M4 验收** | 7 | 13 个 skill 各跑一次 + 端到端记录 | M3 |
+| **M4 打通与验收** | 6b、7 | `apps/web` 里同时看到 13 个 agent、各自的 skill、Aurora 下发的全部任务;13 个 skill 各跑一次 + 端到端记录 | M3 |
 
-**并行边界:** Task 1 的文档内容与 Task 2 的镜像互不依赖。Task 5(删除)必须等 13 份全部抽取完(Task 1 + 1b)。
+**并行边界:** Task 1 的文档内容与 Task 2 的镜像互不依赖。Task 5(删除)必须等 13 份全部抽取完(Task 1 + 1b)。Task 6b(可见性)与 Task 7(验收)可以并行开发,但验收要等 6b 落地。
 
 ---
 
@@ -121,6 +136,7 @@
 ### 修改
 
 - `server/internal/aurora/workflows/*.md`(13 份)— 全部重写为可执行步骤。
+- `server/pkg/db/queries/aurora_agents.sql` + 新迁移 — 13 个 agent 由 `kind='system'` 改为 `kind='user'`,并就地转换已有行(Task 6b)。
 - `docker/runtime/Dockerfile` — 折叠为唯一节点镜像入口,增加媒体工具与 bash(不加 omp)。
 - `server/internal/daemon/daemon.go` — 删除 `isAuroraTask` 的两处分支。
 - `server/internal/daemon/prompt.go` — 删除 `buildAuroraPrompt` 的工具名与 workflow 内联。
@@ -138,6 +154,8 @@
 ### 现有接入位置(行号以写作时的 HEAD 为准)
 
 - 13 个 agent 与 skill 的种子:`server/internal/aurora/agents.go:89` `EnsureSystemAgents`;SQL 在 `server/pkg/db/queries/aurora_agents.sql:29,49`。
+- 可见性(为什么今天在 apps/web 看不到):`server/pkg/db/queries/agent.sql:3` `ListAgents`、`:8` `ListAllAgents`、`:39` `GetAgentInWorkspace` 全部 `kind = 'user'`;正确做法在同文件 `:2843` `CreateSystemUserAgent`(Mika)的注释里。
+- 可见性修复的落点:`aurora_agents.sql:29` 的 `kind='system'` 字面量;`GetAgentBySystemKey`(`agent.sql:2833`)不过滤 kind,所以生成路径不受影响。
 - skill 下发:`server/cmd/server/router.go:1620` → `server/internal/handler/daemon.go:4125`;daemon 侧 `server/internal/daemon/daemon.go:7912` → `execenv/context.go:328`(`claude` → `<workDir>/.claude/skills`)。
 - Aurora 执行分支:`server/internal/daemon/daemon.go:7829-7836`、`:8884-8914`;`aurora_tool_surface.go:34,41,49,118`;`aurora_broker.go:32,271`。
 - 产物:`server/internal/daemon/aurora_manifest.go:55,58,183`;上报 `server/internal/handler/aurora_artifact.go:67`。
@@ -145,18 +163,22 @@
 
 ---
 
-## Task 1: 实现第一个 skill(`xhs-copy`)
 
-**本任务只落地一个 skill。** 其余 12 份见 Task 1b,排在首个端到端验证通过之后 —— 一次改一份,每份都能先跑通再动下一份。
+
+## Task 1: 实现第一个 skill(`text-image`)
+
+**本任务只落地一个 skill。** 其余 4 个图片 skill 与其余 8 份见 Task 1b,排在首个端到端验证通过之后 —— 一次改一份,每份都能先跑通再动下一份。
 
 **Files:**
-- Modify: `server/internal/aurora/workflows/xhs-copy.md`
+- Modify: `server/internal/aurora/workflows/text-image.md`
 - Modify: `server/internal/aurora/workflows_test.go`(新增守卫测试与 `rewrittenSkills` 清单)
-- Read(只读,不修改):`deploy/aurora-sandbox/runtime/src/tools/documents.mjs`、`text-artifact.mjs`、`policy.mjs`、`manifest.mjs`
+- Modify: `server/internal/daemon/managed_secrets.go`(Step 5:把 ARK 密钥送进 agent env)
+- Read(只读,不修改):`deploy/aurora-sandbox/runtime/src/{policy,provider-run,importer,manifest}.mjs`、`runtime/src/tools/seedream.mjs`、`vendor/volcengine/byted-ark-seedream-skill/{SKILL.md,references/MODELS.md}`
 
 **Interfaces:**
 - Produces: 5 段固定结构 —— `## Inputs`、`## Steps`、`## Required outputs`、`## Artifact manifest`、`## Failure behavior`。
-- Produces: `var rewrittenSkills = []string{"xhs-copy"}` —— 已完成改写的清单,Task 1b 逐项往里加。
+- Produces: `var rewrittenSkills = []string{"text-image"}` —— 已完成改写的清单,Task 1b 逐项往里加。
+- Produces: agent 子进程 env 里出现 `ARK_API_KEY`(值,不是文件路径)。
 - Consumes: `aurora.Workflow(skillID)` 内嵌读取(`server/internal/aurora/workflows.go:13-33`);文件名与 skill ID 一一对应,不新增文件。
 
 - [ ] **Step 1: 写"无工具名"守卫测试(红)**
@@ -168,7 +190,7 @@
 // ordinary-agent form. It grows one skill at a time: each one is verified end
 // to end before the next is written, so a document that still tells the model
 // to call a brokered MCP tool is a bug, not a stale comment.
-var rewrittenSkills = []string{"xhs-copy"}
+var rewrittenSkills = []string{"text-image"}
 
 func TestRewrittenWorkflowsDescribeRealSteps(t *testing.T) {
 	for _, id := range rewrittenSkills {
@@ -204,77 +226,139 @@ func TestEveryAvailableSkillHasADocument(t *testing.T) {
 ```
 
 Run: `(cd server && go test ./internal/aurora -run 'TestRewrittenWorkflows|TestEveryAvailableSkill' -count=1)`
-Expected: `TestRewrittenWorkflowsDescribeRealSteps` FAIL —— `xhs-copy.md` 命中 `mcp__aurora__` 与 `no shell`;`TestEveryAvailableSkillHasADocument` PASS
+Expected: `TestRewrittenWorkflowsDescribeRealSteps` FAIL —— `text-image.md` 命中 `mcp__aurora__` 与 `no shell`;`TestEveryAvailableSkillHasADocument` PASS
 
 - [ ] **Step 2: 抽取现有实现**
 
-对 `xhs-copy` 打开两处实现,把事实抄下来,不要凭印象:
+逐条抄下事实,不要凭印象。**凡在下面这些文件里找不到依据的值,停下来问,不要补一个看起来合理的。**
 
 | 来源 | 要抽出的事实 |
 | --- | --- |
-| `runtime/src/tools/text-artifact.mjs` | 允许的文件名与扩展名、编码、大小上限、写入位置 |
-| `runtime/src/tools/documents.mjs` | 有文档时的读取方式(UTF-8/Markdown 直接读;PDF 用 `pdftotext`;DOCX 走固定 ZIP/XML 抽取) |
-| `runtime/src/policy.mjs` 的 `xhs-copy` 条目 | 附件规则(0–1 份文档)、输入输出类型 |
-| `runtime/src/manifest.mjs` | manifest 的字段、路径、上限 |
+| `runtime/src/policy.mjs` 的 `PROVIDER_RUN_OPERATIONS` | seedream 那条的**字面量**操作名(文档里的 `/<operation>/finish` 要用它) |
+| `runtime/src/policy.mjs` 的 seedream 条目 | 允许的 provider、model、origin、输入输出规则 |
+| `runtime/src/tools/seedream.mjs` | 调用顺序:先 `begin` 拿 create 租约 → 再调 provider → 再 `finish`;请求的 `output_format`;URL 与 base64 两种返回的处理 |
+| `vendor/volcengine/byted-ark-seedream-skill/SKILL.md` | 默认端点 `https://ark.cn-beijing.volces.com/api/plan/v3/images/generations`、模型名 `doubao-seedream-5.0-lite` / `-pro`、`size` 取值、`response_format` 固定 `url`、`watermark` 默认 true |
+| `vendor/volcengine/byted-ark-seedream-skill/references/MODELS.md` | `size` 与参考图的合法取值与上限(文档里要写清本 skill 用哪一档) |
+| `runtime/src/provider-run.mjs` | `begin` / `finish` 的**请求体字段**(见 Step 3 的代码块;已抄录,直接用) |
+| `runtime/src/importer.mjs` | 导入请求体字段与返回的 `staging_id` / `size_bytes` / `sha256` |
+| `runtime/src/manifest.mjs` + `server/internal/daemon/aurora_manifest.go` | manifest 的头部字段、`producer.id` 必须是 `byted-ark-seedream-skill`、至少一个 `primary`、20 条与 600 MiB 上限、`size_bytes` 必须是非负整数 |
 
-- [ ] **Step 3: 改写 `xhs-copy.md`**
+- [ ] **Step 3: 改写 `text-image.md`**
 
-```markdown
-# Xiaohongshu Copy
+下面这份是按已核实的实现写成的。`<operation>` 与 `size` 按 Step 2 抽出的字面量填;其余字段都已在实现里核对过。
 
-Write social copy from a written request.
+````markdown
+# Text to Image
 
-You run on a normal Multica agent: you have a shell, the workspace files, and
-the tools installed in this image. Do the work yourself.
+Turn a written request into one image with the Volcengine Ark Seedream model.
+
+You run on a normal Multica agent: you have a shell and the network access this
+node provides. Do the work yourself.
 
 ## Inputs
 
 - `prompt`: the user's request (required).
-- Zero or one attached document. When one is attached, read its path from the
-  task context. Markdown and plain text are read directly. A PDF is read with
-  `pdftotext -layout "<input>" -`. A DOCX is read by unzipping it and stripping
-  the XML tags — do not trust any library or external service for this.
+- This skill takes no attachments. Use text only.
 
 ## Steps
 
-1. When a document is attached, read it with the command for its type above.
-2. Write the copy from the run `prompt` and any document text.
-3. Write the result to `<outputRoot>/xhs-copy.md` as UTF-8 Markdown.
+1. Open the create lease before spending a provider call:
+
+   ```bash
+   curl -fsS -X POST "$MULTICA_SERVER_URL/api/agent/tasks/$MULTICA_TASK_ID/aurora-provider-runs/begin" \
+     -H "Authorization: Bearer $MULTICA_TOKEN" -H 'content-type: application/json' \
+     -d '{"provider":"volcengine-agentplan","operation":"<operation>","model":"doubao-seedream-5.0-lite","arguments":{}}'
+   ```
+
+   Stop and report a failure when the response has `create_allowed` false and no
+   `external_id`. That means the server did not grant a create; submitting
+   anyway would bill a second generation for the same task.
+
+2. Ask Seedream for the image:
+
+   ```bash
+   curl -fsS -X POST "https://ark.cn-beijing.volces.com/api/plan/v3/images/generations" \
+     -H "Authorization: Bearer $ARK_API_KEY" -H 'content-type: application/json' \
+     -d "$(jq -n --arg p "$PROMPT" '{model:"doubao-seedream-5.0-lite",prompt:$p,size:"<size>",response_format:"url",watermark:false}')" \
+     -o /tmp/seedream.json
+   ```
+
+   The result URL is `data[0].url`. Stop and report a failure when the response
+   has no image.
+
+3. Hand that URL to the task-scoped importer. Do not download it yourself: this
+   node's egress allowlist does not cover the provider's media host, and the
+   importer keeps the URL out of the task.
+
+   ```bash
+   curl -fsS -X POST "$MULTICA_SERVER_URL/api/agent/tasks/$MULTICA_TASK_ID/aurora-artifacts/import" \
+     -H "Authorization: Bearer $MULTICA_TOKEN" -H 'content-type: application/json' \
+     -d "$(jq -n --arg u "$(jq -r '.data[0].url' /tmp/seedream.json)" '{url:$u,kind:"image",name:"text-image.png",mime_type:"image/png",size_bytes:null,metadata:{}}')" \
+     -o /tmp/import.json
+   ```
+
+   The response carries `staging_id`, `size_bytes` and `sha256`.
+
+4. Close the run:
+
+   ```bash
+   curl -fsS -X PUT "$MULTICA_SERVER_URL/api/agent/tasks/$MULTICA_TASK_ID/aurora-provider-runs/<operation>/finish" \
+     -H "Authorization: Bearer $MULTICA_TOKEN" -H 'content-type: application/json' \
+     -d '{"state":"succeeded"}'
+   ```
 
 ## Required outputs
 
-- `<outputRoot>/xhs-copy.md` — one text artifact.
+- One primary `image` artifact, staged on the server under the `staging_id` from
+  step 3.
 
 ## Artifact manifest
 
-Write `<outputRoot>/.multica/aurora-artifacts.v1.json`:
+Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Every value below comes
+from a previous step; copy it, do not invent it.
 
 ```json
 {
   "schema": "com.multica.aurora.artifacts",
   "version": 1,
   "task_id": "<the task id from your task context>",
-  "skill_id": "xhs-copy",
+  "skill_id": "text-image",
+  "producer": { "id": "byted-ark-seedream-skill", "version": "5.0.0" },
+  "provider_run": { "provider": "volcengine-agentplan", "model": "doubao-seedream-5.0-lite", "external_id": null },
   "artifacts": [
-    { "source": { "type": "file", "path": "xhs-copy.md" },
-      "kind": "text", "role": "primary", "name": "xhs-copy.md",
-      "format": "md" }
+    {
+      "id": "image-1",
+      "source": { "type": "staged_object", "staging_id": "<staging_id from step 3>" },
+      "name": "text-image.png",
+      "kind": "image",
+      "role": "primary",
+      "format": "png",
+      "mime_type": "image/png",
+      "size_bytes": 0,
+      "sha256": "<sha256 from step 3>",
+      "metadata": {}
+    }
   ]
 }
 ```
 
-The daemon recomputes size, SHA-256 and MIME from the file itself. A manifest
-that names a path outside the output root, or more than 20 artifacts, or more
-than 600 MiB in total, is rejected and the generation fails.
+The daemon re-checks this manifest against the task and the skill: the producer
+id must be `byted-ark-seedream-skill`, the skill id must be `text-image`, at
+least one artifact must be `primary`, and a missing manifest, more than 20
+artifacts, or more than 600 MiB in total is rejected. Take `size_bytes` and
+`sha256` from the import response rather than the placeholders above.
 
 ## Failure behavior
 
-- If an attached document cannot be read, stop and report the failure. Do not
-  invent its contents.
-- Never claim completion unless the output file exists and the manifest names it.
-```
+- A non-2xx from Seedream: report the status and the body, then call
+  `.../<operation>/finish` with `{"state":"failed","error_code":"provider_failed"}`,
+  and write no manifest.
+- Never submit a second Seedream create for the same task.
+- Never claim completion unless step 3 returned a `staging_id` and the manifest
+  names it.
+````
 
-Step 3 的命令与字段必须来自 Step 2 抽出的事实;凡在实现里找不到依据的,停下来问,不要补一个看起来合理的值。
+Step 3 的每个字段都必须能追溯到 Step 2 抽出的事实;凡在实现里找不到依据的,停下来问,不要补一个看起来合理的值。
 
 - [ ] **Step 4: 运行守卫测试**
 
@@ -284,26 +368,54 @@ Expected: PASS
 Run: `(cd server && go test ./internal/aurora -count=1)`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: 把 ARK 密钥送进 agent 进程的 env**
+
+今天 `mcpBrokerChildEnv`(`server/internal/daemon/managed_secrets.go:198`)只把 ARK / OpenAI / 火山语音的**文件路径**给 broker 子进程,Claude 进程拿不到。删掉 broker 后,模型自己调 provider,所以值必须进 agent 的 env。
+
+先写失败测试:
+
+```go
+func TestAgentEnvCarriesTheProviderKeys(t *testing.T) {
+	t.Setenv("ARK_API_KEY", "ark-from-env")
+	// 断言 agent 子进程 env 里出现 "ARK_API_KEY=ark-from-env",
+	// 并且不再出现 "ARK_API_KEY_FILE"
+}
+```
+
+Run: `(cd server && go test ./internal/daemon -run TestAgentEnvCarriesTheProviderKeys -count=1)`
+Expected: FAIL
+
+实现:`managed_secrets` 增加一个供 agent 子进程使用的 env 方法,把 ARK(以及 Task 3 里的其余两个)以**值**的形式返回;`daemon.go` 在组装 `agentEnv` 时并入。保留"缺一个就报错、不静默降级"的行为。**注意**:这一步只做 ARK 就够首个切片跑通,其余两个键在 Task 3 一并处理。
+
+Run: `(cd server && go test ./internal/daemon -run 'TestAgentEnvCarriesTheProviderKeys|TestManagedSecret|TestProviderSecretMount' -count=1)`
+Expected: PASS
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add server/internal/aurora/workflows/xhs-copy.md server/internal/aurora/workflows_test.go
-git commit -m "feat(aurora): make the xhs-copy skill document executable by an ordinary agent"
+git add server/internal/aurora/workflows/text-image.md server/internal/aurora/workflows_test.go server/internal/daemon
+git commit -m "feat(aurora): make the text-image skill document executable by an ordinary agent"
 ```
 
 ## Task 1b: 其余 12 份 skill 文档
 
-**前置:** M0 的单 skill 往返通过(否则不要把 12 份一起押上)。
+**前置:** M0 的 `text-image` 往返通过(否则不要把 12 份一起押上)。
 
 **Files:**
 - Modify: `server/internal/aurora/workflows/*.md`(12 份)
 - Modify: `server/internal/aurora/workflows_test.go` 的 `rewrittenSkills`
 
 **Interfaces:**
-- Consumes: Task 1 的模板与守卫测试。
+- Consumes: Task 1 的模板、守卫测试与 provider 调用样式。
 - Produces: `rewrittenSkills` 含全部 13 项;抽出的内容进入 Task 7 的验收。
 
-- [ ] **Step 1: 逐份抽取**(对照表见原「抽取与内容」小节;每份从 `runtime/src/tools/*.mjs`、`runtime/src/policy.mjs` 与 `vendor/volcengine/*/SKILL.md` 抽,顺序:先本地 4 份,再 provider 4 份,最后异步视频 2 份)
+- [ ] **Step 1: 按批次逐份抽取**(每份从 `runtime/src/tools/*.mjs`、`runtime/src/policy.mjs`、`vendor/volcengine/*/SKILL.md` 与 `runtime/test/*.test.mjs` 抽;顺序如下,先把同类做完再换类)
+
+| 批次 | skill | 备注 |
+| --- | --- | --- |
+| **M1a 图片(先做这 4 个)** | `poster`、`xhs-image`、`product-image`、`image-edit` | **全部路由 `volcengine-seedream`**,复用 Task 1 的调用样式。`product-image` 与 `image-edit` 今天在 `execution_policy.go` 里还写着 `openai-images` / `openai-images-edit`,**本批要先把它们改成 seedream**(见「决策 10」与 Task 3 的清理),再写文档。`image-edit` 需要 1 张参考图,用 Seedream 的 `reference_images`(Base64 Data URI 或图片 URL) |
+| **M1b 视频** | `image-video`、`text-video` | 路由 `volcengine-seedance`,异步:创建 → 轮询 → 结果 URL,轮询间隔与超时按实现写清 |
+| **M1b 其余** | `transcription`、`video-captions`、`id-photo`、`resume`、`document-summary`、`xhs-copy` | 前两个用 ASR(`volcengine-asr`);其余多为本地工具(`pdftotext`、ImageMagick、无头 Chromium、FFmpeg、文本写入) |
 
 - [ ] **Step 2: 每写完一份,把它的 id 加进 `rewrittenSkills` 并跑守卫测试**
 
@@ -383,13 +495,16 @@ git commit -m "feat(runtime): build one node image with the daemon and Claude"
 **Files:**
 - Modify: `server/internal/fleet/model/aurora.go`、`server/internal/fleet/docker/provider.go`、`server/internal/fleet/docker/inspect.go`
 - Modify: `server/internal/daemon/managed_secrets.go`
+- Modify: `server/internal/aurora/execution_policy.go`(`product-image`、`image-edit` 改为 seedream 路由)、`server/internal/aurora/workflows_test.go` 里的生产者期望
 - Modify: `.env.example`、`fleet-config.example.json`
 - Delete: `server/internal/fleet/docker/seccomp.go`
 - Modify: `server/internal/daemon/managed_secrets_test.go`、`server/internal/fleet/model/aurora_test.go`、`server/internal/fleet/docker/aurora_test.go`
 
 **Interfaces:**
-- Produces: 四个固定的环境变量名 `ARK_API_KEY`、`OPENAI_API_KEY`、`VOLC_ASR_API_KEY`、`ANTHROPIC_API_KEY`,由 Fleet 写进节点容器 env,由 daemon 直接读取。
+- Produces: **三个**固定的环境变量名 `ARK_API_KEY`、`VOLC_ASR_API_KEY`、`ANTHROPIC_API_KEY`,由 Fleet 写进节点容器 env,由 daemon 直接读取。**`OPENAI_API_KEY` 不再存在**(决策 10)。
+- **注意顺序:** `ARK_API_KEY` 已在 Task 1 Step 5 提前接进 agent env(首个图片切片要用),本任务补齐 `VOLC_ASR_API_KEY`,并把两者的取值从"读文件"整体改为"读 env"。
 - Produces: `model.AuroraConfig` 删除 `SeccompProfile`、`AppArmorProfile`、`ProviderSecretFiles`、`ProxyImage` 四个字段。
+- Produces: OpenAI 相关的东西一并消失 —— `model.AuroraOpenAIAPIKeyTarget`、`ProviderSecretTargets` 里的 `openai-api-key`、`providerSecretOrder` 的该项、`auroraegress.CompiledProviderHosts` 里的 `api.openai.com:443`、以及 `execution_policy.go` 里两个 skill 的 OpenAI 路由。
 - Consumes: `docker/runtime/Dockerfile` 的镜像契约(Task 2)。
 
 - [ ] **Step 1: 写"密钥经 env、不经文件"的失败测试**
@@ -399,20 +514,22 @@ git commit -m "feat(runtime): build one node image with the daemon and Claude"
 ```go
 func TestProviderSecretsComeFromTheEnvironment(t *testing.T) {
 	t.Setenv("ARK_API_KEY", "ark-from-env")
-	t.Setenv("OPENAI_API_KEY", "openai-from-env")
 	t.Setenv("VOLC_ASR_API_KEY", "volc-from-env")
 	secrets, err := loadManagedProviderSecrets()
 	if err != nil {
 		t.Fatalf("loadManagedProviderSecrets: %v", err)
 	}
-	env := secrets.mcpBrokerChildEnv() // 名称随后调整;先钉住"值来自 env"
+	env := secrets.agentChildEnv()
 	if !slices.Contains(env, "ARK_API_KEY=ark-from-env") {
 		t.Fatalf("provider key did not come from the environment: %v", env)
+	}
+	if slices.ContainsFunc(env, func(v string) bool { return strings.HasPrefix(v, "OPENAI_") }) {
+		t.Fatalf("an OpenAI variable survived the removal: %v", env)
 	}
 }
 
 func TestProviderSecretsRejectMissingValues(t *testing.T) {
-	// 三个键里缺一个 → 返回错误,不静默降级成空字符串
+	// 两个键里缺一个 → 返回错误,不静默降级成空字符串
 }
 ```
 
@@ -421,22 +538,25 @@ Expected: FAIL —— 现有实现从 `/run/secrets/*` 读文件
 
 - [ ] **Step 2: 改 daemon 侧的读取**
 
-`server/internal/daemon/managed_secrets.go`:把 `readManagedSecretFile` 的固定路径读取改为读环境变量;保留"缺一个就报错、不静默降级"的行为。`claudeChildEnv` 继续提供 `ANTHROPIC_API_KEY`,其余三把按 skill 需要注入**同一进程**的环境(模型与脚本同进程,这是本方向接受的形态)。
+`server/internal/daemon/managed_secrets.go`:把 `readManagedSecretFile` 的固定路径读取改为读环境变量;保留"缺一个就报错、不静默降级"的行为。`claudeChildEnv` 继续提供 `ANTHROPIC_API_KEY`,其余两把按 skill 需要注入**同一进程**的环境(模型与脚本同进程,这是本方向接受的形态)。删掉 `mcpBrokerChildEnv` 与三个 `*_API_KEY_FILE` 常量、以及 `String`/`LogValue` 里对应的字段。
 
 - [ ] **Step 3: 删掉配置里的密集字段并放宽 env 禁令**
 
 `server/internal/fleet/model/aurora.go`:
 
 - 删除 `ProxyImage`、`SeccompProfile`、`AppArmorProfile`、`ProviderSecretFiles` 四个字段与 `Validate()` 里对应四段校验;`egressProxySpec` 改为取 `Config.Image`(节点与 sidecar 同镜像,入口不同)。
-- **放宽 `claude_env` 的密钥关键字禁令**:现在任何含 `API_KEY`/`TOKEN`/`SECRET`/`PASSWORD` 的键一律被拒(`claudeEnvSecretMarkers`)。改为只放行四个固定名字,其余仍拒:
+- **放宽 `claude_env` 的密钥关键字禁令**:现在任何含 `API_KEY`/`TOKEN`/`SECRET`/`PASSWORD` 的键一律被拒(`claudeEnvSecretMarkers`)。改为只放行三个固定名字,其余仍拒:
 
 ```go
 // providerEnvNames are the only secret-bearing keys the operator may inject
 // through the Fleet config. They exist because the node runs an ordinary agent
 // that calls the providers directly; the values must be supplied at deploy time
 // from a 0600 file and must never reach the image, SQL, logs, or Git.
+//
+// OPENAI_API_KEY is deliberately absent: Aurora uses only the Volcengine Ark
+// endpoints (Seedream for images, Seedance for video, ASR for transcription).
 var providerEnvNames = map[string]bool{
-	"ARK_API_KEY": true, "OPENAI_API_KEY": true, "VOLC_ASR_API_KEY": true, "ANTHROPIC_API_KEY": true,
+	"ARK_API_KEY": true, "VOLC_ASR_API_KEY": true, "ANTHROPIC_API_KEY": true,
 }
 ```
 
@@ -453,7 +573,7 @@ var providerEnvNames = map[string]bool{
 
 - [ ] **Step 5: 文档与样例**
 
-`.env.example` 增加四个变量(值留空,注释写明"部署时注入;容器 env 对容器内进程可读");`fleet-config.example.json` 删除 `proxy_image` / `seccomp_profile` / `apparmor_profile` / `provider_secret_files`,增加 `claude_env` 里的四个键。
+`.env.example` 增加三个变量(值留空,注释写明"部署时注入;容器 env 对容器内进程可读"),并删除 `OPENAI_API_KEY` 条目;`fleet-config.example.json` 删除 `proxy_image` / `seccomp_profile` / `apparmor_profile` / `provider_secret_files`,增加 `claude_env` 里的三个键。
 
 - [ ] **Step 6: 运行测试**
 
@@ -661,6 +781,99 @@ git commit -m "feat(aurora): show why the runtime is not ready"
 
 ---
 
+## Task 6b: 让 13 个 agent 在 apps/web 里可见可用
+
+**这是「两边完全打通」的第一条,也是今天唯一明确不成立的一条。**
+
+现状:13 个 agent 由 `UpsertAuroraSystemAgent` 写死 `kind='system'`,而 `agent.sql:3/8/39` 的列表与详情查询全部过滤 `kind = 'user'` —— 所以在 apps/web 的 agent 列表、指派选择器、聊天入口里**都看不到它们**,也无法把 issue 指派给它们。
+
+仓库里已有正确做法可照抄:`agent.sql:2843` 的 `CreateSystemUserAgent`(Mika 的载体),其注释写明:「创建一个成员仍能看见、能聊天、能指派 issue 的产品预置 agent。**故意用 `kind='user'`** —— `kind='system'` 会把该行从 agent 列表与指派界面隐藏,并随 runtime 硬删除。」
+
+**Files:**
+- Modify: `server/pkg/db/queries/aurora_agents.sql`(`UpsertAuroraSystemAgent`)
+- Create: `server/migrations/<n>_aurora_agents_visible.up.sql/.down.sql`
+- Modify: `server/internal/aurora/agents.go`、`agents_test.go`
+- Modify: `server/internal/handler/agent.go`(若需要拒绝对这几个 agent 的归档/删技能)
+- Modify: `packages/views/agents/components/tabs/activity-tab.tsx`(仅在无 issue 任务渲染不良时)
+
+**Interfaces:**
+- Produces: 13 个 agent 的 `kind='user'`,其余不变(`system_key='aurora:<skillID>'` 保留 —— `GetAgentBySystemKey` 不过滤 kind,生成路径不受影响)。
+- Produces: 迁移把已有 workspace 的 `kind='system'` Aurora agent 就地转换,幂等。
+
+- [ ] **Step 1: 写"可见"的失败测试**
+
+```go
+// server/internal/aurora/agents_test.go
+func TestAuroraAgentsAreVisibleToMembers(t *testing.T) {
+	// EnsureSystemAgents 之后:
+	//   ListAgents(workspaceID) 必须包含 13 个 system_key 前缀为 "aurora:" 的 agent
+	//   每个 agent 的 kind 必须是 "user"
+}
+```
+
+Run: `(cd server && go test ./internal/aurora -run TestAuroraAgentsAreVisibleToMembers -count=1)`
+Expected: FAIL —— 今天是 `kind='system'`,不出现在 `ListAgents` 里
+
+- [ ] **Step 2: 改种子与 SQL**
+
+`aurora_agents.sql` 的 `UpsertAuroraSystemAgent`:把 `kind` 从 `'system'` 改为 `'user'`,并在 `DO UPDATE` 里补 `kind = EXCLUDED.kind`(否则已存在的行不会被纠正)。注释改写为"Mika 的 `CreateSystemUserAgent` 同构:产品预置但成员可见可指派"。
+
+`server/internal/aurora/agents.go` 的 `systemAgentDef` / `SystemAgentDef` 注释同步:它们不再是"不可见的执行载体"。
+
+- [ ] **Step 3: 写迁移**
+
+必须按当前最高号顺延,并确认幂等:
+
+```sql
+-- (n)_aurora_agents_visible.up.sql
+-- Aurora's 13 skill agents become member-visible, following the same shape as
+-- the Mika carrier (CreateSystemUserAgent): kind='user' is what makes a
+-- product-defined agent appear in agent lists and assignment surfaces. The
+-- system_key identity is unchanged, so GetAgentBySystemKey keeps resolving the
+-- generation path.
+UPDATE agent SET kind = 'user', updated_at = now()
+WHERE kind = 'system' AND system_key LIKE 'aurora:%';
+```
+
+`.down.sql` 是反向 UPDATE(`WHERE kind='user' AND system_key LIKE 'aurora:%'` → `'system'`)。列变更不需要索引;若确实新增索引,单独一个 `CREATE [UNIQUE] INDEX CONCURRENTLY` 文件并登记进 `server/cmd/migrate/main.go`。
+
+Run: `make migrate-up && (cd server && go run ./cmd/migrate up)`
+Expected: 迁移记录一次;重跑无变化
+
+- [ ] **Step 4: 处理两个新出现的边界**
+
+1. **归档会让生成失败。** `GetAgentBySystemKey` 要求 `archived_at IS NULL`。agent 可见后用户能归档它,而 `UpsertAuroraSystemAgent` 的 `DO UPDATE` **不会**清 `archived_at` —— 于是该 skill 的生成会失败在"找不到 agent"。加一条:生成前若目标 agent 已归档,就地解除归档(或明确报出可读的错)。二选一,写进代码注释。
+2. **skill 关联变成用户可编辑。** agent 可见后,Skills 页签能 `DELETE /api/agents/{id}/skills/{skillId}` 摘掉那条关联,任务就会在没有 skill 文档的情况下执行。对这个 13 个 agent 的关联做只读保护,或在交付时把"未见 skill 文档"当成硬失败并给出可读原因。
+
+- [ ] **Step 5: 在 apps/web 里逐条确认**
+
+```bash
+make up C=api,web
+# 打开 /{workspaceSlug}/agents
+```
+
+Expected(三条分别截图/记录):
+1. 列表里出现 13 个 Aurora agent(名称与 `aurora.Catalog()` 的 `Name` 一致);
+2. 打开任一个 → Skills 页签显示它的那一份 skill;
+3. 打开任一个 → Work 页签显示从 Aurora 下发的任务(无 issue 的 quick-create 任务也要能读,不能空行)。
+
+- [ ] **Step 6: 运行测试**
+
+Run: `(cd server && go test ./internal/aurora ./internal/handler -count=1)`
+Expected: PASS
+
+Run: `pnpm typecheck && pnpm test`
+Expected: PASS
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add server/pkg/db server/migrations server/internal/aurora server/internal/handler packages/views/agents
+git commit -m "feat(aurora): make the 13 skill agents visible and assignable in the web app"
+```
+
+---
+
 ## Task 7: 端点回传与结算的一次完整往返
 
 **Files:**
@@ -684,17 +897,28 @@ Expected: PASS。`settleAuroraOnCompleted` 仍要求至少一个已提交资产,
 
 - [ ] **Step 2: 在 Docker Desktop 上跑一次真实往返**
 
-**M0 阶段先跑一次,用现有的沙箱镜像,不构建新镜像。** 这是首个验证切片的两条改动(文档 + 删分支)之外的唯一动作:
+**M0 阶段先跑一次,用现有的沙箱镜像,不构建新镜像。** 首个切片的改动就是 Task 1 的文档与密钥 env、Task 4 的删分支,加上这一次运行。
 
 ```bash
 make up C=api,fleet
-# AURORA_SANDBOX_IMAGE 指向现成的沙箱镜像;密钥不需要 —— xhs-copy 不调 provider
-# 在 Aurora 应用里对 skill「小红书文案」提交一次生成,只填 prompt
+# 需要:ARK_API_KEY(真实可用且有额度)、LOCAL_UPLOAD_BASE_URL 指向审核方能抓到的地址
+# 在 Aurora 应用里对 skill「文字生成图片」提交一次生成,只填 prompt
 ```
 
-Expected: 生成 → 节点领取 → 模型用普通工具写文案 → 文本产物入库 → 结算;`aurora_generation.status` 变为 `completed`。**若卡在 `unknown staging artifact` 或产物为空**,说明 skill 文档里的 manifest 段与实际校验不一致 —— 改文档,不要改校验。
+Expected: 提交 → 节点领取 → 模型走 `begin` → 调 ARK 出图 → 导入拿到 `staging_id` → 写 manifest → daemon 收集 → 资产入库 → `aurora_generation.status` 变为 `completed`。
 
-**判定口径:** 这一步验证的是**执行链路**(skill 下发 → 模型用普通工具干活 → 产物入库)。如果唯一的失败点在 credits(预留失败、余额不足、结算写不进账本),把现象记进验收记录并**判本切片通过** —— 计费不在本计划范围内。反过来,产物没入库、或模型拿不到 Bash,都不算通过。
+失败时的判定口径:
+
+| 卡在哪 | 说明什么 | 怎么处理 |
+| --- | --- | --- |
+| `begin` 未授予 create,或 ARK 返回 401/429 | 密钥或额度问题,**不是**执行链路问题 | 换一把可用且有额度的 Key 再跑;不要改代码绕过 |
+| 模型调不到 ARK(连不通、被拒) | egress 允许列表没有覆盖该端点 —— 这是既有允许列表的问题 | 记录实际错误;确认端点是否在允许列表内,按需要在 Fleet 配置的 `egress_hosts` 里加 |
+| 导入返回 4xx | 文档里的 payload 与真实路由不符 | 改**文档**,不要改路由 |
+| 产物没入库 / `unknown staging artifact` / manifest 被拒 | 文档里的 manifest 段与 `aurora_manifest.go` 的校验不一致 | 改**文档**,不要改校验 |
+| **只有**审核卡住(`LOCAL_UPLOAD_BASE_URL` 抓不到) | 环境问题,不是本次改动引入的 | 记下现象,**判执行链路通过**(模型确实调通了 ARK 拿到图并成功导入),但不要声称端到端 `completed` |
+| credits 相关(预留失败、余额不足、结算写不进账本) | 计费不在本计划范围内 | 记下现象,**判本切片通过** |
+
+反过来,**模型拿不到 Bash、或拿不到 `ARK_API_KEY`,都不算通过** —— 那说明 Task 4 或 Task 1 Step 5 没做对。
 
 **M4 阶段用统一镜像重跑一次**(Task 2 构建的镜像已由 `AURORA_SANDBOX_IMAGE` 指向):
 
@@ -708,11 +932,23 @@ Expected: 同样通过,且浏览器 trace 与账本断言齐全。
 
 13 个 skill 各跑一次,记录:输入、实际执行的命令、产物、账本变化。**未授权的真实 provider 调用记 SKIP 并写明原因,绝不记 PASS。**
 
-- [ ] **Step 4: 写验收记录**
+- [ ] **Step 4: 最终验收的三条可见性检查(M4 的门)**
 
-新建 `docs/superpowers/plans/2026-10-08-aurora-agent-skill-runtime-acceptance.md`,逐条写代码 HEAD、镜像 digest、命令、观察结果、资产与账本断言。不得记录密钥。
+这一组是用户定义的"两边完全打通"判据。**三条都要过,任何一条不过就是没打通**,不得用前几步的绿灯替代:
 
-- [ ] **Step 5: Commit 并开 PR**
+| # | 在 `apps/web` 里看什么 | 通过的判据 |
+| --- | --- | --- |
+| ① | `/{ws}/agents` 列表 | 13 个由 Aurora 创建的 agent 都出现,名称与 `aurora.Catalog()` 的 `Name` 一致 |
+| ② | 任一 agent 的 Skills 页签 | 显示该 agent 对应的那一份 skill(内容与 `server/internal/aurora/workflows/<id>.md` 一致) |
+| ③ | 任一 agent 的 Work 页签 | 显示从 Aurora 下发的全部任务,包括没有 issue 的 quick-create 任务,且不是空行、不是"未知 issue" |
+
+把三条的截图或记录写进验收文件。第 ③ 条如果只在有 issue 的任务上成立、无 issue 的行渲染为空,记 FAIL 并去修渲染,不要改判据。
+
+- [ ] **Step 5: 写验收记录**
+
+新建 `docs/superpowers/plans/2026-10-08-aurora-agent-skill-runtime-acceptance.md`,逐条写代码 HEAD、镜像 digest、命令、观察结果、资产与账本断言,以及上面三条的结论。不得记录密钥。
+
+- [ ] **Step 6: Commit 并开 PR**
 
 ```bash
 git add docs/superpowers/plans/2026-10-08-aurora-agent-skill-runtime-acceptance.md
@@ -734,7 +970,9 @@ gh pr create --repo eanfs/multica --fill
 | provider 密钥 | 只读文件挂载,只有 broker 子进程拿到路径 | **容器 env**,对容器内任何进程可读,`docker inspect` 亦可见 |
 | 计费 create-once | broker 强制:重试不会第二次提交 create | **仅记账**。模型直连 provider,`ambiguous` 冻结不再有强制力;重复提交计费请求成为可能 |
 | 产物 manifest 的作者 | broker(`manifest.mjs`) | **模型**。契约不变:daemon 只当路径清单,自行重算 size/SHA/MIME 并按 `Route` 校验 |
+| manifest 的 `producer.id` | broker 声明的固定 producer,代表"这份 manifest 来自哪个受控实现" | **模型自述的字符串**。daemon 仍要求它等于 `auroraManifestProducersByRoute[route]`(例如 `text-image` 必须是 `byted-ark-seedream-skill`),但填写者是模型 —— 这个字段从此只是形状检查,不是来源证明 |
 | 13 个 skill 的实现 | 9 个受控 MCP 工具 + vendored 上游树 | **13 份可执行文档**;上游树与补丁随目录删除,来源记录不再有库存 |
+| provider 范围 | 火山(Seedream/Seedance/ASR)+ OpenAI 图片 | **只有火山**。OpenAI 的密钥、挂载目标、出口允许列表条目与两个路由全部删除,`product-image`、`image-edit` 改走 Seedream |
 | 模型可用的工具 | Bash/Read/Write 等被 deny,只能调 9 个 broker 工具 | **普通 agent 的全部工具**(`bypassPermissions`) |
 | 平台要求 | 需要能加载 AppArmor 的 Linux 引擎 | **Docker Desktop 即可** —— 排除它的唯一理由是 AppArmor |
 
@@ -744,8 +982,11 @@ gh pr create --repo eanfs/multica --fill
 
 | 项 | 状态 |
 | --- | --- |
-| `xhs-copy` 的单 skill 往返 | **未运行**。这是 M0,唯一能证明方向可行的一步 |
-| 其余 12 份 skill 文档 | 未起草(Task 1b,依赖 M0 通过) |
+| `text-image` 的单 skill 往返 | **未运行**。这是 M0,唯一能证明方向可行的一步;需要一把真实可用的 ARK Key 与额度 |
+| 其余 4 个图片 skill | 未起草(Task 1b 的 M1a 批次,依赖 M0 通过) |
+| 其余 8 份 skill 文档 | 未起草(Task 1b 的 M1b 批次) |
+| `LOCAL_UPLOAD_BASE_URL` 是否满足图片审核 | 未验证。本地纯对象存储抓不到图片产物,需要指向审核方能访问的地址;文本产物没有这个问题 |
+| **apps/web 三条可见性** | **今天 ①不成立**(13 个 agent 是 `kind='system'`,不出现在列表与指派界面);②③随 ① 修复后需实测。Task 6b 是修复,Task 7 Step 4 是判据 |
 | 统一节点镜像 | 未构建 |
 | omp | **本阶段不安装**(用户决定),不是欠账 |
 | Docker Desktop 上的端到端往返 | 未运行 |
@@ -762,12 +1003,14 @@ gh pr create --repo eanfs/multica --fill
 | --- | --- | --- |
 | 13 skill = 13 agent + 13 skill,不用 MCP tool | 1、1b、4 | `TestRewrittenWorkflowsDescribeRealSteps`;`TestAuroraTaskGetsTheOrdinaryExecutionSurface` |
 | 完全复用 issue 干活流程 | 4 | Aurora 分支删除后 `runTask` 无 Aurora 条件;skill 由既有 `ensureTaskSkillBundles` 下发 |
-| 先做一个 skill 加速验证 | 1、4、7 | `xhs-copy` 的端到端往返在**现有镜像**上通过,零镜像/密钥/目录改动 |
+| 先做一个 skill 加速验证 | 1、4、7 | `text-image` 的端到端往返在**现有镜像**上通过,不删目录。前提是有一把可用且有额度的 ARK Key |
 | `deploy/aurora-sandbox/` 完全删除 | 5 | 全仓 grep 无残留;`git ls-files deploy/aurora-sandbox` 为空 |
 | 不用 AppArmor、不用自定义 seccomp | 3、5 | 字段删除;`seccomp.go` 删除;`NodeHostConfig` 只剩 tmpfs 与只读根 |
 | 密钥经 `.env` 进容器 env | 3 | `TestProviderSecretsComeFromTheEnvironment`;镜像 `Config.Env` 无密钥 |
 | 不做服务端 provider 代理 | 1b、3 | skill 文档里是 provider 直连;没有新增服务端转发路由 |
 | omp 暂不安装 | 2 | 镜像契约测试只断言三个入口 |
+| 删掉 OpenAI,只用火山引擎 | 3、1b | 全仓 grep 无 `OPENAI_API_KEY` / `openai-images` 残活;`product-image`、`image-edit` 的路由是 `volcengine-seedream` |
+| **apps/web 里三条可见性(agent / skill / 任务)** | **6b、7** | `TestAuroraAgentsAreVisibleToMembers`;`apps/web` 里 `/{ws}/agents` 列表、Skills 页签、Work 页签三处截图与记录 |
 
 ---
 
@@ -778,10 +1021,10 @@ gh pr create --repo eanfs/multica --fill
 1. **Subagent-Driven(推荐)** —— 每个任务派一个新的子代理,任务之间由我审查。Task 1 是内容工作,适合逐份审。
 2. **Inline Execution** —— 在本会话内按 executing-plans 批量执行,带检查点。
 
-**建议从 M0 开始**,它的范围只有两条改动加一次运行:
+**建议从 M0 开始**,它的范围是三条改动加一次运行:
 
-1. 改 `server/internal/aurora/workflows/xhs-copy.md` 一份文档(Task 1)
+1. 改 `server/internal/aurora/workflows/text-image.md` 一份文档 + 把 ARK 密钥接进 agent env(Task 1,含 Step 5)
 2. 删 Aurora 执行分支(Task 4)
 3. 在现有镜像上跑一次往返(Task 7 Step 2)
 
-**开始前需要确认的只有一件事:** `xhs-copy` 的文档里,有文档附件时的读取命令(`pdftotext`、DOCX 解包)与文本产物的文件名规则,是我从 `runtime/src/tools/{documents,text-artifact}.mjs` 抽出来的。抽出来之后请你或熟悉这块的人过一眼 —— 写错了不会有测试拦住,只会表现为生成失败。
+**开始前需要确认的只有一件事:** `text-image.md` 里的 provider 调用(端点、模型名、`size`、请求体、响应里取 URL 的路径)是我从 `runtime/src/tools/seedream.mjs` 与 `vendor/volcengine/byted-ark-seedream-skill/` 抄出来的。抄出来之后请你或熟悉这块的人过一眼 —— 写错了不会有测试拦住,只会表现为 4xx 或空结果。另外那两处待填的字面量(provider run 的 operation 名、`size` 取值)也要从实现里取,别猜。
