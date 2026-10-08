@@ -127,14 +127,6 @@ func (p *Provider) Ensure(ctx context.Context, n model.Node, b model.Bootstrap) 
 	if e := p.validBootstrap(n, b); e != nil {
 		return model.Observation{}, e
 	}
-	// Read and validate the operator-owned seccomp profile before any Docker
-	// resource is built. The Docker SDK sends SecurityOpt verbatim, so the daemon
-	// receives the inline JSON, never the host path; a bad profile fails closed
-	// here with nothing created.
-	seccompJSON, e := resolveAuroraSeccomp(p.cfg.Aurora)
-	if e != nil {
-		return model.Observation{}, e
-	}
 	network := Resource{Name: p.networkName(), Role: "network", Labels: labels(n.Namespace, p.cfg.FleetID, "namespace", "network")}
 	if e = bounded(ctx, func(c context.Context) error { return p.engine.EnsureNetwork(c, network) }); e != nil {
 		return model.Observation{}, safeError(e)
@@ -167,10 +159,9 @@ func (p *Provider) Ensure(ctx context.Context, n model.Node, b model.Bootstrap) 
 			return model.Observation{}, safeError(e)
 		}
 	}
-	h := NodeHostConfig(n.Resources, true, p.cfg.Aurora, seccompJSON)
+	h := NodeHostConfig(n.Resources, true, p.cfg.Aurora)
 	h.NetworkMode = container.NetworkMode(workspace.Name)
 	h.Mounts = []mount.Mount{{Type: mount.TypeVolume, Source: n.DataVolume, Target: model.DataMount}, {Type: mount.TypeVolume, Source: n.SecretsVolume, Target: model.AuroraEnrollmentDir, ReadOnly: true}}
-	h.Mounts = append(h.Mounts, providerSecretMounts(p.cfg.Aurora)...)
 	c := &container.Config{Image: n.Image, User: "10001:10001", Labels: labels(n.Namespace, p.cfg.FleetID, nodeID(n), "node"), Env: p.nodeEnv(n), Entrypoint: []string{"/usr/local/bin/fleet-node"}, Cmd: []string{"run"}, Healthcheck: &container.HealthConfig{Test: []string{"CMD", "/usr/local/bin/fleet-node", "health"}, Interval: 5 * time.Second, Timeout: 5 * time.Second, Retries: 3}}
 	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	created, createErr := p.engine.Create(callCtx, c, &h, workspace.Name, p.containerName(n))
@@ -212,9 +203,10 @@ func (p *Provider) validBootstrap(n model.Node, b model.Bootstrap) error {
 }
 
 // nodeEnv is the exact container environment for a node. The managed Aurora
-// profile adds the fixed enrollment, egress-proxy and agent-path variables; the
-// daemon still reads its secret from the read-only secrets mount, and the image
-// bakes neither the agent path nor any Node version banner.
+// profile adds the fixed enrollment, egress-proxy and agent-path variables plus
+// the operator's claude_env pairs, which carry the provider credentials the
+// daemon reads from this environment. The image bakes neither the agent path nor
+// any Node version banner.
 func (p *Provider) nodeEnv(n model.Node) []string {
 	env := []string{"HOME=" + model.NodeHome, "FLEET_NODE_MAX_RUNS=" + strconv.Itoa(n.Resources.MaxRuns)}
 	if p.cfg.Aurora != nil {
@@ -233,9 +225,9 @@ func (p *Provider) nodeEnv(n model.Node) []string {
 		if p.cfg.Aurora.AnthropicModel != "" {
 			env = append(env, model.AuroraAnthropicModelEnv+"="+p.cfg.Aurora.AnthropicModel)
 		}
-		// Operator-configured extra Claude Code variables, in deterministic key
-		// order. An empty map appends nothing, so the node env stays
-		// byte-identical when claude_env is absent.
+		// Operator-configured extra node variables (including the provider
+		// credentials), in deterministic key order. An empty map appends nothing,
+		// so the node env stays byte-identical when claude_env is absent.
 		env = append(env, p.cfg.Aurora.ClaudeEnvPairs()...)
 	}
 	return env
@@ -396,25 +388,14 @@ func hostGatewayExtraHosts(linuxHostGateway bool) []string {
 
 // NodeHostConfig is the single HostConfig builder for every Fleet node. The
 // Claude profile (aurora == nil) is unchanged. The Aurora profile adds the
-// inline seccomp profile, the read-only root filesystem, the fixed writable
-// tmpfs surfaces, and the apparmor= reference only when AppArmorProfile is
-// non-empty: an empty profile emits no apparmor option at all. Mount denial
-// stays with the seccomp profile. seccompJSON is the pre-resolved compact
-// profile: the Docker daemon parses the value after "seccomp=" as JSON, so a
-// path never goes on the wire.
-func NodeHostConfig(spec model.Spec, linuxHostGateway bool, aurora *model.AuroraConfig, seccompJSON string) container.HostConfig {
+// read-only root filesystem and the fixed writable tmpfs surfaces. AppArmor and
+// the custom seccomp profile are no longer used: the node runs with Docker's
+// default security settings, so neither option is sent.
+func NodeHostConfig(spec model.Spec, linuxHostGateway bool, aurora *model.AuroraConfig) container.HostConfig {
 	h := container.HostConfig{Resources: container.Resources{NanoCPUs: int64(spec.CPUs) * 1e9, Memory: spec.MemoryBytes, PidsLimit: &spec.Pids}, CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges:true"}, RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled}}
 	h.ExtraHosts = hostGatewayExtraHosts(linuxHostGateway)
 	if aurora != nil {
 		h.ReadonlyRootfs = aurora.ReadonlyRootfs
-		// An empty AppArmorProfile is the operator-acknowledged no-AppArmor
-		// posture, so no apparmor= option is sent at all: an inert option the
-		// daemon silently ignores is worse than none. A configured profile is
-		// added verbatim and the daemon capability is checked at startup.
-		h.SecurityOpt = append(h.SecurityOpt, "seccomp="+seccompJSON)
-		if aurora.AppArmorProfile != "" {
-			h.SecurityOpt = append(h.SecurityOpt, "apparmor="+aurora.AppArmorProfile)
-		}
 		h.Tmpfs = map[string]string{
 			model.AuroraWorkspaceMount: auroraWorkspaceTmpfs,
 			model.AuroraTmpMount:       auroraTmpTmpfs,

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -52,16 +51,9 @@ const (
 	// AuroraNoProxyValue keeps the proxy itself and loopback out of the proxy.
 	AuroraNoProxyValue = "egress,127.0.0.1,localhost"
 
-	// Fixed provider credential destinations inside the sandbox. The managed
-	// daemon and the MCP broker read these exact paths; the Fleet mounts operator
-	// files there read-only and never passes a credential value.
-	AuroraAnthropicAPIKeyTarget = "/run/secrets/anthropic-api-key"
-	AuroraArkAPIKeyTarget       = "/run/secrets/ark-api-key"
-	AuroraVolcASRAPIKeyTarget   = "/run/secrets/volc-asr-api-key"
-
 	// AuroraWorkspaceMount, AuroraTmpMount and AuroraRunMount are the fixed
 	// writable tmpfs surfaces of the Aurora node. Every one is nosuid,nodev,noexec
-	// and owned by the sandbox user; mount denial itself belongs to seccomp.
+	// and owned by the sandbox user.
 	AuroraWorkspaceMount = "/workspace"
 	AuroraTmpMount       = "/tmp"
 	AuroraRunMount       = "/run"
@@ -72,41 +64,6 @@ const (
 // never reach the managed daemon or the enrollment endpoint.
 var enrollmentTokenPattern = regexp.MustCompile("^mse_[0-9a-f]{40}$")
 
-// providerSecretOrder fixes the mount order so one configuration always yields
-// one deterministic container specification.
-var providerSecretOrder = []string{"anthropic-api-key", "ark-api-key", "volc-asr-api-key"}
-
-// ProviderSecretTargets maps each accepted ProviderSecretFiles key to its fixed
-// in-container destination. Keys outside this map are rejected by Validate, so a
-// control plane can never choose a destination.
-var ProviderSecretTargets = map[string]string{
-	"anthropic-api-key": AuroraAnthropicAPIKeyTarget,
-	"ark-api-key":       AuroraArkAPIKeyTarget,
-	"volc-asr-api-key":  AuroraVolcASRAPIKeyTarget,
-}
-
-// ProviderSecretMount is one operator-staged read-only credential source and the
-// fixed destination it appears at inside the sandbox.
-type ProviderSecretMount struct {
-	Key    string
-	Source string
-	Target string
-}
-
-// ProviderSecretMounts returns the configured provider credential mounts in
-// fixed target order. Empty entries mount nothing.
-func (a AuroraConfig) ProviderSecretMounts() []ProviderSecretMount {
-	mounts := make([]ProviderSecretMount, 0, len(a.ProviderSecretFiles))
-	for _, key := range providerSecretOrder {
-		source := strings.TrimSpace(a.ProviderSecretFiles[key])
-		if source == "" {
-			continue
-		}
-		mounts = append(mounts, ProviderSecretMount{Key: key, Source: source, Target: ProviderSecretTargets[key]})
-	}
-	return mounts
-}
-
 // EgressPinsEnv renders the configured provider pins in a deterministic order
 // for the egress sidecar environment. An absent or empty map renders "", which
 // keeps the sidecar's DNS-only behaviour exactly.
@@ -114,9 +71,10 @@ func (a AuroraConfig) EgressPinsEnv() string {
 	return auroraegress.FormatPins(a.EgressPins)
 }
 
-// ClaudeEnvPairs returns the configured extra Claude Code variables as KEY=value
-// entries in deterministic key order, so one configuration always yields one
-// node environment. An absent or empty map returns nil and adds nothing.
+// ClaudeEnvPairs returns the configured extra node environment variables as
+// KEY=value entries in deterministic key order, so one configuration always
+// yields one node environment. An absent or empty map returns nil and adds
+// nothing.
 func (a AuroraConfig) ClaudeEnvPairs() []string {
 	if len(a.ClaudeEnv) == 0 {
 		return nil
@@ -134,26 +92,15 @@ func (a AuroraConfig) ClaudeEnvPairs() []string {
 }
 
 // AuroraConfig selects the managed-sandbox execution profile for one Fleet
-// deployment. It is administrator-owned public configuration: the sandbox image
-// is Config.Image and model credentials belong to the sandbox's own provider
-// secret mounts, never here. When nil the deployment runs the default
-// Claude-only node profile.
+// deployment. It is administrator-owned public configuration: the node image is
+// Config.Image, and the node's provider credentials travel through ClaudeEnv
+// into the container environment, never through a mounted file. When nil the
+// deployment runs the default Claude-only node profile.
 type AuroraConfig struct {
 	// ServerURL is the container-reachable Multica API origin the managed
 	// daemon enrolls against and calls back to. It is not a client-supplied
 	// image, path or credential.
 	ServerURL string `json:"server_url"`
-	// ProxyImage is the digest-pinned egress sidecar image. It is the only
-	// network path off the workspace-internal network.
-	ProxyImage string `json:"proxy_image"`
-	// SeccompProfile is the absolute host path of the deployed seccomp profile.
-	SeccompProfile string `json:"seccomp_profile"`
-	// AppArmorProfile is the loaded AppArmor profile name referenced by the
-	// container. Loading the profile is an operator step. An empty value is the
-	// operator's explicit, acknowledged posture of running this profile without
-	// an AppArmor MAC; the provider then sends no apparmor= SecurityOpt at all.
-	// A non-empty value must be a conservative loaded profile name.
-	AppArmorProfile string `json:"apparmor_profile"`
 	// EgressHosts is the explicit exact host:443 allowlist the sidecar accepts
 	// in addition to the provider hosts compiled into the proxy image.
 	EgressHosts []string `json:"egress_hosts"`
@@ -168,14 +115,12 @@ type AuroraConfig struct {
 	// endpoint override. Empty preserves the provider default.
 	AnthropicBaseURL string `json:"anthropic_base_url"`
 	AnthropicModel   string `json:"anthropic_model"`
-	// ClaudeEnv carries the optional extra Claude Code variables for the
-	// managed child. It is a fixed allowlist of non-secret model-routing and
-	// tool variables, validated at load; an absent map adds nothing to the node
-	// environment. Credentials belong in ProviderSecretFiles, never here.
+	// ClaudeEnv carries the node's extra environment variables for the managed
+	// child. It is a fixed allowlist of model-routing and tool variables plus the
+	// providerEnvNames credentials, validated at load; an absent map adds nothing
+	// to the node environment. Every other credential-bearing key is refused, and
+	// the values are visible to any process in the container.
 	ClaudeEnv map[string]string `json:"claude_env"`
-	// ProviderSecretFiles maps each fixed target name to an absolute host file
-	// mounted read-only at /run/secrets/<name>. Empty values mount nothing.
-	ProviderSecretFiles map[string]string `json:"provider_secret_files"`
 	// ReadonlyRootfs must be explicitly true: the managed profile never opts out
 	// of the read-only root filesystem.
 	ReadonlyRootfs bool `json:"readonly_rootfs"`
@@ -191,18 +136,6 @@ func (a AuroraConfig) Validate() error {
 	if !ValidOrigin(a.ServerURL) {
 		return fmt.Errorf("%w: aurora server_url must be an http(s) origin", ErrInvalidRequest)
 	}
-	if !digestPinnedImagePattern.MatchString(a.ProxyImage) {
-		return fmt.Errorf("%w: aurora proxy_image must be pinned as <name>@sha256:<64 lowercase hex>", ErrInvalidRequest)
-	}
-	if !filepath.IsAbs(a.SeccompProfile) || filepath.Clean(a.SeccompProfile) != a.SeccompProfile {
-		return fmt.Errorf("%w: aurora seccomp_profile must be a clean absolute host path", ErrInvalidRequest)
-	}
-	// An empty profile is the explicit no-AppArmor posture; a non-empty value must
-	// still be a conservative loaded profile name, so a configured name can never
-	// carry a path, space or other unsafe bytes.
-	if a.AppArmorProfile != "" && !profileNamePattern.MatchString(a.AppArmorProfile) {
-		return fmt.Errorf("%w: aurora apparmor_profile must be empty or a loaded profile name", ErrInvalidRequest)
-	}
 	for _, host := range a.EgressHosts {
 		if !validEgressHost(host) {
 			return fmt.Errorf("%w: aurora egress_hosts must be exact host:443 entries", ErrInvalidRequest)
@@ -217,26 +150,20 @@ func (a AuroraConfig) Validate() error {
 	if a.AnthropicModel != "" && !validModelName(a.AnthropicModel) {
 		return fmt.Errorf("%w: aurora anthropic_model must be a non-empty model name", ErrInvalidRequest)
 	}
+	// claude_env is an operator-owned allowlist, not a general credential
+	// channel. The secret-marker ban still applies to every key except the
+	// providerEnvNames credentials, which exist because the node runs an
+	// ordinary agent that calls the providers directly; their values are
+	// supplied at deploy time and must never reach the image, SQL, logs, or Git.
 	for key, value := range a.ClaudeEnv {
-		if isSecretClaudeEnvKey(key) {
+		if isSecretClaudeEnvKey(key) && !providerEnvNames[key] {
 			return fmt.Errorf("%w: aurora claude_env must never carry a credential", ErrInvalidRequest)
 		}
-		if !claudeCodeEnvAllowlist[key] {
+		if !claudeCodeEnvAllowlist[key] && !providerEnvNames[key] {
 			return fmt.Errorf("%w: aurora claude_env key is not in the fixed allowlist", ErrInvalidRequest)
 		}
 		if !validClaudeEnvValue(key, value) {
 			return fmt.Errorf("%w: aurora claude_env value is invalid", ErrInvalidRequest)
-		}
-	}
-	for key, source := range a.ProviderSecretFiles {
-		if _, ok := ProviderSecretTargets[key]; !ok {
-			return fmt.Errorf("%w: aurora provider_secret_files target name is not fixed", ErrInvalidRequest)
-		}
-		if source == "" {
-			continue
-		}
-		if strings.TrimSpace(source) != source || !filepath.IsAbs(source) || filepath.Clean(source) != source || !cleanPathPattern.MatchString(source) {
-			return fmt.Errorf("%w: aurora provider_secret_files source must be a clean absolute host file path", ErrInvalidRequest)
 		}
 	}
 	if !a.ReadonlyRootfs {
@@ -249,21 +176,15 @@ func (a AuroraConfig) Validate() error {
 }
 
 var (
-	// digestPinnedImagePattern matches an immutable OCI reference pinned with a
-	// lowercase sha256 digest. Tag-only references are rejected.
-	digestPinnedImagePattern = regexp.MustCompile("^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$")
-	// profileNamePattern is a conservative AppArmor profile name.
-	profileNamePattern = regexp.MustCompile("^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
 	// networkNamePattern is a conservative Docker network name.
 	networkNamePattern = regexp.MustCompile("^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
-	// cleanPathPattern rejects control characters and whitespace in mount paths.
-	cleanPathPattern = regexp.MustCompile("^/[!-~]+$")
 )
 
 // claudeCodeEnvAllowlist is the exact set of additional Claude Code variables
 // an operator may set through AuroraConfig.ClaudeEnv. It is a fixed allowlist of
 // non-secret model-routing and tool variables; every other key is refused at
-// config load, so the channel can never carry an unvetted variable.
+// config load unless it is one of the providerEnvNames credentials, so the
+// channel can never carry an unvetted variable.
 var claudeCodeEnvAllowlist = map[string]bool{
 	"ANTHROPIC_DEFAULT_FABLE_MODEL":            true,
 	"ANTHROPIC_DEFAULT_FABLE_MODEL_NAME":       true,
@@ -280,9 +201,26 @@ var claudeCodeEnvAllowlist = map[string]bool{
 	"API_TIMEOUT_MS":                           true,
 }
 
+// providerEnvNames are the only secret-bearing keys the operator may inject
+// through the Fleet config's claude_env. They exist because the node runs an
+// ordinary agent that calls the providers directly, so their values must be
+// supplied at deploy time from an owner-only Fleet config and must never reach
+// the image, SQL, logs, or Git.
+//
+// ANTHROPIC_API_KEY is the Ark Agent Plan key: the Ark key is
+// Anthropic-Messages-compatible, so the image and video skills reuse it
+// (decision 5) instead of a separate ARK_API_KEY. OPENAI_API_KEY is deliberately
+// absent: the OpenAI route is gone (decision 10). Only the Volcengine speech
+// endpoint is not Anthropic-compatible, so VOLC_ASR_API_KEY is the single
+// separate provider variable.
+var providerEnvNames = map[string]bool{
+	"ANTHROPIC_API_KEY": true,
+	"VOLC_ASR_API_KEY":  true,
+}
+
 // claudeEnvSecretMarkers are the substrings that mark a claude_env key as
-// credential-bearing. The channel is operator configuration and never carries a
-// credential, so such a key is refused before the allowlist is even consulted.
+// credential-bearing. Such a key is refused unless it is one of the
+// providerEnvNames credentials, before the allowlist is even consulted.
 var claudeEnvSecretMarkers = []string{"API_KEY", "AUTH_TOKEN", "TOKEN", "SECRET", "PASSWORD"}
 
 // maxClaudeEnvValueLen bounds one operator-supplied claude_env value.
@@ -318,7 +256,7 @@ func validEgressHost(raw string) bool {
 // base URL. It starts with a single slash and then permits only URL path-segment
 // characters: unreserved (A-Z a-z 0-9 - . _ ~), percent-encoding, the standard
 // sub-delims (! $ & ' ( ) * + , ; =) and "/" separators.
-var anthropicBaseURLPathPattern = regexp.MustCompile(`^/[A-Za-z0-9\-._~/%!$&'()*+,;=]*$`)
+var anthropicBaseURLPathPattern = regexp.MustCompile(`^/[A-Za-z0-9-._~/%!$&'()*+,;=]*$`)
 
 // ValidAnthropicBaseURL requires a single https host with no credentials, query
 // or fragment, plus an optional path prefix. An empty path is the bare origin; a
@@ -335,7 +273,7 @@ func ValidAnthropicBaseURL(raw string) bool {
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.User != nil ||
-		u.Host == "" || u.Hostname() == "" || strings.ContainsAny(u.Host, ", \t") || u.Port() != "" {
+		u.Host == "" || u.Hostname() == "" || strings.ContainsAny(u.Host, ", 	") || u.Port() != "" {
 		return false
 	}
 	if u.Opaque != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.RawPath != "" && u.RawPath != u.Path) {

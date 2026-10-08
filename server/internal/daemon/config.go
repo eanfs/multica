@@ -182,10 +182,11 @@ type ManagedConfig struct {
 	// EnrollmentTokenFile is the absolute path of the single-use mse_ secret.
 	// It is re-read and re-validated by bootstrapManaged.
 	EnrollmentTokenFile string
-	// ProviderSecrets holds the four validated provider credentials loaded at
-	// managed startup. The Anthropic value is scoped to the Claude child; the
-	// other three are file paths the MCP broker reads itself. LoadConfig
-	// requires every file before any workstation source is read.
+	// ProviderSecrets holds the two validated provider credentials loaded at
+	// managed startup. Both are values read from the process environment: the
+	// Anthropic value is scoped to the Claude child, the Volcengine speech value
+	// to the ordinary agent child. LoadConfig requires the Anthropic value before
+	// any workstation source is read.
 	ProviderSecrets managedProviderSecrets
 }
 
@@ -253,16 +254,16 @@ func LoadConfig(overrides Overrides) (Config, error) {
 			return Config{}, err
 		}
 		// The Claude agent cannot run without its own credential, but the
-		// provider-tool files are optional per route: a missing one stays an
-		// absent path for the MCP broker, whose tool fails closed when called
-		// instead of blocking every other route at startup. The optional
+		// Volcengine speech credential is optional per route: a missing one stays
+		// absent, and the route that needs it fails closed when called instead of
+		// blocking every other route at startup. The optional
 		// ANTHROPIC_BASE_URL/ANTHROPIC_MODEL endpoint overrides are operator
 		// process configuration and are validated here, before startup.
 		endpoint, err := managedClaudeEndpointFromEnv()
 		if err != nil {
 			return Config{}, err
 		}
-		creds, err := loadManagedProviderSecrets(managedSecretPathsFromEnv(), endpoint)
+		creds, err := loadManagedProviderSecrets(endpoint)
 		if err != nil {
 			return Config{}, err
 		}

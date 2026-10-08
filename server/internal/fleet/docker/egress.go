@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/mount"
 	"github.com/multica-ai/multica/server/internal/fleet/model"
 )
 
@@ -66,7 +65,7 @@ func EgressProxyArgs(cfg model.Config, proxyName, workspaceNetwork string, linux
 		"-e", egressAllowedHostsEn+"="+strings.Join(a.EgressHosts, ","),
 		"-e", egressPinsEn+"="+a.EgressPinsEnv(),
 		// The image is final so nothing can follow it as a command.
-		a.ProxyImage,
+		cfg.Image,
 	), nil
 }
 
@@ -90,7 +89,7 @@ func egressProxySpec(cfg model.Config, n model.Node, proxyName string, linuxHost
 	}
 	pids := int64(64)
 	return &container.Config{
-			Image:  a.ProxyImage,
+			Image:  cfg.Image,
 			User:   egressProxyUser,
 			Labels: labels(n.Namespace, cfg.FleetID, nodeID(n), egressProxyRole),
 			Env: []string{
@@ -108,21 +107,6 @@ func egressProxySpec(cfg model.Config, n model.Node, proxyName string, linuxHost
 			ExtraHosts:     hostGatewayExtraHosts(linuxHostGateway),
 			Tmpfs:          map[string]string{model.AuroraTmpMount: egressTmpfs},
 		}, nil
-}
-
-// providerSecretMounts renders the operator-staged credential files as
-// read-only bind mounts at the four fixed destinations. Empty entries are
-// omitted.
-func providerSecretMounts(a *model.AuroraConfig) []mount.Mount {
-	if a == nil {
-		return nil
-	}
-	mounts := a.ProviderSecretMounts()
-	out := make([]mount.Mount, 0, len(mounts))
-	for _, m := range mounts {
-		out = append(out, mount.Mount{Type: mount.TypeBind, Source: m.Source, Target: m.Target, ReadOnly: true})
-	}
-	return out
 }
 
 // defaultImagePATH is the OCI default environment every image carries. It is the

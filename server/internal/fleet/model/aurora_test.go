@@ -7,53 +7,21 @@ import (
 	"testing"
 )
 
-// auroraDigest is one well-formed immutable image reference.
-const auroraDigest = "@sha256:" + "a123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-const auroraEgressImage = "ghcr.io/eanfs/multica-aurora-egress" + auroraDigest
-
-const auroraConfig = `{"namespace":"local","fleet_id":"fleet-1","image":"trusted/image:dev","api_url":"http://127.0.0.1:8080","specs":{"small":{}},"aurora":{"server_url":"http://api.internal:8080","proxy_image":"ghcr.io/eanfs/multica-aurora-egress@sha256:a123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","seccomp_profile":"/etc/multica/aurora/seccomp.json","apparmor_profile":"multica-aurora-sandbox","egress_hosts":["api.example.com:443"],"anthropic_base_url":"https://ark.example.com","anthropic_model":"ark-model","provider_secret_files":{"anthropic-api-key":"/etc/multica/aurora/anthropic-api-key"},"readonly_rootfs":true,"uplink_network":"aurora-egress-uplink"}}`
+const auroraConfig = `{"namespace":"local","fleet_id":"fleet-1","image":"trusted/image:dev","api_url":"http://127.0.0.1:8080","specs":{"small":{}},"aurora":{"server_url":"http://api.internal:8080","egress_hosts":["api.example.com:443"],"anthropic_base_url":"https://ark.example.com","anthropic_model":"ark-model","readonly_rootfs":true,"uplink_network":"aurora-egress-uplink"}}`
 
 func TestLoadConfigAuroraProfile(t *testing.T) {
 	cfg, err := loadTestConfig(t, auroraConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Aurora == nil || cfg.Aurora.ServerURL != "http://api.internal:8080" || cfg.Aurora.ProxyImage != auroraEgressImage ||
-		cfg.Aurora.SeccompProfile != "/etc/multica/aurora/seccomp.json" || cfg.Aurora.AppArmorProfile != "multica-aurora-sandbox" ||
+	if cfg.Aurora == nil || cfg.Aurora.ServerURL != "http://api.internal:8080" ||
 		!cfg.Aurora.ReadonlyRootfs || cfg.Aurora.UplinkNetwork != "aurora-egress-uplink" || len(cfg.Aurora.EgressHosts) != 1 {
 		t.Fatalf("aurora profile lost: %+v", cfg.Aurora)
-	}
-	mounts := cfg.Aurora.ProviderSecretMounts()
-	if len(mounts) != 1 || mounts[0].Target != AuroraAnthropicAPIKeyTarget || mounts[0].Source != "/etc/multica/aurora/anthropic-api-key" {
-		t.Fatalf("provider secret mounts = %+v", mounts)
 	}
 	// A configuration without the profile keeps the default Claude-only node.
 	plain, err := loadTestConfig(t, validConfig)
 	if err != nil || plain.Aurora != nil {
 		t.Fatalf("default profile = %+v err=%v", plain.Aurora, err)
-	}
-}
-
-// TestLoadConfigAuroraEmptyAppArmorAccepted proves an empty apparmor_profile is
-// the operator's explicit no-AppArmor posture, while a non-conservative name is
-// still refused by Validate.
-func TestLoadConfigAuroraEmptyAppArmorAccepted(t *testing.T) {
-	cfg, err := loadTestConfig(t, strings.Replace(auroraConfig, "multica-aurora-sandbox", "", 1))
-	if err != nil {
-		t.Fatalf("empty apparmor_profile rejected: %v", err)
-	}
-	if cfg.Aurora == nil || cfg.Aurora.AppArmorProfile != "" {
-		t.Fatalf("apparmor_profile = %+v, want empty", cfg.Aurora)
-	}
-	if err := cfg.Aurora.Validate(); err != nil {
-		t.Fatalf("explicit empty apparmor_profile must validate: %v", err)
-	}
-	for _, name := range []string{"bad profile", "-leading-dash", "a/b", "a\tb", strings.Repeat("a", 129)} {
-		profile := *cfg.Aurora
-		profile.AppArmorProfile = name
-		if err := profile.Validate(); !errors.Is(err, ErrInvalidRequest) {
-			t.Fatalf("apparmor_profile %q accepted: %v", name, err)
-		}
 	}
 }
 
@@ -92,12 +60,6 @@ func TestLoadConfigRejectsUnsafeAuroraProfile(t *testing.T) {
 		"missing server url":          strings.Replace(auroraConfig, `"server_url":"http://api.internal:8080"`, "", 1),
 		"credentials in url":          strings.Replace(auroraConfig, "http://api.internal:8080", "http://user:pass@api.internal:8080", 1),
 		"path in url":                 strings.Replace(auroraConfig, "http://api.internal:8080", "http://api.internal:8080/api", 1),
-		"tag-only proxy":              strings.Replace(auroraConfig, auroraEgressImage, "ghcr.io/eanfs/multica-aurora-egress:latest", 1),
-		"uppercase proxy digest":      strings.Replace(auroraConfig, "a123456789abcdef", "A123456789ABCDEF", 1),
-		"relative seccomp":            strings.Replace(auroraConfig, "/etc/multica/aurora/seccomp.json", "seccomp.json", 1),
-		"dirty seccomp":               strings.Replace(auroraConfig, "/etc/multica/aurora/seccomp.json", "/etc/multica/aurora/../seccomp.json", 1),
-		"unsafe apparmor":             strings.Replace(auroraConfig, "multica-aurora-sandbox", "../escape", 1),
-		"space in apparmor":           strings.Replace(auroraConfig, "multica-aurora-sandbox", "bad profile", 1),
 		"wildcard egress":             strings.Replace(auroraConfig, "api.example.com:443", "*.example.com:443", 1),
 		"non-443 egress":              strings.Replace(auroraConfig, "api.example.com:443", "api.example.com:8443", 1),
 		"egress without port":         strings.Replace(auroraConfig, "api.example.com:443", "api.example.com", 1),
@@ -106,7 +68,6 @@ func TestLoadConfigRejectsUnsafeAuroraProfile(t *testing.T) {
 		"anthropic query":             strings.Replace(auroraConfig, "https://ark.example.com", "https://ark.example.com?x=1", 1),
 		"anthropic fragment":          strings.Replace(auroraConfig, "https://ark.example.com", "https://ark.example.com#frag", 1),
 		"anthropic credentials":       strings.Replace(auroraConfig, "https://ark.example.com", "https://user:pass@ark.example.com", 1),
-		"claude env api key":          strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"ANTHROPIC_API_KEY":"leak"},`, 1),
 		"claude env auth token":       strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"ANTHROPIC_AUTH_TOKEN":"leak"},`, 1),
 		"claude env secret key":       strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"MY_SECRET_VALUE":"leak"},`, 1),
 		"claude env unknown key":      strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"CLAUDE_CODE_UNKNOWN":"x"},`, 1),
@@ -117,8 +78,6 @@ func TestLoadConfigRejectsUnsafeAuroraProfile(t *testing.T) {
 		"claude env negative timeout": strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"API_TIMEOUT_MS":"-1"},`, 1),
 		"claude env too long":         strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":{"ENABLE_TOOL_SEARCH":"`+strings.Repeat("a", 257)+`"},`, 1),
 		"claude env array":            strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`, `"anthropic_model":"ark-model","claude_env":[],`, 1),
-		"unknown secret target":       strings.Replace(auroraConfig, "anthropic-api-key", "evil-key", 1),
-		"relative secret source":      strings.Replace(auroraConfig, "/etc/multica/aurora/anthropic-api-key", "anthropic-api-key", 1),
 		"readonly false":              strings.Replace(auroraConfig, `"readonly_rootfs":true`, `"readonly_rootfs":false`, 1),
 		"missing readonly":            strings.Replace(auroraConfig, `"readonly_rootfs":true,`, "", 1),
 		"empty uplink":                strings.Replace(auroraConfig, "aurora-egress-uplink", "", 1),
@@ -126,7 +85,6 @@ func TestLoadConfigRejectsUnsafeAuroraProfile(t *testing.T) {
 		"unknown nested key":          strings.Replace(auroraConfig, `"aurora":{"server_url"`, `"aurora":{"image":"evil","server_url"`, 1),
 		"nested null":                 strings.Replace(auroraConfig, `"readonly_rootfs":true`, `"readonly_rootfs":null`, 1),
 		"server url type":             strings.Replace(auroraConfig, `"server_url":"http://api.internal:8080"`, `"server_url":7`, 1),
-		"provider files as array":     strings.Replace(auroraConfig, `"provider_secret_files":{"anthropic-api-key":"/etc/multica/aurora/anthropic-api-key"}`, `"provider_secret_files":[]`, 1),
 		"egress pin unknown host":     withPins(`{"evil.example.com":["93.184.216.34"]}`),
 		"egress pin non public":       withPins(`{"ark.cn-beijing.volces.com":["198.18.0.5"]}`),
 		"egress pin private":          withPins(`{"ark.cn-beijing.volces.com":["10.0.0.1"]}`),
@@ -175,6 +133,33 @@ func TestLoadConfigAuroraClaudeEnv(t *testing.T) {
 	plain, err := loadTestConfig(t, auroraConfig)
 	if err != nil || len(plain.Aurora.ClaudeEnv) != 0 || plain.Aurora.ClaudeEnvPairs() != nil {
 		t.Fatalf("absent claude_env not empty: %+v err=%v", plain.Aurora.ClaudeEnv, err)
+	}
+}
+
+// TestLoadConfigAuroraProviderEnvCredentials proves the two provider
+// credentials the node runs with may travel through claude_env - the Ark key as
+// ANTHROPIC_API_KEY (decision 5) and the Volcengine speech key as the one
+// separate variable - while every other credential-bearing key stays refused.
+func TestLoadConfigAuroraProviderEnvCredentials(t *testing.T) {
+	raw := strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`,
+		`"anthropic_model":"ark-model","claude_env":{"ANTHROPIC_API_KEY":"ark-key","VOLC_ASR_API_KEY":"asr-key"},`, 1)
+	cfg, err := loadTestConfig(t, raw)
+	if err != nil {
+		t.Fatalf("provider credentials rejected: %v", err)
+	}
+	want := map[string]string{"ANTHROPIC_API_KEY": "ark-key", "VOLC_ASR_API_KEY": "asr-key"}
+	if !reflect.DeepEqual(cfg.Aurora.ClaudeEnv, want) {
+		t.Fatalf("claude_env = %+v, want the provider credentials", cfg.Aurora.ClaudeEnv)
+	}
+	pairs := cfg.Aurora.ClaudeEnvPairs()
+	if !reflect.DeepEqual(pairs, []string{"ANTHROPIC_API_KEY=ark-key", "VOLC_ASR_API_KEY=asr-key"}) {
+		t.Fatalf("node env pairs = %v", pairs)
+	}
+	// A third credential-bearing key is still refused.
+	other := strings.Replace(auroraConfig, `"anthropic_model":"ark-model",`,
+		`"anthropic_model":"ark-model","claude_env":{"ARK_API_KEY":"leak"},`, 1)
+	if _, err := loadTestConfig(t, other); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("ARK_API_KEY accepted: %v", err)
 	}
 }
 

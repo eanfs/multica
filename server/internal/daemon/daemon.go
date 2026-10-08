@@ -8696,15 +8696,17 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		agentCustomEnv = task.Agent.CustomEnv
 	}
 	layerCustomEnvAndHermesHome(agentEnv, agentCustomEnv, env.HermesHome, d.logger)
-	// Managed sandbox credential scoping. The Anthropic value reaches only the
-	// provider CLI child a managed node may launch, and only when that child is
-	// the enrolled execution provider. The provider keys an Aurora skill needs
-	// (ARK, Volcengine ASR) are NOT injected here yet: the managed set still
-	// holds them as read-only file paths for the broker that no longer exists.
-	// Wiring those values into this environment is the remaining half of ticket
-	// #197 / the plan's Task 3.
+	// Managed sandbox credential scoping. A managed node launches exactly one
+	// provider CLI: the enrolled execution provider. The Anthropic value reaches
+	// that child's environment, and it is the same value an Aurora skill's shell
+	// steps call the Ark provider with (decision 5). The Volcengine speech key
+	// reaches it as the ordinary agent child's own provider variable. Neither is
+	// a file path: no read-only secret mount remains.
 	if d.cfg.Managed.Enabled && provider == auroraExecutionProvider {
 		for name, value := range d.cfg.Managed.ProviderSecrets.claudeChildEnv() {
+			agentEnv[name] = value
+		}
+		for name, value := range d.cfg.Managed.ProviderSecrets.agentChildEnv() {
 			agentEnv[name] = value
 		}
 	}

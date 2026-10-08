@@ -3,7 +3,6 @@ package docker
 import (
 	"context"
 	"encoding/json"
-	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -152,18 +151,6 @@ func inspectEnvironment(env []string, maxRuns int, aurora *model.AuroraConfig) b
 	return true
 }
 
-// sameBindSource reports whether an inspected bind-mount source is the
-// configured host source. Docker Desktop reports every bind source translated
-// into the VM's path space, observed as the fixed prefix "/host_mnt" followed by
-// the absolute host path, while Linux reports the source verbatim. Accept exactly
-// those two forms; every other difference still fails closed.
-func sameBindSource(inspected, want string) bool {
-	if inspected == want {
-		return true
-	}
-	return filepath.IsAbs(want) && inspected == "/host_mnt"+want
-}
-
 // validateNodeInspection is the adoption authority. It reconstructs the exact
 // HostConfig and mount set for the configured profile, so any drift between the
 // builder and a live container is rejected. The Claude profile (cfg.Aurora nil)
@@ -173,14 +160,7 @@ func validateNodeInspection(r container.InspectResponse, n model.Node, networkNa
 		return model.ErrForbidden
 	}
 	c, h := r.Config, r.HostConfig
-	// The adoption authority recomputes the exact inline seccomp profile from the
-	// configured operator file. An unreadable or malformed profile fails the
-	// inspection closed rather than admitting a container built from a weaker one.
-	seccompJSON, err := resolveAuroraSeccomp(cfg.Aurora)
-	if err != nil {
-		return model.ErrForbidden
-	}
-	want := NodeHostConfig(n.Resources, true, cfg.Aurora, seccompJSON)
+	want := NodeHostConfig(n.Resources, true, cfg.Aurora)
 	if c.Image != n.Image || c.User != "10001:10001" || c.Tty || c.OpenStdin || len(c.ExposedPorts) != 0 || !reflect.DeepEqual([]string(c.Entrypoint), []string{"/usr/local/bin/fleet-node"}) || !reflect.DeepEqual([]string(c.Cmd), []string{"run"}) {
 		return model.ErrForbidden
 	}
@@ -197,9 +177,6 @@ func validateNodeInspection(r container.InspectResponse, n model.Node, networkNa
 		{Type: mount.TypeVolume, Name: n.DataVolume, Destination: model.DataMount, RW: true},
 		{Type: mount.TypeVolume, Name: n.SecretsVolume, Destination: model.AuroraEnrollmentDir, RW: false},
 	}
-	for _, m := range providerSecretMounts(cfg.Aurora) {
-		expected = append(expected, container.MountPoint{Type: mount.TypeBind, Source: m.Source, Destination: m.Target, RW: false})
-	}
 	if len(r.Mounts) != len(expected) {
 		return model.ErrForbidden
 	}
@@ -209,11 +186,7 @@ func validateNodeInspection(r container.InspectResponse, n model.Node, networkNa
 			if m.Type != wantMount.Type || m.Destination != wantMount.Destination || m.RW != wantMount.RW {
 				continue
 			}
-			if wantMount.Type == mount.TypeBind {
-				matched = sameBindSource(m.Source, wantMount.Source)
-			} else {
-				matched = m.Name == wantMount.Name
-			}
+			matched = m.Name == wantMount.Name
 			if matched {
 				break
 			}
