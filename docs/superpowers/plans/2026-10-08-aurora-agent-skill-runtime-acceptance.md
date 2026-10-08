@@ -4,7 +4,7 @@ Task 7 record for [eanfs/multica#205](https://github.com/eanfs/multica/issues/20
 
 ## Snapshot and authority
 
-- Code HEAD: `29cfe0ad8450ab662fa66f12922c138943decbb0`, before this documentation-only commit.
+- Historical tested code HEAD: `29cfe0ad8450ab662fa66f12922c138943decbb0`, before the original documentation-only commit. The controller evidence below remains attached to that snapshot, not to later source fixes or a built image.
 - Branch: `chore/aurora-remove-sandbox-202`; worktree: `/tmp/multica-issue-202`.
 - M0 existing image digest: **NOT SELECTED / NOT OBSERVED**. M4 unified image digest: **NOT BUILT / NOT SELECTED / NOT OBSERVED** in this acceptance run. No historical digest is substituted.
 - The [current plan](<2026-10-08-aurora-agent-skill-runtime.md>), Task 7 brief and continuation rulings supersede stale issue-snapshot names: use `AURORA_RUNTIME_IMAGE`, `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL`; direct node networking, not an egress sidecar or allowlist.
@@ -40,6 +40,17 @@ The brief commands below were **NOT RUN** because their DB-backed packages are u
 ```
 
 Billing is untouched, not calculated, not validated and **not an acceptance gate**. The existing completion contract requires at least one committed asset or refunds; no runtime settlement/refund assertion is claimed here. No necessary source defect was demonstrated, so no completion, billing, API or manifest code was changed.
+
+## Final source-prerequisite follow-up
+
+The combined final fix wave repairs the stale text-image network rationale and addresses three pre-existing prerequisites authorized by the continuation scope ruling, not introduced #203/#204 defects:
+
+- The final Debian stage in [Dockerfile](<../../../docker/runtime/Dockerfile>) installs curl; [the image checker](<../../../scripts/check-runtime-image.sh>) requires it on PATH.
+- [Managed Fleet setup](<../../../scripts/fleet-env.sh>) accepts the documented ARK HTTPS path prefix and preserves it in the config, while rejecting credentials, queries, fragments, explicit ports, whitespace and ambiguous paths. The separate server-origin validator is unchanged.
+- The image checker's credential rejection emits a generic reason, never the image's environment values. Its [hermetic test](<../../../scripts/check-runtime-image.test.sh>) uses synthetic sentinels only.
+- [Text-image step 3](<../../../server/internal/aurora/workflows/text-image.md#L45-L48>) explains task-scoped staging and manifest metadata instead of a nonexistent egress allowlist. Import remains mandatory.
+
+Source-fix snapshot: `e42f555fc6743b2c8faa790903d2c4b37641b467` (after original record `dc83302eac48cd0d28f3d25afda701ac5cb90e73`). At that source snapshot, `bash scripts/check-runtime-image.test.sh` passed 3 hermetic cases, `bash scripts/fleet-env.test.sh` passed 38 behavioral cases (35 existing + 3 new) plus its shell preflight, and the guarded Go model tests `TestValidAnthropicBaseURL` and `TestLoadConfigAuroraAnthropicBaseURL` passed. No broader suite was rerun. These are source fixes, not evidence of a built/tested image. The historical test evidence at `29cfe0ad8` above is unchanged. Image build/run/inspect, M0, M4, all 13 real-provider routes, all three browser gates and the full DB-backed suite remain **INCOMPLETE / NOT RUN**. No live authorization or credential lookup occurred.
 
 ## Live round trips — both NOT RUN
 
@@ -107,7 +118,7 @@ These are prerequisites for a separately approved run, not authorization granted
 - [ ] Authorize real agent CLI and provider calls separately, including provider/model, inputs, budget, quota and retry limits. Docker tests retain `dockerintegration` + `MULTICA_RUN_DOCKER_INTEGRATION=1`; real CLI tests retain `agentintegration` + `MULTICA_RUN_REAL_AGENT_SMOKE=1`. Inspect TestMain and opt-in ordering before any lookup. Flags alone are not consent.
 - [ ] Owner supplies valid ARK endpoint/key through the approved private channel; independently arrange ASR credentials if needed. Do not print secrets. Confirm Bash and credential availability without copying values into evidence.
 - [ ] Verify `LOCAL_UPLOAD_BASE_URL` is reachable by moderation, plus direct node DNS/routing/provider connectivity. Do not reinstall a removed proxy or weaken the importer/manifest checks.
-- [ ] Complete and review the 12 waived workflow rewrites before claiming 13-skill execution. Resolve the stale egress-allowlist rationale in [text-image step 3](<../../../server/internal/aurora/workflows/text-image.md#L45-L47>); the required task-scoped import remains the contract. This static documentation concern is not a demonstrated live failure.
+- [ ] Complete and review the 12 waived workflow rewrites before claiming 13-skill execution. The stale egress-allowlist rationale in [text-image step 3](<../../../server/internal/aurora/workflows/text-image.md#L45-L48>) is repaired by the source-only follow-up above; task-scoped import and the staged-object manifest remain mandatory.
 - [ ] Run M0 and M4, record real sanitized commands/inputs, IDs, import/manifest/asset observations, outcomes and trace references. Record ledger observations only if available; do not repair or evaluate billing as a gate.
 - [ ] Independently capture all three browser gates, including issue-less Work rows. Replace each NOT RUN/SKIP only with actual evidence; partial moderation/credits exceptions must retain their limits.
 
