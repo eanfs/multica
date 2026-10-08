@@ -14,7 +14,17 @@ RUN version="$(node -e 'const v=require("fs").readFileSync("/tmp/claude-version.
 
 # A neutral final base must NOT inherit the Node stage's NODE_VERSION/YARN_VERSION.
 FROM debian:bookworm-slim AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates libstdc++6 libgcc-s1 libatomic1 \
+# One image serves both the Fleet node and an Aurora task. The Aurora skill
+# documents run their own steps in a shell, so the toolchain they call is
+# installed here: Chromium prints the resume PDF, FFmpeg composes captions and
+# extracts audio, ImageMagick applies the fixed ID-photo transform, poppler
+# reads PDF text, and jq/unzip build request bodies and unpack documents.
+# Nothing with a build-time-only purpose enters the image, and the node keeps a
+# single launcher entrypoint.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates bash jq unzip \
+      libstdc++6 libgcc-s1 libatomic1 libnss3 \
+      chromium ffmpeg imagemagick poppler-utils fonts-noto-cjk \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --gid 10001 runtime && useradd --uid 10001 --gid 10001 --create-home runtime
 COPY --from=claude /usr/local/bin/node /usr/local/bin/node
