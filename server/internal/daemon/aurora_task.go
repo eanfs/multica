@@ -36,11 +36,3 @@ func auroraSkillID(task Task) (string, bool) {
 	}
 	return skillID, true
 }
-
-// auroraSystemKey is a nil-safe read of the agent system key for diagnostics.
-func auroraSystemKey(task Task) string {
-	if task.Agent == nil {
-		return ""
-	}
-	return task.Agent.SystemKey
-}

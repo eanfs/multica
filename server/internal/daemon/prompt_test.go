@@ -2305,10 +2305,11 @@ func TestBuildAuroraPromptPointsAtTheSkillDocument(t *testing.T) {
 	}
 }
 
-// TestBuildAuroraPromptNeverNamesBrokerTools is the regression guard for the
-// whole catalog: whatever a skill's policy used to require, the per-turn prompt
-// of an Aurora run must never name a brokered MCP tool. The model reaches its
-// tools through the skill document and its own shell now.
+// TestBuildAuroraPromptNeverNamesBrokerTools is the regression guard for every
+// available skill: whatever a skill's policy requires, the per-turn prompt of an
+// Aurora run must never name a brokered MCP tool. The names are listed literally
+// because the assertion is that they appear nowhere, and the loop over the
+// catalog is what makes it cover all 13 skills rather than one.
 func TestBuildAuroraPromptNeverNamesBrokerTools(t *testing.T) {
 	t.Parallel()
 

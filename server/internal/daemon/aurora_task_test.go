@@ -182,14 +182,17 @@ func TestAuroraTaskGetsTheOrdinaryExecutionSurface(t *testing.T) {
 		t.Errorf("--permission-mode = %q, want the ordinary provider default", got)
 	}
 
-	// The broker no longer replaces the agent's MCP configuration.
+	// The broker no longer replaces the agent's MCP configuration. The fixture's
+	// agent carries an MCP server, so a merged config must reach the launch: a
+	// missing --mcp-config is a failure here, not a reason to skip the check.
 	mcpRaw, err := os.ReadFile(mcpFile)
-	if err == nil {
-		if strings.Contains(string(mcpRaw), `"aurora"`) {
-			t.Errorf("the broker MCP server is still injected:\n%s", mcpRaw)
-		}
-		if !strings.Contains(string(mcpRaw), `"team-tools"`) {
-			t.Errorf("the agent's own MCP server was dropped:\n%s", mcpRaw)
-		}
+	if err != nil {
+		t.Fatalf("no --mcp-config reached the launch: %v", err)
+	}
+	if strings.Contains(string(mcpRaw), `"aurora"`) {
+		t.Errorf("the broker MCP server is still injected:\n%s", mcpRaw)
+	}
+	if !strings.Contains(string(mcpRaw), `"team-tools"`) {
+		t.Errorf("the agent's own MCP server was dropped:\n%s", mcpRaw)
 	}
 }
