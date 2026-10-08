@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/multica-ai/multica/server/internal/testutil"
@@ -75,6 +76,78 @@ func decodeRuntimeView(t *testing.T, workspaceID string) auroraRuntimeView {
 	)
 }
 
+func TestAuroraRuntimeViewReportsAConcreteReasonWhenTheNodeIsNotReady(t *testing.T) {
+	workspaceID, runtimeID := runtimeViewWorkspace(t)
+	nodeID := insertRuntimeNode(t, workspaceID, runtimeID, testutil.Cols{"state": "online"})
+	dbfx.FleetNode(t, "runtime-view-"+uuid.NewString(), testutil.Cols{
+		"id": nodeID, "workspace_id": workspaceID, "runtime_id": runtimeID,
+		"status": "failed", "ready": false, "error_code": "profile_missing",
+		"error_message": "private credential at http://internal:9000",
+	})
+	resp := testutil.Call(t, testHandler.GetAuroraRuntime, runtimeViewRequest(workspaceID)).Want(http.StatusOK)
+	var out auroraRuntimeView
+	resp.JSON(&out)
+	if out.State != "failed" || out.Node == nil || out.Node.Ready || out.Node.ErrorCode == nil || *out.Node.ErrorCode != "runtime_policy_unavailable" {
+		t.Fatalf("projection = %#v, node = %#v; want failed/not-ready/runtime_policy_unavailable", out, out.Node)
+	}
+	if strings.Contains(resp.Text(), "private credential") || strings.Contains(resp.Text(), "internal:9000") {
+		t.Fatal("projection leaked the private Fleet error")
+	}
+}
+
+// These cases catch stale sandbox readiness, unscoped Fleet lookups, and raw error leaks.
+func TestAuroraRuntimeViewFleetProjection(t *testing.T) {
+	for _, tc := range []struct {
+		name, sandbox, state, code string
+		fleet                      testutil.Cols
+	}{
+		{"missing Fleet", "online", "offline", "runtime_offline", nil},
+		{"Fleet not ready", "online", "offline", "runtime_offline", testutil.Cols{"ready": false}},
+		{"Fleet stopped", "online", "offline", "runtime_offline", testutil.Cols{"status": "stopped"}},
+		{"Fleet unknown", "online", "offline", "runtime_offline", testutil.Cols{"status": "future-state"}},
+		{"Fleet starting", "online", "provisioning", "", testutil.Cols{"status": "starting", "ready": false}},
+		{"Fleet failed during enrollment", "starting", "failed", "runtime_offline", testutil.Cols{"status": "failed", "error_code": "private-token-at-internal-host"}},
+		{"Fleet policy", "online", "failed", "runtime_policy_unavailable", testutil.Cols{"status": "failed", "error_code": "profile_missing"}},
+		{"Fleet unconfigured", "online", "failed", "runtime_unconfigured", testutil.Cols{"status": "failed", "error_code": "runtime_unconfigured"}},
+		{"Fleet stale health", "online", "offline", "runtime_offline", testutil.Cols{"health_at": time.Now().Add(-time.Hour)}},
+		{"Fleet revoked", "online", "offline", "runtime_offline", testutil.Cols{"revoked": true}},
+		{"Fleet maintenance", "online", "offline", "runtime_offline", testutil.Cols{"maintenance": true}},
+		{"Fleet stopping", "online", "offline", "runtime_offline", testutil.Cols{"desired": "stopped"}},
+		{"sandbox stopped wins", "stopped", "offline", "runtime_offline", testutil.Cols{}},
+		{"foreign workspace", "online", "offline", "runtime_offline", testutil.Cols{"workspace_id": uuid.NewString(), "error_code": "profile_missing", "status": "failed"}},
+		{"foreign runtime", "online", "offline", "runtime_offline", testutil.Cols{"runtime_id": uuid.NewString()}},
+		{"foreign node", "online", "offline", "runtime_offline", testutil.Cols{"id": uuid.NewString()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspaceID, runtimeID := runtimeViewWorkspace(t)
+			nodeID := insertRuntimeNode(t, workspaceID, runtimeID, testutil.Cols{"state": tc.sandbox})
+			if tc.fleet != nil {
+				cols := testutil.Cols{"id": nodeID, "workspace_id": workspaceID, "runtime_id": runtimeID, "status": "running", "error_message": "private-token-at-internal-host"}
+				for k, v := range tc.fleet {
+					cols[k] = v
+				}
+				dbfx.FleetNode(t, "runtime-view-"+uuid.NewString(), cols)
+			}
+			resp := testutil.Call(t, testHandler.GetAuroraRuntime, runtimeViewRequest(workspaceID)).Want(http.StatusOK)
+			var out auroraRuntimeView
+			resp.JSON(&out)
+			if out.State != tc.state || out.Node == nil || out.Node.Ready {
+				t.Fatalf("want %s/not-ready, got %#v node %#v", tc.state, out, out.Node)
+			}
+			if tc.code == "" {
+				if out.Node.ErrorCode != nil {
+					t.Fatalf("unexpected error code: %s", *out.Node.ErrorCode)
+				}
+			} else if out.Node.ErrorCode == nil || *out.Node.ErrorCode != tc.code {
+				t.Fatalf("want code %s, got %#v", tc.code, out.Node)
+			}
+			if strings.Contains(resp.Text(), "private-token-at-internal-host") {
+				t.Fatal("private Fleet error leaked")
+			}
+		})
+	}
+}
+
 func TestGetAuroraRuntime(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
@@ -120,9 +193,11 @@ func TestGetAuroraRuntime(t *testing.T) {
 
 	t.Run("online and ready once the node is online", func(t *testing.T) {
 		workspaceID, runtimeID := runtimeViewWorkspace(t)
-		insertRuntimeNode(t, workspaceID, runtimeID, testutil.Cols{
-			"state":           "online",
-			"backend_node_id": "fleet-node-1",
+		nodeID := insertRuntimeNode(t, workspaceID, runtimeID, testutil.Cols{
+			"state": "online", "backend_node_id": "fleet-node-1",
+		})
+		dbfx.FleetNode(t, "runtime-view-"+uuid.NewString(), testutil.Cols{
+			"id": nodeID, "workspace_id": workspaceID, "runtime_id": runtimeID, "status": "running",
 		})
 
 		out := decodeRuntimeView(t, workspaceID)
@@ -150,21 +225,24 @@ func TestGetAuroraRuntime(t *testing.T) {
 
 	t.Run("draining still reads as online", func(t *testing.T) {
 		workspaceID, runtimeID := runtimeViewWorkspace(t)
-		insertRuntimeNode(t, workspaceID, runtimeID, testutil.Cols{"state": "draining"})
+		nodeID := insertRuntimeNode(t, workspaceID, runtimeID, testutil.Cols{"state": "draining"})
+		dbfx.FleetNode(t, "runtime-view-"+uuid.NewString(), testutil.Cols{
+			"id": nodeID, "workspace_id": workspaceID, "runtime_id": runtimeID, "status": "running",
+		})
 
 		if out := decodeRuntimeView(t, workspaceID); out.State != "online" {
 			t.Fatalf("state = %q, want online", out.State)
 		}
 	})
 
-	t.Run("stopped reads as unconfigured", func(t *testing.T) {
+	t.Run("stopped reads as offline", func(t *testing.T) {
 		workspaceID, runtimeID := runtimeViewWorkspace(t)
 		insertRuntimeNode(t, workspaceID, runtimeID, testutil.Cols{"state": "stopped"})
 
 		out := decodeRuntimeView(t, workspaceID)
 
-		if out.State != "unconfigured" {
-			t.Fatalf("state = %q, want unconfigured", out.State)
+		if out.State != "offline" {
+			t.Fatalf("state = %q, want offline", out.State)
 		}
 		if out.Node == nil || out.Node.Status != "stopped" {
 			t.Fatalf("node = %#v, want stopped status", out.Node)
@@ -186,8 +264,8 @@ func TestGetAuroraRuntime(t *testing.T) {
 		if out.State != "failed" {
 			t.Fatalf("state = %q, want failed", out.State)
 		}
-		if out.Node == nil || out.Node.ErrorCode == nil || *out.Node.ErrorCode != "unavailable" {
-			t.Fatalf("errorCode = %#v, want unavailable", out.Node)
+		if out.Node == nil || out.Node.ErrorCode == nil || *out.Node.ErrorCode != "runtime_offline" {
+			t.Fatalf("errorCode = %#v, want runtime_offline", out.Node)
 		}
 		// The raw reason names internal addresses; it must not cross the API.
 		body := resp.Text()
@@ -204,8 +282,8 @@ func TestGetAuroraRuntime(t *testing.T) {
 		})
 
 		out := decodeRuntimeView(t, workspaceID)
-		if out.Node == nil || out.Node.ErrorCode == nil || *out.Node.ErrorCode != "profile_missing" {
-			t.Fatalf("errorCode = %#v, want profile_missing", out.Node)
+		if out.Node == nil || out.Node.ErrorCode == nil || *out.Node.ErrorCode != "runtime_policy_unavailable" {
+			t.Fatalf("errorCode = %#v, want runtime_policy_unavailable", out.Node)
 		}
 	})
 
@@ -239,20 +317,30 @@ func TestAuroraRuntimeViewIsReadOnly(t *testing.T) {
 	workspaceID, runtimeID := runtimeViewWorkspace(t)
 	nodeID := insertRuntimeNode(t, workspaceID, runtimeID, testutil.Cols{"state": "online"})
 
-	const readNodeSQL = "SELECT state, COALESCE(backend_node_id, '') FROM aurora_sandbox_node WHERE id = $1"
+	dbfx.FleetNode(t, "runtime-view-"+uuid.NewString(), testutil.Cols{
+		"id": nodeID, "workspace_id": workspaceID, "runtime_id": runtimeID, "status": "running",
+	})
+	// Snapshot complete rows, including activity timestamps, health and credentials.
+	const readProjectionSQL = `SELECT json_build_array(
+  (SELECT row_to_json(n) FROM aurora_sandbox_node n WHERE n.workspace_id = $1),
+  (SELECT row_to_json(f) FROM fleet_nodes f WHERE f.id = $2),
+  (SELECT row_to_json(r) FROM agent_runtime r WHERE r.id = $3),
+  (SELECT count(*) FROM fleet_node_operations o WHERE o.node_id = $2),
+  (SELECT count(*) FROM fleet_node_credentials c WHERE c.node_id = $2)
+ )::text`
 
-	var beforeState, beforeBackend string
-	if err := testPool.QueryRow(context.Background(), readNodeSQL, nodeID).Scan(&beforeState, &beforeBackend); err != nil {
+	var before string
+	if err := testPool.QueryRow(context.Background(), readProjectionSQL, workspaceID, nodeID, runtimeID).Scan(&before); err != nil {
 		t.Fatalf("read node before: %v", err)
 	}
 
 	decodeRuntimeView(t, workspaceID)
 
-	var afterState, afterBackend string
-	if err := testPool.QueryRow(context.Background(), readNodeSQL, nodeID).Scan(&afterState, &afterBackend); err != nil {
+	var after string
+	if err := testPool.QueryRow(context.Background(), readProjectionSQL, workspaceID, nodeID, runtimeID).Scan(&after); err != nil {
 		t.Fatalf("read node after: %v", err)
 	}
-	if beforeState != afterState || beforeBackend != afterBackend {
-		t.Fatalf("view mutated node: %q/%q -> %q/%q", beforeState, beforeBackend, afterState, afterBackend)
+	if before != after {
+		t.Fatal("GET mutated runtime projection rows or created lifecycle records")
 	}
 }

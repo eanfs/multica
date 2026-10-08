@@ -353,6 +353,59 @@ func (q *Queries) FailAuroraSandboxTasksForRuntime(ctx context.Context, arg Fail
 	return items, nil
 }
 
+const getAuroraRuntimeFleetNode = `-- name: GetAuroraRuntimeFleetNode :one
+SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation, workspace_id, runtime_id FROM fleet_nodes
+WHERE id = $1
+  AND workspace_id = $2
+  AND runtime_id = $3
+`
+
+type GetAuroraRuntimeFleetNodeParams struct {
+	NodeID      pgtype.UUID `json:"node_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	RuntimeID   pgtype.UUID `json:"runtime_id"`
+}
+
+// Read-only projection: a Fleet identity must belong to this workspace and
+// managed runtime. The node id is globally unique across Fleet namespaces.
+func (q *Queries) GetAuroraRuntimeFleetNode(ctx context.Context, arg GetAuroraRuntimeFleetNodeParams) (FleetNode, error) {
+	row := q.db.QueryRow(ctx, getAuroraRuntimeFleetNode, arg.NodeID, arg.WorkspaceID, arg.RuntimeID)
+	var i FleetNode
+	err := row.Scan(
+		&i.ID,
+		&i.Namespace,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ContainerID,
+		&i.DaemonID,
+		&i.Name,
+		&i.Spec,
+		&i.Image,
+		&i.ProfileRef,
+		&i.StartEpoch,
+		&i.DataVolume,
+		&i.SecretsVolume,
+		&i.Desired,
+		&i.Status,
+		&i.Generation,
+		&i.Ready,
+		&i.HealthAt,
+		&i.ActiveRuns,
+		&i.PendingReports,
+		&i.FailedReports,
+		&i.Maintenance,
+		&i.Revoked,
+		&i.ErrorCode,
+		&i.ErrorMessage,
+		&i.SpecConfig,
+		&i.Observation,
+		&i.WorkspaceID,
+		&i.RuntimeID,
+	)
+	return i, err
+}
+
 const getAuroraSandboxNodeByWorkspace = `-- name: GetAuroraSandboxNodeByWorkspace :one
 SELECT id, workspace_id, runtime_id, daemon_id, backend_node_id, image_digest, state, enrollment_token_hash, enrollment_expires_at, enrollment_consumed_at, last_active_at, drain_started_at, started_at, stopped_at, failure_reason, created_at, updated_at FROM aurora_sandbox_node
 WHERE workspace_id = $1

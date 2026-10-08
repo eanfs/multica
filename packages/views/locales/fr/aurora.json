@@ -190,14 +190,17 @@
   "runtime": {
     "title": "Exécution",
     "status": {
+      "offline": "Hors ligne",
       "unconfigured": "Non configuré",
       "provisioning": "Préparation",
       "online": "En ligne",
       "failed": "Échec"
     },
-    "recovery": {
-      "unconfigured": "Cet espace de travail n'a pas de nœud d'exécution actif. Lancez une génération pour en provisionner un.",
-      "failed": "Le nœud d'exécution n'a pas pu démarrer. Lancez une génération pour réessayer ; si l'échec persiste, demandez à un administrateur de vérifier l'environnement Fleet."
+    "retry": "Réessayer",
+    "reasons": {
+      "runtime_offline": "Le nœud du runtime est hors ligne. Réessayez pour vérifier son état.",
+      "runtime_unconfigured": "Cet espace de travail ne dispose d’aucun nœud d’exécution actif. Demandez à un administrateur de vérifier la configuration du runtime.",
+      "runtime_policy_unavailable": "La politique du runtime est indisponible. Demandez à un administrateur de vérifier sa configuration."
     },
     "generations_title": "Générations en cours",
     "generations_empty": "Aucune génération en cours."

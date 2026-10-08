@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { CircleAlert, Gauge } from "lucide-react";
+import { Button } from "@multica/ui/components/ui/button";
 import { Badge } from "@multica/ui/components/ui/badge";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import {
@@ -37,6 +38,7 @@ const STATE_VISUAL: Record<
   AuroraRuntimeState,
   { dot: string; tone: string }
 > = {
+  offline: { dot: "bg-warning", tone: "text-warning" },
   online: { dot: "bg-success", tone: "text-success" },
   provisioning: { dot: "bg-info", tone: "text-info" },
   failed: { dot: "bg-destructive", tone: "text-destructive" },
@@ -85,7 +87,11 @@ export function RuntimeStatus() {
           {runtime.isPending ? (
             <Skeleton className="h-16 w-full rounded-lg" />
           ) : (
-            <RuntimeNodeCard target={target} />
+            <RuntimeNodeCard
+              target={target}
+              onRetry={() => void runtime.refetch()}
+              retrying={runtime.isFetching}
+            />
           )}
 
           <section className="flex flex-col gap-2">
@@ -123,16 +129,22 @@ export function RuntimeStatus() {
  */
 function RuntimeNodeCard({
   target,
+  onRetry,
+  retrying,
 }: {
   target: AuroraExecutionTarget | undefined;
+  onRetry: () => void;
+  retrying: boolean;
 }) {
   const { t } = useT("aurora");
   const state = target?.state ?? "unconfigured";
   const visual = STATE_VISUAL[state];
-  // Narrowed to the two states whose copy points at how to recover, not merely
-  // at what is wrong.
-  const recovery: "failed" | "unconfigured" | null =
-    state === "failed" || state === "unconfigured" ? state : null;
+  // Recovery only re-reads the projection; it never provisions or restarts a node.
+  const recovery =
+    state === "failed" || state === "unconfigured" || state === "offline";
+  const code = target?.node?.errorCode;
+  const reason =
+    code ?? (state === "unconfigured" ? "runtime_unconfigured" : "runtime_offline");
 
   return (
     <section className="flex flex-col gap-2 rounded-lg border border-surface-border p-3">
@@ -154,8 +166,20 @@ function RuntimeNodeCard({
       </div>
       {recovery ? (
         <p role="alert" className="text-caption text-warning">
-          {t(($) => $.runtime.recovery[recovery])}
+          {t(($) => $.runtime.reasons[reason])}
         </p>
+      ) : null}
+      {recovery ? (
+        <Button
+          variant="outline"
+          size="sm"
+          className="self-start"
+          onClick={onRetry}
+          disabled={retrying}
+          aria-busy={retrying}
+        >
+          {t(($) => $.runtime.retry)}
+        </Button>
       ) : null}
     </section>
   );
