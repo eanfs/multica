@@ -56,7 +56,7 @@ permissions:
   contents: read
 
 env:
-  RUNTIME_IMAGE: ghcr.io/eanfs/multica-runtime-node
+  RUNTIME_IMAGE: ghcr.io/eanfs/multica-runtime
 
 jobs:
   verify:
@@ -254,7 +254,7 @@ jobs:
       - name: Attest GitHub build provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
-          subject-name: ghcr.io/eanfs/multica-runtime-node
+          subject-name: ghcr.io/eanfs/multica-runtime
           subject-digest: ${{ steps.runtime.outputs.digest }}
           push-to-registry: true
 
