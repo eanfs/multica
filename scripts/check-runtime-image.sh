@@ -67,7 +67,7 @@ for bin in /usr/local/bin/multica /usr/local/bin/fleet-node /usr/local/bin/claud
 done
 
 # The shell and the media toolchain the skill documents call.
-for tool in bash jq unzip chromium ffmpeg convert pdftoppm pdfinfo; do
+for tool in bash curl jq unzip chromium ffmpeg convert pdftoppm pdfinfo; do
   if probe "command -v $tool >/dev/null"; then pass "tool_present $tool"; else fail "tool_present $tool" "not on PATH"; fi
 done
 
