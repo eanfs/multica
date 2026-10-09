@@ -1,23 +1,147 @@
 # Text to Video
 
-The text-video skill turns a written request into one video.
+Turn a written request into one video with the Volcengine Ark Seedance model.
 
-This skill runs in a managed sandbox with no shell and no Multica CLI. The only execution path is the reviewed Aurora MCP broker; call its tools by the qualified Claude names given below.
+You run on a normal Multica agent: you have a shell and the network access this
+node provides. Do the work yourself.
 
 ## Inputs
 
-- prompt: the required user instruction.
+- `prompt`: the user's request (required). It is the generation prompt in your
+  task message; use it verbatim. It must be at most 3000 characters.
+- This skill takes no attachments. Use text only.
+- `ANTHROPIC_API_KEY` is the Ark Agent Plan key and `ANTHROPIC_BASE_URL` names
+  the Ark endpoint; the video endpoints are built from that base.
 
 ## Steps
 
-1. Call the brokered MCP tool `mcp__aurora__aurora_seedance_generate` (broker method `aurora.seedance_generate`) with `prompt`.
+1. Open the create lease before spending a provider call:
+
+   ```bash
+   curl -fsS -X POST "$MULTICA_SERVER_URL/api/agent/tasks/$MULTICA_TASK_ID/aurora-provider-runs/begin" \
+     -H "Authorization: Bearer $MULTICA_TOKEN" -H 'content-type: application/json' \
+     -d '{"provider":"volcengine-agentplan","operation":"seedance.create","model":"doubao-seedance-2.0","arguments":{}}'
+   ```
+
+   Stop and report a failure when the response has `create_allowed` false and no
+   `external_id`. The lease is bookkeeping, not a hard guard: nothing at the
+   provider stops a second call, so treating a refusal as fatal is what keeps
+   this run to one create.
+
+2. Create the task. Set `PROMPT` to the user's request exactly as it appears in
+   your task message:
+
+   ```bash
+   request=$(jq -n --arg p "$PROMPT" '{
+     model: "doubao-seedance-2.0",
+     content: [ { type: "text", text: $p } ]
+   }')
+
+   curl -fsS -X POST "${ANTHROPIC_BASE_URL:-https://ark.cn-beijing.volces.com/api/plan}/v3/contents/generations/tasks" \
+     -H "Authorization: Bearer $ANTHROPIC_API_KEY" -H 'content-type: application/json' \
+     --data-binary "$request" -o /tmp/seedance-create.json
+   ```
+
+   The task id is the response's top-level `id`, and it looks like
+   `cgt-<digits>-<suffix>`. Stop and report a failure when it is missing.
+
+3. Poll the task every 5 seconds until it reaches a terminal state. The status
+   is the response's `task.status`:
+
+   ```bash
+   task_id=$(jq -r '.id' /tmp/seedance-create.json)
+   deadline=$(( $(date +%s) + 1800 ))   # 30 minutes, the supported ceiling
+   while :; do
+     curl -fsS "${ANTHROPIC_BASE_URL:-https://ark.cn-beijing.volces.com/api/plan}/v3/contents/generations/tasks/$task_id" \
+       -H "Authorization: Bearer $ANTHROPIC_API_KEY" -o /tmp/seedance-poll.json
+     status=$(jq -r '.status // empty' /tmp/seedance-poll.json)
+     case "$status" in
+       succeeded) break ;;
+       failed|expired|cancelled) echo "Seedance task ended as $status" >&2; exit 1 ;;
+     esac
+     [ "$(date +%s)" -ge "$deadline" ] && { echo "Seedance task timed out" >&2; exit 1; }
+     sleep 5
+   done
+   ```
+
+   The comparison is exact and lowercase. Any other status means the task is
+   still running; keep polling until the deadline.
+
+4. Hand the result URL to the task-scoped importer. Do not download it yourself:
+   this node's egress allowlist does not cover the provider's media host, and the
+   importer keeps the URL out of the task.
+
+   ```bash
+   result_url=$(jq -r '.content.video_url // (.content.videos[0].url) // empty' /tmp/seedance-poll.json)
+   [ -n "$result_url" ] || { echo "Seedance succeeded without output" >&2; exit 1; }
+
+   curl -fsS -X POST "$MULTICA_SERVER_URL/api/agent/tasks/$MULTICA_TASK_ID/aurora-artifacts/import" \
+     -H "Authorization: Bearer $MULTICA_TOKEN" -H 'content-type: application/json' \
+     -d "$(jq -n --arg u "$result_url" '{url:$u,kind:"video",name:"text-video.mp4",mime_type:"video/mp4",size_bytes:null,metadata:{}}')" \
+     -o /tmp/import.json
+   ```
+
+   The response carries `staging_id`, `size_bytes` and `sha256`.
+
+5. Close the run:
+
+   ```bash
+   curl -fsS -X PUT "$MULTICA_SERVER_URL/api/agent/tasks/$MULTICA_TASK_ID/aurora-provider-runs/seedance.create/finish" \
+     -H "Authorization: Bearer $MULTICA_TOKEN" -H 'content-type: application/json' \
+     -d '{"state":"succeeded"}'
+   ```
 
 ## Required outputs
 
-- One primary video artifact identifier returned by `aurora.seedance_generate`.
+- One primary `video` artifact, staged on the server under the `staging_id` from
+  step 4.
+
+## Artifact manifest
+
+Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Every value below comes
+from a previous step; copy it, do not invent it.
+
+```json
+{
+  "schema": "com.multica.aurora.artifacts",
+  "version": 1,
+  "task_id": "<the task id from your task context>",
+  "skill_id": "text-video",
+  "producer": { "id": "byted-ark-seedance-skill", "version": "5.0.0", "tree_sha256": null },
+  "provider_run": { "provider": "volcengine-agentplan", "model": "doubao-seedance-2.0", "external_id": "cgt-..." },
+  "artifacts": [
+    {
+      "id": "video-1",
+      "source": { "type": "staged_object", "staging_id": "<staging_id from step 4>" },
+      "name": "text-video.mp4",
+      "kind": "video",
+      "role": "primary",
+      "format": "mp4",
+      "mime_type": "video/mp4",
+      "size_bytes": 0,
+      "sha256": "<sha256 from step 4>",
+      "metadata": {}
+    }
+  ]
+}
+```
+
+Set `provider_run.external_id` to the `cgt-…` task id from step 2. The daemon
+re-checks this manifest against the task and the skill: the producer id must be
+`byted-ark-seedance-skill`, the skill id must be `text-video`, at least one
+artifact must be `primary`, and `size_bytes` must be a non-negative integer. A
+missing manifest, more than 20 artifacts, or more than 600 MiB in total is
+rejected. Take `size_bytes` and `sha256` from the import response rather than the
+placeholders above.
 
 ## Failure behavior
 
-- Stop immediately when any tool returns an error.
-- Never retry a tool that creates an artifact.
-- Never claim completion unless the tool returned every required artifact identifier.
+- A non-2xx from Seedance: report the status and the body, then call
+  `.../seedance.create/finish` with `{"state":"failed","error_code":"provider_failed"}`,
+  and write no manifest.
+- A task that ends `failed`, `expired` or `cancelled`, or that is still running
+  after 30 minutes: report that status. Do not start a second task.
+- **Never submit a second Seedance create for the same task**, on any path: the
+  create is billable and the provider cannot deduplicate it.
+- Never claim completion unless step 4 returned a `staging_id` and the manifest
+  names it.

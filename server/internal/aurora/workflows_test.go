@@ -37,10 +37,27 @@ var workflowForbiddenPatterns = []struct {
 }
 
 // rewrittenSkills lists the skill documents that have been converted to the
-// ordinary-agent form. It grows one skill at a time: each one is verified end
-// to end before the next is written, so a document that still tells the model
-// to call a brokered MCP tool is a bug, not a stale comment.
-var rewrittenSkills = []string{"text-image"}
+// ordinary-agent form. It grew one skill at a time, each verified end to end
+// before the next was written, and now covers every available skill: a document
+// that still tells the model to call a brokered MCP tool is a bug, not a stale
+// comment. A skill added to the catalog later must be added here too, or
+// TestAvailableSkillsHaveCanonicalWorkflows will hold it to the broker-form
+// contract instead.
+var rewrittenSkills = []string{
+	"document-summary",
+	"id-photo",
+	"image-edit",
+	"image-video",
+	"poster",
+	"product-image",
+	"resume",
+	"text-image",
+	"text-video",
+	"transcription",
+	"video-captions",
+	"xhs-copy",
+	"xhs-image",
+}
 
 // rewrittenSkillSet is the lookup form of rewrittenSkills.
 func rewrittenSkillSet() map[string]bool {
