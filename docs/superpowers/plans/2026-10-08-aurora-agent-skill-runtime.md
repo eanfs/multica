@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Task 5 用户覆盖（2026-10-08）：** 用户明确跳过 #199，允许在只有 `text-image` 完成重写时删除旧实现；其余 12 份仍未完成，不得扩充 `rewrittenSkills` 或声称 13 个技能均可运行。旧源码可从 `2a2cef75fa16ec893960118dd70844c1251cb973` 恢复。用户同时明确退役 egress sidecar：删除生命周期、代理环境、允许列表与 IP pin，节点改用自有、可直接出站的 bridge 网络。以下原始计划中被覆盖的前置条件不再是 Task 5 的阻塞条件。
+
 **Goal:** 让 Aurora 的 13 个 skill 通过 multica 既有的「agent 加载 skill」机制执行 —— 每个 skill 一个预置 system agent、一份可执行的 skill 文档,模型用普通工具(Bash / Read / Write)按文档完成任务;删掉 Aurora 专有的 MCP broker 执行面、`deploy/aurora-sandbox/` 全部内容与全部自定义隔离策略,节点密钥**复用既有的 Anthropic 凭据通道**(ARK 的 key 兼容 Anthropic 协议,直接作 `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL` 使用,不新增密钥变量)。
 
 **Architecture:** Aurora 不再拥有独立执行通道。`daemon.isAuroraTask` 分支被删除后,Aurora 任务与普通 issue 任务逐字节同路径:入队写入 `agent_task_queue` 并绑定 agent 的 `runtime_id` → 节点领取 → daemon 把该 agent 启用的 skill 物化到 `<workdir>/.claude/skills/<slug>/SKILL.md` → `BuildPrompt` → 拉起 Claude(`bypassPermissions`,无工具白名单,无 MaxTurns)→ 产物落盘 → 回传结算。13 个 system agent、13 个 skill 行、13 条 `agent_skill` 关联**今天已经存在**(`aurora.EnsureSystemAgents`),本计划改的是它们的内容与执行面,不是重新搭建。节点镜像是 `docker/runtime/Dockerfile` 的单一产物,内含 daemon(`multica` + `fleet-node`)与 Claude。**计费不在本计划范围内** —— 见「用户已确认的决策」第 8 条。
@@ -31,7 +33,7 @@
 
 ## Global Constraints
 
-- **先抽取,后删除。** 13 份 skill 文档的新内容必须在删除 `deploy/aurora-sandbox/` **之前**从既有实现中抽出(见 Task 1 与「删除清单」小节)。删除动作是 Task 5,排在 Task 1 之后,顺序不可调换。
+- **删除前记录覆盖范围。** Task 5 已获用户豁免 #199；当前只完成 `text-image` 重写，其余文档仍需独立实现与验收。
 - **不新增第二套执行机制。** 不引入新的队列、新的 agent 类型、新的领取通道或第二个 daemon。Aurora 继续使用 `agent_task_queue` 与 `agent_runtime`。
 - **不改公开 API 的兼容边界。** `GET /api/aurora/runtime` 的既有字段保留;`@api/aurora/generations` 的 503 `aurora_runtime_unavailable` 语义保留(未配置运行时仍 fail closed,不排队不预留积分)。
 - **13 个 skill 必须有可执行文档。** 每个 skill 的 `.md` 必须包含:输入、真实步骤(具体命令或 HTTP 端点/认证/请求体/轮询)、产物写入路径、manifest 写入、失败处理。禁止写成"调用某个工具"。
@@ -74,7 +76,7 @@
 | `server/internal/fleet/docker/seccomp.go` | 删除(不再有配置 seccomp 的路径) |
 | `server/internal/fleet/model/aurora.go` 的 `SeccompProfile`、`AppArmorProfile`、`ProviderSecretFiles`、`ProxyImage`、`AuroraOpenAIAPIKeyTarget` 与 `ProviderSecretTargets`/`providerSecretOrder` 里的 `openai-api-key` | 删除字段与校验(Task 3) |
 | OpenAI 出口与路由:`auroraegress.CompiledProviderHosts` 的 `api.openai.com:443`、`execution_policy.go` 的 `openai-images`/`openai-images-edit` 两个路由、`runtime/src/tools/openai-images.mjs` 与它的测试、`runtime/test/provider-openai.test.mjs` | 删除(决策 10);两个 skill 改走 seedream。`auroraManifestProducersByRoute` 里的两条 OpenAI 条目随之成为死项,一并删除 |
-| `aws-deploy` 仓库的 `AURORA_SANDBOX_IMAGE`、`APPARMOR_PROFILE`、`AURORA_EGRESS_*` 部署变量 | 在独立仓库处理,本计划只列出 |
+| `aws-deploy` 仓库的 `AURORA_RUNTIME_IMAGE`、`APPARMOR_PROFILE`、`AURORA_EGRESS_*` 部署变量 | 在独立仓库处理,本计划只列出 |
 
 ---
 
@@ -106,7 +108,7 @@
 
 第三条是既有约束,不是本次改动引入的。若只卡在审核,按 Task 7 第 2 步的判定口径处理:记下现象、判执行链路通过(模型确实调通了 ARK 并拿到图),但**不要**声称端到端 completed。
 
-通过之后再做其余 4 个图片 skill、其余 8 份文档、镜像统一、剩余凭据(火山语音 ASR)归位与目录删除。**删目录(Task 5)必须等 13 份全部抽取完**,这一点不因为首个切片通过而放宽。
+通过之后再做其余 4 个图片 skill、其余 8 份文档、镜像统一、剩余凭据(火山语音 ASR)归位与目录删除。**Task 5 的全 13 份前置已由用户明确豁免**；其余重写不在本次删除任务内。
 
 ---
 
@@ -121,7 +123,7 @@
 | **M3 清理** | 5、6 | `deploy/aurora-sandbox/` 与全部引用消失;仓库测试全绿 | M2 |
 | **M4 打通与验收** | 6b、7 | `apps/web` 里同时看到 13 个 agent、各自的 skill、Aurora 下发的全部任务;13 个 skill 各跑一次 + 端到端记录 | M3 |
 
-**并行边界:** Task 1 的文档内容与 Task 2 的镜像互不依赖。Task 5(删除)必须等 13 份全部抽取完(Task 1 + 1b)。Task 6b(可见性)与 Task 7(验收)可以并行开发,但验收要等 6b 落地。
+**并行边界:** Task 1 的文档内容与 Task 2 的镜像互不依赖。Task 5(删除)按用户覆盖跳过 #199，但不得将缺失的 12 份标为完成。Task 6b(可见性)与 Task 7(验收)可以并行开发,但验收要等 6b 落地。
 
 ---
 
@@ -534,7 +536,7 @@ Expected: FAIL —— 现有实现从 `/run/secrets/*` 读文件
 
 `server/internal/fleet/model/aurora.go`:
 
-- 删除 `ProxyImage`、`SeccompProfile`、`AppArmorProfile`、`ProviderSecretFiles` 四个字段与 `Validate()` 里对应四段校验;`egressProxySpec` 改为取 `Config.Image`(节点与 sidecar 同镜像,入口不同)。
+- 删除 `ProxyImage`、`SeccompProfile`、`AppArmorProfile`、`ProviderSecretFiles` 四个字段与 `Validate()` 里对应四段校验;后续 Task 5 按用户覆盖删除整个 sidecar（包括 `egressProxySpec`），而不是共享镜像保留它。
 - **放宽 `claude_env` 的密钥关键字禁令**:现在任何含 `API_KEY`/`TOKEN`/`SECRET`/`PASSWORD` 的键一律被拒(`claudeEnvSecretMarkers`)。改为只放行这一个固定名字,其余仍拒:
 
 ```go
@@ -648,7 +650,7 @@ git commit -m "refactor(aurora): run Aurora tasks on the ordinary agent surface"
 
 ## Task 5: 删除 `deploy/aurora-sandbox/` 与其全部引用
 
-**前置:** Task 1 必须已完成。此任务开始前运行 Step 1 的守卫测试确认。
+**前置（用户覆盖）:** 运行 Step 1 守卫并如实记录范围；#199 已明确豁免，不以 13 份全部重写阻塞删除。
 
 **Files:**
 - Delete: `deploy/aurora-sandbox/`(整目录)
@@ -657,24 +659,24 @@ git commit -m "refactor(aurora): run Aurora tasks on the ordinary agent surface"
 - Modify: `package.json` 的 `test:aurora-runtime` 脚本、`.github/ci-paths.json`(若含 Aurora 路径)、`AGENTS.md`
 
 **Interfaces:**
-- Consumes: Task 1 交付的 13 份文档(删除后它们是 skill 内容的唯一来源)。
+- Consumes: 现有 13 份文档，其中只有 `text-image` 已重写；旧源码保留在基线提交中，不虚报其余技能可运行。
 - Produces: 仓库内不再有任何对 `deploy/aurora-sandbox` 的引用。
 
 - [ ] **Step 1: 确认抽取已完成**
 
 Run: `(cd server && go test ./internal/aurora -run TestRewrittenWorkflowsDescribeRealSteps -count=1)`
-Expected: PASS,**且 `rewrittenSkills` 已含全部 13 项**(Task 1 + Task 1b 完成)。
+Expected: PASS；当前 `rewrittenSkills` 仅含 `text-image`，按用户覆盖记录未完成范围，不伪造 13 项。
 
 ```bash
 grep -c '"' server/internal/aurora/workflows_test.go | head -1   # 人工确认 rewrittenSkills 是 13 项
 ```
 
-**任一条不满足则停止本任务** —— 删除会让未抽取的内容无法复原。
+**用户已授权删除未完全抽取的实现。** 用基线提交恢复旧内容；不要把这个授权当作其余技能已完成。
 
-同时确认 13 份文档里每个 provider 调用都写全了端点、认证头、请求体与轮询方式:
+记录各文档的 provider 调用完整性；缺失部分属于已豁免的 #199，不在本次补写：
 
 Run: `grep -L "https://" server/internal/aurora/workflows/*.md`
-Expected: 只列出纯本地的 skill(`id-photo`、`resume`、`xhs-copy` 等)。任何 provider skill 出现在列表里,说明它还没写完。
+Expected: 如实记录缺少端点的文档；不得由守卫通过推断全部技能已完成。
 
 - [ ] **Step 2: 删除目录与文件**
 
@@ -905,7 +907,7 @@ Expected: 提交 → 节点领取 → 模型走 `begin` → 调 ARK 出图 → �
 | 卡在哪 | 说明什么 | 怎么处理 |
 | --- | --- | --- |
 | `begin` 未授予 create,或 ARK 返回 401/429 | 密钥或额度问题,**不是**执行链路问题 | 换一把可用且有额度的 Key 再跑;不要改代码绕过 |
-| 模型调不到 ARK(连不通、被拒) | egress 允许列表没有覆盖该端点 —— 这是既有允许列表的问题 | 记录实际错误;确认端点是否在允许列表内,按需要在 Fleet 配置的 `egress_hosts` 里加 |
+| 模型调不到 ARK(连不通、被拒) | 节点直接出站的 DNS、路由或供应商端点错误 | 记录实际错误并检查部署网络与端点；不再配置 sidecar 允许列表 |
 | 导入返回 4xx | 文档里的 payload 与真实路由不符 | 改**文档**,不要改路由 |
 | 产物没入库 / `unknown staging artifact` / manifest 被拒 | 文档里的 manifest 段与 `aurora_manifest.go` 的校验不一致 | 改**文档**,不要改校验 |
 | **只有**审核卡住(`LOCAL_UPLOAD_BASE_URL` 抓不到) | 环境问题,不是本次改动引入的 | 记下现象,**判执行链路通过**(模型确实调通了 ARK 拿到图并成功导入),但不要声称端到端 `completed` |
@@ -913,7 +915,7 @@ Expected: 提交 → 节点领取 → 模型走 `begin` → 调 ARK 出图 → �
 
 反过来,**模型拿不到 Bash、或拿不到 `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`,都不算通过** —— 那说明 Task 4 做漏了,或凭据通道没配好。
 
-**M4 阶段用统一镜像重跑一次**(Task 2 构建的镜像已由 `AURORA_SANDBOX_IMAGE` 指向):
+**M4 阶段用统一镜像重跑一次**(Task 2 构建的镜像已由 `AURORA_RUNTIME_IMAGE` 指向):
 
 ```bash
 MULTICA_RUN_DOCKER_INTEGRATION=1 make env-exec ARGS="-- pnpm exec playwright test --project=fleet-docker"
@@ -964,7 +966,7 @@ gh pr create --repo eanfs/multica --fill
 | 计费 create-once | broker 强制:重试不会第二次提交 create | **仅记账**。模型直连 provider,`ambiguous` 冻结不再有强制力;重复提交计费请求成为可能 |
 | 产物 manifest 的作者 | broker(`manifest.mjs`) | **模型**。契约不变:daemon 只当路径清单,自行重算 size/SHA/MIME 并按 `Route` 校验 |
 | manifest 的 `producer.id` | broker 声明的固定 producer,代表"这份 manifest 来自哪个受控实现" | **模型自述的字符串**。daemon 仍要求它等于 `auroraManifestProducersByRoute[route]`(例如 `text-image` 必须是 `byted-ark-seedream-skill`),但填写者是模型 —— 这个字段从此只是形状检查,不是来源证明 |
-| 13 个 skill 的实现 | 9 个受控 MCP 工具 + vendored 上游树 | **13 份可执行文档**;上游树与补丁随目录删除,来源记录不再有库存 |
+| 13 个 skill 的实现 | 9 个受控 MCP 工具 + vendored 上游树 | **目标为 13 份可执行文档，目前只完成 text-image**；其余 #199 已被用户跳过，旧实现可从基线恢复 |
 | provider 范围 | 火山(Seedream/Seedance/ASR)+ OpenAI 图片 | **只有火山**。OpenAI 的密钥、挂载目标、出口允许列表条目与两个路由全部删除,`product-image`、`image-edit` 改走 Seedream |
 | 模型可用的工具 | Bash/Read/Write 等被 deny,只能调 9 个 broker 工具 | **普通 agent 的全部工具**(`bypassPermissions`) |
 | 平台要求 | 需要能加载 AppArmor 的 Linux 引擎 | **Docker Desktop 即可** —— 排除它的唯一理由是 AppArmor |
@@ -986,7 +988,7 @@ gh pr create --repo eanfs/multica --fill
 | 真实 provider 调用 | 未授权、未运行;需要三把真实密钥与预算 |
 | credits 计费 | **本计划不动**。按 skill 固定积分的预留/退款照旧保留,但不再是验证的门;改用 token 用量计算是后续独立计划 |
 | 隔离验证 | **本方向下不存在**。不要把它列为"待补",它已被明确放弃 |
-| `aws-deploy` 仓库的 `AURORA_SANDBOX_IMAGE` / `APPARMOR_PROFILE` / `AURORA_EGRESS_*` | 未处理(独立仓库) |
+| `aws-deploy` 仓库的 `AURORA_RUNTIME_IMAGE` / `APPARMOR_PROFILE` / `AURORA_EGRESS_*` | 未处理(独立仓库) |
 
 ---
 

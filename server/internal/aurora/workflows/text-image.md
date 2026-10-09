@@ -43,8 +43,9 @@ node provides. Do the work yourself.
    has no image.
 
 3. Hand that URL to the task-scoped importer. Do not download it yourself: this
-   node's egress allowlist does not cover the provider's media host, and the
-   importer keeps the URL out of the task.
+   workflow requires a server-staged artifact associated with the current task.
+   Use the returned staging ID and integrity metadata in the manifest below,
+   not the provider URL or a local download.
 
    ```bash
    curl -fsS -X POST "$MULTICA_SERVER_URL/api/agent/tasks/$MULTICA_TASK_ID/aurora-artifacts/import" \

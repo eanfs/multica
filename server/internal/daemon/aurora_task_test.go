@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -38,6 +39,7 @@ func auroraTaskTestTask() Task {
 			ID:        auroraTaskTestAgentID,
 			Name:      "aurora-text-image",
 			SystemKey: "aurora:" + auroraTaskTestSkill,
+			Skills:    []SkillData{{ID: "text-image-skill", Source: "workspace", Name: "文字生成图片", Content: "# Text to Image\nCreate the requested image and artifact manifest."}},
 			// An agent-level MCP server is an ordinary feature. An Aurora task
 			// must keep it exactly as any other task does.
 			McpConfig: json.RawMessage(`{"mcpServers":{"team-tools":{"command":"node","args":["server.js"]}}}`),
@@ -142,12 +144,32 @@ func TestIsAuroraTask(t *testing.T) {
 	}
 }
 
-// TestAuroraTaskGetsTheOrdinaryExecutionSurface pins the direction of the
-// Aurora execution layer: an Aurora system-agent run launches with exactly the
-// options an ordinary task gets. The narrowed surface (turn cap, reviewed
-// allowlist, general-purpose deny list, broker-only MCP config) is gone, and
-// the skill document delivered into the workdir is what tells the model how to
-// do the work.
+// Missing required skill documents fail before any provider CLI is launched.
+func TestAuroraTaskMissingDocumentDoesNotLaunchCLI(t *testing.T) {
+	for _, ordinaryIssue := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ordinary_issue=%v", ordinaryIssue), func(t *testing.T) {
+			d, argsFile, _, cleanup := newAuroraTaskTestDaemon(t)
+			defer cleanup()
+			task := auroraTaskTestTask()
+			if ordinaryIssue {
+				task.GenerationID = ""
+				task.QuickCreatePrompt = ""
+				task.IssueID = "ordinary-assigned-issue"
+			}
+			task.Agent.Skills = nil
+			_, err := d.runTask(context.Background(), task, "claude", 0, d.logger)
+			if err == nil || !strings.Contains(err.Error(), "required Aurora skill document") {
+				t.Fatalf("expected readable missing-document error, got %v", err)
+			}
+			if _, err := os.Stat(argsFile); !os.IsNotExist(err) {
+				t.Fatalf("CLI launched without required document: %v", err)
+			}
+		})
+	}
+}
+
+// Aurora still gets the ordinary tool surface; its delivered skill document
+// guides execution rather than a broker, tool allowlist or turn cap.
 func TestAuroraTaskGetsTheOrdinaryExecutionSurface(t *testing.T) {
 	t.Parallel()
 

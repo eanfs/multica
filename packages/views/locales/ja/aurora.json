@@ -190,14 +190,18 @@
   "runtime": {
     "title": "実行",
     "status": {
+      "offline": "オフライン",
       "unconfigured": "未設定",
       "provisioning": "準備中",
       "online": "オンライン",
       "failed": "失敗"
     },
-    "recovery": {
-      "unconfigured": "このワークスペースには実行ノードがありません。生成を開始するとプロビジョニングされます。",
-      "failed": "実行ノードを起動できませんでした。生成を開始すると再試行されます。失敗が続く場合は、管理者に Fleet 実行環境の確認を依頼してください。"
+    "retry": "再試行",
+    "reasons": {
+      "runtime_not_provisioned": "このワークスペースには稼働中の実行ノードがありません。生成を開始すると作成されます。",
+      "runtime_offline": "ランタイムノードはオフラインです。再試行して状態を確認してください。",
+      "runtime_unconfigured": "このワークスペースには稼働中の実行ノードがありません。管理者にランタイム設定の確認を依頼してください。",
+      "runtime_policy_unavailable": "ランタイムポリシーを利用できません。管理者にランタイム設定の確認を依頼してください。"
     },
     "generations_title": "実行中の生成",
     "generations_empty": "実行中の生成はありません。"

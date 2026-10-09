@@ -46,7 +46,7 @@ services:
       DATABASE_URL: ${LOCAL_FLEET_DATABASE_URL}
       MULTICA_LOCAL_FLEET_URL: http://127.0.0.1:8090
       MULTICA_LOCAL_FLEET_SECRET_FILE: /run/fleet/service-key
-      AURORA_SANDBOX_IMAGE: ${AURORA_SANDBOX_IMAGE:?set AURORA_SANDBOX_IMAGE to the digest-pinned node image}
+      AURORA_RUNTIME_IMAGE: ${AURORA_RUNTIME_IMAGE:?set AURORA_RUNTIME_IMAGE to the digest-pinned node image}
     volumes:
       - ./.superpowers/fleet-local/service-key:/run/fleet/service-key:ro
 

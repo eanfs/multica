@@ -373,7 +373,7 @@ func TestWorkspaceSandboxManagerFailClosed(t *testing.T) {
 			t.Setenv("AURORA_FLEET_CONTROL_TOKEN_FILE", "")
 			t.Setenv("MULTICA_LOCAL_FLEET_URL", tc.url)
 			t.Setenv("MULTICA_LOCAL_FLEET_SECRET_FILE", tc.secret)
-			t.Setenv("AURORA_SANDBOX_IMAGE", tc.image)
+			t.Setenv("AURORA_RUNTIME_IMAGE", tc.image)
 			mgr := newWorkspaceSandboxManager(nil, nil)
 			if (mgr != nil) != tc.wantEnabled {
 				t.Fatalf("manager enabled = %v, want %v", mgr != nil, tc.wantEnabled)
@@ -398,7 +398,7 @@ func TestWorkspaceSandboxManagerRejectsInvalidSecret(t *testing.T) {
 	t.Setenv("AURORA_FLEET_CONTROL_TOKEN_FILE", "")
 	t.Setenv("MULTICA_LOCAL_FLEET_URL", "http://127.0.0.1:19001")
 	t.Setenv("MULTICA_LOCAL_FLEET_SECRET_FILE", path)
-	t.Setenv("AURORA_SANDBOX_IMAGE", "ghcr.io/eanfs/multica-aurora@sha256:"+strings.Repeat("a", 64))
+	t.Setenv("AURORA_RUNTIME_IMAGE", "ghcr.io/eanfs/multica-aurora@sha256:"+strings.Repeat("a", 64))
 	if mgr := newWorkspaceSandboxManager(nil, nil); mgr != nil {
 		t.Fatal("manager enabled with a non-private service key file")
 	}

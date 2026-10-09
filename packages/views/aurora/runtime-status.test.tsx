@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { setApiInstance } from "@multica/core/api";
 import type { ApiClient } from "@multica/core/api/client";
@@ -24,7 +24,10 @@ type RouteHandler = (path: string) => unknown;
 /** Installs a read-only API client that routes by path. */
 function installApi(handler: RouteHandler) {
   setApiInstance({
-    requestJson: async (path: string) => handler(path),
+    requestJson: async (path: string, options?: RequestInit) => {
+      expect(options?.method ?? "GET").toBe("GET");
+      return handler(path);
+    },
   } as unknown as ApiClient);
 }
 
@@ -91,6 +94,76 @@ afterEach(() => {
 });
 
 describe("RuntimeStatus", () => {
+  it("shows why the runtime is not ready instead of a bare failure", async () => {
+    installReads({
+      workspaceId: "ws-1",
+      state: "failed",
+      node: {
+        id: "node-1",
+        status: "failed",
+        ready: false,
+        errorCode: "runtime_policy_unavailable",
+      },
+    });
+    renderRuntime();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The runtime policy is unavailable. Ask an administrator to check the runtime configuration.",
+    );
+  });
+
+  it("shows an offline reason and retry without exposing unknown error text", async () => {
+    installReads({
+      workspaceId: "ws-1",
+      state: "offline",
+      node: {
+        status: "offline",
+        ready: false,
+        errorCode: "private endpoint credential=secret",
+      },
+    });
+    renderRuntime();
+    expect(await screen.findByText("Offline")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "The runtime node is offline.",
+    );
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.queryByText(/credential=secret/)).not.toBeInTheDocument();
+  });
+
+  it("keeps provisioning guidance for a workspace with no node and offers no retry", async () => {
+    installReads({ workspaceId: "ws-1" });
+    renderRuntime();
+    expect(await screen.findByText("Not set up")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Start a generation to provision one.",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Retry" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers a retry that re-reads the projection", async () => {
+    let reads = 0;
+    installApi((path) => {
+      if (path === "/api/aurora/generations") return { generations: [] };
+      if (path === "/api/aurora/runtime") {
+        reads++;
+        return reads === 1
+          ? {
+              workspaceId: "ws-1",
+              state: "failed",
+              node: { ready: false, status: "failed" },
+            }
+          : TARGET;
+      }
+      throw new Error("unexpected path " + path);
+    });
+    renderRuntime();
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Online")).toBeInTheDocument();
+    expect(reads).toBe(2);
+  });
+
   it("shows the online node without a recovery hint", async () => {
     renderRuntime();
 
@@ -111,7 +184,7 @@ describe("RuntimeStatus", () => {
 
     expect(await screen.findByText("Failed")).toBeInTheDocument();
     expect(
-      screen.getByText(/execution node failed to start/i),
+      screen.getByText(/runtime node is offline/i),
     ).toBeInTheDocument();
   });
 
@@ -128,7 +201,7 @@ describe("RuntimeStatus", () => {
   });
 
   it("normalizes an unknown server state to unconfigured", async () => {
-    installReads({ ...(TARGET as object), state: "paused" });
+    installReads({ state: "paused", node: { status: "future", ready: false } });
     renderRuntime();
 
     expect(await screen.findByText("Not set up")).toBeInTheDocument();

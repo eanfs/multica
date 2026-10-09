@@ -22,7 +22,7 @@
 // nonzero size, verifies the exact credit settlement from the ledger, and then
 // deletes its objects. It never executes a vendor script or a provider CLI on
 // the host, and it uses the digest-pinned sandbox image named by
-// AURORA_SANDBOX_IMAGE (rejected unless it is an @sha256 reference).
+// AURORA_RUNTIME_IMAGE (rejected unless it is an @sha256 reference).
 //
 // Output is deliberately sanitized and bounded. Tests log only the test name,
 // provider and model ID, Multica generation/asset IDs, duration, status, byte
@@ -78,10 +78,10 @@ const (
 	auroraSmokeMicroPerCredit = 1_000_000
 
 	// Fixture paths are relative to the repository root.
-	auroraSmokeWAVFixture      = "deploy/aurora-sandbox/fixtures/input/audio/short.wav"
-	auroraSmokeImageFixture    = "deploy/aurora-sandbox/fixtures/input/image/reference.png"
-	auroraSmokeVideoFixture    = "deploy/aurora-sandbox/fixtures/input/video/short.mp4"
-	auroraSmokeDocumentFixture = "deploy/aurora-sandbox/fixtures/input/document/resume.md"
+	auroraSmokeWAVFixture      = "server/pkg/agent/testdata/aurora/audio/short.wav"
+	auroraSmokeImageFixture    = "server/pkg/agent/testdata/aurora/image/reference.png"
+	auroraSmokeVideoFixture    = "server/pkg/agent/testdata/aurora/video/short.mp4"
+	auroraSmokeDocumentFixture = "server/pkg/agent/testdata/aurora/document/resume.md"
 )
 
 var (
@@ -297,9 +297,9 @@ func loadAuroraSmokeConfig() (auroraSmokeConfig, error) {
 	if token == "" {
 		return auroraSmokeConfig{}, errors.New("AURORA_SMOKE_API_TOKEN is required")
 	}
-	image := strings.TrimSpace(os.Getenv("AURORA_SANDBOX_IMAGE"))
+	image := strings.TrimSpace(os.Getenv("AURORA_RUNTIME_IMAGE"))
 	if !auroraSmokeImageDigestRE.MatchString(image) {
-		return auroraSmokeConfig{}, errors.New("AURORA_SANDBOX_IMAGE must be a digest-pinned @sha256 reference")
+		return auroraSmokeConfig{}, errors.New("AURORA_RUNTIME_IMAGE must be a digest-pinned @sha256 reference")
 	}
 	return auroraSmokeConfig{
 		baseURL:     baseURL,

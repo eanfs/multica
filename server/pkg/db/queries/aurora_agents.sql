@@ -1,7 +1,7 @@
 -- Aurora system-agent seeding (Plan 3 Task 1). These queries back
--- aurora.EnsureSystemAgents, which lazily materialises a workspace's 16 skill
--- system agents — one managed runtime row, and per catalog skill one
--- kind='system' agent, one skill row, and the agent_skill junction — on first
+-- aurora.EnsureSystemAgents, which lazily materialises a workspace's 13 available
+-- skill agents — one managed runtime row, and per available catalog skill one
+-- kind='user' agent, one skill row, and the agent_skill junction — on first
 -- generation creation.
 
 -- name: GetAuroraManagedRuntime :one
@@ -27,9 +27,9 @@ INSERT INTO agent_runtime (
 RETURNING *;
 
 -- name: UpsertAuroraSystemAgent :one
--- Inserts or refreshes one Aurora system agent. kind='system' marks it an
--- invisible execution carrier (hidden from agent lists and hard-deleted with
--- its runtime), exactly like the Agent Builder's carriers. Idempotency rides
+-- Like Mika's CreateSystemUserAgent, this product-defined agent is deliberately
+-- kind='user': members can see it, chat with it and assign issues to it.
+-- Idempotency rides
 -- migration 172's partial unique index on
 -- (workspace_id, owner_id, runtime_id, system_key) WHERE system_key IS NOT
 -- NULL; the arbiter must name all four columns and repeat the predicate, or
@@ -40,10 +40,13 @@ INSERT INTO agent (
     workspace_id, owner_id, runtime_id, kind, system_key, name, instructions,
     runtime_mode, visibility, permission_mode, runtime_config
 ) VALUES (
-    $1, $2, $3, 'system', $4, $5, $6, 'cloud', 'workspace', 'private', '{}'::jsonb
+    $1, $2, $3, 'user', $4, $5, $6, 'cloud', 'workspace', 'private', '{}'::jsonb
 )
 ON CONFLICT (workspace_id, owner_id, runtime_id, system_key) WHERE system_key IS NOT NULL
-DO UPDATE SET name = EXCLUDED.name, instructions = EXCLUDED.instructions
+-- Recover archived carriers in place on generation's pre-enqueue seed. Both
+-- archive fields are cleared; system_key/runtime identity is unchanged.
+DO UPDATE SET name = EXCLUDED.name, instructions = EXCLUDED.instructions,
+    kind = EXCLUDED.kind, archived_at = NULL, archived_by = NULL
 RETURNING *;
 
 -- name: UpsertAuroraSkill :one
@@ -56,4 +59,36 @@ INSERT INTO skill (workspace_id, name, description, content, config, created_by)
 VALUES ($1, $2, '', $3, '{}'::jsonb, $4)
 ON CONFLICT (workspace_id, name)
 DO UPDATE SET content = EXCLUDED.content, updated_at = now()
+RETURNING *;
+
+-- name: AdoptAuroraSystemAgent :one
+-- Adopts the workspace's existing Aurora carrier for one system_key and rebinds
+-- it to the current managed runtime, whatever runtime or archive state it is in.
+--
+-- The seed must key on system_key alone. Migration 172's partial unique index
+-- includes runtime_id, so once a runtime teardown unbinds a carrier
+-- (UnbindUserAgentsFromRuntime sets runtime_id = NULL for kind = 'user'), an
+-- insert-first seed sees a different tuple, inserts a second row, and leaves
+-- GetAgentBySystemKey (archived_at IS NULL, ORDER BY created_at ASC) resolving
+-- the older, unbound one: the workspace shows duplicate Aurora agents and a
+-- generation binds to a carrier with no runtime. Adopting the earliest row keeps
+-- the seed's identity identical to the one that lookup resolves.
+UPDATE agent
+SET owner_id = @owner_id,
+    runtime_id = @runtime_id,
+    kind = 'user',
+    name = @name,
+    instructions = @instructions,
+    runtime_mode = 'cloud',
+    visibility = 'workspace',
+    permission_mode = 'private',
+    archived_at = NULL,
+    archived_by = NULL,
+    updated_at = now()
+WHERE id = (
+    SELECT a.id FROM agent a
+    WHERE a.workspace_id = @workspace_id AND a.system_key = @system_key
+    ORDER BY a.created_at ASC, a.id ASC
+    LIMIT 1
+)
 RETURNING *;

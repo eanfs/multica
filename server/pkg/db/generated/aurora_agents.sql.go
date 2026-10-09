@@ -11,6 +11,92 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const adoptAuroraSystemAgent = `-- name: AdoptAuroraSystemAgent :one
+UPDATE agent
+SET owner_id = $1,
+    runtime_id = $2,
+    kind = 'user',
+    name = $3,
+    instructions = $4,
+    runtime_mode = 'cloud',
+    visibility = 'workspace',
+    permission_mode = 'private',
+    archived_at = NULL,
+    archived_by = NULL,
+    updated_at = now()
+WHERE id = (
+    SELECT a.id FROM agent a
+    WHERE a.workspace_id = $5 AND a.system_key = $6
+    ORDER BY a.created_at ASC, a.id ASC
+    LIMIT 1
+)
+RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, disabled_runtime_skills, service_tier, conversation_starters
+`
+
+type AdoptAuroraSystemAgentParams struct {
+	OwnerID      pgtype.UUID `json:"owner_id"`
+	RuntimeID    pgtype.UUID `json:"runtime_id"`
+	Name         string      `json:"name"`
+	Instructions string      `json:"instructions"`
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	SystemKey    pgtype.Text `json:"system_key"`
+}
+
+// Adopts the workspace's existing Aurora carrier for one system_key and rebinds
+// it to the current managed runtime, whatever runtime or archive state it is in.
+//
+// The seed must key on system_key alone. Migration 172's partial unique index
+// includes runtime_id, so once a runtime teardown unbinds a carrier
+// (UnbindUserAgentsFromRuntime sets runtime_id = NULL for kind = 'user'), an
+// insert-first seed sees a different tuple, inserts a second row, and leaves
+// GetAgentBySystemKey (archived_at IS NULL, ORDER BY created_at ASC) resolving
+// the older, unbound one: the workspace shows duplicate Aurora agents and a
+// generation binds to a carrier with no runtime. Adopting the earliest row keeps
+// the seed's identity identical to the one that lookup resolves.
+func (q *Queries) AdoptAuroraSystemAgent(ctx context.Context, arg AdoptAuroraSystemAgentParams) (Agent, error) {
+	row := q.db.QueryRow(ctx, adoptAuroraSystemAgent,
+		arg.OwnerID,
+		arg.RuntimeID,
+		arg.Name,
+		arg.Instructions,
+		arg.WorkspaceID,
+		arg.SystemKey,
+	)
+	var i Agent
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.AvatarUrl,
+		&i.RuntimeMode,
+		&i.RuntimeConfig,
+		&i.Visibility,
+		&i.Status,
+		&i.MaxConcurrentTasks,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.RuntimeID,
+		&i.Instructions,
+		&i.ArchivedAt,
+		&i.ArchivedBy,
+		&i.CustomEnv,
+		&i.CustomArgs,
+		&i.McpConfig,
+		&i.Model,
+		&i.ThinkingLevel,
+		&i.ComposioToolkitAllowlist,
+		&i.PermissionMode,
+		&i.Kind,
+		&i.SystemKey,
+		&i.DisabledRuntimeSkills,
+		&i.ServiceTier,
+		&i.ConversationStarters,
+	)
+	return i, err
+}
+
 const createAuroraManagedRuntime = `-- name: CreateAuroraManagedRuntime :one
 INSERT INTO agent_runtime (
     workspace_id, daemon_id, name, runtime_mode, provider, status,
@@ -74,9 +160,9 @@ type GetAuroraManagedRuntimeParams struct {
 }
 
 // Aurora system-agent seeding (Plan 3 Task 1). These queries back
-// aurora.EnsureSystemAgents, which lazily materialises a workspace's 16 skill
-// system agents — one managed runtime row, and per catalog skill one
-// kind='system' agent, one skill row, and the agent_skill junction — on first
+// aurora.EnsureSystemAgents, which lazily materialises a workspace's 13 available
+// skill agents — one managed runtime row, and per available catalog skill one
+// kind='user' agent, one skill row, and the agent_skill junction — on first
 // generation creation.
 // The workspace's server-hosted (managed) runtime, the idempotency anchor for
 // seeding. It may be unbound (daemon_id still NULL) or already bound to the
@@ -156,10 +242,11 @@ INSERT INTO agent (
     workspace_id, owner_id, runtime_id, kind, system_key, name, instructions,
     runtime_mode, visibility, permission_mode, runtime_config
 ) VALUES (
-    $1, $2, $3, 'system', $4, $5, $6, 'cloud', 'workspace', 'private', '{}'::jsonb
+    $1, $2, $3, 'user', $4, $5, $6, 'cloud', 'workspace', 'private', '{}'::jsonb
 )
 ON CONFLICT (workspace_id, owner_id, runtime_id, system_key) WHERE system_key IS NOT NULL
-DO UPDATE SET name = EXCLUDED.name, instructions = EXCLUDED.instructions
+DO UPDATE SET name = EXCLUDED.name, instructions = EXCLUDED.instructions,
+    kind = EXCLUDED.kind, archived_at = NULL, archived_by = NULL
 RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, disabled_runtime_skills, service_tier, conversation_starters
 `
 
@@ -172,15 +259,17 @@ type UpsertAuroraSystemAgentParams struct {
 	Instructions string      `json:"instructions"`
 }
 
-// Inserts or refreshes one Aurora system agent. kind='system' marks it an
-// invisible execution carrier (hidden from agent lists and hard-deleted with
-// its runtime), exactly like the Agent Builder's carriers. Idempotency rides
+// Like Mika's CreateSystemUserAgent, this product-defined agent is deliberately
+// kind='user': members can see it, chat with it and assign issues to it.
+// Idempotency rides
 // migration 172's partial unique index on
 // (workspace_id, owner_id, runtime_id, system_key) WHERE system_key IS NOT
 // NULL; the arbiter must name all four columns and repeat the predicate, or
 // Postgres will not match the partial index. DO UPDATE refreshes
 // name/instructions so a later seed enriches the prompt without creating a
 // second row.
+// Recover archived carriers in place on generation's pre-enqueue seed. Both
+// archive fields are cleared; system_key/runtime identity is unchanged.
 func (q *Queries) UpsertAuroraSystemAgent(ctx context.Context, arg UpsertAuroraSystemAgentParams) (Agent, error) {
 	row := q.db.QueryRow(ctx, upsertAuroraSystemAgent,
 		arg.WorkspaceID,

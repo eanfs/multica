@@ -13,7 +13,7 @@ var ErrNodeNotFound = errors.New("fleet node not found")
 
 // The Aurora profile admits every workspace node under one fixed name and one
 // administrator-approved resource spec. The spec name must match a key in the
-// Fleet's Config.Specs; the image is the deployed AURORA_SANDBOX_IMAGE.
+// Fleet's Config.Specs; the image is the deployed AURORA_RUNTIME_IMAGE.
 const (
 	auroraFleetNodeName = "aurora-sandbox"
 	auroraFleetNodeSpec = "sandbox"

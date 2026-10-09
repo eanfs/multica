@@ -84,21 +84,19 @@ export function isAuroraGenerationTerminal(status: string | undefined): boolean 
 /**
  * The high-level execution state of a workspace.
  *
- * The server derives it from the workspace's managed sandbox node
- * (`aurora_sandbox_node`): no node is `unconfigured`, a starting node is
- * `provisioning`, an online or draining node is `online`, and a node whose
- * fleet ensure call failed is `failed`. A stopped node reads as
- * `unconfigured` because the next generation re-provisions it rather than
- * leaving it dead.
+ * The server projects the workspace node and Fleet health. No node is
+ * `unconfigured`; a starting node is `provisioning`. Unavailable nodes are
+ * `offline` or `failed`, and only a ready node is `online`.
  */
 export type AuroraRuntimeState =
   | "unconfigured"
   | "provisioning"
   | "online"
+  | "offline"
   | "failed";
 
 /**
- * Maps a wire state onto the view's four-state vocabulary.
+ * Maps a wire state onto the view's runtime vocabulary.
  *
  * The schema keeps the wire value a plain string so a state from a newer
  * server still parses; an unrecognized one collapses to `unconfigured`, which
@@ -111,6 +109,7 @@ export function normalizeAuroraRuntimeState(
   switch (state) {
     case "provisioning":
     case "online":
+    case "offline":
     case "failed":
     case "unconfigured":
       return state;

@@ -14,17 +14,16 @@ import (
 
 type fakeCalls struct {
 	Engine
-	inspect        func(context.Context, string) (Inspection, error)
-	find           func(context.Context, map[string]string) ([]Resource, error)
-	create         func(context.Context, *container.Config, *container.HostConfig, string, string) (string, error)
-	ensureVolume   func(context.Context, Resource) error
-	ensureNetwork  func(context.Context, Resource) error
-	connectNetwork func(context.Context, string, string, []string) error
-	removeNetwork  func(context.Context, Resource) error
-	bootstrap      func(context.Context, []Resource, []byte) error
-	start          func(context.Context, string) error
-	stop           func(context.Context, string) error
-	health         func(context.Context, string) ([]byte, error)
+	inspect       func(context.Context, string) (Inspection, error)
+	find          func(context.Context, map[string]string) ([]Resource, error)
+	create        func(context.Context, *container.Config, *container.HostConfig, string, string) (string, error)
+	ensureVolume  func(context.Context, Resource) error
+	ensureNetwork func(context.Context, Resource) error
+	removeNetwork func(context.Context, Resource) error
+	bootstrap     func(context.Context, []Resource, []byte) error
+	start         func(context.Context, string) error
+	stop          func(context.Context, string) error
+	health        func(context.Context, string) ([]byte, error)
 }
 
 func (f fakeCalls) Inspect(c context.Context, id string) (Inspection, error) { return f.inspect(c, id) }
@@ -36,9 +35,6 @@ func (f fakeCalls) Create(c context.Context, a *container.Config, h *container.H
 }
 func (f fakeCalls) EnsureVolume(c context.Context, r Resource) error  { return f.ensureVolume(c, r) }
 func (f fakeCalls) EnsureNetwork(c context.Context, r Resource) error { return f.ensureNetwork(c, r) }
-func (f fakeCalls) ConnectNetwork(c context.Context, net, id string, aliases []string) error {
-	return f.connectNetwork(c, net, id, aliases)
-}
 func (f fakeCalls) RemoveNetwork(c context.Context, r Resource) error { return f.removeNetwork(c, r) }
 func (f fakeCalls) InstallBootstrap(c context.Context, r []Resource, b []byte) error {
 	return f.bootstrap(c, r, b)

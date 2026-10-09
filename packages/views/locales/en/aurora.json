@@ -190,14 +190,18 @@
   "runtime": {
     "title": "Execution",
     "status": {
+      "offline": "Offline",
       "unconfigured": "Not set up",
       "provisioning": "Preparing",
       "online": "Online",
       "failed": "Failed"
     },
-    "recovery": {
-      "unconfigured": "This workspace has no running execution node. Start a generation to provision one.",
-      "failed": "The execution node failed to start. Start a generation to retry; if it keeps failing, ask an administrator to check the Fleet runtime."
+    "retry": "Retry",
+    "reasons": {
+      "runtime_not_provisioned": "This workspace has no running execution node. Start a generation to provision one.",
+      "runtime_offline": "The runtime node is offline. Retry to check its status.",
+      "runtime_unconfigured": "This workspace has no running execution node. Ask an administrator to check the runtime configuration.",
+      "runtime_policy_unavailable": "The runtime policy is unavailable. Ask an administrator to check the runtime configuration."
     },
     "generations_title": "Running generations",
     "generations_empty": "Nothing is running."
