@@ -38,27 +38,35 @@ node provides. Do the work yourself.
 
    ```bash
    REFS=()   # e.g. REFS=(/path/one.png /path/two.jpg)
-   request=$(jq -n --arg p "$PROMPT" '{
+   jq -n --arg p "$PROMPT" '{
      model: "doubao-seedream-5.0-lite", prompt: $p,
      size: "2K", response_format: "url", output_format: "png", watermark: false
-   }')
+   }' > /tmp/seedream-request.json
+
    if [ ${#REFS[@]} -gt 0 ]; then
-     data_uris=()
+     # Assemble the body in files, never in argv: one argument is capped at
+     # 128 KiB and a single image's base64 is already larger. Seedream takes
+     # reference images in `image`, as one data URI or a list of them.
+     rm -f /tmp/seedream-refs.jsonl
      for f in "${REFS[@]}"; do
        case "${f##*.}" in
          jpg|jpeg) mime=image/jpeg ;;
-         webp)     mime=image/webp ;;
          *)        mime=image/png ;;
        esac
-       data_uris+=("data:$mime;base64,$(base64 -w0 "$f")")
+       printf 'data:%s;base64,' "$mime" >> /tmp/seedream-refs.jsonl
+       base64 -w0 "$f" | tr -d '\n' >> /tmp/seedream-refs.jsonl
+       printf '\n' >> /tmp/seedream-refs.jsonl
      done
-     request=$(jq -n --argjson r "$(printf '%s\n' "${data_uris[@]}" | jq -R . | jq -s .)" \
-       --argjson base "$request" '$base + {reference_images: $r}')
+     jq -Rn '[inputs]' /tmp/seedream-refs.jsonl > /tmp/seedream-refs.json
+     jq --slurpfile r /tmp/seedream-refs.json \
+       '. + {image: ($r[0] | if length == 1 then .[0] else . end)}' \
+       /tmp/seedream-request.json > /tmp/seedream-request.tmp &&
+       mv /tmp/seedream-request.tmp /tmp/seedream-request.json
    fi
 
    curl -fsS -X POST "${ANTHROPIC_BASE_URL:-https://ark.cn-beijing.volces.com/api/plan}/v3/images/generations" \
      -H "Authorization: Bearer $ANTHROPIC_API_KEY" -H 'content-type: application/json' \
-     --data-binary "$request" -o /tmp/seedream.json
+     --data-binary @/tmp/seedream-request.json -o /tmp/seedream.json
    ```
 
    The result URLs are `data[].url`. Stop and report a failure when the response
@@ -99,7 +107,7 @@ node provides. Do the work yourself.
 
 ## Artifact manifest
 
-Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Every value below comes
+Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Run `mkdir -p "<outputRoot>/.multica"` first: nothing creates that directory for you. Every value below comes
 from a previous step; copy it, do not invent it. One entry per imported object.
 
 ```json

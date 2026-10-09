@@ -70,7 +70,7 @@ node provides. Do the work yourself.
 
 ## Artifact manifest
 
-Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Every value below comes
+Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Run `mkdir -p "<outputRoot>/.multica"` first: nothing creates that directory for you. Every value below comes
 from a previous step; copy it, do not invent it.
 
 ```json

@@ -17,7 +17,7 @@ You run on a normal Multica agent: you have a shell. Do the work yourself.
 1. Produce the photo with one fixed transform. `INPUT` is the downloaded image:
 
    ```bash
-   mkdir -p "<outputRoot>/artifacts"
+   mkdir -p "<outputRoot>/artifacts" "<outputRoot>/.multica"
    convert -auto-orient "$INPUT" -colorspace sRGB -resize '600x600^' \
      -background white -gravity center -extent 600x600 \
      "<outputRoot>/artifacts/id-photo.png"
@@ -41,7 +41,7 @@ You run on a normal Multica agent: you have a shell. Do the work yourself.
 
 ## Artifact manifest
 
-Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. A local file artifact
+Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Run `mkdir -p "<outputRoot>/.multica"` first: nothing creates that directory for you. A local file artifact
 names its path **relative to the output root**; the daemon re-derives the size
 and hash from the file, so copy what you measured.
 

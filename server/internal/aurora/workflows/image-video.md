@@ -40,21 +40,24 @@ node provides. Do the work yourself.
      jpg|jpeg) mime=image/jpeg ;;
      *)        mime=image/png ;;
    esac
-   request=$(jq -n --arg p "$PROMPT" --arg url "data:$mime;base64,$(base64 -w0 "$IMAGE")" '{
+   # One argument is capped at 128 KiB, so the data URI goes through a file
+   # rather than through jq's argv.
+   { printf 'data:%s;base64,' "$mime"; base64 -w0 "$IMAGE" | tr -d '\n'; } > /tmp/image-data-uri.txt
+   jq -n --arg p "$PROMPT" --rawfile url /tmp/image-data-uri.txt '{
      model: "doubao-seedance-2.0",
      content: [ { type: "text", text: $p }, { type: "image_url", image_url: { url: $url } } ]
-   }')
+   }' > /tmp/seedance-create-request.json
 
    curl -fsS -X POST "${ANTHROPIC_BASE_URL:-https://ark.cn-beijing.volces.com/api/plan}/v3/contents/generations/tasks" \
      -H "Authorization: Bearer $ANTHROPIC_API_KEY" -H 'content-type: application/json' \
-     --data-binary "$request" -o /tmp/seedance-create.json
+     --data-binary @/tmp/seedance-create-request.json -o /tmp/seedance-create.json
    ```
 
    The task id is the response's top-level `id`, and it looks like
    `cgt-<digits>-<suffix>`. Stop and report a failure when it is missing.
 
 3. Poll the task every 5 seconds until it reaches a terminal state. The status
-   is the response's `task.status`:
+   is the response's top-level `status` field:
 
    ```bash
    task_id=$(jq -r '.id' /tmp/seedance-create.json)
@@ -80,7 +83,7 @@ node provides. Do the work yourself.
    importer keeps the URL out of the task.
 
    ```bash
-   result_url=$(jq -r '.content.video_url // (.content.videos[0].url) // empty' /tmp/seedance-poll.json)
+   result_url=$(jq -r '.content.video_url // empty' /tmp/seedance-poll.json)
    [ -n "$result_url" ] || { echo "Seedance succeeded without output" >&2; exit 1; }
 
    curl -fsS -X POST "$MULTICA_SERVER_URL/api/agent/tasks/$MULTICA_TASK_ID/aurora-artifacts/import" \
@@ -106,7 +109,7 @@ node provides. Do the work yourself.
 
 ## Artifact manifest
 
-Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Every value below comes
+Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Run `mkdir -p "<outputRoot>/.multica"` first: nothing creates that directory for you. Every value below comes
 from a previous step; copy it, do not invent it.
 
 ```json

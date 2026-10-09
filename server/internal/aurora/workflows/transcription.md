@@ -50,18 +50,22 @@ node provides. Do the work yourself.
    is no task to poll and no callback:
 
    ```bash
+   # One argument is capped at 128 KiB, so the recording reaches jq through a
+   # file instead. Newlines are stripped so `--rawfile` sees the base64 alone.
+   base64 -w0 "$AUDIO" | tr -d '\n' > /tmp/asr.b64
+   jq -n --arg uid "$MULTICA_TASK_ID" --arg fmt "$FORMAT" --rawfile data /tmp/asr.b64 '{
+     user: { uid: $uid },
+     audio: { format: $fmt, data: $data },
+     request: { model_name: "bigmodel", enable_punc: true, enable_itn: true }
+   }' > /tmp/asr-request.json
+
    curl -fsS -D /tmp/asr-headers.txt -X POST "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash" \
      -H 'content-type: application/json' \
      -H "x-api-key: $VOLC_ASR_API_KEY" \
      -H 'x-api-resource-id: volc.bigasr.auc_turbo' \
      -H "x-api-request-id: $(cat /proc/sys/kernel/random/uuid)" \
      -H 'x-api-sequence: -1' \
-     -d "$(jq -n --arg uid "$MULTICA_TASK_ID" --arg fmt "$FORMAT" \
-       --arg data "$(base64 -w0 "$AUDIO")" '{
-         user: { uid: $uid },
-         audio: { format: $fmt, data: $data },
-         request: { model_name: "bigmodel", enable_punc: true, enable_itn: true }
-       }')" \
+     --data-binary @/tmp/asr-request.json \
      -o /tmp/asr.json
    ```
 
@@ -78,7 +82,7 @@ node provides. Do the work yourself.
 5. Write the transcript as the run's artifact:
 
    ```bash
-   mkdir -p "<outputRoot>/artifacts"
+   mkdir -p "<outputRoot>/artifacts" "<outputRoot>/.multica"
    jq -r '.result.text' /tmp/asr.json > "<outputRoot>/artifacts/transcription.txt"
    ```
 
@@ -97,7 +101,7 @@ node provides. Do the work yourself.
 
 ## Artifact manifest
 
-Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. A local file artifact
+Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Run `mkdir -p "<outputRoot>/.multica"` first: nothing creates that directory for you. A local file artifact
 names its path **relative to the output root**; the daemon re-derives the size
 and hash from the file itself, so copy what you measured rather than inventing
 it.

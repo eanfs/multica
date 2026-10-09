@@ -43,18 +43,22 @@ node provides. Do the work yourself.
    task to poll and no callback:
 
    ```bash
+   # One argument is capped at 128 KiB, so the audio reaches jq through a file
+   # instead. Newlines are stripped so `--rawfile` sees the base64 alone.
+   base64 -w0 /tmp/asr.wav | tr -d '\n' > /tmp/asr.b64
+   jq -n --arg uid "$MULTICA_TASK_ID" --rawfile data /tmp/asr.b64 '{
+     user: { uid: $uid },
+     audio: { format: "wav", data: $data },
+     request: { model_name: "bigmodel", enable_punc: true, enable_itn: true }
+   }' > /tmp/asr-request.json
+
    curl -fsS -D /tmp/asr-headers.txt -X POST "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash" \
      -H 'content-type: application/json' \
      -H "x-api-key: $VOLC_ASR_API_KEY" \
      -H 'x-api-resource-id: volc.bigasr.auc_turbo' \
      -H "x-api-request-id: $(cat /proc/sys/kernel/random/uuid)" \
      -H 'x-api-sequence: -1' \
-     -d "$(jq -n --arg uid "$MULTICA_TASK_ID" \
-       --arg data "$(base64 -w0 /tmp/asr.wav)" '{
-         user: { uid: $uid },
-         audio: { format: "wav", data: $data },
-         request: { model_name: "bigmodel", enable_punc: true, enable_itn: true }
-       }')" \
+     --data-binary @/tmp/asr-request.json \
      -o /tmp/asr.json
    ```
 
@@ -65,11 +69,13 @@ node provides. Do the work yourself.
    ```bash
    grep -qi '^x-api-status-code: 20000000' /tmp/asr-headers.txt || {
      echo "Volcengine ASR failed: $(grep -i '^x-api-status-code:' /tmp/asr-headers.txt)" >&2; exit 1; }
-   mkdir -p "<outputRoot>/artifacts"
+   mkdir -p "<outputRoot>/artifacts" "<outputRoot>/.multica"
    jq -r '.result.text' /tmp/asr.json > "<outputRoot>/artifacts/transcript.txt"
    ```
 
-   The transcript is a supporting artifact, not the run's primary result. Do not
+   The transcript carries the role `transcript`, not the run's primary result. It
+   is published beside the video because this skill's declared output is the
+   video alone. Do not
    publish a manifest yet: the primary is the captioned video below.
 
 4. Build the subtitle file yourself. The service returns text only — no
@@ -115,12 +121,12 @@ node provides. Do the work yourself.
 
 - `<outputRoot>/artifacts/video-captions.mp4` — the captioned video. It is the
   run's **primary** artifact, and this skill declares video output only.
-- `<outputRoot>/artifacts/transcript.txt` — the transcript, as a supporting
-  artifact.
+- `<outputRoot>/artifacts/transcript.txt` — the transcript, with the role
+  `transcript`: it is published beside the video, not as the skill's output.
 
 ## Artifact manifest
 
-Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Local file artifacts
+Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Run `mkdir -p "<outputRoot>/.multica"` first: nothing creates that directory for you. Local file artifacts
 name their path **relative to the output root**; compute each size and hash from
 the file you wrote.
 

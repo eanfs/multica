@@ -47,7 +47,7 @@ the copy is yours to write.
 3. Write the copy as the run's artifact:
 
    ```bash
-   mkdir -p "<outputRoot>/artifacts"
+   mkdir -p "<outputRoot>/artifacts" "<outputRoot>/.multica"
    # Write the copy to <outputRoot>/artifacts/xhs-copy.md
    ```
 
@@ -58,7 +58,7 @@ the copy is yours to write.
 
 ## Artifact manifest
 
-Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. A local file artifact
+Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Run `mkdir -p "<outputRoot>/.multica"` first: nothing creates that directory for you. A local file artifact
 names its path **relative to the output root**; compute its size and hash from
 the file you wrote.
 
