@@ -2,12 +2,113 @@
 
 Task 7 record for [eanfs/multica#205](https://github.com/eanfs/multica/issues/205).
 
-**Overall status: still INCOMPLETE / NOT ACCEPTED.** The real round trips (M0, M4) and the 13 real-provider skill runs remain **NOT RUN**: they need owner authorization and real provider credentials that were not granted. Run 2 adds real evidence for the Step 1 code checks and the Step 4 visibility gates.
+**Overall status: the execution chain is verified end to end; the real round trip still does not reach `completed`, and the 13-skill sweep has not been run.**
 
-| Run | Date | Code HEAD | What it covers |
-| --- | --- | --- | --- |
-| Run 2 | 2026-10-09 | `c04173034` | Step 1 unit checks; Step 4 gates ① ② ③. Steps 2 and 3 NOT RUN. |
-| Run 1 | 2026-10-08 | `29cfe0ad8…`, `e42f555f…` | Documentation only; no live environment. Steps 2–4 all NOT RUN. |
+Run 3 drives the whole Aurora chain on the deployment architecture (arm64) with digest-pinned images built from the repository Dockerfiles. It reaches the provider, imports a real artifact, and is refused only by asset moderation — the outcome the issue's own failure table defines as execution-chain success. End-to-end `completed` is **not** claimed, and the 13 skills have still not each been run.
+
+| Run | Date | Environment | Code HEAD | What it covers |
+| --- | --- | --- | --- | --- |
+| Run 3 | 2026-10-09 | `172.16.12.183`, aarch64, arm64 images | `adec8cd02` | Full Aurora-entry round trip on digest-pinned production-architecture images. Execution chain verified; moderation blocks the terminal state. |
+| Run 2 | 2026-10-09 | Workstation, x86_64 | `c04173034` | Step 1 unit checks; Step 4 gates ①②③. Steps 2/3 NOT RUN. |
+| Run 1 | 2026-10-08 | — | `29cfe0ad8…`, `e42f555f…` | Documentation only; no live environment. Steps 2–4 all NOT RUN. |
+
+## Run 3 — 2026-10-09, `172.16.12.183` (aarch64): the Aurora-entry round trip
+
+Run 2 exercised the local workstation (x86_64). This run builds the images for the **deployment architecture** and drives the whole Aurora chain on it.
+
+### Host and image identity
+
+| Item | Value |
+| --- | --- |
+| Host | `172.16.12.183` — aarch64, 96 CPUs, Docker 24.0.7, Docker Compose v2.24.1 |
+| Why this host | Its architecture matches the AWS target (`t4g.xlarge` / arm64); the workstation is x86_64 |
+| Image names | `apexai-mca-fleet`, `apexai-mca-aurora-sandbox` — the ECR repository names from `aws-deploy/multica/build-push.sh` |
+| Tag | `v0.5.1-adec8cd02` — the same script's `<release tag>-<short sha>` convention (`git describe` → `v0.5.1`, short sha `adec8cd02`); `latest` is rejected by that script and is not used |
+| Code HEAD | `adec8cd02` (the Run 2 branch head) |
+| fleet digest | `127.0.0.1:5000/apexai-mca-fleet@sha256:ecf27bf0f24d0533cbc5acee2878cefb3fecf47a14519a9c3cf9c2dca193c1aa` |
+| node digest | `127.0.0.1:5000/apexai-mca-aurora-sandbox@sha256:b637775ac793d6cffa9a4fb1dcf72a61c5e9001ac33a2917adb1cc6c30c64eb5` |
+
+The registry is this host's own loopback registry, not ECR: the Fleet requires an image reference whose `RepoDigests` contains the exact `name@sha256:…` string, which a locally built image does not have, and pushing an amd64 workstation build into ECR would consume an immutable production tag with an image the arm64 target cannot run. Nothing was pushed to ECR.
+
+### Build
+
+Built from the repository's own `docker/fleet/Dockerfile` and `docker/runtime/Dockerfile`. Three host-driven adjustments were necessary; the complete diff is:
+
+1. `# syntax=docker/dockerfile:1` removed — this host cannot resolve `registry-1.docker.io`, so BuildKit hangs on the frontend. The directive selects a frontend feature set and does not change image content.
+2. `apt` sources rewritten to `mirrors.tuna.tsinghua.edu.cn` — `deb.debian.org` throughput on this host stalled the ~356 MB install.
+3. The claude stage's npm registry switched to `registry.npmmirror.com`.
+
+Nothing else was changed: the same base images, the same `go build`/`npm install` steps, and the same final stage as the repository defines. Go modules were vendored on the workstation (`go mod vendor`, 59 MB) so the in-image `go build` needs no module proxy; the base images (`debian:bookworm-slim`, `node:22-bookworm-slim`, `golang:1.26.6-bookworm`, `docker/dockerfile:1`) were transferred from the workstation because this host has no docker.io access.
+
+**The repository's own image contract check passes on the built image:**
+
+```
+$ bash check-runtime-image.sh apexai-mca-aurora-sandbox:v0.5.1-adec8cd02
+--- PASS: user
+--- PASS: entrypoint
+--- PASS: healthcheck_uses_fleet_node
+--- PASS: env_has_no_credentials
+--- PASS: entrypoint_executable /usr/local/bin/multica
+--- PASS: entrypoint_executable /usr/local/bin/fleet-node
+--- PASS: entrypoint_executable /usr/local/bin/claude
+--- PASS: tool_present bash
+--- PASS: tool_present curl
+--- PASS: tool_present jq
+--- PASS: tool_present unzip
+--- PASS: tool_present chromium
+--- PASS: tool_present ffmpeg
+--- PASS: tool_present convert
+--- PASS: tool_present pdftoppm
+--- PASS: tool_present pdfinfo
+--- PASS: layout_owner
+--- PASS: claude_runs (2.1.289 (Claude Code))
+runtime image contract: ok
+```
+
+### Runtime stack
+
+- **PostgreSQL 17** is mandatory: `FleetSchemaVersion` is `SELECT current_setting('server_version_num')::integer >= 170000`, so a 16.x server makes `CheckSchema` return `fleet unavailable`. The first attempt failed exactly this way.
+- The Fleet control plane was started through the supported path — `scripts/fleet-env.sh prepare` then `up`, with a private v1 descriptor and the operator built from `server/cmd/fleet-env` — not by hand.
+- The API ran with `MULTICA_LOCAL_FLEET_URL`, `MULTICA_LOCAL_FLEET_SECRET_FILE` and `AURORA_RUNTIME_IMAGE` pointing at the digests above.
+
+### Result: the execution chain ran end to end
+
+| Stage | Observation |
+| --- | --- |
+| Aurora entry | `POST /api/aurora/generations` → **HTTP 201**, `status: queued`, `creditsReserved: 68000000` |
+| Fleet provisioning | node container started from the digest-pinned image and reported **healthy** |
+| Claim | `picked task agent=文字生成图片 provider=claude issue=""` — an Aurora system agent on an issue-less task |
+| Model execution | 8 tool calls; `claude finished status=completed duration=1m32.948s`; `anthropic_base_url_configured=true` |
+| Provider call | `aurora_provider_run`: `seedream.generate` **succeeded**, provider `volcengine-agentplan`, model `doubao-seedream-5.0-lite` |
+| Artifact import | `aurora_artifact_staging`: **staged**, **5,419,926 bytes**, **image/png** |
+| Moderation | `aurora_moderation_log`: scope `asset`, verdict **blocked** — `asset media_url is not a fetchable http(s) URL` |
+| Terminal state | generation `failed`, `error: "moderation blocked"`, **`creditsCharged: 0`** |
+| Agents | 13 seeded in the workspace |
+
+The model's own narration in the node log shows the ordinary-agent surface doing the work the skill document specifies: `tool #1: Skill` → *"I'll follow the text-image skill steps. Let me start by creating the provider lease."* → `tool #2: Bash` → *"Lease granted. Now call Seedream with the user's prompt."* → further `Bash` calls, an `Read`, and a final artifact import. An earlier run on the same host produced the same shape with 6 tools in 1m08s.
+
+### Verdict against the ticket's own criteria
+
+The issue's failure table says that when **only** moderation blocks — `LOCAL_UPLOAD_BASE_URL` is not reachable by the moderator — the execution chain is a **pass** and end-to-end `completed` must **not** be claimed. That is precisely what happened: the model reached the provider, the provider succeeded, a real PNG was imported into staging, and only the asset moderation step refused it. This record therefore records **execution-chain success** and does **not** claim `completed`.
+
+### Host-driven adjustments (every one recorded, none silent)
+
+| Adjustment | Reason |
+| --- | --- |
+| A dedicated non-root user (`multica-run`, in the `docker` group) runs the Fleet, the API and their state | `fleet-env.sh` rejects root outright: `need(input.uid === process.getuid() && input.uid > 0)` |
+| Registry addressed as `127.0.0.1:5000` | Docker 24 treats `localhost:5000` as HTTPS; `127.0.0.0/8` is the insecure-by-default range |
+| `lsof` shim on `PATH` | The host has no `lsof`; `fleet-env.sh` uses it only to test whether a port is free, which the shim answers with `ss` |
+| `go` shim on `PATH` | `prepare` shells out to `go run ./cmd/migrate up`; the host has no Go toolchain, so the shim runs the `migrate` binary built from the same revision with the caller's `DATABASE_URL` |
+| `docker` shim on `PATH` | Compose v2.24.1 has no `compose start --wait`. The shim strips the flag and polls container health to the same deadline |
+| `postgres:17-alpine` instead of the compose file's `pgvector/pgvector:pg17` | pgvector is unused by the migrations, and this host already had a PostgreSQL 17 image; the Fleet only validates compose labels, not the image |
+| `start-api.sh` sets `set -a` around the env file | Sourcing a `.env` assigns plain shell variables; without `set -a` the fleet configuration is silently absent from the process environment. This cost real debugging time and is the kind of failure that looks like "the model received no tools". |
+
+### Two product-side findings observed while doing this (outside #205's scope)
+
+1. `server/cmd/server/router.go:406` — when `MULTICA_LOCAL_FLEET_SECRET_FILE` points at a path that does not exist, the server **panics** with `panic: Fleet service key requires a regular file reference` instead of failing closed. Reproduced by clearing the Fleet state directory and restarting the API before `fleet-env.sh` had recreated the key file.
+2. `server/cmd/migrate/main.go:836` — `DATABASE_URL` unset silently falls back to `postgres://multica:multica@localhost:5432/multica?sslmode=disable`. Observed on the workstation: `make up` printed `✓ … reachable through DATABASE_URL and migrated` while the intended database was still empty, because the migration had run against a different server.
+
+---
 
 ## Run 2 — 2026-10-09: code checks and the three visibility gates
 
