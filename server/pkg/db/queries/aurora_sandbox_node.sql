@@ -25,6 +25,14 @@ RETURNING *;
 SELECT * FROM aurora_sandbox_node
 WHERE workspace_id = $1;
 
+-- name: GetAuroraRuntimeFleetNode :one
+-- Read-only projection: a Fleet identity must belong to this workspace and
+-- managed runtime. The node id is globally unique across Fleet namespaces.
+SELECT * FROM fleet_nodes
+WHERE id = sqlc.arg(node_id)
+  AND workspace_id = sqlc.arg(workspace_id)
+  AND runtime_id = sqlc.arg(runtime_id);
+
 -- name: LockAuroraSandboxNodeByWorkspace :one
 -- Serialises enrollment rotation and node lifecycle transitions for one
 -- workspace until the surrounding transaction commits.

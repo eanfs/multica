@@ -54,7 +54,7 @@ fi
 # baking a name here would suggest the image expects one of its own.
 env_dump="$(inspect '{{range .Config.Env}}{{println .}}{{end}}')"
 if printf '%s\n' "$env_dump" | grep -qE '(API_KEY|TOKEN|SECRET|PASSWORD)='; then
-  fail env_has_no_credentials "$(printf '%s' "$env_dump" | tr '\n' ' ')"
+  fail env_has_no_credentials "credential variable present in image environment"
 else
   pass env_has_no_credentials
 fi

@@ -203,6 +203,18 @@ function historyTask(index: number): AgentTask {
   };
 }
 
+describe("ActivityTab issue-less Aurora runs", () => {
+  it("renders a readable quick-create source and transcript without an issue link", async () => {
+    agentTasksRef.current = () => Promise.resolve({
+      tasks: [{ ...historyTask(0), kind: "quick_create" }], nextCursor: null,
+    });
+    renderTab();
+    expect(await screen.findByText("Quick create")).toBeInTheDocument();
+    expect(screen.getByTestId("task-0")).toBeInTheDocument();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  });
+});
+
 describe("ActivityTab loaded history rows", () => {
   it("reveals cached rows before requesting older history and deduplicates overlapping pages", async () => {
     const tasks = Array.from({ length: 31 }, (_, i) => historyTask(i));

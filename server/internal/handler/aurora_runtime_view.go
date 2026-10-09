@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/multica-ai/multica/server/internal/fleet/model"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -33,7 +34,7 @@ type AuroraRuntimeNodeResponse struct {
 }
 
 // AuroraExecutionTargetResponse is the workspace's execution target as the
-// runtime view consumes it. State is one of unconfigured, provisioning, online
+// runtime view consumes it. State is unconfigured, provisioning, online, offline
 // or failed.
 type AuroraExecutionTargetResponse struct {
 	WorkspaceID string                     `json:"workspaceId"`
@@ -48,8 +49,8 @@ type AuroraExecutionTargetResponse struct {
 // The read never takes the node's lifecycle lock and never calls the Fleet: the
 // runtime view is a projection, and a read that serialised against generation
 // creation would turn opening a screen into a write-path dependency. It uses
-// the non-locking GetAuroraSandboxNodeByWorkspace and GetAuroraManagedRuntime
-// queries, so it cannot block or be blocked by Ensure.
+// non-locking reads of the sandbox, Fleet node and managed runtime. It does not
+// acquire lifecycle locks or refresh Fleet observations.
 func (h *Handler) GetAuroraRuntime(w http.ResponseWriter, r *http.Request) {
 	workspaceID, ok := parseUUIDOrBadRequest(w, h.resolveWorkspaceID(r), "workspace_id")
 	if !ok {
@@ -86,17 +87,32 @@ func (h *Handler) GetAuroraRuntime(w http.ResponseWriter, r *http.Request) {
 		runtimeID = &id
 	}
 
+	var fleet *db.FleetNode
+	if node != nil {
+		row, err := h.Queries.GetAuroraRuntimeFleetNode(r.Context(), db.GetAuroraRuntimeFleetNodeParams{
+			NodeID: node.ID, WorkspaceID: workspaceID, RuntimeID: node.RuntimeID,
+		})
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+		case err != nil:
+			writeError(w, http.StatusInternalServerError, "failed to load execution status")
+			return
+		default:
+			fleet = &row
+		}
+	}
+	state := auroraExecutionState(node, fleet, time.Now())
 	writeJSON(w, http.StatusOK, AuroraExecutionTargetResponse{
 		WorkspaceID: uuidToString(workspaceID),
-		Node:        auroraRuntimeNodeResponse(node),
+		Node:        auroraRuntimeNodeResponse(node, fleet, state),
 		RuntimeID:   runtimeID,
-		State:       auroraExecutionState(node),
+		State:       state,
 	})
 }
 
 // auroraRuntimeNodeResponse projects a node row into its consumer shape. It
 // returns nil for a workspace with no row so the JSON node field is null.
-func auroraRuntimeNodeResponse(node *db.AuroraSandboxNode) *AuroraRuntimeNodeResponse {
+func auroraRuntimeNodeResponse(node *db.AuroraSandboxNode, fleet *db.FleetNode, state string) *AuroraRuntimeNodeResponse {
 	if node == nil {
 		return nil
 	}
@@ -110,56 +126,79 @@ func auroraRuntimeNodeResponse(node *db.AuroraSandboxNode) *AuroraRuntimeNodeRes
 	return &AuroraRuntimeNodeResponse{
 		ID:          id,
 		Status:      node.State,
-		Ready:       node.State == "online",
+		Ready:       state == "online",
 		Provider:    auroraExecutionNodeProvider,
-		ErrorCode:   auroraRuntimeErrorCode(*node),
+		ErrorCode:   auroraRuntimeErrorCode(*node, fleet, state),
 		OperationID: nil, // the local node row does not persist the create operation id
 		CreatedAt:   node.CreatedAt.Time.UTC().Format(time.RFC3339Nano),
 	}
 }
 
-// auroraRuntimeErrorCode maps a failed node's raw failure reason onto the public
-// recovery vocabulary the runtime surfaces already speak. The raw reason names
-// internal errors, and possibly endpoints, so it never leaves the server; an
-// unrecognised failure collapses to "unavailable", which the client renders as
-// generic recovery guidance.
-func auroraRuntimeErrorCode(node db.AuroraSandboxNode) *string {
-	if node.State != "failed" {
+// auroraRuntimeErrorCode only emits the public recovery vocabulary. Neither
+// Fleet error messages nor the sandbox's raw failure reason cross this boundary.
+func auroraRuntimeErrorCode(node db.AuroraSandboxNode, fleet *db.FleetNode, state string) *string {
+	if state != "failed" && state != "offline" && state != "unconfigured" {
 		return nil
 	}
-	code := "unavailable"
-	if node.FailureReason.Valid {
+	code := "runtime_offline"
+	if state == "unconfigured" {
+		code = "runtime_unconfigured"
+	}
+	if fleet != nil {
+		switch fleet.ErrorCode {
+		case "runtime_unconfigured":
+			code = "runtime_unconfigured"
+		case "profile_missing", "runtime_policy_unavailable":
+			code = "runtime_policy_unavailable"
+		}
+	}
+	if node.State == "failed" && node.FailureReason.Valid {
 		reason := strings.ToLower(node.FailureReason.String)
-		switch {
-		case strings.Contains(reason, "busy"):
-			code = "busy"
-		case strings.Contains(reason, "profile"),
-			strings.Contains(reason, "credential"),
-			strings.Contains(reason, "secret"):
-			code = "profile_missing"
-		case strings.Contains(reason, "not found"), strings.Contains(reason, "no such"):
-			code = "instance_missing"
+		if strings.Contains(reason, "profile") || strings.Contains(reason, "credential") || strings.Contains(reason, "secret") || strings.Contains(reason, "policy") {
+			code = "runtime_policy_unavailable"
 		}
 	}
 	return &code
 }
 
-// auroraExecutionState collapses the node row's lifecycle state into the four
-// states the view renders. A draining node still serves work, so it reads as
-// online; a stopped node reads as unconfigured because the next generation
-// re-provisions it rather than leaving it dead.
-func auroraExecutionState(node *db.AuroraSandboxNode) string {
+// Enrollment alone is not readiness. Reuse Fleet's claimability policy so stale
+// health, maintenance and revoked nodes cannot appear online. This is a pure
+// projection of stored observations, not an attempt to refresh or start a node.
+func auroraExecutionState(node *db.AuroraSandboxNode, fleet *db.FleetNode, now time.Time) string {
 	if node == nil {
 		return "unconfigured"
+	}
+	if node.State == "failed" {
+		return "failed"
+	}
+	if node.State == "stopped" {
+		return "offline"
+	}
+	if fleet != nil {
+		if fleet.Status == "failed" {
+			return "failed"
+		}
+		if fleet.Revoked || fleet.Maintenance || fleet.Desired != "running" {
+			return "offline"
+		}
+		switch fleet.Status {
+		case "creating", "starting":
+			return "provisioning"
+		case "running":
+		default:
+			return "offline"
+		}
 	}
 	switch node.State {
 	case "starting":
 		return "provisioning"
 	case "online", "draining":
-		return "online"
-	case "failed":
-		return "failed"
-	default:
-		return "unconfigured"
+		if fleet != nil && model.CanClaim(model.Node{
+			Desired: fleet.Desired, Status: fleet.Status, Ready: fleet.Ready,
+			Maintenance: fleet.Maintenance, Revoked: fleet.Revoked, HealthAt: fleet.HealthAt.Time,
+		}, now) {
+			return "online"
+		}
 	}
+	return "offline"
 }

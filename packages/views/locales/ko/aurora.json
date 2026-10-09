@@ -190,14 +190,18 @@
   "runtime": {
     "title": "실행",
     "status": {
+      "offline": "오프라인",
       "unconfigured": "미설정",
       "provisioning": "준비 중",
       "online": "온라인",
       "failed": "실패"
     },
-    "recovery": {
-      "unconfigured": "이 워크스페이스에는 실행 노드가 없습니다. 생성을 시작하면 프로비저닝됩니다.",
-      "failed": "실행 노드를 시작하지 못했습니다. 생성을 시작하면 다시 시도합니다. 계속 실패하면 관리자에게 Fleet 실행 환경 점검을 요청하세요."
+    "retry": "다시 시도",
+    "reasons": {
+      "runtime_not_provisioned": "이 워크스페이스에는 실행 중인 노드가 없습니다. 생성을 시작하면 만들어집니다.",
+      "runtime_offline": "런타임 노드가 오프라인입니다. 다시 시도하여 상태를 확인하세요.",
+      "runtime_unconfigured": "이 워크스페이스에는 실행 중인 노드가 없습니다. 관리자에게 런타임 설정 확인을 요청하세요.",
+      "runtime_policy_unavailable": "런타임 정책을 사용할 수 없습니다. 관리자에게 런타임 설정 확인을 요청하세요."
     },
     "generations_title": "실행 중인 생성",
     "generations_empty": "실행 중인 생성이 없습니다."

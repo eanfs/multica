@@ -79,18 +79,6 @@ func inspectEnvironment(env []string, maxRuns int, aurora *model.AuroraConfig) b
 			if aurora == nil || value != model.AuroraEnrollmentFile {
 				return false
 			}
-		case model.AuroraHTTPProxyEnv:
-			if aurora == nil || value != model.AuroraEgressProxyEndpoint {
-				return false
-			}
-		case model.AuroraHTTPSProxyEnv:
-			if aurora == nil || value != model.AuroraEgressProxyEndpoint {
-				return false
-			}
-		case model.AuroraNoProxyEnv:
-			if aurora == nil || value != model.AuroraNoProxyValue {
-				return false
-			}
 		case model.AuroraClaudePathEnv:
 			// The provider supplies the one agent executable path at container
 			// start; the neutral image deliberately bakes no MULTICA_CLAUDE_PATH.
@@ -127,7 +115,7 @@ func inspectEnvironment(env []string, maxRuns int, aurora *model.AuroraConfig) b
 	if !seen["HOME"] || !seen["FLEET_NODE_MAX_RUNS"] {
 		return false
 	}
-	if aurora != nil && (!seen[model.AuroraManagedEnv] || !seen[model.AuroraServerURLEnv] || !seen[model.AuroraEnrollmentFileEnv] || !seen[model.AuroraHTTPProxyEnv] || !seen[model.AuroraHTTPSProxyEnv] || !seen[model.AuroraNoProxyEnv] || !seen[model.AuroraClaudePathEnv]) {
+	if aurora != nil && (!seen[model.AuroraManagedEnv] || !seen[model.AuroraServerURLEnv] || !seen[model.AuroraEnrollmentFileEnv] || !seen[model.AuroraClaudePathEnv]) {
 		return false
 	}
 	if aurora != nil {

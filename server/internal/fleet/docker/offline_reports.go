@@ -164,12 +164,7 @@ func (p *Provider) Delete(ctx context.Context, n model.Node, ref model.Operation
 			return safeError(e)
 		}
 	}
-	if p.cfg.Aurora != nil {
-		if e = p.removeEgress(ctx, n); e != nil {
-			return safeError(e)
-		}
-	}
-	// Volumes follow the sidecar; data still precedes the per-node network so a
+	// Volumes follow the node; data still precedes the per-node network so a
 	// crash or uncertain earlier deletion leaves data for fresh proof/retry.
 	for _, r := range []Resource{p.volume(n, "secrets"), p.volume(n, "data")} {
 		if r.Role == "data" {
@@ -237,7 +232,7 @@ func (e *sdkEngine) nodeResourcesAbsent(ctx context.Context, n model.Node) (bool
 			return false, model.ErrForbidden
 		}
 		if r.ID != n.ContainerID {
-			if r.Role != "diagnostic" && r.Role != "bootstrap" && r.Role != egressProxyRole {
+			if r.Role != "diagnostic" && r.Role != "bootstrap" {
 				return false, model.ErrUnknownHealth
 			}
 			absent = false
@@ -245,7 +240,7 @@ func (e *sdkEngine) nodeResourcesAbsent(ctx context.Context, n model.Node) (bool
 		}
 		absent = false
 	}
-	// An Aurora node also owns its internal workspace network; completion needs
+	// An Aurora node also owns its workspace network; completion needs
 	// that network gone, not only its containers and volumes.
 	if absent && e.cfg.Aurora != nil {
 		nw, err := e.client.NetworkInspect(ctx, p.workspaceNetwork(n).Name, network.InspectOptions{})
@@ -357,10 +352,6 @@ func (e *sdkEngine) recoverHelpers(ctx context.Context, n model.Node) error {
 		}
 		if !Owns(r.Labels, n.Namespace, e.cfg.FleetID, nodeID(n), r.Role) {
 			return model.ErrForbidden
-		}
-		if r.Role == egressProxyRole {
-			// The egress sidecar is not a helper; Delete owns its removal.
-			continue
 		}
 		if r.Role != "diagnostic" && r.Role != "bootstrap" {
 			return model.ErrUnknownHealth

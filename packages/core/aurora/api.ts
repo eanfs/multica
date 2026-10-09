@@ -202,7 +202,10 @@ export function parseAuroraRuntime(
   return {
     value: {
       ...parsed.value,
-      state: normalizeAuroraRuntimeState(parsed.value.state),
+      state:
+        parsed.value.state === "online" && parsed.value.node?.ready !== true
+          ? "offline"
+          : normalizeAuroraRuntimeState(parsed.value.state),
     },
     degraded: parsed.degraded,
   };

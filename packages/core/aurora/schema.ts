@@ -158,7 +158,10 @@ export const auroraRuntimeNodeSchema = z.object({
   status: z.string().default(""),
   ready: z.boolean().default(false),
   provider: z.string().default(""),
-  errorCode: z.string().optional(),
+  errorCode: z
+    .enum(["runtime_unconfigured", "runtime_offline", "runtime_policy_unavailable"])
+    .optional()
+    .catch(undefined),
   operationId: z.string().optional(),
   createdAt: z.string().default(""),
 });

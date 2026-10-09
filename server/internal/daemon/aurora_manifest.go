@@ -49,11 +49,11 @@ const (
 	auroraArtifactSniffBytes = 512
 
 	// auroraSandboxRoot is the fixed mount a managed sandbox presents to the
-	// agent (see deploy/aurora-sandbox/runtime/src/task-context.mjs). Its
+	// agent. Its
 	// presence is what tells the daemon it is running inside the sandbox and
 	// therefore has an artifact tree to validate.
 	auroraSandboxRoot = "/workspace"
-	// auroraSandboxOutputRoot is the fixed mount the broker writes outputs
+	// auroraSandboxOutputRoot is the fixed mount the agent writes outputs
 	// under.
 	auroraSandboxOutputRoot = "/workspace/output"
 )

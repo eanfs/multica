@@ -16,6 +16,50 @@ import (
 	"github.com/multica-ai/multica/server/pkg/skillbundle"
 )
 
+func TestEnsureTaskSkillBundles_AuroraRequiresDocument(t *testing.T) {
+	task := Task{Agent: &AgentData{SystemKey: "aurora:text-image"}}
+	d := &Daemon{}
+	err := d.ensureTaskSkillBundles(context.Background(), &task)
+	if err == nil || !strings.Contains(err.Error(), "required Aurora skill document") {
+		t.Fatalf("missing required document must fail delivery readably, got %v", err)
+	}
+}
+
+func TestEnsureTaskSkillBundles_AuroraResolvedDocument(t *testing.T) {
+	for _, tc := range []struct {
+		name, source, content string
+		wantError             bool
+	}{
+		{"文字生成图片", "workspace", "# Workflow", false},
+		{"文字生成图片", "workspace", "  ", true},
+		{"unrelated", "workspace", "# Workflow", true},
+		{"文字生成图片", "plugin", "# Workflow", true},
+	} {
+		t.Run(tc.name+tc.source+tc.content, func(t *testing.T) {
+			bundle := SkillData{ID: "skill-1", Source: tc.source, Name: tc.name, Content: tc.content}
+			ref := skillRefFromBundle(bundle)
+			bundle.Hash, bundle.SizeBytes = ref.Hash, ref.SizeBytes
+			d := &Daemon{skillCache: NewSkillBundleCache(t.TempDir())}
+			if err := d.skillCache.Store("ws-1", bundle); err != nil {
+				t.Fatal(err)
+			}
+			task := Task{WorkspaceID: "ws-1", Agent: &AgentData{SystemKey: "aurora:text-image", Name: "renamed agent", SkillRefs: []SkillRefData{ref}}}
+			err := d.ensureTaskSkillBundles(context.Background(), &task)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("delivery error = %v, want error %v", err, tc.wantError)
+			}
+			if !tc.wantError && (len(task.Agent.Skills) != 1 || task.Agent.Skills[0].Content != "# Workflow") {
+				t.Fatal("document not delivered")
+			}
+		})
+	}
+	// Ordinary user agents still execute without any skill document.
+	task := Task{Agent: &AgentData{}}
+	if err := (&Daemon{}).ensureTaskSkillBundles(context.Background(), &task); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSkillBundleResolveTimeout(t *testing.T) {
 	cases := []struct {
 		name string

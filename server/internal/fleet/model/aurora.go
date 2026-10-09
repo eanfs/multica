@@ -2,14 +2,11 @@ package model
 
 import (
 	"fmt"
-	"net"
 	"net/url"
 	"regexp"
 	"sort"
 	"strings"
 	"unicode"
-
-	"github.com/multica-ai/multica/server/internal/auroraegress"
 )
 
 // The managed Aurora sandbox runtime reads exactly one single-use enrollment
@@ -23,13 +20,6 @@ const (
 	AuroraServerURLEnv      = "MULTICA_SERVER_URL"
 	AuroraEnrollmentFileEnv = "MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE"
 
-	// AuroraHTTPProxyEnv, AuroraHTTPSProxyEnv and AuroraNoProxyEnv are the only
-	// proxy variables the managed sandbox may inherit. The node never joins the
-	// uplink network; the proxy is its only egress.
-	AuroraHTTPProxyEnv  = "HTTP_PROXY"
-	AuroraHTTPSProxyEnv = "HTTPS_PROXY"
-	AuroraNoProxyEnv    = "NO_PROXY"
-
 	// AuroraAnthropicBaseURLEnv and AuroraAnthropicModelEnv forward the optional
 	// operator-configured managed Claude endpoint. They are never credentials.
 	AuroraAnthropicBaseURLEnv = "ANTHROPIC_BASE_URL"
@@ -41,15 +31,7 @@ const (
 	// CLI, and the adoption authority rejects a live container that omits it or
 	// carries a different value.
 	AuroraClaudePathEnv = "MULTICA_CLAUDE_PATH"
-	AuroraClaudePath    = "/opt/aurora/runtime/node_modules/.bin/claude"
-
-	// AuroraEgressAlias is the Docker network alias the egress sidecar takes on
-	// the workspace-internal network, so the sandbox can reach it by name.
-	AuroraEgressAlias = "egress"
-	// AuroraEgressProxyEndpoint is the only proxy endpoint the sandbox may use.
-	AuroraEgressProxyEndpoint = "http://" + AuroraEgressAlias + ":3128"
-	// AuroraNoProxyValue keeps the proxy itself and loopback out of the proxy.
-	AuroraNoProxyValue = "egress,127.0.0.1,localhost"
+	AuroraClaudePath    = "/usr/local/bin/claude"
 
 	// AuroraWorkspaceMount, AuroraTmpMount and AuroraRunMount are the fixed
 	// writable tmpfs surfaces of the Aurora node. Every one is nosuid,nodev,noexec
@@ -63,13 +45,6 @@ const (
 // "mse_" plus 40 lowercase hex characters. Validation is local so junk secrets
 // never reach the managed daemon or the enrollment endpoint.
 var enrollmentTokenPattern = regexp.MustCompile("^mse_[0-9a-f]{40}$")
-
-// EgressPinsEnv renders the configured provider pins in a deterministic order
-// for the egress sidecar environment. An absent or empty map renders "", which
-// keeps the sidecar's DNS-only behaviour exactly.
-func (a AuroraConfig) EgressPinsEnv() string {
-	return auroraegress.FormatPins(a.EgressPins)
-}
 
 // ClaudeEnvPairs returns the configured extra node environment variables as
 // KEY=value entries in deterministic key order, so one configuration always
@@ -101,16 +76,6 @@ type AuroraConfig struct {
 	// daemon enrolls against and calls back to. It is not a client-supplied
 	// image, path or credential.
 	ServerURL string `json:"server_url"`
-	// EgressHosts is the explicit exact host:443 allowlist the sidecar accepts
-	// in addition to the provider hosts compiled into the proxy image.
-	EgressHosts []string `json:"egress_hosts"`
-	// EgressPins maps an already-allowed provider hostname (bare, lowercase, no
-	// port) to the public addresses the egress sidecar must dial instead of
-	// resolving. It is operator-owned public configuration and never a way to
-	// add a host: every pin host must already be a compiled or configured
-	// provider target, and every address must be public. An absent map preserves
-	// today's DNS behaviour exactly.
-	EgressPins map[string][]string `json:"egress_pins"`
 	// AnthropicBaseURL and AnthropicModel forward the optional managed Claude
 	// endpoint override. Empty preserves the provider default.
 	AnthropicBaseURL string `json:"anthropic_base_url"`
@@ -124,9 +89,6 @@ type AuroraConfig struct {
 	// ReadonlyRootfs must be explicitly true: the managed profile never opts out
 	// of the read-only root filesystem.
 	ReadonlyRootfs bool `json:"readonly_rootfs"`
-	// UplinkNetwork is the operator-provided Docker network only the egress
-	// sidecar joins. The sandbox never joins it.
-	UplinkNetwork string `json:"uplink_network"`
 }
 
 // Validate rejects an Aurora profile that could not safely enroll or isolate.
@@ -135,14 +97,6 @@ type AuroraConfig struct {
 func (a AuroraConfig) Validate() error {
 	if !ValidOrigin(a.ServerURL) {
 		return fmt.Errorf("%w: aurora server_url must be an http(s) origin", ErrInvalidRequest)
-	}
-	for _, host := range a.EgressHosts {
-		if !validEgressHost(host) {
-			return fmt.Errorf("%w: aurora egress_hosts must be exact host:443 entries", ErrInvalidRequest)
-		}
-	}
-	if err := auroraegress.ValidateEgressPins(a.EgressPins, a.EgressHosts); err != nil {
-		return fmt.Errorf("%w: aurora egress_pins must pin only already-allowed provider hosts to public addresses", ErrInvalidRequest)
 	}
 	if a.AnthropicBaseURL != "" && !ValidAnthropicBaseURL(a.AnthropicBaseURL) {
 		return fmt.Errorf("%w: aurora anthropic_base_url must be a single https host without credentials, query or fragment, with an optional path prefix", ErrInvalidRequest)
@@ -170,16 +124,9 @@ func (a AuroraConfig) Validate() error {
 	if !a.ReadonlyRootfs {
 		return fmt.Errorf("%w: aurora readonly_rootfs must be explicitly true", ErrInvalidRequest)
 	}
-	if !networkNamePattern.MatchString(a.UplinkNetwork) {
-		return fmt.Errorf("%w: aurora uplink_network must be a Docker network name", ErrInvalidRequest)
-	}
+
 	return nil
 }
-
-var (
-	// networkNamePattern is a conservative Docker network name.
-	networkNamePattern = regexp.MustCompile("^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
-)
 
 // claudeCodeEnvAllowlist is the exact set of additional Claude Code variables
 // an operator may set through AuroraConfig.ClaudeEnv. It is a fixed allowlist of
@@ -241,16 +188,6 @@ func isSecretClaudeEnvKey(key string) bool {
 		}
 	}
 	return false
-}
-
-// validEgressHost accepts only an exact host:443 entry with no wildcard.
-func validEgressHost(raw string) bool {
-	host := strings.ToLower(strings.TrimSpace(raw))
-	if host == "" || host != raw || strings.ContainsAny(host, "*? ") {
-		return false
-	}
-	name, port, err := net.SplitHostPort(host)
-	return err == nil && name != "" && port == "443" && !strings.Contains(name, "/")
 }
 
 // anthropicBaseURLPathPattern matches the optional path prefix of an Anthropic

@@ -7107,8 +7107,11 @@ func waitCodexRolloutPresent(ctx context.Context, codexHome, sessionID string) b
 }
 
 func (d *Daemon) ensureTaskSkillBundles(ctx context.Context, task *Task) error {
-	if task == nil || task.Agent == nil || len(task.Agent.SkillRefs) == 0 {
+	if task == nil || task.Agent == nil {
 		return nil
+	}
+	if len(task.Agent.SkillRefs) == 0 {
+		return requireAuroraSkillDocument(*task)
 	}
 	resolved := make(map[string]SkillData, len(task.Agent.SkillRefs))
 	misses := make([]SkillRefData, 0)
@@ -7166,7 +7169,7 @@ func (d *Daemon) ensureTaskSkillBundles(ctx context.Context, task *Task) error {
 		skills = append(skills, bundle)
 	}
 	task.Agent.Skills = skills
-	return nil
+	return requireAuroraSkillDocument(*task)
 }
 
 // resolveSkillBundle downloads one skill bundle and writes it to the on-disk

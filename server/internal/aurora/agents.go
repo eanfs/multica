@@ -11,8 +11,9 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
-// SystemAgentDef is one workspace-level system agent carrying a single Aurora
-// skill. The 16 definitions correspond one-to-one with the 16 catalog entries;
+// SystemAgentDef describes an Aurora skill carrier. Available carriers are
+// member-visible and assignable; unavailable placeholders remain hidden.
+// The 16 definitions correspond one-to-one with the 16 catalog entries;
 // SystemKey is the agent's stable identity ("aurora:"+skillID), never its
 // display name.
 type SystemAgentDef struct {
@@ -75,12 +76,13 @@ func ManagedRuntimeID(ctx context.Context, q *db.Queries, workspaceID pgtype.UUI
 	return rt.ID, nil
 }
 
-// EnsureSystemAgents lazily materialises Aurora's 16 workspace-level system
-// agents: one managed runtime row, and per catalog skill one kind='system'
+// EnsureSystemAgents lazily materialises Aurora's 13 available workspace-level
+// agents: one managed runtime row, and per available catalog skill one kind='user'
 // agent, one skill row, and the agent_skill junction. It is idempotent —
 // calling it twice against the same workspace leaves the same rows — so the
 // generation-creation path (Plan 3 Task 2) can seed every workspace without
-// counting rows first.
+// counting rows first. Reseeding restores archived carriers in place so a user
+// archive cannot leave generation lookup permanently broken.
 //
 // ownerID must be a real user id (agent.owner_id references "user"): the
 // caller passes the workspace owner. No transaction is taken on purpose: each
@@ -92,6 +94,10 @@ func EnsureSystemAgents(ctx context.Context, q *db.Queries, workspaceID, ownerID
 		return err
 	}
 	for _, e := range Catalog() {
+		// Preserve existing unavailable placeholders without exposing or repairing them.
+		if !e.Available {
+			continue
+		}
 		skill, err := q.UpsertAuroraSkill(ctx, db.UpsertAuroraSkillParams{
 			WorkspaceID: workspaceID,
 			Name:        e.Name,
@@ -102,7 +108,13 @@ func EnsureSystemAgents(ctx context.Context, q *db.Queries, workspaceID, ownerID
 			return fmt.Errorf("upsert skill %q: %w", e.ID, err)
 		}
 		def := systemAgentDef(e)
-		agent, err := q.UpsertAuroraSystemAgent(ctx, db.UpsertAuroraSystemAgentParams{
+		// Adopt the workspace's existing carrier for this system_key before
+		// inserting one. Migration 172's unique index includes runtime_id, so an
+		// insert-first seed would mint a second carrier after a runtime teardown
+		// unbound the first; agent_workspace_name_unique then fails the seed and
+		// generation creation breaks, while GetAgentBySystemKey keeps resolving
+		// the older, unbound row.
+		agent, err := q.AdoptAuroraSystemAgent(ctx, db.AdoptAuroraSystemAgentParams{
 			WorkspaceID:  workspaceID,
 			OwnerID:      ownerID,
 			RuntimeID:    runtimeID,
@@ -110,6 +122,16 @@ func EnsureSystemAgents(ctx context.Context, q *db.Queries, workspaceID, ownerID
 			Name:         def.Name,
 			Instructions: def.Instructions,
 		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			agent, err = q.UpsertAuroraSystemAgent(ctx, db.UpsertAuroraSystemAgentParams{
+				WorkspaceID:  workspaceID,
+				OwnerID:      ownerID,
+				RuntimeID:    runtimeID,
+				SystemKey:    pgtype.Text{String: def.SystemKey, Valid: true},
+				Name:         def.Name,
+				Instructions: def.Instructions,
+			})
+		}
 		if err != nil {
 			return fmt.Errorf("upsert agent %q: %w", e.ID, err)
 		}

@@ -1038,7 +1038,7 @@ func newLocalFleetProvisioner() aurora.FleetProvisioner {
 // generation creation answer 503 with aurora_runtime_unavailable before any
 // reservation; the catalog and library endpoints are unaffected.
 func newWorkspaceSandboxManager(pool *pgxpool.Pool, queries *db.Queries) aurora.WorkspaceSandboxManager {
-	image := strings.TrimSpace(os.Getenv("AURORA_SANDBOX_IMAGE"))
+	image := strings.TrimSpace(os.Getenv("AURORA_RUNTIME_IMAGE"))
 	provisioner := newLocalFleetProvisioner()
 	if provisioner == nil || image == "" {
 		slog.Info("aurora sandbox autoprovisioning disabled",

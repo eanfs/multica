@@ -1,0 +1,319 @@
+name: Runtime node supply chain
+
+# Builds, scans, signs and publishes the unified node image, which runs
+# model-authored shell with provider credentials in its environment.
+#
+# Pull requests build the host-platform image without pushing, verify the image
+# contract, and scan both the filesystem and the image. A push to main in
+# eanfs/multica additionally publishes linux/amd64+linux/arm64 to GHCR, signs
+# the OCI index digest keylessly, and attaches SPDX SBOM and provenance
+# attestations. Tags aid discovery only: fleet configuration and documentation
+# reference the image by digest.
+#
+# Policy: the gate blocks every detected secret and every CRITICAL
+# vulnerability that .github/runtime-node-vex.json does not accept. That file
+# documents the Debian base-image advisories this image cannot fix; a new
+# CRITICAL therefore blocks until it is fixed or explicitly accepted there. HIGH
+# findings are reported (artifact + job summary) but do not block.
+
+on:
+  pull_request:
+    paths:
+      - "docker/runtime/**"
+      - ".dockerignore"
+      - "scripts/check-runtime-image.sh"
+      - "scripts/check-runtime-image.test.sh"
+      - "server/cmd/fleet-node/**"
+      - "server/cmd/multica/**"
+      - "server/internal/**"
+      - "server/pkg/**"
+      - "server/go.mod"
+      - "server/go.sum"
+      - ".github/runtime-node-vex.json"
+      - ".github/workflows/runtime-image.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docker/runtime/**"
+      - ".dockerignore"
+      - "scripts/check-runtime-image.sh"
+      - "scripts/check-runtime-image.test.sh"
+      - "server/cmd/fleet-node/**"
+      - "server/cmd/multica/**"
+      - "server/internal/**"
+      - "server/pkg/**"
+      - "server/go.mod"
+      - "server/go.sum"
+      - ".github/runtime-node-vex.json"
+      - ".github/workflows/runtime-image.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: runtime-image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+permissions:
+  contents: read
+
+env:
+  RUNTIME_IMAGE: ghcr.io/eanfs/multica-runtime
+
+jobs:
+  verify:
+    name: Verify, build, and scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # Hermetic: fake Docker and explicit utility paths, so a checker regression
+      # fails before the image build is paid for.
+      - name: Checker regressions
+        run: bash scripts/check-runtime-image.test.sh
+
+      - name: Build host-platform node image without pushing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/runtime/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          sbom: false
+          tags: ${{ env.RUNTIME_IMAGE }}:ci
+
+      - name: Verify the node image contract
+        run: bash scripts/check-runtime-image.sh "${{ env.RUNTIME_IMAGE }}:ci"
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+
+      - name: Generate SPDX SBOMs with Syft
+        run: |
+          syft dir:. -o spdx-json > sbom-repo.spdx.json
+          syft "${{ env.RUNTIME_IMAGE }}:ci" -o spdx-json > sbom-runtime.spdx.json
+
+      - name: Scan filesystem with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          format: json
+          output: trivy-fs.json
+          exit-code: "0"
+
+      - name: Scan node image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.RUNTIME_IMAGE }}:ci
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          format: json
+          output: trivy-runtime.json
+          exit-code: "0"
+
+      - name: Enforce supply-chain release policy
+        if: always()
+        run: |
+          set -euo pipefail
+          failed=0
+          # trivy-fs.json scans the whole monorepo and reports pre-existing
+          # dependencies no Aurora change can fix; it is advisory. The image scan
+          # keeps scanners: vuln,secret, so a baked-in secret always blocks and a
+          # CRITICAL blocks unless runtime-node-vex.json accepts that exact
+          # advisory for this image.
+          for report in trivy-runtime.json; do
+            [ -f "$report" ] || continue
+            violations="$(jq -r --slurpfile vex .github/runtime-node-vex.json '
+              def vexed($id; $pkg; $ver; $image):
+                [ $vex[0].entries[]?
+                  | select(.cve == $id and .package == $pkg and .version == $ver)
+                  | . as $entry
+                  | select($image | contains($entry.image))
+                ] | length > 0;
+              . as $report
+              | [ ($report.Results[]? | (.Secrets // [])[]
+                    | "secret " + (.RuleID // "unknown") + " at " + (.Target // "unknown")),
+                  ($report.Results[]? | (.Vulnerabilities // [])[]
+                    | select(.Severity == "CRITICAL")
+                    | select(vexed(.VulnerabilityID; .PkgName; .InstalledVersion; ($report.ArtifactName // .Target // "")) | not)
+                    | (.VulnerabilityID // "unknown") + " " + (.PkgName // "unknown") + " " + (.InstalledVersion // "unknown") + " CRITICAL at " + ($report.ArtifactName // .Target // "unknown")) ]
+              | .[]' "$report")"
+            if [ -n "$violations" ]; then
+              printf 'supply-chain release policy blocked %s:\n%s\n' "$report" "$violations"
+              failed=1
+            fi
+          done
+          [ "$failed" -eq 0 ]
+
+      - name: Summarize HIGH findings
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            printf '## Node image HIGH findings (advisory)\n\n'
+            jq -r '
+              . as $report
+              | [ ($report.Results[]? | (.Vulnerabilities // [])[]
+                    | select(.Severity == "HIGH")
+                    | (.VulnerabilityID // "unknown") + " " + (.PkgName // "unknown") + " " + (.InstalledVersion // "unknown")) ]
+              | if length == 0 then "none" else (.[] | "- " + .) end' trivy-runtime.json 2>/dev/null || printf 'no image report\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload supply-chain reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-node-reports
+          path: |
+            sbom-*.spdx.json
+            trivy-*.json
+          retention-days: 30
+          if-no-files-found: error
+
+  publish:
+    name: Publish signed image
+    if: github.repository == 'eanfs/multica' && github.ref == 'refs/heads/main'
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      runtime_digest: ${{ steps.runtime.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Docker QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the node OCI index
+        id: runtime
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/runtime/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: |
+            ${{ env.RUNTIME_IMAGE }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/eanfs/multica
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+
+      - name: Generate published SPDX SBOM
+        run: syft "${{ env.RUNTIME_IMAGE }}@${{ steps.runtime.outputs.digest }}" -o spdx-json > sbom-published.spdx.json
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Sign the OCI index digest keylessly
+        run: cosign sign --yes "${{ env.RUNTIME_IMAGE }}@${{ steps.runtime.outputs.digest }}"
+
+      - name: Attach the SPDX attestation
+        run: cosign attest --yes --type spdxjson --predicate sbom-published.spdx.json "${{ env.RUNTIME_IMAGE }}@${{ steps.runtime.outputs.digest }}"
+
+      - name: Write the provenance predicate
+        run: |
+          jq -n --arg repository "${GITHUB_REPOSITORY}" --arg revision "${GITHUB_SHA}" --arg digest "${{ steps.runtime.outputs.digest }}" \
+            '{builder: {id: ("https://github.com/" + $repository + "/actions")}, buildType: "https://github.com/docker/buildx", invocation: {configSource: {uri: ("git+https://github.com/" + $repository), digest: {sha1: $revision}}}, metadata: {buildInvocationID: $digest, completeness: {parameters: true, environment: true, materials: false}, reproducible: false}, materials: [{uri: ("git+https://github.com/" + $repository), digest: {sha1: $revision}}]}' > provenance-published.json
+
+      - name: Attach the provenance attestation
+        run: cosign attest --yes --type slsaprovenance --predicate provenance-published.json "${{ env.RUNTIME_IMAGE }}@${{ steps.runtime.outputs.digest }}"
+
+      - name: Attest GitHub build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-name: ghcr.io/eanfs/multica-runtime
+          subject-digest: ${{ steps.runtime.outputs.digest }}
+          push-to-registry: true
+
+      - name: Record the published digest reference
+        run: printf '%s@%s\n' "${{ env.RUNTIME_IMAGE }}" "${{ steps.runtime.outputs.digest }}" | tee digest-references.txt
+
+      - name: Upload the published SBOM, provenance and digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-node-published
+          path: |
+            sbom-published.spdx.json
+            provenance-published.json
+            digest-references.txt
+          retention-days: 30
+          if-no-files-found: error
+
+  verify-published:
+    name: Verify the published signature and attestations
+    if: github.repository == 'eanfs/multica' && github.ref == 'refs/heads/main'
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # Pull the published digest with the job token: the package may still be
+      # private on its first publication, and anonymous GHCR pulls would fail.
+      - name: Login to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Verify the signature, attestations, digest and architectures
+        env:
+          RUNTIME_DIGEST: ${{ needs.publish.outputs.runtime_digest }}
+        run: |
+          set -euo pipefail
+          identity="https://github.com/eanfs/multica/.github/workflows/runtime-image.yml@refs/heads/main"
+          issuer="https://token.actions.githubusercontent.com"
+          reference="${RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
+          cosign verify --certificate-identity "${identity}" --certificate-oidc-issuer "${issuer}" "${reference}"
+          cosign verify-attestation --type spdxjson --certificate-identity "${identity}" --certificate-oidc-issuer "${issuer}" "${reference}"
+          cosign verify-attestation --type slsaprovenance --certificate-identity "${identity}" --certificate-oidc-issuer "${issuer}" "${reference}"
+          tag_digest="$(docker buildx imagetools inspect "${RUNTIME_IMAGE}:sha-${GITHUB_SHA}" --format "{{.Manifest.Digest}}")"
+          test "${tag_digest}" = "${RUNTIME_DIGEST}"
+          raw="$(docker buildx imagetools inspect "${reference}" --raw)"
+          printf "%s\n" "${raw}" | jq -e '([.manifests[].platform.architecture] | index("amd64")) and ([.manifests[].platform.architecture] | index("arm64"))' > /dev/null
+          printf "verified %s@%s\n" "${RUNTIME_IMAGE}" "${RUNTIME_DIGEST}"

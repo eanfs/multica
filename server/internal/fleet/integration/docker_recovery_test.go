@@ -176,9 +176,6 @@ func (f *fakeRecoveryEngine) Inspect(_ context.Context, id string) (docker.Inspe
 }
 
 func (f *fakeRecoveryEngine) EnsureNetwork(context.Context, docker.Resource) error { return nil }
-func (f *fakeRecoveryEngine) ConnectNetwork(context.Context, string, string, []string) error {
-	return nil
-}
 func (f *fakeRecoveryEngine) RemoveNetwork(context.Context, docker.Resource) error { return nil }
 func (f *fakeRecoveryEngine) EnsureVolume(context.Context, docker.Resource) error  { return nil }
 

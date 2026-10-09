@@ -6,13 +6,6 @@ node - "$root" "$@" <<'NODE'
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),cp=require('child_process'),net=require('net');
 const root=process.argv[2],action=process.argv[3],argv=process.argv.slice(4),args={};let lock,locked=false;
 const need=ok=>{if(!ok)throw Error('denied');};
-// isPublicAddress mirrors the sidecar's IsPublicIP blocked ranges so a pinned
-// non-public address is denied before any Docker or SQL action.
-const blockedV4=[['0.0.0.0',8],['10.0.0.0',8],['100.64.0.0',10],['127.0.0.0',8],['169.254.0.0',16],['172.16.0.0',12],['192.0.0.0',24],['192.0.2.0',24],['192.88.99.0',24],['192.168.0.0',16],['198.18.0.0',15],['198.51.100.0',24],['203.0.113.0',24],['224.0.0.0',4],['240.0.0.0',4]];
-const blockedV6=[['::',128],['::1',128],['64:ff9b::',96],['100::',64],['2001::',32],['2001:2::',48],['2001:db8::',32],['2001:10::',28],['2002::',16],['fc00::',7],['fe80::',10],['ff00::',8]];
-function ipv4ToInt(raw){const p=raw.split('.').map(Number);return (((p[0]<<24)>>>0)|(p[1]<<16)|(p[2]<<8)|p[3])>>>0;}
-function ipv6ToBigInt(raw){let a=raw;const m=a.match(/(\d{1,3}(?:\.\d{1,3}){3})$/);if(m){const b=m[1].split('.').map(Number);a=a.slice(0,m.index)+((b[0]<<8)|b[1]).toString(16)+':'+((b[2]<<8)|b[3]).toString(16);}const [head,tail]=a.split('::');const hp=head?head.split(':').filter(Boolean):[];const tp=tail?tail.split(':').filter(Boolean):[];const groups=[...hp,...Array(8-hp.length-tp.length).fill('0'),...tp];return groups.reduce((acc,g)=>(acc<<16n)|BigInt(parseInt(g,16)),0n);}
-function isPublicAddress(raw){const family=net.isIP(raw);if(family===0)return false;if(family===6){const value=ipv6ToBigInt(raw);return !blockedV6.some(([base,bits])=>{const b=ipv6ToBigInt(base),shift=128n-BigInt(bits);return (value>>shift)===(b>>shift);});}const value=ipv4ToInt(raw);return !blockedV4.some(([base,bits])=>{const b=ipv4ToInt(base),shift=32-bits;return shift===32?value===b:(value>>>shift)===(b>>>shift);});}
 function directories(p){need(path.isAbsolute(p));for(let d=p;;d=path.dirname(d)){const s=fs.lstatSync(d);need(s.isDirectory()&&!s.isSymbolicLink());if(path.dirname(d)===d)break;}}
 function readPrivate(p){need(path.isAbsolute(p));directories(path.dirname(p));const parent=fs.statSync(path.dirname(p));need(parent.uid===process.getuid()&&(parent.mode&0o777)===0o700);const fd=fs.openSync(p,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK);try{const s=fs.fstatSync(fd);need(s.isFile()&&(s.mode&0o777)===0o600&&s.uid===process.getuid()&&s.size<=1048576);return fs.readFileSync(fd,'utf8');}finally{fs.closeSync(fd);}}
 const json=p=>JSON.parse(readPrivate(p));
@@ -36,28 +29,28 @@ try{
  need(input.uid===process.getuid()&&input.uid>0&&input.gid===process.getgid()&&input.gid>0&&Number.isInteger(input.socket_gid)&&input.socket_gid>=0);
  need(path.isAbsolute(input.socket_path)&&input.pg_alias==='postgres'&&input.pg_port===5432&&Number(url.port||5432)===input.pg_host_port);
  for(const k of ['node_image','fleet_image'])need(typeof input[k]==='string'&&/^[a-zA-Z0-9._/:-]+@sha256:[a-f0-9]{64}$/.test(input[k]));
-// Aurora profile fields. The uplink network is the owned fleet-nodes network
-// and is written below. The node image is the top-level node_image, shared with
-// the egress sidecar; provider credentials travel as values through claude_env,
-// never as a host file path.
+// Aurora nodes use the single node image and call providers directly.
+// Provider credentials travel through claude_env, never a host file path.
 const aurora=input.aurora;need(aurora&&typeof aurora==='object'&&!Array.isArray(aurora));
-const auroraKeys=['server_url','egress_hosts','egress_pins','anthropic_base_url','anthropic_model','claude_env'];
+const auroraKeys=['server_url','anthropic_base_url','anthropic_model','claude_env'];
 need(Object.keys(aurora).length===auroraKeys.length&&auroraKeys.every(k=>Object.hasOwn(aurora,k)));
 const serverOrigin=new URL(aurora.server_url);need(['http:','https:'].includes(serverOrigin.protocol)&&serverOrigin.hostname&&!serverOrigin.username&&!serverOrigin.password&&!serverOrigin.search&&!serverOrigin.hash&&serverOrigin.pathname==='/');
-need(Array.isArray(aurora.egress_hosts)&&aurora.egress_hosts.every(h=>typeof h==='string'&&/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?:443$/.test(h)));
-// Operator pins: a bare lowercase DNS host already in the compiled or configured
-// allowlist, mapped to 1..8 public bare IP addresses. A pin narrows DNS for one
-// already-allowed host and can never add a host, port or IP-literal target.
-const compiledProviderHosts=['api.anthropic.com:443','ark.cn-beijing.volces.com:443','openspeech.bytedance.com:443'];
-const egressPins=aurora.egress_pins;need(egressPins&&typeof egressPins==='object'&&!Array.isArray(egressPins));
-const pinnedHosts=new Set([...compiledProviderHosts,...aurora.egress_hosts]);
-for(const [host,addresses] of Object.entries(egressPins)){
- need(/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/.test(host)&&host.length<=253&&net.isIP(host)===0&&pinnedHosts.has(host+':443'));
- need(Array.isArray(addresses)&&addresses.length>=1&&addresses.length<=8);
- for(const address of addresses)need(typeof address==='string'&&net.isIP(address)!==0&&isPublicAddress(address));
-}
 need(typeof aurora.anthropic_base_url==='string'&&typeof aurora.anthropic_model==='string');
-if(aurora.anthropic_base_url!==''){const base=new URL(aurora.anthropic_base_url);need(base.protocol==='https:'&&base.hostname&&!base.port&&!base.username&&!base.password&&!base.search&&!base.hash&&(base.pathname===''||base.pathname==='/'));}
+if(aurora.anthropic_base_url!==''){
+ // Match model.ValidAnthropicBaseURL, including its unambiguous path prefix.
+ // Check the raw spelling before WHATWG URL can erase :443, whitespace or dots.
+ const raw=aurora.anthropic_base_url;
+ need(!/[\s\x00-\x1f\x7f?#\\]/.test(raw));
+ const parts=raw.match(/^https:\/\/([^/]+)(\/.*)?$/);need(parts);
+ const authority=parts[1],prefix=parts[2]||'',base=new URL(raw);
+ need(base.hostname&&!base.port&&!/[@,]/.test(authority)&&!/:\d+$/.test(authority));
+ if(prefix!==''){
+  const decoded=decodeURIComponent(prefix);
+  need(/^\/[A-Za-z0-9-._~/%!$&'()*+,;=]*$/.test(decoded)&&!decoded.includes('//')&&!decoded.endsWith('/')&&!decoded.slice(1).split('/').some(segment=>segment==='.'||segment==='..'));
+  // Of the permitted decoded characters, only percent needs canonical escaping.
+  need(prefix===decoded.replaceAll('%','%25'));
+ }
+}
 if(aurora.anthropic_model!=='')need(aurora.anthropic_model.trim()===aurora.anthropic_model&&!/[\s]/.test(aurora.anthropic_model));
 // Extra Claude Code variables: exact allowlist, operator config only, never a
 // credential value. API_TIMEOUT_MS is digits only; a model value may carry the
@@ -168,7 +161,7 @@ for(const [key,value] of Object.entries(claudeEnv)){
  if(action==='prepare'){
   // Preserve raw URI credentials, database encoding and query ordering.
   const m=dsn.match(/^(postgres(?:ql)?:\/\/[^/]*@)([^/]+)(\/.*)$/);need(m);writePrivate(dbPath,m[1]+input.pg_alias+':'+input.pg_port+m[3]);
-  writePrivate(configPath,{namespace:id.namespace,fleet_id:id.fleet_id,image:input.node_image,api_url:input.api_url,max_nodes:2,specs:{sandbox:{cpus:2,memory_bytes:4294967296,pids:256,max_runs:1}},aurora:{server_url:input.aurora.server_url,egress_hosts:input.aurora.egress_hosts,egress_pins:input.aurora.egress_pins,anthropic_base_url:input.aurora.anthropic_base_url,anthropic_model:input.aurora.anthropic_model,claude_env:input.aurora.claude_env,readonly_rootfs:true,uplink_network:id.node_network}});writePrivate(keyPath,key);
+  writePrivate(configPath,{namespace:id.namespace,fleet_id:id.fleet_id,image:input.node_image,api_url:input.api_url,max_nodes:2,specs:{sandbox:{cpus:2,memory_bytes:4294967296,pids:256,max_runs:1}},aurora:{server_url:input.aurora.server_url,anthropic_base_url:input.aurora.anthropic_base_url,anthropic_model:input.aurora.anthropic_model,claude_env:input.aurora.claude_env,readonly_rootfs:true}});writePrivate(keyPath,key);
   // Parent-approved exception: load DB URI into only the original Fleet process.
   const startup='IFS= read -r DATABASE_URL < /run/multica-fleet/database-url || test -n "$$DATABASE_URL"; test -n "$$DATABASE_URL" || exit 1; export DATABASE_URL; exec /usr/local/bin/fleet';
   writePrivate(composePath,{services:{fleet:{container_name:id.node_network+'-control',image:input.fleet_image,user:input.uid+':'+input.gid,group_add:[String(input.socket_gid)],entrypoint:['/bin/sh','-ec'],command:[startup],environment:{FLEET_ADDR:'0.0.0.0:8090',FLEET_CONFIG_FILE:'/run/multica-fleet/config.json',FLEET_SERVICE_KEY_FILE:'/run/multica-fleet/service-key'},ports:['127.0.0.1:'+id.port+':8090'],volumes:[{type:'bind',source:input.socket_path,target:'/var/run/docker.sock'},{type:'bind',source:fleetDir,target:'/run/multica-fleet',read_only:true},...mounts],labels:{...labels,'multica.fleet.role':'control'},extra_hosts:['host.docker.internal:host-gateway'],networks:['shared-pg','fleet-nodes'],healthcheck:{test:['CMD','/usr/local/bin/fleet','readyz'],interval:'5s',timeout:'10s',retries:12},read_only:true,cap_drop:['ALL'],security_opt:['no-new-privileges:true'],restart:'unless-stopped'}},networks:{'shared-pg':{external:true,name:pgNet.Name},'fleet-nodes':{external:true,name:id.node_network}}});need(!readPrivate(composePath).includes(dsn)&&!readPrivate(composePath).includes(key.trim()));

@@ -45,7 +45,7 @@ func helperSnapshot(c *container.Config, h *container.HostConfig, l map[string]s
 
 func imageLabels() map[string]string {
 	return map[string]string{
-		"org.opencontainers.image.title":    "multica-aurora-sandbox",
+		"org.opencontainers.image.title":    "multica-runtime",
 		"org.opencontainers.image.source":   "https://github.com/eanfs/multica",
 		"org.opencontainers.image.licenses": "MIT",
 		"org.opencontainers.image.created":  "2026-10-06T00:00:00Z",

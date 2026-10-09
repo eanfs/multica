@@ -230,6 +230,27 @@ describe("parseAuroraAssets", () => {
 });
 
 describe("parseAuroraRuntime", () => {
+  it("discards unknown and malformed runtime reason codes without losing the projection", () => {
+    for (const errorCode of ["private credential", null, 42]) {
+      const parsed = parseAuroraRuntime({
+        state: "offline",
+        node: { ready: false, errorCode },
+      });
+      expect(parsed.degraded).toBe(false);
+      expect(parsed.value.state).toBe("offline");
+      expect(parsed.value.node?.errorCode).toBeUndefined();
+    }
+  });
+
+  it("does not report online when the node explicitly is not ready", () => {
+    const parsed = parseAuroraRuntime({
+      state: "online",
+      node: { status: "future", ready: false },
+    });
+    expect(parsed.degraded).toBe(false);
+    expect(parsed.value.state).toBe("offline");
+  });
+
   it("reads the workspace's execution target", () => {
     const parsed = parseAuroraRuntime({
       workspaceId: "ws-1",

@@ -3,7 +3,7 @@ title: Local Docker Fleet
 description: Run and recover the optional local Docker Fleet, its private inputs, and its verification gates.
 ---
 
-The local Docker Fleet is an optional component that manages execution nodes as Docker containers against the same checkout PostgreSQL database as the API. It reuses the existing daemon, runtime, task queue, and report protocol. This page covers the local API integration, the optional managed environment component, the Aurora managed sandbox, the safety rules that govern deletion, the verification gates, and what the setup does not provide.
+The local Docker Fleet is an optional component that manages execution nodes as Docker containers against the same checkout PostgreSQL database as the API. It reuses the existing daemon, runtime, task queue, and report protocol. This page covers the local API integration, the optional managed environment component, the Aurora managed agents, the safety rules that govern deletion, the verification gates, and what the setup does not provide.
 
 ## Local API integration
 
@@ -56,12 +56,12 @@ The registry persists the managed namespace, Fleet ID, allocated port, and closu
 Networking is deliberately narrow:
 
 - Fleet joins only the verified shared PostgreSQL Docker network and its own node network.
-- Nodes join the node network only and never the PostgreSQL network.
+- Default nodes join the node network; Aurora nodes use an owned per-node outbound-capable bridge. Neither joins the PostgreSQL network.
 - Only the Fleet port is published, and only on loopback.
 
 Images must be digest-pinned `repository@sha256:...` references. `docker-compose.fleet.yml` sends no checkout build context, and the compose create uses `--no-build`.
 
-The version 1 descriptor declares these fields: `version`, `database_name`, `database_lifecycle`, `context`, `engine_id`, `pg_container_id`, `pg_network_id`, `pg_alias`, `pg_port`, `pg_host_port`, `socket_path`, `uid`, `gid`, `socket_gid`, `node_image`, `fleet_image`, `api_url`, `profiles_file`, and `service_key_file`. It must name the exact registered database (`database_name` must equal the checkout database) and declare `database_lifecycle=exclusive-managed` only after a separate physical ownership preflight. Registry membership is not ownership proof; verify current database identity before any managed database use.
+The version 1 descriptor declares these fields: `version`, `database_name`, `database_lifecycle`, `context`, `engine_id`, `pg_container_id`, `pg_network_id`, `pg_alias`, `pg_port`, `pg_host_port`, `socket_path`, `uid`, `gid`, `socket_gid`, `node_image`, `fleet_image`, `api_url`, `profiles_file`, `service_key_file`, and `aurora`. It must name the exact registered database (`database_name` must equal the checkout database) and declare `database_lifecycle=exclusive-managed` only after a separate physical ownership preflight. Registry membership is not ownership proof; verify current database identity before any managed database use.
 
 Credential profiles use a strict private map:
 
@@ -71,29 +71,27 @@ Credential profiles use a strict private map:
 
 An empty owner value disables that owner's profile. Credential files must be regular, non-symlink `0600` files owned by the explicit non-root UID, and their directories must be `0700`. `api_url` is the approved `host.docker.internal` API URL and is preserved unchanged.
 
-## Aurora managed sandbox
+## Aurora managed agents
 
 The same Fleet can run Aurora's managed skill execution instead of the default
 Claude-only node. The server builds its Aurora fleet client only when all three
 inputs are present: `MULTICA_LOCAL_FLEET_URL`, `MULTICA_LOCAL_FLEET_SECRET_FILE`,
-and a digest-pinned `AURORA_SANDBOX_IMAGE` naming the descriptor's `image`.
+and a digest-pinned `AURORA_RUNTIME_IMAGE` naming the descriptor's `image`.
 Without all three, `POST /api/aurora/generations` still fails closed with
 `aurora_runtime_unavailable` before any credit is reserved; the catalog and
 library endpoints are unaffected.
 
-The `aurora` block of the Fleet config selects the managed sandbox profile (see
-`fleet-config.example.json`). Every field is administrator-owned public
-configuration, not a credential:
+The `aurora` block of the Fleet config selects the managed agent profile (see
+`fleet-config.example.json`). Configuration is administrator-owned; `claude_env` may contain credentials:
 
 - `server_url` — the container-reachable Multica API origin the managed daemon enrolls against.
-- `egress_hosts` — exact `host:443` entries added to the sidecar's allowlist.
-- `egress_pins` — optional map from an already-allowed provider hostname (bare, lowercase, no port) to one or more public IPv4/IPv6 addresses the sidecar dials instead of resolving DNS.
 - `anthropic_base_url` and `anthropic_model` — optional managed Claude endpoint override; the base URL may carry an optional path prefix such as `/api/plan`, and empty keeps the provider default.
 - `claude_env` — optional map of extra node variables for the managed child, including the two provider credentials described below.
 - `readonly_rootfs` — must be explicitly `true`.
-- `uplink_network` — the operator network only the egress sidecar joins.
 
-The node and its egress sidecar run the same top-level `image`: the sidecar starts with the fixed `/usr/local/bin/aurora-egress-proxy` entrypoint and the node with `fleet-node run`.
+The node uses `docker/runtime/Dockerfile`, `fleet-node run`, and `/usr/local/bin/claude`. Its owned per-node bridge network supports direct outbound access without a proxy, provider allowlist or IP pins.
+
+Upgrading an existing Fleet config: `egress_hosts`, `egress_pins`, `uplink_network`, `proxy_image`, `seccomp_profile`, `apparmor_profile` and `provider_secret_files` were removed. The loader rejects unknown keys, so a config that still carries one stops the Fleet at startup; delete them and keep the provider credentials in `claude_env`.
 
 `claude_env` accepts the fixed allowlist of model-routing and tool variables —
 `ANTHROPIC_DEFAULT_{FABLE,HAIKU,OPUS,SONNET}_MODEL`, their `_NAME` variants,
@@ -111,17 +109,8 @@ control characters.
 
 Both credentials are values in the node container environment, so any process in
 the container can read them and `docker inspect` shows them; that is the
-accepted posture. They must be supplied at deploy time from an owner-only Fleet
+accepted posture. They must be supplied at deploy time from a `0600` Fleet
 config and must never reach the image, SQL, logs, or Git.
-
-`egress_pins` is for networks whose DNS is hijacked or answers with fake-IP
-addresses (for example a Clash-style transparent proxy that resolves every
-provider host to a benchmark address such as `198.18.x.x`). Pinning a provider
-host to the public addresses a trusted resolver reports makes the sidecar dial
-those addresses directly, with no DNS lookup. A pin only ever narrows DNS: its
-host must already be compiled into the proxy image or listed in `egress_hosts`,
-so a pin can never add a host, and the `https`/443, no-IP-literal, public-address
-and server-origin rules are unchanged.
 
 A managed node starts from the fixed `fleet-node run` entrypoint, which
 `exec`s `multica daemon start --managed`. Its single-use enrollment secret
@@ -129,19 +118,18 @@ A managed node starts from the fixed `fleet-node run` entrypoint, which
 `/secrets/aurora-enrollment`; SQL stores only its hash, and the Fleet holds the
 raw secret in a process-local handoff. The sandbox runs as non-root
 (`10001:10001`) on a read-only root filesystem with `cap_drop: ALL` and
-`no-new-privileges`, and joins only its workspace-internal network. AppArmor and
+`no-new-privileges`, and joins only its outbound-capable per-node network. AppArmor and
 the custom seccomp profile are no longer used: the node runs with Docker's
 default security settings. Provider credentials are values in the container
 environment, never a mounted file.
 
-The reviewed MCP broker is the only execution surface for an Aurora task. The
-daemon stages the task's inputs, writes a mode-`0400` context and task token
-under the task workdir, and injects the broker as the sole `mcpServers` entry.
-The tools the model may call travel separately as the qualified
-`mcp__aurora__<tool>` identifiers in `--allowedTools`. A missing context,
-input, token, or skill policy fails the task before launch and refunds it.
+Aurora runs on the ordinary agent surface: shell, provider CLI and Multica CLI, driven by the skill document. The model writes `.multica/aurora-artifacts.v1.json`; the daemon independently validates paths, file type/link count, size, MIME and SHA-256. Provider-run records are bookkeeping only and cannot prevent duplicate billable calls.
+
+Only `text-image` has been rewritten as executable steps. The owner waived #199 (the remaining 12 rewrites); removing the old runtime does not make all 13 skills operational. Removed source remains recoverable at `2a2cef75fa16ec893960118dd70844c1251cb973`.
 
 ### Aurora crash semantics and recovery
+
+Existing proxy-profile nodes are not adopted by this runtime. Before upgrading, use the old control plane to quiesce and drain the exact owned namespace, resolve all terminal reports, and remove its nodes, sidecars and internal networks through its normal lifecycle. Preserve database and registry recovery inputs on any failure. Then update the private descriptor/config and API image variable together and provision fresh nodes with the unified image. This source change performs no live migration.
 
 - The enrollment secret exists only in the Fleet process's handoff table. A coordinator crash before the node bootstraps loses it, the node fails, and Aurora re-arms after its 5-minute TTL. The secret is never stored in SQL as plaintext and is never retried automatically.
 - The reaper stops an idle node after 15 minutes, drains a node past 8 hours, and deletes its Fleet node. Node deletion is permanent and ordered, and refuses while work is queued or a terminal report is unresolved.
