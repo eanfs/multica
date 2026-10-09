@@ -151,7 +151,8 @@ func TestBuildMetaSkillContentSlimKindMatrix(t *testing.T) {
 		{"## Background Task Safety", nonAuroraKinds},
 		{"## Agent Identity", allKinds},
 		{"## Available Commands", allKinds},
-		{"## Issue Body Formatting", allKinds},
+		// A generation never authors an issue (#213).
+		{"## Issue Body Formatting", nonAuroraKinds},
 		{"### Workflow", allKinds},
 		{"## Important: Always Use the `multica` CLI", nonAuroraKinds},
 		{"## Output", allKinds},
@@ -476,6 +477,8 @@ func TestBuildMetaSkillContentAuroraUsesOrdinaryAgentSurface(t *testing.T) {
 		// repository; a generation gets the turn rule in its workflow instead.
 		"## Background Task Safety",
 		"the final comment you meant to post",
+		// A generation never authors an issue.
+		"## Issue Body Formatting",
 		// The old Output section forbade exactly what the workflow requires.
 		"do not write artifact files",
 		"do not run commands",

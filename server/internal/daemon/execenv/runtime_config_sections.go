@@ -403,9 +403,8 @@ func writeAvailableCommandsAurora(b *strings.Builder) {
 }
 
 // writeIssueBodyFormatting emits the default Markdown hierarchy for issue
-// descriptions. It is shared by every task kind because issue creation and
-// updates can be requested from issue, chat, autopilot, and quick-create
-// surfaces.
+// descriptions. It is shared by every kind that can author an issue (issue,
+// chat, autopilot, quick-create); a generation never does (#213).
 func writeIssueBodyFormatting(b *strings.Builder) {
 	b.WriteString("## Issue Body Formatting\n\n")
 	b.WriteString("An issue title already serves as its H1. By default, do not add a Markdown H1 (`# ...`) to an issue body or description; start with prose or `##` subheadings. Only add an H1 when the user specifically requests one.\n\n")
@@ -1086,10 +1085,10 @@ func writeOutput(b *strings.Builder, kind taskKind, ctx TaskContextForEnv) {
 // Shared rows — Header, Agent Identity, Requesting User, Workspace Context,
 // Connected Apps, Workflow, Output — are emitted for every kind (or gated by
 // their own data preconditions). Always Use CLI is withheld from kindAurora —
-// see that guard's call site for why — and Background Task Safety is withheld
-// because it is written for a kind with a comment channel and a repository.
-// Aurora also has its own command index (writeAvailableCommandsAurora) instead
-// of the issue-oriented one.
+// see that guard's call site for why — and Background Task Safety and Issue
+// Body Formatting are withheld because that kind has no comment channel, no
+// repository, and never authors an issue. Aurora also has its own command index
+// (writeAvailableCommandsAurora) instead of the issue-oriented one.
 func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	var b strings.Builder
 	kind := classifyTask(ctx)
@@ -1118,7 +1117,11 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	default:
 		writeAvailableCommands(&b, ctx)
 	}
-	writeIssueBodyFormatting(&b)
+	// A generation never authors an issue; the issue-body hierarchy rules are
+	// dead weight on that kind (#213).
+	if kind != kindAurora {
+		writeIssueBodyFormatting(&b)
+	}
 
 	if kind == kindIssue {
 		writeCommentFormatting(&b)
