@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/multica-ai/multica/server/internal/aurora"
+	"github.com/multica-ai/multica/server/pkg/skillbundle"
 )
 
 // auroraSystemKeyPrefix marks Aurora's workspace-level system agents. Their
@@ -23,7 +24,7 @@ func requireAuroraSkillDocument(task Task) error {
 	entry, ok := aurora.Lookup(skillID)
 	if ok {
 		for _, skill := range task.Agent.Skills {
-			if skill.Source == "workspace" && skill.Name == entry.Name && strings.TrimSpace(skill.Content) != "" {
+			if skill.Source == skillbundle.SourceWorkspace && skill.Name == entry.Name && strings.TrimSpace(skill.Content) != "" {
 				return nil
 			}
 		}

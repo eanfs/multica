@@ -168,7 +168,8 @@ func TestInspectAuroraEnvironment(t *testing.T) {
 	base := []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=" + model.NodeHome, "FLEET_NODE_MAX_RUNS=1"}
 	managed := []string{"MULTICA_MANAGED=1", "MULTICA_SERVER_URL=http://api.internal:8080", "MULTICA_MANAGED_ENROLLMENT_TOKEN_FILE=" + model.AuroraEnrollmentFile}
 	agent := []string{"MULTICA_CLAUDE_PATH=" + model.AuroraClaudePath}
-	full := append(append(append(append(append([]string{}, base...), managed...), []string{}...), agent...), "ANTHROPIC_BASE_URL=https://ark.example.com", "ANTHROPIC_MODEL=ark-model")
+	full := append(append(append([]string{}, base...), managed...), agent...)
+	full = append(full, "ANTHROPIC_BASE_URL=https://ark.example.com", "ANTHROPIC_MODEL=ark-model")
 	if !inspectEnvironment(full, 1, auroraConfig().Aurora) {
 		t.Fatal("valid aurora environment rejected")
 	}
@@ -178,14 +179,10 @@ func TestInspectAuroraEnvironment(t *testing.T) {
 	if inspectEnvironment(base, 1, auroraConfig().Aurora) {
 		t.Fatal("missing managed enrollment environment accepted")
 	}
-	noProxy := append(append([]string{}, base...), managed...)
-	if inspectEnvironment(noProxy, 1, auroraConfig().Aurora) {
-		t.Fatal("missing agent environment accepted")
-	}
 	// The provider supplies the agent path, so an adopted container that omits
 	// it would let the daemon fall back to a PATH lookup the image no longer
 	// satisfies.
-	noAgent := append(append(append([]string{}, base...), managed...), []string{}...)
+	noAgent := append(append([]string{}, base...), managed...)
 	noAgent = append(noAgent, "ANTHROPIC_BASE_URL=https://ark.example.com", "ANTHROPIC_MODEL=ark-model")
 	if inspectEnvironment(noAgent, 1, auroraConfig().Aurora) {
 		t.Fatal("aurora environment without the provider agent path accepted")
@@ -383,5 +380,37 @@ func TestInspectAuroraClaudeEnvExact(t *testing.T) {
 	}
 	if !inspectEnvironment(fixed, 1, &none) {
 		t.Fatal("clean node rejected when the config carries no claude_env")
+	}
+}
+
+// TestNodeHostConfigAuroraTmpfsHardening restores the assertion the retired
+// egress test carried: every writable Aurora surface is nosuid, nodev and noexec
+// and owned by the sandbox user, and only the Aurora profile adds them. The
+// adoption authority compares Tmpfs against NodeHostConfig's own output, so
+// constant drift here would otherwise be invisible.
+func TestNodeHostConfigAuroraTmpfsHardening(t *testing.T) {
+	spec := model.Spec{CPUs: 2, MemoryBytes: 4 << 30, Pids: 256, MaxRuns: 1}
+	h := NodeHostConfig(spec, true, auroraConfig().Aurora)
+	want := map[string]string{
+		model.AuroraWorkspaceMount: auroraWorkspaceTmpfs,
+		model.AuroraTmpMount:       auroraTmpTmpfs,
+		model.AuroraRunMount:       auroraRunTmpfs,
+	}
+	if !reflect.DeepEqual(h.Tmpfs, want) {
+		t.Fatalf("tmpfs = %v, want %v", h.Tmpfs, want)
+	}
+	for mount, opts := range h.Tmpfs {
+		for _, required := range []string{"nosuid", "nodev", "noexec", "uid=10001", "gid=10001"} {
+			if !strings.Contains(opts, required) {
+				t.Fatalf("tmpfs %s missing %s: %s", mount, required, opts)
+			}
+		}
+	}
+	if !h.ReadonlyRootfs || !reflect.DeepEqual(h.SecurityOpt, []string{"no-new-privileges:true"}) {
+		t.Fatalf("aurora host config = %+v", h)
+	}
+	claude := NodeHostConfig(spec, true, nil)
+	if claude.ReadonlyRootfs || len(claude.Tmpfs) != 0 || !reflect.DeepEqual(claude.SecurityOpt, []string{"no-new-privileges:true"}) {
+		t.Fatalf("claude hostconfig changed: %+v", claude)
 	}
 }

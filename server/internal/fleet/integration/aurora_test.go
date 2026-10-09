@@ -393,20 +393,14 @@ func removeAuroraTestResources(t *testing.T, ctx context.Context, cli *client.Cl
 	f := filters.NewArgs(filters.Arg("label", label))
 	contexts, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	containers, err := cli.ContainerList(contexts, container.ListOptions{All: true, Filters: f})
-	if err == nil {
-		for _, c := range containers {
-			_ = cli.ContainerRemove(contexts, c.ID, container.RemoveOptions{Force: true})
-		}
-	}
 	testFilter := filters.NewArgs(filters.Arg("label", "aurora.it="+namespace))
-	containers, err = cli.ContainerList(contexts, container.ListOptions{All: true, Filters: testFilter})
-	if err == nil {
-		for _, c := range containers {
-			_ = cli.ContainerRemove(contexts, c.ID, container.RemoveOptions{Force: true})
-		}
-	}
 	for _, filter := range []filters.Args{f, testFilter} {
+		containers, cerr := cli.ContainerList(contexts, container.ListOptions{All: true, Filters: filter})
+		if cerr == nil {
+			for _, c := range containers {
+				_ = cli.ContainerRemove(contexts, c.ID, container.RemoveOptions{Force: true})
+			}
+		}
 		vols, verr := cli.VolumeList(contexts, volume.ListOptions{Filters: filter})
 		if verr == nil {
 			for _, v := range vols.Volumes {

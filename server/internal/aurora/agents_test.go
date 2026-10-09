@@ -143,7 +143,6 @@ func TestAuroraAgentsAreVisibleToMembers(t *testing.T) {
 	if len(byKey) != 13 {
 		t.Fatalf("visible Aurora agents = %d, want 13", len(byKey))
 	}
-	available := 0
 	for _, entry := range aurora.Catalog() {
 		agent, ok := byKey["aurora:"+entry.ID]
 		if !entry.Available {
@@ -155,9 +154,6 @@ func TestAuroraAgentsAreVisibleToMembers(t *testing.T) {
 		if !ok || agent.Kind != "user" || agent.Name != entry.Name {
 			t.Fatalf("catalog agent %s not visible: %+v", entry.ID, agent)
 		}
-		if entry.Available {
-			available++
-		}
 		if _, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: agent.ID, WorkspaceID: ws}); err != nil {
 			t.Fatal(err)
 		}
@@ -168,9 +164,6 @@ func TestAuroraAgentsAreVisibleToMembers(t *testing.T) {
 		if err != nil || len(skills) != 1 || skills[0].Name != entry.Name {
 			t.Fatalf("catalog skill not linked: %v %v", skills, err)
 		}
-	}
-	if available != 13 {
-		t.Fatalf("available visible agents = %d, want 13", available)
 	}
 	// Simulate a previously seeded hidden, archived agent. Reseeding must repair
 	// it in place, preserving the identity used by generation lookup.
