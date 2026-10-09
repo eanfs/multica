@@ -84,6 +84,8 @@ Fleet 配置的 `aurora` 块用于选择受管智能体 profile（见 `fleet-con
 
 节点使用 `docker/runtime/Dockerfile`、`fleet-node run` 与 `/usr/local/bin/claude`。每节点自有的 bridge 网络支持直接出站，不再使用代理、供应商允许列表或 IP pin。
 
+升级既有 Fleet 配置：`egress_hosts`、`egress_pins`、`uplink_network`、`proxy_image`、`seccomp_profile`、`apparmor_profile` 与 `provider_secret_files` 已删除。加载器会拒绝未知键，仍携带这些键的配置会让 Fleet 启动失败；请删除它们，并把供应商凭据保留在 `claude_env`。
+
 `claude_env` 接受固定允许列表中的模型选择与工具路由变量：
 `ANTHROPIC_DEFAULT_{FABLE,HAIKU,OPUS,SONNET}_MODEL` 及其 `_NAME` 变体、
 `CLAUDE_CODE_SUBAGENT_MODEL`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`、

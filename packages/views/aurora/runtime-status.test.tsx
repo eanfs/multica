@@ -130,6 +130,18 @@ describe("RuntimeStatus", () => {
     expect(screen.queryByText(/credential=secret/)).not.toBeInTheDocument();
   });
 
+  it("keeps provisioning guidance for a workspace with no node and offers no retry", async () => {
+    installReads({ workspaceId: "ws-1" });
+    renderRuntime();
+    expect(await screen.findByText("Not set up")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Start a generation to provision one.",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Retry" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("offers a retry that re-reads the projection", async () => {
     let reads = 0;
     installApi((path) => {

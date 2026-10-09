@@ -108,7 +108,13 @@ func EnsureSystemAgents(ctx context.Context, q *db.Queries, workspaceID, ownerID
 			return fmt.Errorf("upsert skill %q: %w", e.ID, err)
 		}
 		def := systemAgentDef(e)
-		agent, err := q.UpsertAuroraSystemAgent(ctx, db.UpsertAuroraSystemAgentParams{
+		// Adopt the workspace's existing carrier for this system_key before
+		// inserting one. Migration 172's unique index includes runtime_id, so an
+		// insert-first seed would mint a second carrier after a runtime teardown
+		// unbound the first; agent_workspace_name_unique then fails the seed and
+		// generation creation breaks, while GetAgentBySystemKey keeps resolving
+		// the older, unbound row.
+		agent, err := q.AdoptAuroraSystemAgent(ctx, db.AdoptAuroraSystemAgentParams{
 			WorkspaceID:  workspaceID,
 			OwnerID:      ownerID,
 			RuntimeID:    runtimeID,
@@ -116,6 +122,16 @@ func EnsureSystemAgents(ctx context.Context, q *db.Queries, workspaceID, ownerID
 			Name:         def.Name,
 			Instructions: def.Instructions,
 		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			agent, err = q.UpsertAuroraSystemAgent(ctx, db.UpsertAuroraSystemAgentParams{
+				WorkspaceID:  workspaceID,
+				OwnerID:      ownerID,
+				RuntimeID:    runtimeID,
+				SystemKey:    pgtype.Text{String: def.SystemKey, Valid: true},
+				Name:         def.Name,
+				Instructions: def.Instructions,
+			})
+		}
 		if err != nil {
 			return fmt.Errorf("upsert agent %q: %w", e.ID, err)
 		}

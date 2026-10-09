@@ -91,6 +91,8 @@ The `aurora` block of the Fleet config selects the managed agent profile (see
 
 The node uses `docker/runtime/Dockerfile`, `fleet-node run`, and `/usr/local/bin/claude`. Its owned per-node bridge network supports direct outbound access without a proxy, provider allowlist or IP pins.
 
+Upgrading an existing Fleet config: `egress_hosts`, `egress_pins`, `uplink_network`, `proxy_image`, `seccomp_profile`, `apparmor_profile` and `provider_secret_files` were removed. The loader rejects unknown keys, so a config that still carries one stops the Fleet at startup; delete them and keep the provider credentials in `claude_env`.
+
 `claude_env` accepts the fixed allowlist of model-routing and tool variables —
 `ANTHROPIC_DEFAULT_{FABLE,HAIKU,OPUS,SONNET}_MODEL`, their `_NAME` variants,
 `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,

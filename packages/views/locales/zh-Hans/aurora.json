@@ -198,6 +198,7 @@
     },
     "retry": "重试",
     "reasons": {
+      "runtime_not_provisioned": "此工作区没有运行中的执行节点。发起一次生成即可创建。",
       "runtime_offline": "运行时节点已离线。重试以检查状态。",
       "runtime_unconfigured": "此工作区没有运行中的执行节点。请联系管理员检查运行时配置。",
       "runtime_policy_unavailable": "运行时策略不可用。请联系管理员检查运行时配置。"

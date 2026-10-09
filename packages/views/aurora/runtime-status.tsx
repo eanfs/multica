@@ -143,8 +143,13 @@ function RuntimeNodeCard({
   const recovery =
     state === "failed" || state === "unconfigured" || state === "offline";
   const code = target?.node?.errorCode;
+  // A workspace with no node yet is provisioned by starting a generation, so the
+  // node-less unconfigured state keeps provisioning guidance and offers no Retry:
+  // a refetch cannot create a node. A server-reported reason always wins.
+  const awaitingFirstGeneration = state === "unconfigured" && target?.node == null;
   const reason =
-    code ?? (state === "unconfigured" ? "runtime_unconfigured" : "runtime_offline");
+    code ??
+    (awaitingFirstGeneration ? "runtime_not_provisioned" : "runtime_offline");
 
   return (
     <section className="flex flex-col gap-2 rounded-lg border border-surface-border p-3">
@@ -169,7 +174,7 @@ function RuntimeNodeCard({
           {t(($) => $.runtime.reasons[reason])}
         </p>
       ) : null}
-      {recovery ? (
+      {recovery && !awaitingFirstGeneration ? (
         <Button
           variant="outline"
           size="sm"

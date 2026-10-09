@@ -60,3 +60,35 @@ VALUES ($1, $2, '', $3, '{}'::jsonb, $4)
 ON CONFLICT (workspace_id, name)
 DO UPDATE SET content = EXCLUDED.content, updated_at = now()
 RETURNING *;
+
+-- name: AdoptAuroraSystemAgent :one
+-- Adopts the workspace's existing Aurora carrier for one system_key and rebinds
+-- it to the current managed runtime, whatever runtime or archive state it is in.
+--
+-- The seed must key on system_key alone. Migration 172's partial unique index
+-- includes runtime_id, so once a runtime teardown unbinds a carrier
+-- (UnbindUserAgentsFromRuntime sets runtime_id = NULL for kind = 'user'), an
+-- insert-first seed sees a different tuple, inserts a second row, and leaves
+-- GetAgentBySystemKey (archived_at IS NULL, ORDER BY created_at ASC) resolving
+-- the older, unbound one: the workspace shows duplicate Aurora agents and a
+-- generation binds to a carrier with no runtime. Adopting the earliest row keeps
+-- the seed's identity identical to the one that lookup resolves.
+UPDATE agent
+SET owner_id = @owner_id,
+    runtime_id = @runtime_id,
+    kind = 'user',
+    name = @name,
+    instructions = @instructions,
+    runtime_mode = 'cloud',
+    visibility = 'workspace',
+    permission_mode = 'private',
+    archived_at = NULL,
+    archived_by = NULL,
+    updated_at = now()
+WHERE id = (
+    SELECT a.id FROM agent a
+    WHERE a.workspace_id = @workspace_id AND a.system_key = @system_key
+    ORDER BY a.created_at ASC, a.id ASC
+    LIMIT 1
+)
+RETURNING *;

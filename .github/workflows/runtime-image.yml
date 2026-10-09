@@ -1,0 +1,56 @@
+name: Runtime image
+
+# The unified node image runs model-authored shell with provider credentials in
+# its environment, so its contract is checked on every change that can alter it.
+# This restores the build-and-contract gate the retired aurora-sandbox workflow
+# carried. SBOM generation, vulnerability scanning, signing and the digest-pinned
+# publish are NOT restored here and remain follow-up work.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker/runtime/**"
+      - "scripts/check-runtime-image.sh"
+      - "scripts/check-runtime-image.test.sh"
+      - "server/cmd/fleet-node/**"
+      - "server/cmd/multica/**"
+      - "server/go.mod"
+      - "server/go.sum"
+      - ".github/workflows/runtime-image.yml"
+  pull_request:
+    paths:
+      - "docker/runtime/**"
+      - "scripts/check-runtime-image.sh"
+      - "scripts/check-runtime-image.test.sh"
+      - "server/cmd/fleet-node/**"
+      - "server/cmd/multica/**"
+      - "server/go.mod"
+      - "server/go.sum"
+      - ".github/workflows/runtime-image.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Hermetic: fake Docker and explicit utility paths, so a checker regression
+      # fails before the image build is paid for.
+      - name: Checker regressions
+        run: bash scripts/check-runtime-image.test.sh
+
+      - name: Build the node image
+        run: docker build -f docker/runtime/Dockerfile -t multica-runtime-node:ci .
+
+      - name: Verify the node image contract
+        run: bash scripts/check-runtime-image.sh multica-runtime-node:ci

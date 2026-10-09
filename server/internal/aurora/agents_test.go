@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/aurora"
@@ -419,4 +420,88 @@ func seedUnavailableAgents(t *testing.T) map[string]string {
 		snapshots[id] = snapshot
 	}
 	return snapshots
+}
+
+// TestAuroraCarriersSurviveRuntimeTeardown pins the reseed contract after a
+// managed runtime is deleted. Migration 172's unique index includes runtime_id,
+// so an insert-first seed would mint a second carrier per skill while
+// GetAgentBySystemKey kept resolving the older, unbound row: the workspace would
+// show duplicate Aurora agents and a generation would bind to a carrier with no
+// runtime.
+func TestAuroraCarriersSurviveRuntimeTeardown(t *testing.T) {
+	if agentsTestPool == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	ws, owner := util.MustParseUUID(agentsTestWorkspaceID), util.MustParseUUID(agentsTestUserID)
+	tx, err := agentsTestPool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	q := db.New(tx)
+
+	if err := aurora.EnsureSystemAgents(ctx, q, ws, owner); err != nil {
+		t.Fatal(err)
+	}
+	first, err := aurora.ManagedRuntimeID(ctx, q, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := pgtype.Text{String: "aurora:text-image", Valid: true}
+	before, err := q.GetAgentBySystemKey(ctx, db.GetAgentBySystemKeyParams{WorkspaceID: ws, SystemKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	carriers := countAvailableAuroraCarriers(t, ctx, tx, ws)
+
+	// Simulate the runtime-delete path: it unbinds every kind='user' agent and
+	// then removes the runtime row.
+	if _, err := q.UnbindUserAgentsFromRuntime(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM agent_runtime WHERE id = $1", first); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := aurora.EnsureSystemAgents(ctx, q, ws, owner); err != nil {
+		t.Fatal(err)
+	}
+	second, err := aurora.ManagedRuntimeID(ctx, q, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == first {
+		t.Fatal("teardown did not mint a new managed runtime")
+	}
+	after, err := q.GetAgentBySystemKey(ctx, db.GetAgentBySystemKeyParams{WorkspaceID: ws, SystemKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ID != before.ID {
+		t.Fatalf("reseed changed carrier identity: %x -> %x", before.ID.Bytes, after.ID.Bytes)
+	}
+	if after.RuntimeID != second {
+		t.Fatalf("carrier runtime = %v, want the new managed runtime %v", after.RuntimeID, second)
+	}
+	if got := countAvailableAuroraCarriers(t, ctx, tx, ws); got != carriers {
+		t.Fatalf("available carriers = %d, want %d after reseed", got, carriers)
+	}
+}
+
+// countAvailableAuroraCarriers counts only the 13 available carriers, so the
+// hidden placeholders another test seeds cannot change the result.
+func countAvailableAuroraCarriers(t *testing.T, ctx context.Context, tx pgx.Tx, ws pgtype.UUID) int {
+	t.Helper()
+	keys := make([]string, 0, 13)
+	for _, e := range aurora.Catalog() {
+		if e.Available {
+			keys = append(keys, "aurora:"+e.ID)
+		}
+	}
+	var n int
+	if err := tx.QueryRow(ctx, "SELECT count(*) FROM agent WHERE workspace_id = $1 AND system_key = ANY($2)", ws, keys).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
