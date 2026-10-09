@@ -10,11 +10,11 @@ name: Runtime node supply chain
 # attestations. Tags aid discovery only: fleet configuration and documentation
 # reference the image by digest.
 #
-# Policy: the gate blocks every CRITICAL vulnerability and every detected
-# secret. HIGH findings are reported (artifact + job summary) but do not block,
-# because the Debian media toolchain this image installs carries advisories that
-# no Aurora change can fix; tighten this by adding a VEX allowlist the way the
-# retired sandbox workflow did once the owner sets the accepted baseline.
+# Policy: the gate blocks every detected secret and every CRITICAL
+# vulnerability that .github/runtime-node-vex.json does not accept. That file
+# documents the Debian base-image advisories this image cannot fix; a new
+# CRITICAL therefore blocks until it is fixed or explicitly accepted there. HIGH
+# findings are reported (artifact + job summary) but do not block.
 
 on:
   pull_request:
@@ -29,6 +29,7 @@ on:
       - "server/pkg/**"
       - "server/go.mod"
       - "server/go.sum"
+      - ".github/runtime-node-vex.json"
       - ".github/workflows/runtime-image.yml"
   push:
     branches: [main]
@@ -43,6 +44,7 @@ on:
       - "server/pkg/**"
       - "server/go.mod"
       - "server/go.sum"
+      - ".github/runtime-node-vex.json"
       - ".github/workflows/runtime-image.yml"
   workflow_dispatch:
 
@@ -126,16 +128,24 @@ jobs:
           failed=0
           # trivy-fs.json scans the whole monorepo and reports pre-existing
           # dependencies no Aurora change can fix; it is advisory. The image scan
-          # keeps scanners: vuln,secret, so a baked-in secret and an unfixed
-          # CRITICAL still block publication.
+          # keeps scanners: vuln,secret, so a baked-in secret always blocks and a
+          # CRITICAL blocks unless runtime-node-vex.json accepts that exact
+          # advisory for this image.
           for report in trivy-runtime.json; do
             [ -f "$report" ] || continue
-            violations="$(jq -r '
+            violations="$(jq -r --slurpfile vex .github/runtime-node-vex.json '
+              def vexed($id; $pkg; $ver; $image):
+                [ $vex[0].entries[]?
+                  | select(.cve == $id and .package == $pkg and .version == $ver)
+                  | . as $entry
+                  | select($image | contains($entry.image))
+                ] | length > 0;
               . as $report
               | [ ($report.Results[]? | (.Secrets // [])[]
                     | "secret " + (.RuleID // "unknown") + " at " + (.Target // "unknown")),
                   ($report.Results[]? | (.Vulnerabilities // [])[]
                     | select(.Severity == "CRITICAL")
+                    | select(vexed(.VulnerabilityID; .PkgName; .InstalledVersion; ($report.ArtifactName // .Target // "")) | not)
                     | (.VulnerabilityID // "unknown") + " " + (.PkgName // "unknown") + " " + (.InstalledVersion // "unknown") + " CRITICAL at " + ($report.ArtifactName // .Target // "unknown")) ]
               | .[]' "$report")"
             if [ -n "$violations" ]; then
