@@ -145,9 +145,10 @@ func TestBuildMetaSkillContentSlimKindMatrix(t *testing.T) {
 	issueKinds := map[taskKind]bool{kindIssue: true}
 	checks := []sectionCheck{
 		{"# Multica Agent Runtime", allKinds},
-		// Aurora runs on the ordinary agent surface, so the ordinary safety
-		// section applies to it too (#213).
-		{"## Background Task Safety", allKinds},
+		// The safety section is written for a kind with a comment channel and a
+		// repository; a generation has neither, and writeWorkflowAurora carries
+		// the turn-terminal rule in the form it can act on (#213).
+		{"## Background Task Safety", nonAuroraKinds},
 		{"## Agent Identity", allKinds},
 		{"## Available Commands", allKinds},
 		{"## Issue Body Formatting", allKinds},
@@ -419,8 +420,9 @@ func TestBuildMetaSkillContentAuroraUsesOrdinaryAgentSurface(t *testing.T) {
 		AgentName:         "Eve",
 		AgentID:           "eve-1",
 		// The daemon resolves the Aurora agent's attached skill onto the task,
-		// which is what puts the skill in the brief's index.
-		AgentSkills: []SkillContextForEnv{{Name: "text-image"}},
+		// which is what puts the skill in the brief's index. In production the
+		// attached skill IS the run's skill.
+		AgentSkills: []SkillContextForEnv{{Name: "poster"}},
 	})
 
 	for _, want := range []string{
@@ -429,12 +431,18 @@ func TestBuildMetaSkillContentAuroraUsesOrdinaryAgentSurface(t *testing.T) {
 		"ordinary agent surface",
 		"`multica` CLI",
 		"## Available Commands",
-		// Turn exit is task-terminal for a generation too.
-		"## Background Task Safety",
+		// The index describes the real surface rather than the issue CRUD the
+		// workflow forbids, so pin its body too.
+		"ordinary Multica agent surface",
+		"`multica --help`",
 		"## Skills",
 		"**This is an Aurora generation run.** There is no Multica issue.",
-		// The model writes the artifacts and the manifest; the platform collects.
-		"Write the artifacts and their manifest yourself",
+		// The turn-terminal rule for a generation, in the form it can act on.
+		"Finish inside this turn",
+		// The manifest is the model's; local files are the skill's business and
+		// server-staged artifacts stay server-staged.
+		"Write the run's manifest under the run's output root",
+		"any artifact files the skill's steps produce locally",
 		"The platform collects the artifacts the manifest names",
 		// No reader comment exists on this surface.
 		"there is no reader comment on this surface",
@@ -446,6 +454,7 @@ func TestBuildMetaSkillContentAuroraUsesOrdinaryAgentSurface(t *testing.T) {
 
 	for _, banned := range []string{
 		// The broker died with deploy/aurora-sandbox (#213).
+		"broker",
 		"brokered",
 		"MCP tool",
 		"mcp__aurora__",
@@ -463,6 +472,10 @@ func TestBuildMetaSkillContentAuroraUsesOrdinaryAgentSurface(t *testing.T) {
 		// for endpoints the CLI does not expose.
 		"## Important: Always Use the `multica` CLI",
 		"never `curl`",
+		// The safety section is written for a kind with a comment channel and a
+		// repository; a generation gets the turn rule in its workflow instead.
+		"## Background Task Safety",
+		"the final comment you meant to post",
 		// The old Output section forbade exactly what the workflow requires.
 		"do not write artifact files",
 		"do not run commands",

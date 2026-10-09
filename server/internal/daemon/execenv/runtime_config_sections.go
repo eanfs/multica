@@ -106,9 +106,12 @@ func writeHeader(b *strings.Builder, kind taskKind) {
 // (URL/logs/stop triple, general cleanup handle) — do not reword it without
 // a fresh review decision.
 //
-// Emitted for every kind, Aurora included: a generation runs on the ordinary
-// agent surface with a shell and the `multica` CLI, and turn exit is
-// task-terminal for it exactly as it is for an issue run (#213).
+// Task-kind gating: every paragraph is written for a kind that posts a comment,
+// can wait on external CI, and may manage a local daemon. A generation has no
+// reader comment, no repository, and no `multica daemon`; describing them would
+// be the same brief-versus-surface mismatch #213 fixes. The caller skips this
+// section for kindAurora, whose turn-terminal fact and synchronous-completion
+// rule are stated by writeWorkflowAurora instead.
 func writeBackgroundTaskSafetySlim(b *strings.Builder) {
 	b.WriteString("## Background Task Safety\n\n")
 	b.WriteString("Multica marks the task terminal the moment your top-level turn exits — any run-owned work still active is orphaned, its result lost, and the final comment you meant to post never sends. There is no background-completion wakeup, whatever a tool response promises; an issue wakeup (`multica issue wakeup create`) is different — the platform stores it and starts a new run later. Never background-and-yield: collect required results inside foreground tool calls that block to completion, run unobservable work synchronously, and never end a turn \"standing by\" for something to finish — that message becomes your final output.\n\n")
@@ -685,7 +688,8 @@ func writeWorkflowAurora(b *strings.Builder) {
 	b.WriteString("**This is an Aurora generation run.** There is no Multica issue.\n\n")
 	b.WriteString("- The skill document for this run is in your working directory's project skills directory. Follow it: it names the inputs, the steps, the output paths and the artifact manifest to write.\n")
 	b.WriteString("- Do not create, update, or comment on issues. Your output belongs to this run's artifact manifest, not to a new issue.\n")
-	b.WriteString("- The platform collects the artifacts the manifest names, and fails the generation if the manifest is missing or does not match this run.\n\n")
+	b.WriteString("- The platform collects the artifacts the manifest names, and fails the generation if the manifest is missing or does not match this run.\n")
+	b.WriteString("- Finish inside this turn: exiting orphans any run-owned work, there is no background-completion wakeup, and the platform collects the manifest only after the turn ends.\n\n")
 }
 
 // writeWorkflowIssue emits the single issue workflow used by every
@@ -1042,7 +1046,7 @@ func writeOutput(b *strings.Builder, kind taskKind, ctx TaskContextForEnv) {
 			writeInlineBlocksPolicy(b)
 		}
 	case kindAurora:
-		b.WriteString("This is an Aurora generation run. Write the artifacts and their manifest yourself into the run's output root; the platform collects them from there.\n\n")
+		b.WriteString("This is an Aurora generation run. Write the run's manifest under the run's output root, and any artifact files the skill's steps produce locally; the platform collects what the manifest names from there.\n\n")
 		b.WriteString("**Delivering files here:** there is no reader comment on this surface — describe what you produced in one short line and stop.\n")
 	default:
 		if ctx.IsSquadLeader {
@@ -1082,8 +1086,10 @@ func writeOutput(b *strings.Builder, kind taskKind, ctx TaskContextForEnv) {
 // Shared rows — Header, Agent Identity, Requesting User, Workspace Context,
 // Connected Apps, Workflow, Output — are emitted for every kind (or gated by
 // their own data preconditions). Always Use CLI is withheld from kindAurora —
-// see that guard's call site for why. Aurora also has its own command index
-// (writeAvailableCommandsAurora) instead of the issue-oriented one.
+// see that guard's call site for why — and Background Task Safety is withheld
+// because it is written for a kind with a comment channel and a repository.
+// Aurora also has its own command index (writeAvailableCommandsAurora) instead
+// of the issue-oriented one.
 func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	var b strings.Builder
 	kind := classifyTask(ctx)
@@ -1094,7 +1100,12 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	// every resume; they now travel in the per-turn user message
 	// (daemon.BuildPrompt) instead. See MUL-5377.
 	writeHeader(&b, kind)
-	writeBackgroundTaskSafetySlim(&b)
+	// The safety section is written for a kind with a comment channel and a
+	// repository; writeWorkflowAurora states the turn-terminal rule for a
+	// generation instead (#213).
+	if kind != kindAurora {
+		writeBackgroundTaskSafetySlim(&b)
+	}
 	writeAgentIdentity(&b, ctx)
 	writeRequestingUser(&b, ctx)
 	writeWorkspaceContext(&b, ctx)
