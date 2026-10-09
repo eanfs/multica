@@ -40,13 +40,14 @@ import (
 // below.
 
 // writeHeader emits the brief's leading title and one-line elevator pitch.
-// Aurora is the one kind with no Multica CLI at all (see writeWorkflowAurora),
-// so the generic "use the `multica` CLI" line would contradict its own workflow
-// and recruit a call its runtime cannot make. Aurora gets its own header.
+// Aurora is a generation run rather than an issue run, so it keeps its own
+// header — but it executes on the ordinary agent surface (shell, node network
+// access, `multica` CLI, the skill document the daemon installs), and the
+// header must say so.
 func writeHeader(b *strings.Builder, kind taskKind) {
 	b.WriteString("# Multica Agent Runtime\n\n")
 	if kind == kindAurora {
-		b.WriteString("You are a managed Aurora creation agent running one generation in the Multica platform. There is no shell and no `multica` CLI in this runtime; the brokered Aurora MCP tool named in the per-turn user message is your only way to act.\n\n")
+		b.WriteString("You are an Aurora creation agent running one generation in the Multica platform. You run on the ordinary agent surface: a shell, this node's network access, and the `multica` CLI. The skill document installed for this run carries the steps; follow it.\n\n")
 		return
 	}
 	b.WriteString("You are a coding agent in the Multica platform. Use the `multica` CLI to interact with the platform.\n\n")
@@ -105,10 +106,9 @@ func writeHeader(b *strings.Builder, kind taskKind) {
 // (URL/logs/stop triple, general cleanup handle) — do not reword it without
 // a fresh review decision.
 //
-// Task-kind gating: every paragraph names a `multica`/`gh` command, and
-// Aurora is the one sandbox with no shell and no Multica CLI. The caller skips
-// this section for kindAurora; the Aurora workflow's own stop rule ("call the
-// brokered tool once, then stop") is the replacement.
+// Emitted for every kind, Aurora included: a generation runs on the ordinary
+// agent surface with a shell and the `multica` CLI, and turn exit is
+// task-terminal for it exactly as it is for an issue run (#213).
 func writeBackgroundTaskSafetySlim(b *strings.Builder) {
 	b.WriteString("## Background Task Safety\n\n")
 	b.WriteString("Multica marks the task terminal the moment your top-level turn exits — any run-owned work still active is orphaned, its result lost, and the final comment you meant to post never sends. There is no background-completion wakeup, whatever a tool response promises; an issue wakeup (`multica issue wakeup create`) is different — the platform stores it and starts a new run later. Never background-and-yield: collect required results inside foreground tool calls that block to completion, run unobservable work synchronously, and never end a turn \"standing by\" for something to finish — that message becomes your final output.\n\n")
@@ -388,15 +388,15 @@ func writeAvailableCommandsQuickCreate(b *strings.Builder) {
 	b.WriteString("- `multica issue create --title \"...\" [--description \"...\" | --description-file <path> | --description-stdin] [--priority X] [--status X] [--assignee X | --assignee-id <uuid>] [--parent <issue-id>] [--stage N] [--project <project-id>] [--due-date <YYYY-MM-DD>] [--attachment <path>]` — Create a new issue; `--attachment` may be repeated. Inline `--description \"...\"` is only for a short single-line body with no code, quotes, backticks or `$()`. Anything multi-line, or carrying code snippets / file paths / quotes / backticks / `$()` — which quick-create descriptions usually are — MUST go to a file, because the shell rewrites or truncates rich text passed inline (MUL-2904). Prefer `--description-file <path>` over `--description-stdin` (flags after a HEREDOC terminator can be silently swallowed, #4182). Write that file inside your working directory (e.g. `./description.md`), never `/tmp` or shared paths, and treat a failed write as fatal — never run `--description-file` against a file whose write did not succeed. The CLI rejects a path outside the workdir so a stale file from another run can't leak in (MUL-4252).\n\n")
 }
 
-// writeAvailableCommandsAurora emits the command surface for a managed Aurora
-// generation. There is no shell and no `multica` CLI inside the sandbox, so
-// the section deliberately advertises no platform command at all — advertising
-// one would recruit a guaranteed-failed call from a surface that cannot run
-// it. The one execution path is the brokered MCP tool the per-turn user
-// message names.
+// writeAvailableCommandsAurora emits the command surface for an Aurora
+// generation. A generation runs on the ordinary agent surface, so this names
+// that surface and its CLI entry point, but it does not reuse the
+// issue-oriented index: a generation must not create, update, or comment on
+// issues, and the generic index cross-references sections this kind does not
+// emit (for example `## Comment Formatting`).
 func writeAvailableCommandsAurora(b *strings.Builder) {
 	b.WriteString("## Available Commands\n\n")
-	b.WriteString("This is a managed Aurora generation. The runtime has **no shell and no `multica` CLI**, so do not try to run commands, create issues, or reach the Multica API. Your only callable tools are the brokered Aurora MCP tool(s) named in the per-turn user message.\n\n")
+	b.WriteString("You run on the ordinary Multica agent surface: a shell, this node's network access, and the `multica` CLI. The skill document for this run names the commands and endpoints it needs; for anything else run `multica --help` or `multica <command> --help`.\n\n")
 }
 
 // writeIssueBodyFormatting emits the default Markdown hierarchy for issue
@@ -1042,8 +1042,8 @@ func writeOutput(b *strings.Builder, kind taskKind, ctx TaskContextForEnv) {
 			writeInlineBlocksPolicy(b)
 		}
 	case kindAurora:
-		b.WriteString("This is a managed Aurora generation. The brokered MCP tool writes the artifact and its manifest into the run's output root, and the platform collects and stores them; you are not the delivery channel. Do not write artifact files or a manifest yourself, do not run commands, and do not print or link a runtime-local path.\n\n")
-		b.WriteString("**Delivering files here:** the platform collects the artifact from the broker's output root automatically — describe what you produced in one short line and stop.\n")
+		b.WriteString("This is an Aurora generation run. Write the artifacts and their manifest yourself into the run's output root; the platform collects them from there.\n\n")
+		b.WriteString("**Delivering files here:** there is no reader comment on this surface — describe what you produced in one short line and stop.\n")
 	default:
 		if ctx.IsSquadLeader {
 			b.WriteString("⚠️ **Final results MUST be delivered via `multica issue comment add`** — unless your outcome is `no_action`, which your Squad Operating Protocol states in full. For every other outcome (`action`, `failed`) a comment is mandatory. The user does NOT see your terminal output or run logs — only comments on the issue.\n\n")
@@ -1081,9 +1081,9 @@ func writeOutput(b *strings.Builder, kind taskKind, ctx TaskContextForEnv) {
 //
 // Shared rows — Header, Agent Identity, Requesting User, Workspace Context,
 // Connected Apps, Workflow, Output — are emitted for every kind (or gated by
-// their own data preconditions). Background Task Safety and Always Use CLI are
-// additionally skipped for kindAurora, which has no shell and no `multica` CLI:
-// naming one would recruit a call its runtime cannot make.
+// their own data preconditions). Always Use CLI is withheld from kindAurora —
+// see that guard's call site for why. Aurora also has its own command index
+// (writeAvailableCommandsAurora) instead of the issue-oriented one.
 func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	var b strings.Builder
 	kind := classifyTask(ctx)
@@ -1094,11 +1094,7 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	// every resume; they now travel in the per-turn user message
 	// (daemon.BuildPrompt) instead. See MUL-5377.
 	writeHeader(&b, kind)
-	// Background Task Safety names `multica`/`gh` commands throughout; the
-	// Aurora sandbox has neither, so the section is skipped for kindAurora.
-	if kind != kindAurora {
-		writeBackgroundTaskSafetySlim(&b)
-	}
+	writeBackgroundTaskSafetySlim(&b)
 	writeAgentIdentity(&b, ctx)
 	writeRequestingUser(&b, ctx)
 	writeWorkspaceContext(&b, ctx)
@@ -1117,8 +1113,8 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 		writeCommentFormatting(&b)
 	}
 
-	// Quick-create and Aurora are both issue-less surfaces with no repository
-	// checkout workflow; the section would be dead weight.
+	// Quick-create and Aurora are both issue-less surfaces that never carry a
+	// repository checkout; the section would be dead weight.
 	if kind != kindQuickCreate && kind != kindAurora {
 		writeRepositories(&b, ctx)
 	}
@@ -1157,8 +1153,10 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 		writeAttachments(&b)
 	}
 
-	// Aurora is the one surface with no Multica CLI at all; telling it to use
-	// one would recruit a call the runtime cannot make.
+	// Withheld from Aurora: the shared guardrail forbids `curl` for platform
+	// resources, while the provider skill documents call the task-scoped
+	// `/api/agent/tasks/<id>/aurora-*` endpoints with curl — the CLI exposes no
+	// such command. Aurora keeps its own `multica` CLI index above.
 	if kind != kindAurora {
 		writeAlwaysUseCLI(&b)
 	}

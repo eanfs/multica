@@ -134,8 +134,10 @@ func TestBuildMetaSkillContentSlimKindMatrix(t *testing.T) {
 		kindIssue: true, kindAutopilotRunOnly: true,
 		kindQuickCreate: true, kindChat: true, kindAurora: true,
 	}
-	// Aurora is the one kind with no Multica CLI at all, so it is the only kind
-	// that must NOT carry the always-use-CLI section.
+	// Aurora is the one kind that must NOT carry the always-use-CLI section: the
+	// shared guardrail forbids `curl`, while the executable Aurora skill
+	// documents call the task-scoped agent endpoints with curl because the CLI
+	// exposes no such command (#213).
 	nonAuroraKinds := map[taskKind]bool{
 		kindIssue: true, kindAutopilotRunOnly: true,
 		kindQuickCreate: true, kindChat: true,
@@ -143,8 +145,9 @@ func TestBuildMetaSkillContentSlimKindMatrix(t *testing.T) {
 	issueKinds := map[taskKind]bool{kindIssue: true}
 	checks := []sectionCheck{
 		{"# Multica Agent Runtime", allKinds},
-		// Every paragraph names a `multica`/`gh` command; Aurora has neither.
-		{"## Background Task Safety", nonAuroraKinds},
+		// Aurora runs on the ordinary agent surface, so the ordinary safety
+		// section applies to it too (#213).
+		{"## Background Task Safety", allKinds},
 		{"## Agent Identity", allKinds},
 		{"## Available Commands", allKinds},
 		{"## Issue Body Formatting", allKinds},
@@ -394,13 +397,20 @@ func TestBackgroundTaskSafetySlimHardPins(t *testing.T) {
 	}
 }
 
-// TestBuildMetaSkillContentAuroraUsesBrokerWorkflow pins the Aurora brief
-// selection: an Aurora generation must render the broker workflow, must NOT
-// render the quick-create guardrail that tells it to run `multica issue
-// create`, and must NOT advertise the Multica CLI it does not have. Before
-// kindAurora existed the generation was classified as quick-create and the
-// sandbox agent was told to use a command its surface denies (task-20).
-func TestBuildMetaSkillContentAuroraUsesBrokerWorkflow(t *testing.T) {
+// TestBuildMetaSkillContentAuroraUsesOrdinaryAgentSurface pins the Aurora brief
+// after #213. An Aurora generation runs on the ordinary agent surface — shell,
+// node network access, `multica` CLI, the skill document in the project skills
+// directory — so the brief must describe that surface and must never resurrect
+// the deleted MCP broker, which it did while the sandbox removal migrated only
+// writeWorkflowAurora.
+//
+// Deliberate divergences remain, and this test pins them: Aurora gets its own
+// command index instead of the issue-oriented one (a generation must not
+// create, update, or comment on issues), it gets no quick-create guardrail,
+// and it gets no "never curl" CLI guardrail (the provider skill documents call
+// the task-scoped agent endpoints with curl, because the CLI exposes no such
+// command).
+func TestBuildMetaSkillContentAuroraUsesOrdinaryAgentSurface(t *testing.T) {
 	t.Parallel()
 
 	out := buildMetaSkillContent("claude", TaskContextForEnv{
@@ -408,34 +418,54 @@ func TestBuildMetaSkillContentAuroraUsesBrokerWorkflow(t *testing.T) {
 		QuickCreatePrompt: "橘猫窗台晒太阳图片生成",
 		AgentName:         "Eve",
 		AgentID:           "eve-1",
+		// The daemon resolves the Aurora agent's attached skill onto the task,
+		// which is what puts the skill in the brief's index.
+		AgentSkills: []SkillContextForEnv{{Name: "text-image"}},
 	})
 
 	for _, want := range []string{
+		// The header names the surface the skill documents actually run on.
+		"You are an Aurora creation agent",
+		"ordinary agent surface",
+		"`multica` CLI",
 		"## Available Commands",
-		"no shell and no `multica` CLI",
-		"managed Aurora creation agent",
-		"This is a managed Aurora generation run.",
-		"The broker writes the artifact and its manifest",
+		// Turn exit is task-terminal for a generation too.
+		"## Background Task Safety",
+		"## Skills",
+		"**This is an Aurora generation run.** There is no Multica issue.",
+		// The model writes the artifacts and the manifest; the platform collects.
+		"Write the artifacts and their manifest yourself",
+		"The platform collects the artifacts the manifest names",
+		// No reader comment exists on this surface.
+		"there is no reader comment on this surface",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Aurora brief missing %q\n---\n%s", want, out)
 		}
 	}
 
-	// The header and Background Task Safety used to name the Multica CLI
-	// unconditionally, contradicting the Aurora sections that say no such CLI
-	// exists. Ban every command name those two emitted, not just the
-	// quick-create guardrail.
 	for _, banned := range []string{
+		// The broker died with deploy/aurora-sandbox (#213).
+		"brokered",
+		"MCP tool",
+		"mcp__aurora__",
+		"no shell",
+		"The broker writes the artifact and its manifest",
+		"You are a managed Aurora creation agent",
+		// A generation is not a quick-create.
 		"Run exactly one `multica issue create --output json` invocation",
 		"quick-create assistant",
-		"## Important: Always Use the",
-		"multica issue comment add",
-		"Use the `multica` CLI to interact with the platform",
-		"multica issue wakeup create",
-		"multica daemon status",
-		"gh pr checks",
-		"## Background Task Safety",
+		// Nor does it get the issue-oriented command index the other kinds use.
+		"multica issue create --title",
+		"multica issue comment add <issue-id>",
+		"multica repo checkout <url>",
+		// The shared CLI guardrail forbids curl; the skill documents require it
+		// for endpoints the CLI does not expose.
+		"## Important: Always Use the `multica` CLI",
+		"never `curl`",
+		// The old Output section forbade exactly what the workflow requires.
+		"do not write artifact files",
+		"do not run commands",
 	} {
 		if strings.Contains(out, banned) {
 			t.Errorf("Aurora brief must not carry %q\n---\n%s", banned, out)

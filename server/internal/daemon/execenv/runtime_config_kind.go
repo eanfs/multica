@@ -33,12 +33,11 @@ const (
 	// kindChat: interactive chat session, no issue.
 	kindChat
 	// kindAurora: a managed Aurora generation run that executes one reviewed
-	// skill through the sandbox's MCP broker. It is enqueued through the
-	// quick-create carrier and therefore also carries QuickCreatePrompt, so it
-	// must be classified BEFORE kindQuickCreate: otherwise the brief hands the
-	// sandbox agent the quick-create guardrail that says to run
-	// `multica issue create` — a command its narrowed surface (no Bash, no
-	// CLI) cannot run — while the broker tool it must call goes unnamed.
+	// skill document on the ordinary agent surface (shell, node network access,
+	// `multica` CLI). It is enqueued through the quick-create carrier and
+	// therefore also carries QuickCreatePrompt, so it must be classified BEFORE
+	// kindQuickCreate: otherwise the brief hands it the quick-create guardrail
+	// that says to run `multica issue create`, which a generation must not do.
 	kindAurora
 )
 
