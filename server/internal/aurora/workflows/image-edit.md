@@ -74,9 +74,10 @@ node provides. Do the work yourself.
    carries no image.
 
 3. Hand every URL to the task-scoped importer, first as `primary` and the rest as
-   `supporting`. Do not download them yourself: this node's egress allowlist does
-   not cover the provider's media host, and the importer keeps the URL out of the
-   task.
+   `supporting`. Do not download them yourself: this workflow requires a
+   server-staged artifact associated with the current task. Use the returned
+   staging ID and integrity metadata in the manifest below, not the provider URL
+   or a local download.
 
    ```bash
    jq -r '.data[].url' /tmp/seedream.json | nl -ba | while read -r n url; do
@@ -108,7 +109,9 @@ node provides. Do the work yourself.
 
 ## Artifact manifest
 
-Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Run `mkdir -p "<outputRoot>/.multica"` first: nothing creates that directory for you. Every value below comes
+Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Run
+`mkdir -p "<outputRoot>/.multica"` first: nothing creates that directory for
+you. Every value below comes
 from a previous step; copy it, do not invent it. One entry per imported object.
 
 ```json

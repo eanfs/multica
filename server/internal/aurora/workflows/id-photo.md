@@ -41,7 +41,9 @@ You run on a normal Multica agent: you have a shell. Do the work yourself.
 
 ## Artifact manifest
 
-Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Run `mkdir -p "<outputRoot>/.multica"` first: nothing creates that directory for you. A local file artifact
+Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Run
+`mkdir -p "<outputRoot>/.multica"` first: nothing creates that directory for
+you. A local file artifact
 names its path **relative to the output root**; the daemon re-derives the size
 and hash from the file, so copy what you measured.
 

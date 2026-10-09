@@ -126,7 +126,9 @@ node provides. Do the work yourself.
 
 ## Artifact manifest
 
-Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Run `mkdir -p "<outputRoot>/.multica"` first: nothing creates that directory for you. Local file artifacts
+Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Run
+`mkdir -p "<outputRoot>/.multica"` first: nothing creates that directory for
+you. Local file artifacts
 name their path **relative to the output root**; compute each size and hash from
 the file you wrote.
 

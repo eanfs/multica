@@ -68,8 +68,9 @@ node provides. Do the work yourself.
    still running; keep polling until the deadline.
 
 4. Hand the result URL to the task-scoped importer. Do not download it yourself:
-   this node's egress allowlist does not cover the provider's media host, and the
-   importer keeps the URL out of the task.
+   this workflow requires a server-staged artifact associated with the current
+   task. Use the returned staging ID and integrity metadata in the manifest
+   below, not the provider URL or a local download.
 
    ```bash
    result_url=$(jq -r '.content.video_url // empty' /tmp/seedance-poll.json)
@@ -98,7 +99,9 @@ node provides. Do the work yourself.
 
 ## Artifact manifest
 
-Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Run `mkdir -p "<outputRoot>/.multica"` first: nothing creates that directory for you. Every value below comes
+Write `<outputRoot>/.multica/aurora-artifacts.v1.json`. Run
+`mkdir -p "<outputRoot>/.multica"` first: nothing creates that directory for
+you. Every value below comes
 from a previous step; copy it, do not invent it.
 
 ```json
