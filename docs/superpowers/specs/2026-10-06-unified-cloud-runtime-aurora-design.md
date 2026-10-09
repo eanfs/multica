@@ -4,7 +4,9 @@
 
 状态：2026-10-07 深度审查修订版（r2），书面规格待用户审阅。统一镜像与运行时的方向已确认；执行环境与隔离实证门尚未关闭，不能标为已证明可实施。
 
-初稿基线：`feat/local-docker-cloud-runtime`，`92650fc80`。审查基线：`1bb9b9043`；本次不修改并行进行的 Fleet 代码。问题、证据与处置见[深度审查记录](2026-10-07-unified-cloud-runtime-aurora-review.md)。本文是架构规格，尚不是包含逐文件任务和测试命令的实施计划。
+初稿基线：`feat/local-docker-cloud-runtime`，`92650fc80`。审查基线：`1bb9b9043`。本次设计审查仅修订文档，未实施代码变更；后续实施包含本规格要求的 Fleet、daemon 与 Aurora 接线改造。问题、证据与处置见[深度审查记录](2026-10-07-unified-cloud-runtime-aurora-review.md)。本文是架构规格，尚不是包含逐文件任务和测试命令的实施计划。
+
+文档交付：本规格与审查记录已随 [PR #188](https://github.com/eanfs/multica/pull/188) 合并。该合并不表示统一镜像方案已实施或通过验收；原有 Aurora 对接的运行证据不能替代 §12 的 G0–G5。本文始终要求一个节点发布镜像、一个配置 digest 和一套 Cloud Runtime。
 
 ## 1. 目标与已确认边界
 
