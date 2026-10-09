@@ -414,7 +414,7 @@ func buildAuroraPrompt(task Task) string {
 		b.WriteString("This run has no attachments.\n\n")
 	}
 	b.WriteString("Hard rules:\n")
-	b.WriteString("- Do the work yourself with the tools you have. There is no broker and no other execution path.\n")
+	b.WriteString("- Do the work yourself with the tools you have; you are the only execution path.\n")
 	b.WriteString("- Write the generation's artifacts and their manifest exactly as the skill document specifies. The platform collects them from there, and the generation fails if the manifest is missing or does not match this run.\n")
 	b.WriteString("- Never submit a second billable provider request for this run. If a provider call fails, stop and report its message.\n")
 	b.WriteString("- When you are done, print one short line naming the produced artifact and stop.\n")

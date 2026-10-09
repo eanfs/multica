@@ -21,9 +21,11 @@ type SystemAgentDef struct {
 	SystemKey    string
 	Name         string
 	Instructions string
-	// RequiredTools is the reviewed MCP tool set the skill's canonical workflow
-	// calls, copied from the execution policy. The daemon narrows a task's
-	// surface to this trusted list; unavailable skills carry none.
+	// RequiredTools is the provider-operation set copied from the skill's
+	// execution policy. It documents what the skill's steps perform; it is not
+	// a tool allowlist — Aurora runs on the ordinary agent surface, so nothing
+	// narrows the model's tools to this set (see SkillExecutionPolicy.RequiredTools).
+	// Unavailable skills carry none.
 	RequiredTools []string
 }
 
