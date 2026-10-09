@@ -419,6 +419,32 @@ func TestAuroraArtifactUploadRejectsKindOutsideSkillPolicy(t *testing.T) {
 		artifactUploadRequest(t, taskID, agentID, taskID, videoFields, video)).Want(http.StatusBadRequest)
 }
 
+// TestAuroraArtifactUploadAcceptsTheVideoCaptionsTranscript covers the one
+// artifact a skill publishes outside its declared output: video-captions only
+// advertises the video, and its ASR transcript travels beside it as role
+// `transcript`. The report path already exempts that pair; the upload path must
+// exempt the same one, or every captions run fails artifact collection with a
+// 400 after the video was already encoded.
+func TestAuroraArtifactUploadAcceptsTheVideoCaptionsTranscript(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	store := &artifactTestStorage{}
+	withArtifactStorage(t, store)
+	agentID, taskID, _ := seedAuroraArtifactTask(t, "video-captions")
+
+	content := []byte("hello world")
+	transcript := artifactUploadFields("transcript-1", "transcript.txt", "text", "transcript", "txt", "text/plain", len(content), artifactSHA256Field(content))
+	testutil.Call(t, testHandler.UploadAuroraArtifact,
+		artifactUploadRequest(t, taskID, agentID, taskID, transcript, content)).Want(http.StatusOK)
+
+	// The exemption is the transcript role, not the text kind: the same kind
+	// under any other role is still outside the skill's declared output.
+	primary := artifactUploadFields("primary-2", "primary-2.txt", "text", "primary", "txt", "text/plain", len(content), artifactSHA256Field(content))
+	testutil.Call(t, testHandler.UploadAuroraArtifact,
+		artifactUploadRequest(t, taskID, agentID, taskID, primary, content)).Want(http.StatusBadRequest)
+}
+
 func TestAuroraArtifactUploadRejectsOversizeStream(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
