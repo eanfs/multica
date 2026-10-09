@@ -411,8 +411,13 @@ func (h *Handler) validateAuroraArtifactInput(w http.ResponseWriter, skillID str
 	}
 	policy, ok := aurora.ExecutionPolicy(skillID)
 	if !ok || !slices.Contains(policy.OutputKinds, input.Kind) {
-		writeError(w, http.StatusBadRequest, "artifact kind is not produced by this skill")
-		return auroraArtifactKind{}, false
+		// A transcript is route metadata, not the skill's declared output:
+		// video-captions publishes the ASR transcript beside the primary
+		// video, and the catalog only advertises the video.
+		if input.Role != "transcript" || input.Kind != "text" {
+			writeError(w, http.StatusBadRequest, "artifact kind is not produced by this skill")
+			return auroraArtifactKind{}, false
+		}
 	}
 	if !auroraArtifactNamePattern.MatchString(input.Name) || strings.Contains(input.Name, "..") {
 		writeError(w, http.StatusBadRequest, "invalid artifact name")

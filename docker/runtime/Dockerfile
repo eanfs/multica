@@ -16,9 +16,10 @@ RUN version="$(node -e 'const v=require("fs").readFileSync("/tmp/claude-version.
 FROM debian:bookworm-slim AS runtime
 # One image serves both the Fleet node and an Aurora task. The Aurora skill
 # documents run their own steps in a shell, so the toolchain they call is
-# installed here: Chromium prints the resume PDF, FFmpeg composes captions and
-# extracts audio, ImageMagick applies the fixed ID-photo transform, poppler
-# reads PDF text, and jq/unzip build request bodies and unpack documents.
+# installed here: curl calls the provider and the Multica API, Chromium prints
+# the resume PDF, FFmpeg composes captions and extracts audio, ImageMagick
+# applies the fixed ID-photo transform, poppler reads PDF text, and jq/unzip
+# build request bodies and unpack documents.
 # Nothing with a build-time-only purpose enters the image, and the node keeps a
 # single launcher entrypoint.
 RUN apt-get update && apt-get install -y --no-install-recommends \

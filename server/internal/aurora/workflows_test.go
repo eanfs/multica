@@ -12,44 +12,16 @@ import (
 	"github.com/multica-ai/multica/server/internal/aurora"
 )
 
-// auroraToolPattern extracts the MCP tool names a brief is allowed to call. The
-// broker namespaces every reviewed tool as "aurora.<verb>", so this is the only
-// tool-shaped token a brief may contain.
-var auroraToolPattern = regexp.MustCompile("\\baurora\\.[a-z0-9_]+\\b")
+// auroraManifestSchema is the one "aurora.<name>" token a skill document may
+// contain. The deleted broker namespaced every reviewed tool as "aurora.<verb>"
+// and named them in the briefs; an Aurora task now runs on the ordinary agent
+// surface, so a document must carry its own shell steps instead. This schema
+// name is not a tool, which is why it is the sole exception.
+const auroraManifestSchema = "com.multica.aurora.artifacts"
 
-// workflowForbiddenPatterns is the security half of the broker-form brief
-// contract. A broker-form brief is model-facing prompt content: it may name
-// reviewed tools and artifact IDs, but it must never hand the prompt a shell, a
-// location, a secret, or a way to pick a vendor, a model, or a package. A
-// rewritten brief (see rewrittenSkills) deliberately carries the real commands,
-// endpoints, and credential variable names, so these rules do not apply to it.
-var workflowForbiddenPatterns = []struct {
-	name string
-	re   *regexp.Regexp
-}{
-	{"URL", regexp.MustCompile("(?i)https?://")},
-	{"shell command", regexp.MustCompile("(?i)\\b(bash|zsh|fish|sh|powershell)\\b")},
-	{"dynamic package installation", regexp.MustCompile("(?i)\\b(npm|pnpm|yarn|pip3?|apt|apt-get|brew)\\s+(install|add|i|get)\\b")},
-	{"npx invocation", regexp.MustCompile("(?i)\\bnpx\\b")},
-	{"API key or secret", regexp.MustCompile("(?i)\\b(api[ _-]?key|secret|password|credential|bearer|token)\\b")},
-	{"provider selection", regexp.MustCompile("(?i)\\b(provider|vendor|endpoint)\\b")},
-	{"model selection", regexp.MustCompile("(?i)\\bmodel\\b")},
-}
-
-// rewrittenSkills lists the skill documents that have been converted to the
-// ordinary-agent form. It grows one skill at a time: each one is verified end
-// to end before the next is written, so a document that still tells the model
-// to call a brokered MCP tool is a bug, not a stale comment.
-var rewrittenSkills = []string{"text-image"}
-
-// rewrittenSkillSet is the lookup form of rewrittenSkills.
-func rewrittenSkillSet() map[string]bool {
-	set := make(map[string]bool, len(rewrittenSkills))
-	for _, id := range rewrittenSkills {
-		set[id] = true
-	}
-	return set
-}
+// auroraToolPattern extracts tool-shaped tokens from a brief. Only
+// auroraManifestSchema's tail may match.
+var auroraToolPattern = regexp.MustCompile(`\baurora\.[a-z0-9_]+\b`)
 
 func availableSkills() []string {
 	var ids []string
@@ -63,13 +35,10 @@ func availableSkills() []string {
 }
 
 // TestAvailableSkillsHaveCanonicalWorkflows asserts the embedded bundle carries
-// exactly one brief per available catalog skill, that each brief names its
-// skill, and that no broker-form brief smuggles in a shell, location, secret, or
-// provider/model/package selection. Rewritten briefs carry those facts on
-// purpose and are checked by TestRewrittenWorkflowsDescribeRealSteps instead.
+// exactly one brief per available catalog skill and that each brief names its
+// skill. What a brief may say is TestRewrittenWorkflowsDescribeRealSteps.
 func TestAvailableSkillsHaveCanonicalWorkflows(t *testing.T) {
 	available := availableSkills()
-	rewritten := rewrittenSkillSet()
 	if len(available) != 13 {
 		t.Fatalf("available skills = %d, want 13", len(available))
 	}
@@ -104,16 +73,6 @@ func TestAvailableSkillsHaveCanonicalWorkflows(t *testing.T) {
 		if !strings.Contains(brief, skill) {
 			t.Errorf("Workflow(%q) does not name its skill", skill)
 		}
-		if rewritten[skill] {
-			// A rewritten brief is the executable form; its contract is
-			// TestRewrittenWorkflowsDescribeRealSteps.
-			continue
-		}
-		for _, rule := range workflowForbiddenPatterns {
-			if match := rule.re.FindString(brief); match != "" {
-				t.Errorf("Workflow(%q) contains %s text %q", skill, rule.name, match)
-			}
-		}
 	}
 }
 
@@ -140,10 +99,12 @@ func TestUnavailableSkillsHaveNoWorkflow(t *testing.T) {
 }
 
 // TestWorkflowToolsMatchExecutionPolicy is the contract between the prompt and
-// the server-owned policy: a broker-form brief may reference exactly the
-// reviewed tools Task 1 recorded for its skill, and nothing outside the policy
-// may appear in any broker-form brief. A rewritten brief must name no brokered
-// tool at all, because it reaches the provider through the shell.
+// the server-owned policy. The policy's RequiredTools used to be the daemon's
+// tool allowlist, so the older form of this test asserted that a brief named
+// exactly them; the daemon no longer reads the field (the broker is gone), but
+// the table still names the vendored producer each route runs on. A brief must
+// name none of them: an Aurora document reaches its provider through the shell,
+// not through a brokered tool.
 func TestWorkflowToolsMatchExecutionPolicy(t *testing.T) {
 	policyTools := map[string]bool{}
 	for _, entry := range aurora.Catalog() {
@@ -157,6 +118,9 @@ func TestWorkflowToolsMatchExecutionPolicy(t *testing.T) {
 		if len(policy.RequiredTools) == 0 {
 			t.Fatalf("ExecutionPolicy(%q) has no required tools", entry.ID)
 		}
+		if policy.Route == "" {
+			t.Fatalf("ExecutionPolicy(%q) has no route", entry.ID)
+		}
 		for _, tool := range policy.RequiredTools {
 			policyTools[tool] = true
 		}
@@ -165,7 +129,6 @@ func TestWorkflowToolsMatchExecutionPolicy(t *testing.T) {
 		t.Fatal("no execution policy declares required tools")
 	}
 
-	rewritten := rewrittenSkillSet()
 	for _, entry := range aurora.Catalog() {
 		if !entry.Available {
 			continue
@@ -174,45 +137,20 @@ func TestWorkflowToolsMatchExecutionPolicy(t *testing.T) {
 		if !ok {
 			t.Fatalf("Workflow(%q) = missing", entry.ID)
 		}
-		policy, _ := aurora.ExecutionPolicy(entry.ID)
-
-		if rewritten[entry.ID] {
-			// A rewritten brief must name no brokered tool. The loose
-			// aurora.<verb> pattern cannot decide that: every rewritten manifest
-			// carries the schema name "com.multica.aurora.artifacts", which is
-			// not a tool. Compare against the policy's own tool names instead.
-			for tool := range policyTools {
-				if strings.Contains(brief, tool) {
-					t.Errorf("rewritten workflow %q still names broker tool %q", entry.ID, tool)
-				}
-			}
-			continue
-		}
-
-		referenced := auroraToolPattern.FindAllString(brief, -1)
-		sort.Strings(referenced)
-		referenced = slices.Compact(referenced)
-
-		want := append([]string(nil), policy.RequiredTools...)
-		sort.Strings(want)
-		want = slices.Compact(want)
-		if !slices.Equal(referenced, want) {
-			t.Errorf("Workflow(%q) tools = %v, want exactly %v", entry.ID, referenced, want)
-		}
-		for _, tool := range referenced {
-			if !policyTools[tool] {
-				t.Errorf("Workflow(%q) references %q, which no execution policy declares", entry.ID, tool)
+		for tool := range policyTools {
+			if strings.Contains(brief, tool) {
+				t.Errorf("workflow %q still names broker tool %q", entry.ID, tool)
 			}
 		}
 	}
 }
 
 // TestRewrittenWorkflowsDescribeRealSteps is the contract for a brief an
-// ordinary agent can execute: it carries the five fixed sections and never
-// tells the model to call a brokered MCP tool or claims the runtime has no
-// shell.
+// ordinary agent can execute. Every available skill is held to it: the brief
+// carries the five fixed sections, describes real steps, and never falls back
+// to the deleted broker's vocabulary.
 func TestRewrittenWorkflowsDescribeRealSteps(t *testing.T) {
-	for _, id := range rewrittenSkills {
+	for _, id := range availableSkills() {
 		brief, ok := aurora.Workflow(id)
 		if !ok {
 			t.Fatalf("skill %q has no workflow document", id)
@@ -225,6 +163,17 @@ func TestRewrittenWorkflowsDescribeRealSteps(t *testing.T) {
 				t.Errorf("skill %q still references %q", id, banned)
 			}
 		}
+		// The banned list only names the tools that existed. A rewritten tool
+		// name would slip past it, and past the policy names too, so match the
+		// namespace itself and allow only the manifest schema.
+		for _, ref := range auroraToolPattern.FindAllString(brief, -1) {
+			if ref != "aurora.artifacts" {
+				t.Errorf("skill %q names %q: that is a broker tool name, not a step", id, ref)
+			}
+		}
+		if !strings.Contains(brief, auroraManifestSchema) {
+			t.Errorf("skill %q does not name the artifact manifest schema %q", id, auroraManifestSchema)
+		}
 		for _, want := range []string{"## Inputs", "## Steps", "## Required outputs", "## Artifact manifest", "## Failure behavior"} {
 			if !strings.Contains(brief, want) {
 				t.Errorf("skill %q is missing the %q section", id, want)
@@ -234,7 +183,7 @@ func TestRewrittenWorkflowsDescribeRealSteps(t *testing.T) {
 }
 
 // TestEveryAvailableSkillHasADocument keeps the catalog and the embedded bundle
-// in step. It does not require the document to be rewritten yet.
+// in step.
 func TestEveryAvailableSkillHasADocument(t *testing.T) {
 	for _, e := range aurora.Catalog() {
 		if _, ok := aurora.Workflow(e.ID); e.Available && !ok {
