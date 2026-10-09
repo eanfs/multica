@@ -1,8 +1,110 @@
 # INCOMPLETE / NOT ACCEPTED — Aurora agent + skill runtime
 
+Task 7 record for [eanfs/multica#205](https://github.com/eanfs/multica/issues/205).
+
+**Overall status: still INCOMPLETE / NOT ACCEPTED.** The real round trips (M0, M4) and the 13 real-provider skill runs remain **NOT RUN**: they need owner authorization and real provider credentials that were not granted. Run 2 adds real evidence for the Step 1 code checks and the Step 4 visibility gates.
+
+| Run | Date | Code HEAD | What it covers |
+| --- | --- | --- | --- |
+| Run 2 | 2026-10-09 | `c04173034` | Step 1 unit checks; Step 4 gates ① ② ③. Steps 2 and 3 NOT RUN. |
+| Run 1 | 2026-10-08 | `29cfe0ad8…`, `e42f555f…` | Documentation only; no live environment. Steps 2–4 all NOT RUN. |
+
+## Run 2 — 2026-10-09: code checks and the three visibility gates
+
+### Snapshot, environment and authorization
+
+| Item | Value |
+| --- | --- |
+| Code HEAD | `c04173034` — merge of PR #215 (`fix/aurora-brief-213`) into `main` |
+| Branch / worktree | `feat/aurora-acceptance-205`, `/Users/lirichen/Work/apexai/multica-205` |
+| Managed environment | `multica_205-908`; database `multica_multica_205_908`, 650 migrations applied |
+| API | `http://localhost:18988` — `/health` OK, reports commit `c04173034` |
+| Web | `http://localhost:13908` |
+| Fleet | **not configured**. The workspace's Aurora managed runtime is `offline`; a generation create answers `503 aurora_runtime_unavailable`. |
+| Provider authorization | **NOT GRANTED.** No ARK key was used and no provider request was made. |
+
+Steps 2 (M0/M4 round trips) and 3 (13 skill runs) are **NOT RUN**. No real-provider row is PASS.
+
+### Step 1 — unit level
+
+| Command | Actual result | Verdict |
+| --- | --- | --- |
+| `( cd server && go test ./internal/service -run Aurora -count=1 )` | `ok  github.com/multica-ai/multica/server/internal/service  3.344s`, exit 0 | **PASS** |
+| `( cd server && go test ./internal/handler -run Aurora -count=1 )` | `FAIL` — one case only: `--- FAIL: TestAuroraFleetProvisionToClaim (0.05s)` → `aurora_fleet_e2e_test.go:90: ensure workspace sandbox: ensure workspace sandbox: fleet unavailable: private response status 503` | **FAIL, pre-existing** |
+
+Both ran through `make env-exec` so they used the environment's `DATABASE_URL`.
+
+`TestAuroraFleetProvisionToClaim` is **not a regression from this work**: the Run 2 worktree carries **zero source changes** (clean tree at `c04173034`). Localization performed:
+
+- The 205 database holds every `fleet_*` and `aurora_*` table with all 650 migrations applied, so this is not a missing-relation failure.
+- `( cd server && go test ./internal/fleet/store -run TestFleetAuroraIntent -count=1 )` → `ok`. The store-level Aurora admission path passes against the same database, so the write path itself is sound.
+- The failure is at the service/HTTP layer. The test's in-process Fleet service answers **503**, and `cloudruntime.privateOperationError` (`server/internal/cloudruntime/fleet_internal.go:33`) reports only the status code for a 503, so the Fleet's `error_code` never reaches the test output. `fleet/http.go:60-77` maps every unclassified error to `503 unavailable`.
+
+The root cause therefore remains **not settled**, consistent with the pre-existing red set already recorded in `AGENTS.md` (Aurora leftovers, item 9). No source was changed to make the case pass.
+
+### Step 4 — the three visibility gates
+
+Mode: a real headless Chromium session against `http://localhost:13908`, signed in as `dev@localhost` through the UI, in that user's personal workspace.
+
+The 13 Aurora system agents were materialized by the product path, not by a fixture: `POST /api/aurora/generations` calls `aurora.EnsureSystemAgents` at `server/internal/handler/aurora.go:172` *before* the Fleet check at `:183`, so the seed lands even when the sandbox cannot start. That request answered `503 aurora_runtime_unavailable` — expected without a Fleet — and the 13 agents were created.
+
+#### Gate ① — agent list: **PASS**
+
+`/{ws}/agents` renders **13** agents (`Mine 13` / `All 13`). The extracted page text contains all 13 `aurora.Catalog()` `Name` values and no extras; the three `available: false` catalog entries (`数字人口播`, `PPT 制作`, `Excel 数据分析`) are not agents.
+
+![agents list](../../assets/aurora-acceptance-205/agents-list.png)
+
+#### Gate ② — the agent's skill: **PASS at the data layer; the UI does not render content while the runtime is offline**
+
+- **UI:** `Capabilities → Skills` shows the agent's single skill, `文字生成图片`, labelled *Inherited from runtime*. No skill body is rendered; the pane states *"The local runtime is offline. Reconnect it to refresh inherited skills."* Clicking the row opens nothing.
+- **Data layer, all 13:** every agent has exactly one `agent_skill` row whose bound `skill.name` equals the agent's name (13/13). Each `skill.content` is byte-equal to `server/internal/aurora/workflows/<id>.md` apart from one trailing newline — the document ends with one, the stored value does not. The `id`↔`name` mapping came from `GET /api/aurora/skills`.
+
+So "one skill per agent, matching its workflow document" is verified in the database and through the API, **not** in the browser. This build renders inherited skill *content* only while the runtime is connected, and connecting it is exactly the Fleet round trip that is not authorized.
+
+![agent skills tab](../../assets/aurora-acceptance-205/agent-skills-tab.png)
+
+#### Gate ③ — issue-less task rows: **PASS for rendering; the named tab is not where tasks render**
+
+A task row with `issue_id = NULL` renders as:
+
+> **Quick create** · Succeeded · just now · 20s
+
+No blank row and no "unknown issue" text appears anywhere on the page. `GET /api/agents/{id}/tasks` returns the row carrying `"issue_id": ""` and `"kind": "quick_create"`.
+
+Two qualifications:
+
+1. **The row was hand-seeded, not produced by a round trip.** The product path refuses it while the managed runtime is offline: `POST /api/issues/quick-create` answers `422 agent_unavailable / runtime_offline`, and the Aurora generation path stops at the same Fleet check. This gate is about the renderer, so a row with the same shape (`status='completed'`, `issue_id NULL`, `runtime_id` = the workspace's `aurora_managed` runtime) was inserted directly into `agent_task_queue`.
+2. **The literal "Work tab" criterion does not match this build.** At `c04173034` the agent detail tabs are Overview / Work / Capabilities / Settings. The **Work tab lists issues** (`Assigned` / `Created`, empty here); agent task rows render in **Overview → Recent work** (`ActivityTab` in `packages/views/agents/components/tabs/activity-tab.tsx`). The criterion's wording predates that split. This record reports what was observed rather than changing the criterion.
+
+A first seed without `completed_at` rendered nothing: the row filter requires `!!t.completed_at` (`activity-tab.tsx:132`). That is the component's own filter, not a defect.
+
+![issue-less recent work row](../../assets/aurora-acceptance-205/agent-recent-work-issue-less.png)
+
+### Environment findings (not product defects)
+
+| Observation | Detail |
+| --- | --- |
+| `make up C=api,web` failed | `pnpm install` failed in `apps/desktop`'s `electron` postinstall: the environment exports `ELECTRON_MIRROR=https://npm.taobao.org/mirrors/electron/`, whose certificate no longer matches. Installing with `ELECTRON_SKIP_BINARY_DOWNLOAD=1` succeeded. |
+| Browser launch failed | The installed Playwright expects `chromium_headless_shell-1208`; the machine's cache holds 1234/1243. The cached 1243 binary was used through `executablePath`. |
+| Transient `ENOSPC` | The worktree's `node_modules` is 2.2 GB and the volume ran out mid-run; space recovered without intervention. |
+| Browser authentication | The API's cookies (`multica_auth`, `multica_csrf*`) alone are not sufficient. `multica_logged_in` plus a real UI sign-in was required, and the user needed `onboarded_at` set. |
+| `bash -l` breaks Go tooling | A login shell resolves an older `/usr/local/go/bin/go` that cannot parse `go 1.26.6` or the `tool` directive. Run Go commands with `bash -c`. |
+| `GIT_CONFIG_*` pollution | The ambient environment sets `GIT_CONFIG_COUNT=2` without the matching `GIT_CONFIG_KEY_*`, which breaks every `git` call inside the `internal/daemon/execenv` tests (44 spurious failures). Clearing those variables makes the package pass. |
+
+### What Run 2 does not establish
+
+- No real model call, no ARK request, no image, no import, no manifest, no asset and no ledger change.
+- No Fleet node was provisioned; `503 aurora_runtime_unavailable` is the observed and expected answer.
+- Gate ②'s browser content view and gate ③'s real producer path stay blocked on the same unauthorized round trip.
+- Nothing here proves container isolation, Docker Desktop behaviour, or that the 13 workflows execute.
+
+---
+
+## Run 1 — 2026-10-08 (documentation-only)
+
 Task 7 record for [eanfs/multica#205](https://github.com/eanfs/multica/issues/205), 2026-10-08. **Documentation delivered; operational acceptance not achieved.** Code evidence is not a live round trip. No real provider row below is PASS.
 
-## Snapshot and authority
+### Snapshot and authority
 
 - Historical tested code HEAD: `29cfe0ad8450ab662fa66f12922c138943decbb0`, before the original documentation-only commit. The controller evidence below remains attached to that snapshot, not to later source fixes or a built image.
 - Branch: `chore/aurora-remove-sandbox-202`; worktree: `/tmp/multica-issue-202`.
@@ -11,13 +113,13 @@ Task 7 record for [eanfs/multica#205](https://github.com/eanfs/multica/issues/20
 - Tasks 6/6b code was approved. This does not establish DB, migration, API or browser behavior. The catalog has 16 entries: 13 available carriers; `avatar-video`, `ppt`, `excel` remain unavailable and hidden. See [catalog](<../../../server/internal/aurora/catalog.go>). Visibility of 13 agents is **not execution of 13 workflows**.
 - [#199](https://github.com/eanfs/multica/issues/199) remains waived: only [text-image](<../../../server/internal/aurora/workflows/text-image.md>) has the executable-document rewrite; **12 rewrites remain missing**. The waiver permits source cleanup, not a claim that those workflows work.
 
-## Authorization and environment
+### Authorization and environment
 
 Controller status: **NOT AUTHORIZED / NOT USABLE YET**. Its read-only investigation recorded a stopped shared PostgreSQL container, no reachable database on port 5432, and no registered worktree environment. The startup/isolated-testing authorization request timed out without consent. The final preflight found no `.env.worktree`; no credentials were inspected.
 
 No DB-backed TestMain was executed against default localhost. No migration, DB provisioning, API/Web/Fleet startup, Docker lifecycle, real agent CLI lookup/execution, provider request, AWS operation or spend was performed for Task 7. Optional gated tests were not invoked: an unset opt-in is not proof that package TestMain is safe. No new authorization flags or live-looking fixtures were added.
 
-## Existing code verification, not live acceptance
+### Existing code verification, not live acceptance
 
 These are **controller-recorded results at the code HEAD above**, not Task 7 reruns. The controller ran full frontend checks once; Task 7 does not repeat them. The CLI guard is [go-test-with-agent-cli-guard.sh](<../../../scripts/go-test-with-agent-cli-guard.sh>).
 
@@ -41,7 +143,7 @@ The brief commands below were **NOT RUN** because their DB-backed packages are u
 
 Billing is untouched, not calculated, not validated and **not an acceptance gate**. The existing completion contract requires at least one committed asset or refunds; no runtime settlement/refund assertion is claimed here. No necessary source defect was demonstrated, so no completion, billing, API or manifest code was changed.
 
-## Final source-prerequisite follow-up
+### Final source-prerequisite follow-up
 
 The combined final fix wave repairs the stale text-image network rationale and addresses three pre-existing prerequisites authorized by the continuation scope ruling, not introduced #203/#204 defects:
 
@@ -52,7 +154,7 @@ The combined final fix wave repairs the stale text-image network rationale and a
 
 Source-fix snapshot: `e42f555fc6743b2c8faa790903d2c4b37641b467` (after original record `dc83302eac48cd0d28f3d25afda701ac5cb90e73`). At that source snapshot, `bash scripts/check-runtime-image.test.sh` passed 3 hermetic cases, `bash scripts/fleet-env.test.sh` passed 38 behavioral cases (35 existing + 3 new) plus its shell preflight, and the guarded Go model tests `TestValidAnthropicBaseURL` and `TestLoadConfigAuroraAnthropicBaseURL` passed. No broader suite was rerun. These are source fixes, not evidence of a built/tested image. The historical test evidence at `29cfe0ad8` above is unchanged. Image build/run/inspect, M0, M4, all 13 real-provider routes, all three browser gates and the full DB-backed suite remain **INCOMPLETE / NOT RUN**. No live authorization or credential lookup occurred.
 
-## Live round trips — both NOT RUN
+### Live round trips — both NOT RUN
 
 The following are prescribed future commands, **not commands executed in this record**. They require exact owner authorization and verified setup first.
 
@@ -67,7 +169,7 @@ A later run must distinguish failure locations: denied create or ARK 401/429 is 
 
 If only moderation blocks after a real provider image and successful import, record execution-chain success but **do not claim end-to-end completed**. Record credits problems and continue execution-chain verification where possible without changing billing; billing is not the gate. None of those exceptions can turn an entirely unrun chain into a pass.
 
-## Thirteen real-provider rows — all SKIP
+### Thirteen real-provider rows — all SKIP
 
 Inputs below are catalog input types, **not submitted test inputs**. For every row: actual input = NOT SUBMITTED; actual executed command = NONE; artifact = NOT OBSERVED; ledger change = NOT OBSERVED. No provider-specific command is invented for the 12 missing rewrites.
 
@@ -87,7 +189,7 @@ Inputs below are catalog input types, **not submitted test inputs**. For every r
 | document-summary | document, text | **SKIP** | No authorized live environment/CLI/provider budget; executable rewrite missing under #199 waiver |
 | transcription | audio, video | **SKIP** | No authorized live environment/CLI/provider budget or ASR setup; executable rewrite missing under #199 waiver |
 
-## Three separate browser gates — all NOT RUN
+### Three separate browser gates — all NOT RUN
 
 These are the M4 product gates in the web app, not substitutes for the round trip. No app was started and no authenticated browser environment was authorized.
 
@@ -99,7 +201,7 @@ These are the M4 product gates in the web app, not substitutes for the round tri
 
 All three must pass before “fully connected” can be claimed. If an authorized browser run later shows blank issue-less Work rows, record FAIL and fix rendering rather than weaken the criterion.
 
-## Accepted behavior changes and costs
+### Accepted behavior changes and costs
 
 - Ordinary agent tools with `bypassPermissions` replace the broker-only restricted surface; no second queue, agent type, claim channel or daemon is introduced. Existing runtime API fields and unconfigured generation 503 semantics remain the boundary.
 - Docker defaults replace AppArmor/custom seccomp policy; read-only root and `no-new-privileges` remain. The removed isolation matrix has **no replacement** and is not a pending requirement. No claim of verified container isolation or Docker Desktop success is made.
@@ -109,7 +211,7 @@ All three must pass before “fully connected” can be claimed. If an authorize
 - Only Volcengine routes remain; product-image/image-edit use Seedream, not OpenAI Images. Twelve executable-document rewrites are still absent. `omp` is intentionally not installed in this phase.
 - External AWS deployment-repository changes are out of scope and unverified. Historical broker/sidecar acceptance cannot validate this changed execution surface.
 
-## Owner authorization and setup checklist
+### Owner authorization and setup checklist
 
 These are prerequisites for a separately approved run, not authorization granted by this document:
 
