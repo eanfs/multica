@@ -5309,7 +5309,9 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 
 	// Aurora generations settle on the terminal event: refund the reservation
 	// and mark the generation failed. Idempotent via the generation-status check.
-	s.settleAuroraOnFailed(ctx, task, failureReason)
+	// The classified reason is a taxonomy code; the daemon's own message is what
+	// tells the user anything, so pass both and let the settlement choose.
+	s.settleAuroraOnFailed(ctx, task, auroraFailureReason(errMsg, failureReason))
 
 	// The auto-retry child (if any) was created inside the transaction above so
 	// no newer chat task could jump ahead of it. Surface it now: broadcast
@@ -6266,8 +6268,9 @@ func (s *TaskService) HandleFailedTasks(ctx context.Context, tasks []db.AgentTas
 		// Aurora generations settle on the terminal event. This is the single
 		// funnel every sweeper failure path (stale, offline, queued-expiry,
 		// orphan-recovery) feeds, so a generation whose task was swept into a
-		// terminal failed state is refunded and marked failed here.
-		s.settleAuroraOnFailed(ctx, t, failureReason)
+		// terminal failed state is refunded and marked failed here. A swept task
+		// carries whatever the daemon last recorded, which beats the code.
+		s.settleAuroraOnFailed(ctx, t, auroraFailureReason(t.Error.String, failureReason))
 
 		workspaceID := ""
 		if t.IssueID.Valid {
