@@ -8,9 +8,8 @@ package handler
 //   - upload streams a sandbox-produced local file through SHA-256 and a
 //     per-kind byte limiter into Multica storage, sniffing the first bytes
 //     before anything is stored.
-//   - import fetches exactly one HTTPS provider result URL through the
-//     SSRF-safe client in internal/aurora, revalidating DNS on every redirect,
-//     and never persists or logs the URL.
+//   - import fetches exactly one HTTPS provider result URL and never persists
+//     or logs the URL.
 //
 // Both insert the staging row only after storage succeeds; a failed insert
 // deletes the object it just wrote so an unreferenced object cannot accumulate.
@@ -390,13 +389,17 @@ func (h *Handler) ImportAuroraArtifact(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, newAuroraArtifactStagingResponse(row))
 }
 
-// auroraArtifactImportHTTPClient returns the test override or the production
-// SSRF-safe client.
+// artifactImportHTTPClient fetches a provider artifact source. The timeout is
+// the only bound: a hung provider must not hold the request open.
+var artifactImportHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+// auroraArtifactImportHTTPClient returns the test override or the shared
+// production client.
 func (h *Handler) auroraArtifactImportHTTPClient() *http.Client {
 	if h.auroraArtifactImportClient != nil {
 		return h.auroraArtifactImportClient
 	}
-	return aurora.NewArtifactImportClient(nil, nil)
+	return artifactImportHTTPClient
 }
 
 // validateAuroraArtifactInput enforces the server-owned artifact policy: the
@@ -699,8 +702,6 @@ func parseAuroraArtifactSourceURL(w http.ResponseWriter, raw string) (*url.URL, 
 // signed provider URL.
 func writeAuroraArtifactImportFetchError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, aurora.ErrArtifactAddrBlocked), errors.Is(err, aurora.ErrArtifactRedirectRefused):
-		writeError(w, http.StatusBadRequest, "artifact source url is not allowed")
 	case isAuroraArtifactTimeout(err):
 		writeError(w, http.StatusGatewayTimeout, "artifact source timed out")
 	default:

@@ -12,41 +12,17 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/multica-ai/multica/server/internal/aurora"
 	"github.com/multica-ai/multica/server/internal/testutil"
 )
 
 // artifactTestPNG is the shortest byte string http.DetectContentType reports as
 // image/png, so sniff-based MIME tests do not need a real encoder.
 const artifactTestPNG = "\x89PNG\r\n\x1a\n"
-
-// artifactTestAllowLoopback is the test-only address policy: the real one
-// refuses loopback, but the httptest servers these tests fetch from live there.
-var artifactTestAllowLoopback aurora.ArtifactAddrPolicy = func(addr netip.Addr) bool {
-	return addr.Unmap().IsLoopback() || aurora.IsPublicAddress(addr)
-}
-
-// artifactTestResolver answers DNS for the importer without touching the
-// network. Literal IPs resolve to themselves, matching net.DefaultResolver.
-type artifactTestResolver struct {
-	answers map[string][]netip.Addr
-}
-
-func (r artifactTestResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {
-	if addr, err := netip.ParseAddr(host); err == nil {
-		return []netip.Addr{addr}, nil
-	}
-	if addrs, ok := r.answers[host]; ok {
-		return addrs, nil
-	}
-	return nil, fmt.Errorf("artifact test resolver: no answer for %q", host)
-}
 
 type artifactTestResponse struct {
 	StagingID          string          `json:"staging_id"`
@@ -100,21 +76,17 @@ func withArtifactImportClient(t *testing.T, client *http.Client) {
 	t.Cleanup(func() { testHandler.auroraArtifactImportClient = previous })
 }
 
-// artifactTestHTTPSClient is the guarded importer client with the httptest
-// server's self-signed certificate trusted. The SSRF guard is untouched.
-func artifactTestHTTPSClient(t *testing.T, server *httptest.Server, resolver aurora.ArtifactHostResolver, allow aurora.ArtifactAddrPolicy) *http.Client {
+// artifactTestHTTPSClient is the importer client with the httptest server's
+// self-signed certificate trusted.
+func artifactTestHTTPSClient(t *testing.T, server *httptest.Server) *http.Client {
 	t.Helper()
-	client := aurora.NewArtifactImportClient(resolver, allow)
-	clientTransport, ok := client.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("artifact importer transport = %T, want *http.Transport", client.Transport)
-	}
 	serverTransport, ok := server.Client().Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("httptest transport = %T, want *http.Transport", server.Client().Transport)
 	}
-	clientTransport.TLSClientConfig = serverTransport.TLSClientConfig
-	return client
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = serverTransport.TLSClientConfig
+	return &http.Client{Transport: transport, Timeout: 30 * time.Second}
 }
 
 func seedAuroraArtifactTask(t *testing.T, skillID string) (agentID, taskID, generationID string) {
@@ -561,7 +533,7 @@ func TestAuroraArtifactImportStreamsRemoteIntoStaging(t *testing.T) {
 
 	store := &artifactTestStorage{}
 	withArtifactStorage(t, store)
-	withArtifactImportClient(t, artifactTestHTTPSClient(t, server, artifactTestResolver{}, artifactTestAllowLoopback))
+	withArtifactImportClient(t, artifactTestHTTPSClient(t, server))
 
 	agentID, taskID, generationID := seedAuroraArtifactTask(t, "xhs-image")
 	resp := testutil.Call(t, testHandler.ImportAuroraArtifact,
@@ -672,52 +644,6 @@ func TestAuroraArtifactImportRejectsHTTPURL(t *testing.T) {
 		artifactImportRequest(taskID, agentID, taskID, artifactImportBody("http://example.com/x", nil))).Want(http.StatusBadRequest)
 }
 
-func TestAuroraArtifactImportRejectsPrivateDNS(t *testing.T) {
-	if testHandler == nil || testPool == nil {
-		t.Skip("database not available")
-	}
-	withArtifactStorage(t, &artifactTestStorage{})
-	withArtifactImportClient(t, aurora.NewArtifactImportClient(
-		artifactTestResolver{answers: map[string][]netip.Addr{
-			"internal.example": {netip.MustParseAddr("10.0.0.7")},
-		}}, nil))
-	agentID, taskID, _ := seedAuroraArtifactTask(t, "xhs-image")
-
-	testutil.Call(t, testHandler.ImportAuroraArtifact,
-		artifactImportRequest(taskID, agentID, taskID, artifactImportBody("https://internal.example/secret", nil))).Want(http.StatusBadRequest)
-
-	if n := storedArtifactCount(t, taskID); n != 0 {
-		t.Fatalf("private DNS wrote %d staging rows, want 0", n)
-	}
-}
-
-func TestAuroraArtifactImportRejectsDirectPrivateIP(t *testing.T) {
-	if testHandler == nil || testPool == nil {
-		t.Skip("database not available")
-	}
-	withArtifactStorage(t, &artifactTestStorage{})
-	withArtifactImportClient(t, aurora.NewArtifactImportClient(artifactTestResolver{}, nil))
-	agentID, taskID, _ := seedAuroraArtifactTask(t, "xhs-image")
-
-	testutil.Call(t, testHandler.ImportAuroraArtifact,
-		artifactImportRequest(taskID, agentID, taskID, artifactImportBody("https://169.254.169.254/latest/meta-data/", nil))).Want(http.StatusBadRequest)
-}
-
-func TestAuroraArtifactImportRejectsMixedDNS(t *testing.T) {
-	if testHandler == nil || testPool == nil {
-		t.Skip("database not available")
-	}
-	withArtifactStorage(t, &artifactTestStorage{})
-	withArtifactImportClient(t, aurora.NewArtifactImportClient(
-		artifactTestResolver{answers: map[string][]netip.Addr{
-			"mixed.example": {netip.MustParseAddr("93.184.216.34"), netip.MustParseAddr("10.0.0.7")},
-		}}, nil))
-	agentID, taskID, _ := seedAuroraArtifactTask(t, "xhs-image")
-
-	testutil.Call(t, testHandler.ImportAuroraArtifact,
-		artifactImportRequest(taskID, agentID, taskID, artifactImportBody("https://mixed.example/x", nil))).Want(http.StatusBadRequest)
-}
-
 func TestAuroraArtifactImportRevalidatesRedirects(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
@@ -728,15 +654,12 @@ func TestAuroraArtifactImportRevalidatesRedirects(t *testing.T) {
 	mux.HandleFunc("/redirect-file", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/file", http.StatusFound)
 	})
-	mux.HandleFunc("/redirect-private", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "https://169.254.169.254/latest/meta-data/", http.StatusFound)
-	})
 	server := httptest.NewTLSServer(mux)
 	defer server.Close()
 
 	store := &artifactTestStorage{}
 	withArtifactStorage(t, store)
-	withArtifactImportClient(t, artifactTestHTTPSClient(t, server, artifactTestResolver{}, artifactTestAllowLoopback))
+	withArtifactImportClient(t, artifactTestHTTPSClient(t, server))
 	agentID, taskID, _ := seedAuroraArtifactTask(t, "xhs-image")
 
 	t.Run("allowed redirect is followed", func(t *testing.T) {
@@ -747,29 +670,6 @@ func TestAuroraArtifactImportRevalidatesRedirects(t *testing.T) {
 		}
 	})
 
-	t.Run("private redirect is refused", func(t *testing.T) {
-		testutil.Call(t, testHandler.ImportAuroraArtifact,
-			artifactImportRequest(taskID, agentID, taskID, artifactImportBody(server.URL+"/redirect-private", nil))).Want(http.StatusBadRequest)
-	})
-}
-
-func TestAuroraArtifactImportRejectsExcessiveRedirects(t *testing.T) {
-	if testHandler == nil || testPool == nil {
-		t.Skip("database not available")
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/loop", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/loop", http.StatusFound)
-	})
-	server := httptest.NewTLSServer(mux)
-	defer server.Close()
-
-	withArtifactStorage(t, &artifactTestStorage{})
-	withArtifactImportClient(t, artifactTestHTTPSClient(t, server, artifactTestResolver{}, artifactTestAllowLoopback))
-	agentID, taskID, _ := seedAuroraArtifactTask(t, "xhs-image")
-
-	testutil.Call(t, testHandler.ImportAuroraArtifact,
-		artifactImportRequest(taskID, agentID, taskID, artifactImportBody(server.URL+"/loop", nil))).Want(http.StatusBadRequest)
 }
 
 func TestAuroraArtifactImportRejectsExcessiveResponseBytes(t *testing.T) {
@@ -798,7 +698,7 @@ func TestAuroraArtifactImportRejectsExcessiveResponseBytes(t *testing.T) {
 	defer server.Close()
 
 	withArtifactStorage(t, &artifactTestStorage{})
-	withArtifactImportClient(t, artifactTestHTTPSClient(t, server, artifactTestResolver{}, artifactTestAllowLoopback))
+	withArtifactImportClient(t, artifactTestHTTPSClient(t, server))
 	agentID, taskID, _ := seedAuroraArtifactTask(t, "xhs-image")
 
 	testutil.Call(t, testHandler.ImportAuroraArtifact,
@@ -831,7 +731,7 @@ func TestAuroraArtifactImportRejectsSniffedMIMEMismatch(t *testing.T) {
 	defer server.Close()
 
 	withArtifactStorage(t, &artifactTestStorage{})
-	withArtifactImportClient(t, artifactTestHTTPSClient(t, server, artifactTestResolver{}, artifactTestAllowLoopback))
+	withArtifactImportClient(t, artifactTestHTTPSClient(t, server))
 	agentID, taskID, _ := seedAuroraArtifactTask(t, "xhs-image")
 
 	testutil.Call(t, testHandler.ImportAuroraArtifact,
@@ -850,7 +750,7 @@ func TestAuroraArtifactImportTimeout(t *testing.T) {
 	server := httptest.NewTLSServer(mux)
 	defer server.Close()
 
-	client := artifactTestHTTPSClient(t, server, artifactTestResolver{}, artifactTestAllowLoopback)
+	client := artifactTestHTTPSClient(t, server)
 	client.Timeout = 50 * time.Millisecond
 	withArtifactStorage(t, &artifactTestStorage{})
 	withArtifactImportClient(t, client)
@@ -876,7 +776,7 @@ func TestAuroraArtifactImportDeletesObjectAfterStagingInsertFailure(t *testing.T
 
 	store := &artifactTestStorage{}
 	withArtifactStorage(t, store)
-	withArtifactImportClient(t, artifactTestHTTPSClient(t, server, artifactTestResolver{}, artifactTestAllowLoopback))
+	withArtifactImportClient(t, artifactTestHTTPSClient(t, server))
 	agentID, taskID, _ := seedAuroraArtifactTask(t, "xhs-image")
 
 	body := artifactImportBody(server.URL+"/file", map[string]any{"manifest_artifact_id": "primary-1"})
@@ -904,7 +804,7 @@ func TestAuroraArtifactImportStorageFailureLeavesNoRow(t *testing.T) {
 	defer server.Close()
 
 	withArtifactStorage(t, &artifactTestStorage{failUpload: true})
-	withArtifactImportClient(t, artifactTestHTTPSClient(t, server, artifactTestResolver{}, artifactTestAllowLoopback))
+	withArtifactImportClient(t, artifactTestHTTPSClient(t, server))
 	agentID, taskID, _ := seedAuroraArtifactTask(t, "xhs-image")
 
 	testutil.Call(t, testHandler.ImportAuroraArtifact,

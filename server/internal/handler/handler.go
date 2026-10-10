@@ -333,9 +333,7 @@ type Handler struct {
 	CloudBilling                 cloudRuntimeProxy
 	// Test-only HTTP override; nil uses the default client in production.
 	googleOAuthHTTPClient *http.Client
-	// Test-only override for the SSRF-safe provider artifact import client;
-	// nil builds aurora.NewArtifactImportClient with the production
-	// public-address policy.
+	// Test-only override for the provider artifact import client.
 	auroraArtifactImportClient *http.Client
 	// Lark integration. All three are nil when the Lark master key
 	// (MULTICA_LARK_SECRET_KEY) is unset; the corresponding HTTP
