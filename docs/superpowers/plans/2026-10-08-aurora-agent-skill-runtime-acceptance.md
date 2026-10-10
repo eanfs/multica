@@ -2,15 +2,98 @@
 
 Task 7 record for [eanfs/multica#205](https://github.com/eanfs/multica/issues/205).
 
-**Overall status: the execution chain is verified end to end; the real round trip still does not reach `completed`, and the 13-skill sweep has not been run.**
+**Overall status: an image generation now reaches `completed` with settlement on a private-network stack; the 13-skill sweep has not been run.**
 
-Run 3 drives the whole Aurora chain on the deployment architecture (arm64) with digest-pinned images built from the repository Dockerfiles. It reaches the provider, imports a real artifact, and is refused only by asset moderation — the outcome the issue's own failure table defines as execution-chain success. End-to-end `completed` is **not** claimed, and the 13 skills have still not each been run.
+Run 3 could not reach `completed` at all: asset moderation fetched the media URL server-side and refused a non-public host, so every image generation failed with a refund. Run 4 reaches `completed` only after the owner removed that guard (PR #217) — a deliberate weakening of a security control and a deviation from the isolation plan, recorded below alongside the evidence rather than presented as a clean win. The 13 skills have still not each been run.
 
 | Run | Date | Environment | Code HEAD | What it covers |
 | --- | --- | --- | --- | --- |
-| Run 3 | 2026-10-09 | `172.16.12.183`, aarch64, arm64 images | `adec8cd02` | Full Aurora-entry round trip on digest-pinned production-architecture images. Execution chain verified; moderation blocks the terminal state. |
+| Run 4 | 2026-10-10 | `172.16.12.183`, aarch64 | `b5cd14938` | **An image generation reaches `completed`** with a real PNG and a charged settlement, after the artifact fetches' public-address guard was removed. Cost recorded. |
+| Run 3 | 2026-10-09 | `172.16.12.183`, aarch64, arm64 images | `adec8cd02` | Full Aurora-entry round trip on digest-pinned production-architecture images. Execution chain verified; moderation blocked the terminal state. |
 | Run 2 | 2026-10-09 | Workstation, x86_64 | `c04173034` | Step 1 unit checks; Step 4 gates ①②③. Steps 2/3 NOT RUN. |
 | Run 1 | 2026-10-08 | — | `29cfe0ad8…`, `e42f555f…` | Documentation only; no live environment. Steps 2–4 all NOT RUN. |
+
+## Run 4 — 2026-10-10, `172.16.12.183` (aarch64): the first `completed`, and what it cost
+
+Runs 1–3 could not produce a single end-to-end `completed`. This run does, and records why it could not before.
+
+### What was blocking it
+
+The moderator fetches the artifact's media URL **server-side** and screens the bytes locally. Two gates sat in front of that fetch:
+
+1. `parseAssetURL` accepts only an absolute `http(s)` URL with a host. With `LOCAL_UPLOAD_BASE_URL` unset, the stored URL is site-relative (`/uploads/…`), so the report was rejected with `422` — `asset media_url is not a fetchable http(s) URL`.
+2. With the base URL set, the fetch reached the dial guard: every resolved address had to be public. On this host the media origin is `172.16.12.183`, so the fetch refused — `asset host "172.16.12.183" resolves to non-public address 172.16.12.183` — `screenImage` returned an error rather than a decision, and the handler answered `500 content moderation unavailable`.
+
+Both are hard-coded. Grepping `internal/aurora/moderation.go` for `os.Getenv` returned nothing: no deployment setting could admit a private origin. Text artifacts were unaffected only because the MVP screen for them validates the URL and never fetches.
+
+The observed failure shape, on this stack, for **every** image skill:
+
+| Generation | Skill | Terminal state | `creditsCharged` |
+| --- | --- | --- | --- |
+| `07536e8c-3889-459e-8ebb-c2b3596de466` | `poster` | `failed / moderation blocked` | **0** (refunded) |
+| `35efe516-f161-466b-83d7-4b59c09bd847` | `text-image` | `failed / moderation blocked` | **0** (refunded) |
+| `ee6084bf-abf8-4654-a763-1d71e3f97818` | `text-image` | `failed / moderation blocked` | **0** (refunded) |
+
+In each case the model ran, the provider succeeded, and a real image was staged — `aurora_artifact_staging` recorded `staged`, `2,489,960` bytes, `image/png` for the `poster` run — and only the asset screen refused it.
+
+### The removal
+
+The owner judged the guard over-design and directed its removal. [PR #217](https://github.com/eanfs/multica/pull/217), merge `b5cd14938`, 7 files, +28/−394:
+
+- `isPublicIP`, the `DialContext` address check and the redirect refusal in `newAssetHTTPClient`
+- `internal/aurora/artifact_import.go` entirely — `ErrArtifactAddrBlocked`, `ErrArtifactRedirectRefused`, `ArtifactHostResolver`, `ArtifactAddrPolicy`, `IsPublicAddress`, and the guarded `NewArtifactImportClient`
+- the `400` mapping for the two removed errors
+
+Kept: `parseAssetURL`'s scheme+host check, the 16 MiB fetch cap, the 25 MP decode cap, the decode checks, the NSFW colour heuristic, and query-string redaction in fetch errors.
+
+### Result: `completed`, with settlement
+
+One image generation, submitted through `POST /api/aurora/generations` on the merged build:
+
+| Field | Value |
+| --- | --- |
+| generation | `10152bf8-1092-4806-9d92-f9c007f8edc7` |
+| skill | `text-image` |
+| status | **`completed`** |
+| error | `null` |
+| `creditsReserved` / `creditsCharged` | `68000000` / **`68000000`** |
+| asset | `kind=image`, `format=png`, `/uploads/workspaces/…/aurora-artifacts/…/text-image.png` |
+
+The asset is a real object, fetched through the same URL shape the moderator fetched:
+
+```
+$ curl -o act.png -w '%{http_code} %{size_download} %{content_type}' <media_url>
+200 5043021 image/png
+$ file act.png
+PNG image data, 2048 x 2048, 8-bit/color RGB, non-interlaced
+```
+
+No `aurora_moderation_log` row was written for this run: the screen passed, and only refusals are logged.
+
+A second run on the merged build (`2960dc2d-a07f-4b99-a33f-c9981acf02c6`, `text-image`) reproduced the same result — `completed`, `creditsCharged=68000000`.
+
+### The settlement round trip
+
+This is what Task 7 asked for, and it is the first time this record can show it. The ledger separates the two outcomes exactly:
+
+| Generation | Ledger | Outcome |
+| --- | --- | --- |
+| `10152bf8…` (image, completed) | `deduction -68000000`, balance `606000000` — **no refund** | charged |
+| `ab6c93f5…` (text, completed) | `deduction -26000000`, balance `674000000` — **no refund** | charged |
+| `07536e8c…` (poster, failed) | `deduction -76000000` then `refund +76000000`, balance back to `700000000` | refunded |
+| `35efe516…` (image, failed) | `deduction -68000000` then `refund +68000000` | refunded |
+
+Reserve → execute → moderated writeback → charge, and reserve → failure → refund. Both legs observed on the same stack.
+
+### What Run 4 does not establish, and what it costs
+
+- **The 13-skill sweep has still not been run.** One image skill and one text skill have been exercised; the other eleven have not.
+- **The `completed` terminal state now depends on a removed security control.** A `media_url` supplied by a sandbox is fetched wherever it points, cloud instance metadata (`169.254.169.254`) included. This is recorded here because the acceptance result cannot be separated from it, not as an endorsement.
+- **It is a deliberate deviation from a written plan.** `docs/superpowers/plans/2026-09-25-aurora-sandbox-fleet-isolation.md` §366 requires exactly this rejection, and the skill-runtime plan lists "Implement SSRF-safe provider import" as a completed step. The owner made the call with that consequence stated in the PR and commit.
+- **Equivalent guards remain elsewhere** and were not touched: `internal/integrations/wecom/media_guard.go` (which does carry a `MULTICA_WECOM_MEDIA_ALLOW_CIDRS` escape hatch) and `pkg/remotemcp/client.go`.
+- `LOCAL_UPLOAD_BASE_URL` is still required for any artifact to pass at all; without it the URL stays site-relative and is rejected outright.
+
+---
 
 ## Run 3 — 2026-10-09, `172.16.12.183` (aarch64): the Aurora-entry round trip
 
