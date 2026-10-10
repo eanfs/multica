@@ -370,3 +370,50 @@ func TestSandboxManagerRejectsCrossOwnerRuntime(t *testing.T) {
 		t.Fatalf("provisioner ensure calls = %d, want 0 for a foreign runtime", fleet.callCount())
 	}
 }
+
+// TestSandboxManagerReprovisionsAStaleOnlineNode pins the fix for #223. An
+// online row whose last_active_at has gone quiet is not evidence that the node
+// still exists: its container can be removed while the row keeps
+// state = 'online', and adopting it skips the Fleet call entirely — so the
+// generation is accepted and then sits in queued with no error and no timeout
+// until the reaper's 15-minute idle sweep happens to retire the row.
+func TestSandboxManagerReprovisionsAStaleOnlineNode(t *testing.T) {
+	pool := auroraTestPool(t)
+	q := db.New(pool)
+	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
+	ctx := context.Background()
+
+	params := sandboxNodeParams(t, ws, runtimeID, uuid.NewString())
+	params.ImageDigest = validSandboxImageDigest
+	created, err := q.CreateAuroraSandboxNode(ctx, params)
+	if err != nil {
+		t.Fatalf("create starting node: %v", err)
+	}
+	if _, err := q.ConsumeAuroraSandboxEnrollment(ctx, params.EnrollmentTokenHash); err != nil {
+		t.Fatalf("consume enrollment to online: %v", err)
+	}
+	// A daemon that stopped heartbeating long enough ago to stop counting as
+	// alive, with the reaper not yet having retired the row.
+	if _, err := pool.Exec(ctx,
+		`UPDATE aurora_sandbox_node SET last_active_at = now() - interval '10 minutes' WHERE id = $1`,
+		created.ID,
+	); err != nil {
+		t.Fatalf("backdate last_active_at: %v", err)
+	}
+
+	fleet := &fakeProvisioner{node: aurora.FleetNode{ID: "backend-node-9", State: "launching", BackendID: "container-9"}}
+	mgr := aurora.NewSandboxManager(q, pool, fleet, validSandboxImageDigest, nil)
+	node, err := mgr.Ensure(ctx, ws, runtimeID)
+	if err != nil {
+		t.Fatalf("ensure stale node: %v", err)
+	}
+	if fleet.callCount() != 1 {
+		t.Fatalf("provisioner ensure calls = %d, want 1 for a stale online node", fleet.callCount())
+	}
+	if node.State != "starting" {
+		t.Fatalf("ensured node state = %q, want starting (re-armed for a fresh node)", node.State)
+	}
+	if node.BackendNodeID.String != "backend-node-9" {
+		t.Fatalf("backend node id = %q, want the fleet's new node", node.BackendNodeID.String)
+	}
+}

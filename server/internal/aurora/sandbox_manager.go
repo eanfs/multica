@@ -152,6 +152,23 @@ const sandboxAdoptWait = 2 * time.Second
 // sandboxAdoptPoll is how often the waiting caller re-reads the node.
 const sandboxAdoptPoll = 20 * time.Millisecond
 
+// sandboxAdoptStaleness is how long an online node may go without a recorded
+// heartbeat before Ensure stops believing it exists.
+//
+// Deliberately not sandboxIdleTimeout (15m). That one asks "should a healthy
+// node be retired to reclaim capacity"; this one asks "may I still adopt this
+// row". A node whose container has been removed keeps state = 'online' until
+// the reaper gets to it, and adopting it skips the Fleet call entirely — so a
+// generation was accepted, sat in queued with no error and no timeout, and
+// nothing reconciled the two rows. Measured: an 800-second stall on a stack
+// whose node container had been deleted.
+//
+// The daemon heartbeats every 15s by default (daemon.DefaultHeartbeatInterval)
+// and the runtime liveness threshold is 45s, so two minutes is eight missed
+// beats: long enough that a healthy node cannot trip it, short enough that the
+// stall is a pause rather than an outage.
+const sandboxAdoptStaleness = 2 * time.Minute
+
 // arm decides whether the existing node already satisfies the request and, when
 // it does not, arms a fresh enrollment. A starting node with a live enrollment
 // but no backend id is a provision another caller owns and may still be
@@ -226,7 +243,8 @@ func (m *SandboxManager) armOnce(ctx context.Context, workspaceID, runtimeID pgt
 	}
 	if !noRow && m.reusable(existing, runtimeID) {
 		// Already serving: adopt the row instead of calling the fleet again.
-		if existing.State == "online" {
+		// "Online" is not self-validating — see staleOnline.
+		if existing.State == "online" && !m.staleOnline(existing) {
 			if err := tx.Commit(ctx); err != nil {
 				return sandboxArm{}, false, err
 			}
@@ -296,6 +314,22 @@ func (m *SandboxManager) armOnce(ctx context.Context, workspaceID, runtimeID pgt
 		return sandboxArm{}, false, err
 	}
 	return sandboxArm{node: scrubEnrollment(node), ownerID: ownerID, token: raw, needFleet: true}, false, nil
+}
+
+// staleOnline reports whether an online row has gone quiet for longer than a
+// managed daemon's heartbeat can plausibly be missed.
+//
+// An online node always carries last_active_at: ConsumeAuroraSandboxEnrollment
+// sets it when the row flips to online, MarkAuroraSandboxNodeStopped bumps it on
+// the way out, and TouchAuroraSandboxNode refreshes it on every daemon
+// heartbeat. A missing value therefore means nothing has proved this node is
+// serving, which is treated as stale — the fail-closed direction, because the
+// alternative is adopting a node that may no longer exist.
+func (m *SandboxManager) staleOnline(node db.AuroraSandboxNode) bool {
+	if !node.LastActiveAt.Valid {
+		return true
+	}
+	return node.LastActiveAt.Time.Before(m.now().Add(-sandboxAdoptStaleness))
 }
 
 // reusable reports whether the node is bound to the requested runtime and was
