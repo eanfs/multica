@@ -11,9 +11,12 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -73,16 +76,52 @@ const (
 	defaultAssetFetchTimeout = 10 * time.Second
 	maxAssetBytes            = 16 << 20
 	maxScreenedPixels        = 25_000_000
-	// nsfwSkinRatioThreshold is the fraction of sampled pixels that may be
-	// skin-toned before an image is rejected. Explicit imagery is dominated by
-	// bare skin; a portrait is not. The value is deliberately coarse — this is
-	// a local heuristic, not a classifier — and sits well above the ~12% a
-	// head-and-shoulders portrait scores so ordinary output is not rejected.
-	nsfwSkinRatioThreshold = 0.6
+	// defaultSkinRatioThreshold is the fraction of sampled pixels that may be
+	// skin-toned before an image is rejected.
+	//
+	// Calibrated against measurement rather than intuition. The predicate below
+	// is the Peer et al. (2009) RGB rule, whose original context is crowd
+	// detection: find skin pixels, then confirm with a face or body. Nothing
+	// here confirms, so the global ratio stands alone, and warm subjects score
+	// high without containing a person. Measured on this repository's own
+	// acceptance runs: a pale-oak and ceramic product shot 85%, a 小红书
+	// recommendation card 70%, and a second card 61% — all refused under the
+	// previous 0.6. The committed fixtures bracket what the signal can offer:
+	// skin_dominant.png is 100%, neutral_portrait.png is 12.5%.
+	//
+	// 0.9 clears every observed false positive while still refusing the fixture
+	// the screen exists for. It is a coarse gate and has false negatives of its
+	// own; the honest fix is a real classifier, which the Moderator interface
+	// is designed to accept as a replacement rather than a rewrite.
+	defaultSkinRatioThreshold = 0.9
 	// skinSampleGrid caps the sampled pixels per image regardless of source
 	// resolution, so screening cost does not scale with the upload.
 	skinSampleGrid = 64
 )
+
+// skinRatioThresholdEnv overrides defaultSkinRatioThreshold. A deployment that
+// wants the screen tighter or looser than the calibrated default sets it to a
+// fraction in (0, 1].
+const skinRatioThresholdEnv = "AURORA_NSFW_SKIN_RATIO_THRESHOLD"
+
+// skinRatioThresholdFromEnv reads the configured threshold, falling back to the
+// calibrated default when it is unset or unusable. An unparseable or
+// out-of-range value warns and falls back rather than removing the screen: an
+// operator who writes "90" instead of "0.9" must not silently disable it, which
+// is the one outcome the moderation spec forbids.
+func skinRatioThresholdFromEnv() float64 {
+	raw := strings.TrimSpace(os.Getenv(skinRatioThresholdEnv))
+	if raw == "" {
+		return defaultSkinRatioThreshold
+	}
+	parsed, err := strconv.ParseFloat(raw, 64)
+	if err != nil || parsed <= 0 || parsed > 1 {
+		slog.Warn("ignoring unusable skin-ratio threshold; using the default",
+			"env", skinRatioThresholdEnv, "value", raw, "default", defaultSkinRatioThreshold)
+		return defaultSkinRatioThreshold
+	}
+	return parsed
+}
 
 //go:embed blocked_terms.json
 var blockedTermsJSON []byte
@@ -110,6 +149,10 @@ type blockedTerm struct {
 type defaultModerator struct {
 	terms  []blockedTerm
 	assets AssetFetcher
+	// skinRatioThreshold is the global skin-tone fraction at or above which an
+	// image is refused. Held per instance so a deployment can tune it and a
+	// test can pin it without the environment.
+	skinRatioThreshold float64
 }
 
 // NewDefaultModerator returns the repository's built-in moderator: the
@@ -126,7 +169,11 @@ func NewDefaultModerator() Moderator {
 }
 
 func newDefaultModerator(terms []blockedTerm, assets AssetFetcher) *defaultModerator {
-	return &defaultModerator{terms: terms, assets: assets}
+	return &defaultModerator{
+		terms:              terms,
+		assets:             assets,
+		skinRatioThreshold: skinRatioThresholdFromEnv(),
+	}
 }
 
 // mustBlockedTerms parses the embedded blocklist and panics on a malformed or
@@ -327,10 +374,10 @@ func (m *defaultModerator) screenImage(ctx context.Context, mediaURL string) (De
 	}
 
 	ratio := skinRatio(img)
-	if ratio >= nsfwSkinRatioThreshold {
+	if ratio >= m.skinRatioThreshold {
 		return Decision{
 			Allowed: false,
-			Reason:  fmt.Sprintf("image is %.0f%% skin-toned, at or above the %.0f%% explicit-content threshold", ratio*100, nsfwSkinRatioThreshold*100),
+			Reason:  fmt.Sprintf("image is %.0f%% skin-toned, at or above the %.0f%% explicit-content threshold", ratio*100, m.skinRatioThreshold*100),
 		}, nil
 	}
 	return Decision{Allowed: true}, nil

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -334,5 +335,88 @@ func TestModeratorNewDefaultModeratorLoadsTheRepositoryTable(t *testing.T) {
 	}
 	if decision.Allowed {
 		t.Fatal("NewDefaultModerator() allowed a term from the repository blocklist")
+	}
+}
+
+// TestSkinRatioThresholdClearsTheObservedFalsePositives pins the numbers #219
+// produced. Each is a measurement from the acceptance runs, where the image was
+// a real product or design asset with no person in it and the screen refused it
+// anyway. If the default ever drops under one of these, legitimate warm-toned
+// output is being thrown away again.
+func TestSkinRatioThresholdClearsTheObservedFalsePositives(t *testing.T) {
+	observed := []struct {
+		subject string
+		ratio   float64
+	}{
+		{"pale-oak product shot", 0.85},
+		{"小红书 recommendation card", 0.70},
+		{"second recommendation card", 0.61},
+	}
+	for _, o := range observed {
+		if o.ratio >= defaultSkinRatioThreshold {
+			t.Errorf("%s measured %.2f, which the default %.2f would still refuse",
+				o.subject, o.ratio, defaultSkinRatioThreshold)
+		}
+	}
+}
+
+// TestModeratorScreenImageHonoursTheConfiguredThreshold shows the instance
+// value is what gates, not the constant. skin_dominant.png measures exactly
+// 1.0, so it is the fixture that reveals which threshold the screen consulted.
+func TestModeratorScreenImageHonoursTheConfiguredThreshold(t *testing.T) {
+	cases := []struct {
+		threshold float64
+		allowed   bool
+	}{
+		{0.5, false},
+		{0.99, false},
+		{1.0, false}, // the comparison is >=, so equality still refuses
+		{1.01, true},
+	}
+	for _, tc := range cases {
+		m := newFixtureModerator(&fixtureFetcher{})
+		m.skinRatioThreshold = tc.threshold
+		decision, err := m.ScreenAsset(context.Background(), "https://cdn.example/skin_dominant.png", "image")
+		if err != nil {
+			t.Fatalf("threshold %.2f: ScreenAsset = %v, want a decision", tc.threshold, err)
+		}
+		if decision.Allowed != tc.allowed {
+			t.Errorf("threshold %.2f: Allowed = %v, want %v (%s)",
+				tc.threshold, decision.Allowed, tc.allowed, decision.Reason)
+		}
+	}
+}
+
+func TestSkinRatioThresholdDefaultsToTheCalibratedValue(t *testing.T) {
+	t.Setenv(skinRatioThresholdEnv, "")
+	if got := skinRatioThresholdFromEnv(); got != defaultSkinRatioThreshold {
+		t.Fatalf("unset %s gave %v, want the default %v", skinRatioThresholdEnv, got, defaultSkinRatioThreshold)
+	}
+}
+
+func TestSkinRatioThresholdReadsTheEnvironment(t *testing.T) {
+	for _, value := range []string{"0.75", "1", " 0.5 "} {
+		t.Setenv(skinRatioThresholdEnv, value)
+		want, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil {
+			t.Fatalf("test case %q is not a float: %v", value, err)
+		}
+		if got := skinRatioThresholdFromEnv(); got != want {
+			t.Errorf("%s=%q gave %v, want %v", skinRatioThresholdEnv, value, got, want)
+		}
+	}
+}
+
+// TestSkinRatioThresholdIgnoresUnusableValues guards the fail-safe direction. An
+// operator who writes 90 instead of 0.9, or 0, or a word, must get the
+// calibrated default rather than an ungated pipeline: silently removing the
+// screen is the one outcome the moderation spec forbids.
+func TestSkinRatioThresholdIgnoresUnusableValues(t *testing.T) {
+	for _, value := range []string{"90", "0", "-0.5", "1.1", "abc", "   "} {
+		t.Setenv(skinRatioThresholdEnv, value)
+		if got := skinRatioThresholdFromEnv(); got != defaultSkinRatioThreshold {
+			t.Errorf("%s=%q gave %v, want the default %v",
+				skinRatioThresholdEnv, value, got, defaultSkinRatioThreshold)
+		}
 	}
 }
