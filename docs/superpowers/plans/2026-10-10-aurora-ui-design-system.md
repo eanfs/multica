@@ -4,23 +4,23 @@
 
 **Goal:** 把 `apps/aurora` 的界面换成 DESIGN.md 定义的设计系统——暖纸色画布、深海军蓝侧栏与 Hero、紫色主操作、珊瑚橙点缀、粉彩标签、8px 按钮 / 12px 卡片——结构与交互照搬参考实现 `aurora-ai-agents`。
 
-**Architecture:** 三层，web/desktop 零影响。`packages/views/aurora/aurora.css` 是设计层：`--aurora-*` 变量 + `aurora-*` 前缀类，不读任何 Multica token；`apps/aurora/app/globals.css` 把 Multica 语义 token 桥接到这套调色板（该文件只被 Aurora 一个 app 引入，所以桥接只影响 Aurora 的 CSS bundle），Aurora 里的 shadcn 原语因此自动换色；`packages/views/aurora/*.tsx` 与 `apps/aurora/components/*.tsx` 把原来的 Tailwind 工具类簇换成语义 `aurora-*` 类。**行为、可访问名、i18n 键、查询与状态逻辑一行不动**，所有改动都是"同一个 DOM 语义，不同的皮"。
+**Architecture:** 三层，样式作用域限于 Aurora。`packages/views/aurora/aurora.css` 是设计层：`--aurora-*` 变量 + `aurora-*` 前缀类，不读任何 Multica token；`apps/aurora/app/globals.css` 把 Multica 语义 token 桥接到这套调色板（该文件只被 Aurora 一个 app 引入，所以桥接只影响 Aurora 的 CSS bundle），Aurora 里的 shadcn 原语因此自动换色；`packages/views/aurora/*.tsx` 与 `apps/aurora/components/*.tsx` 把原来的 Tailwind 工具类簇换成语义 `aurora-*` 类。**生成、结算、查询逻辑与既有可访问名保持不变**；新增的移动导航使用共享 Sheet 管理焦点与关闭，新增展示文案按计划补齐 i18n。
 
 **Tech Stack:** Next.js 16 App Router、React 19、Tailwind v4（`@import` / `@theme`）、shadcn + Base UI 原语、TanStack Query、vitest + Testing Library。
 
-**Spec:** `/Users/lirichen/Work/apexai/aurora-ai-agents/DESIGN.md`（`Apex-AI-Tools-design`）+ 参考样式表 `/Users/lirichen/Work/apexai/aurora-ai-agents/app/globals.css`（413 行）。Task 1 是它的前缀化移植。
+**Spec:** `/Users/lirichen/Work/apexai/aurora-ai-agents/DESIGN.md`（`Apex-AI-Tools-design`）+ 参考样式表 `/Users/lirichen/Work/apexai/aurora-ai-agents/app/globals.css`（413 行）。Task 1 是它的前缀化移植；移动导航的遮罩与关闭使用共享 Sheet，不照搬手写 off-canvas。
 
 ## Global Constraints
 
 以下约束对**每个** Task 都成立，不再重复。
 
-- **不碰行为。** 每个 Task 只改 `className`、新增 `className`、CSS、以及新增展示型子组件。不改 hook 调用、不改 state、不改 `onClick`/`onChange`、不改查询键、不改 props 签名（Task 2 新增组件除外）。
+- **不碰行为。** 每个 Task 只改 `className`、新增 `className`、CSS、以及新增展示型子组件。不改 hook 调用、不改 state、不改 `onClick`/`onChange`、不改查询键、不改 props 签名（Task 2 新增组件除外）。Task 3 的移动导航是明确例外：新增响应式状态与共享 Sheet 的打开/关闭控制，不改变页面业务状态。
 - **不碰可访问契约。** 保留所有 `role`、`aria-*`、`htmlFor`/`id` 配对、`disabled`、`aria-busy`、`aria-label`、`type="button"`、装饰图标的 `aria-hidden="true"`。现存测试大量用 `getByRole`/`getByLabelText`/文案查询，改完必须全绿。
 - **不新增文案，除非本计划明确列出。** 文案规则见 `apps/docs/content/docs/developers/conventions.mdx` §3：标题、标签、数值、按钮动作不重复描述；描述默认省略。计划里新加的 i18n 键要一次补齐 5 个 locale（`en`/`zh-Hans`/`ja`/`ko`/`fr`），`packages/views/locales/parity.test.ts` 会强制键平价。
 - **CSS 类必须 `aurora-` 前缀。** `aurora.css` 里的规则是**无层级（unlayered）纯 CSS**，在层叠里胜过 Tailwind 的 `@layer utilities`；不带前缀的通用名（`.card`、`.sidebar`）会静默压过 `packages/ui` 原语。同理：给一个元素加了 `aurora-*` 类之后，不要指望再用工具类覆盖它的同一属性。
 - **颜色与圆角只能来自 `--aurora-*`。** CSS 里不写裸色值（`rgba()` 遮罩/半透明白除外，那是 DESIGN.md 自己的写法）；TSX 里半径只用 Tailwind 阶梯：`rounded-sm`=4px、`rounded-md`=6px、`rounded-lg`=8px、`rounded-xl`=12px、`rounded-2xl`=16px、`rounded-full`=胶囊/圆点。**禁止** `rounded` 裸类和 `rounded-[6px]` 这类定值（`scripts/check-ui-radius-tokens.mjs` 会让 CI 红）。
 - **Aurora 锁定亮色。** DESIGN.md 只有一套画布，参考实现没有暗色主题。Task 1 用 `forcedTheme="light"` 钉住，不发明暗色盘。
-- **不动共享组件。** `packages/views/layout/collection-page.tsx`、`packages/views/auth/login-page.tsx`、`packages/ui/**` 一律不改：Aurora 换成自己的 page header/state，登录页靠 token 桥换色。**Aurora 专属的 chrome 只放 `packages/views/aurora/`。**
+- **不动共享组件。** `packages/views/layout/collection-page.tsx`、`packages/views/auth/login-page.tsx`、`packages/ui/**` 一律不改：Aurora 换成自己的 page header/state，登录页靠 token 桥换色。**Aurora 专属的 chrome 只放 `packages/views/aurora/`；app 的导航与断点 wiring 留在 `apps/aurora/`。**
 - **改测试前先读测试文件。** 本计划给的新断言里的渲染辅助（`renderDirectory`、`renderComposer` 之类）以被测文件里实际存在的那个为准：先跑一次现有测试确认基线是绿的，再复用它的 harness 与 fixture 名称写新断言。不要新造一套 provider 包装。
 - **每个 Task 的验收命令：**
   ```bash
@@ -130,7 +130,7 @@
 
 **Interfaces:**
 - Consumes: 无（本 Task 是其余所有 Task 的基础）。
-- Produces: `--aurora-*` 变量 38 个、`aurora-*` 类 130 个（下面 CSS 是唯一权威清单）；以及被桥接的 Multica 语义 token。**后续所有 Task 只能用这份清单里的类名，不得新增裸 CSS。**
+- Produces: `--aurora-*` 变量与 `aurora-*` 类（下面 CSS 是唯一权威清单）；以及被桥接的 Multica 语义 token。**后续所有 Task 只能用这份清单里的类名，不得新增裸 CSS。**
 - 关键约束：`aurora.css` 的规则是 unlayered 纯 CSS，**层叠优先级高于 Tailwind 工具类**。给元素加 `aurora-*` 类之后，同一属性上的工具类不再生效。
 
 - [ ] **Step 1: 建 `packages/views/aurora/aurora.css`**
@@ -202,9 +202,8 @@
   --aurora-sidebar-width: 272px;
 }
 
-/* The design's focus ring. Scoped to the three Aurora surfaces so it reaches
-   the drawer's and dialog's portalled content without covering the document. */
-.aurora-app :focus-visible,
+/* The Aurora body scope includes the portalled navigation and generation UI. */
+.aurora-theme :focus-visible,
 .aurora-drawer :focus-visible,
 .aurora-dialog :focus-visible {
   outline: 2px solid var(--aurora-violet);
@@ -221,6 +220,24 @@
   background: var(--aurora-paper);
   font-size: 14px;
   line-height: 1.6;
+}
+
+.aurora-nav-drawer {
+  width: min(var(--aurora-sidebar-width), 94vw);
+  max-width: none;
+  gap: 0;
+  padding: 0;
+  border: 0;
+  background: var(--aurora-navy);
+}
+
+.aurora-nav-drawer .aurora-sidebar {
+  position: static;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  visibility: visible;
+  transform: none;
 }
 
 .aurora-sidebar {
@@ -306,7 +323,6 @@
   border-color: rgba(255, 255, 255, 0.18);
   color: #fff;
   background: transparent;
-  font-size: 22px;
 }
 
 .aurora-user-panel {
@@ -490,19 +506,6 @@
 .aurora-sidebar-footer {
   margin-top: auto;
   padding: 0 12px 16px;
-}
-
-.aurora-scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 35;
-  display: none;
-  border: 0;
-  background: rgba(14, 26, 45, 0.45);
-}
-
-.aurora-scrim--open {
-  display: block;
 }
 
 /* --- Shell: workspace column ---------------------------------------------- */
@@ -1714,16 +1717,7 @@
 
 @media (max-width: 900px) {
   .aurora-sidebar {
-    position: fixed;
-    inset: 0 auto 0 0;
-    visibility: hidden;
-    transform: translateX(-105%);
-    transition: transform 0.22s ease, visibility 0.22s linear;
-  }
-
-  .aurora-sidebar--open {
-    visibility: visible;
-    transform: translateX(0);
+    display: none;
   }
 
   .aurora-sidebar-close,
@@ -1841,9 +1835,11 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .aurora-app *,
-  .aurora-app *::before,
-  .aurora-app *::after {
+  .aurora-theme [data-slot="sheet-content"],
+  .aurora-theme [data-slot="sheet-overlay"],
+  .aurora-theme *,
+  .aurora-theme *::before,
+  .aurora-theme *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
@@ -1851,13 +1847,14 @@
 
 - [ ] **Step 2: 写守卫测试（先红）**
 
-`apps/aurora/app/aurora-theme.test.ts`：守住"引用即声明"、"用到即定义"、桥接完整性、以及 DESIGN.md 的字号下限。拼错一个类名不会报错、只会变成没样式，这个测试是唯一防线。
+`apps/aurora/app/aurora-theme.test.ts`：守住"引用即声明"、"用到即定义"、桥接完整性、以及 DESIGN.md 的字号下限。拼错一个类名不会报错、只会变成没样式。用 TypeScript AST 只扫描 `className` 与明确列出的类名常量，避免把 import 路径或 DOM ID 当成类。动态拼接只展开下表的有限集合，不允许任意前缀匹配；新增类名常量或动态表达式时同步维护扫描清单。未使用类检查在 Task 11 完成迁移后启用。
 
 ```ts
 // @vitest-environment node
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import ts from "typescript";
 
 /**
  * The Aurora design layer is two files that must agree: the stylesheet that
@@ -1905,23 +1902,54 @@ function declaredVariables(source: string): Set<string> {
   return names;
 }
 
-/** Every `aurora-*` token written in a non-test .tsx file under a root. */
+/** Explicit finite families used by the three concatenated class expressions. */
+const DYNAMIC_CLASSES: Record<string, string[]> = {
+  "aurora-avatar--": ["coral", "violet", "rose", "mint", "amber", "blue", "rust", "strawberry"],
+  "aurora-orbit-avatar--": ["1", "2", "3", "4"],
+  "aurora-tint-": ["1", "2", "3", "4", "5", "6"],
+};
+const CLASS_CONSTANTS = new Set([
+  "GRID_CLASS", "TONE_CLASS", "AURORA_RUNTIME_VISUAL", "GENERATION_STATUS_PILL",
+]);
+
+/** Inspect JSX className expressions and the named class maps, never IDs/imports. */
+function classesInSource(source: string): Set<string> {
+  const file = ts.createSourceFile("source.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const used = new Set<string>();
+  const collect = (node: ts.Node) => {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      for (const token of node.text.split(/\s+/)) {
+        if (!token.startsWith("aurora-")) continue;
+        const suffixes = DYNAMIC_CLASSES[token];
+        if (suffixes) suffixes.forEach((suffix) => used.add(token + suffix));
+        else used.add(token);
+      }
+    }
+    ts.forEachChild(node, collect);
+  };
+  const visit = (node: ts.Node) => {
+    if (ts.isJsxAttribute(node) && node.name.getText(file) === "className" && node.initializer) {
+      collect(node.initializer);
+    } else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) &&
+      CLASS_CONSTANTS.has(node.name.text) && node.initializer) {
+      collect(node.initializer);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return used;
+}
+
+/** All non-test TS/TSX sources under the app and its shared Aurora views. */
 function classesUsedIn(root: string): Set<string> {
   const used = new Set<string>();
   const walk = (current: string) => {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
       if (entry.name === "node_modules" || entry.name === ".next") continue;
       const next = join(current, entry.name);
-      if (entry.isDirectory()) {
-        walk(next);
-      } else if (
-        /\.tsx$/.test(entry.name) &&
-        !/\.test\.tsx$/.test(entry.name)
-      ) {
-        const source = readFileSync(next, "utf8");
-        for (const match of source.matchAll(/\b(aurora-[a-z0-9-]+)\b/g)) {
-          used.add(match[1]);
-        }
+      if (entry.isDirectory()) walk(next);
+      else if (/\.tsx?$/.test(entry.name) && !/\.(test|spec)\.tsx?$/.test(entry.name)) {
+        classesInSource(readFileSync(next, "utf8")).forEach((name) => used.add(name));
       }
     }
   };
@@ -1949,27 +1977,26 @@ describe("aurora design layer", () => {
       ...classesUsedIn(resolve(repoRoot, "packages/views/aurora")),
       ...classesUsedIn(resolve(repoRoot, "apps/aurora")),
     ]);
-    // A class composed by concatenation matches only its literal prefix, so a
-    // token that at least one full class extends is a use, not a typo.
-    const unresolved = [...used].filter(
-      (token) =>
-        !declared.has(token) &&
-        ![...declared].some((name) => name.startsWith(token)),
-    );
+    const unresolved = [...used].filter((token) => !declared.has(token));
     expect(unresolved).toEqual([]);
   });
 
-  it("declares no class the components never use", () => {
-    // The same rule read backwards: a rule nothing references is dead weight in
-    // a stylesheet that ships whole to every Aurora page.
-    const used = new Set([
-      ...classesUsedIn(resolve(repoRoot, "packages/views/aurora")),
-      ...classesUsedIn(resolve(repoRoot, "apps/aurora")),
-    ]);
-    const dead = [...declared].filter(
-      (name) => !used.has(name) && ![...used].some((token) => name.startsWith(token)),
-    );
-    expect(dead).toEqual([]);
+  it("ignores module paths and DOM IDs while checking actual class names", () => {
+    const source = `
+      import { Providers } from "./aurora-providers";
+      const GRID_CLASS = "aurora-card-grid";
+      const AURORA_RUNTIME_VISUAL = { online: { dot: "aurora-dot" } };
+      const view = <div id="aurora-prompt" className={cn("aurora-page", GRID_CLASS)} />;
+      const typo = <span className="aurora-page-typo" />;
+      const dynamic = <span className={"aurora-tint-" + index} />;
+    `;
+    const used = classesInSource(source);
+    expect(used.has("aurora-providers")).toBe(false);
+    expect(used.has("aurora-prompt")).toBe(false);
+    expect(used.has("aurora-card-grid")).toBe(true);
+    expect(used.has("aurora-dot")).toBe(true);
+    expect(used.has("aurora-tint-6")).toBe(true);
+    expect([...used].filter((name) => !declared.has(name))).toEqual(["aurora-page-typo"]);
   });
 
   it("bridges the palette onto the semantic tokens the primitives read", () => {
@@ -2008,7 +2035,7 @@ describe("aurora design layer", () => {
 - [ ] **Step 3: 跑测试确认红**
 
 Run: `pnpm --filter @multica/aurora test -- aurora-theme`
-Expected: FAIL — `aurora.css` 还不存在，`readFileSync` 抛 ENOENT。
+Expected: FAIL — 尚未追加 globals.css 的 import 与 token 桥；Step 1 已创建 `aurora.css`，不应预期 ENOENT。
 
 - [ ] **Step 4: 桥接 token（`apps/aurora/app/globals.css`）**
 
@@ -2106,7 +2133,7 @@ const geistSans = Geist({
     geistMono.variable,
   )}
 >
-  <body className="h-full overflow-hidden">
+  <body className="aurora-theme h-full overflow-hidden">
     {/* DESIGN.md defines one canvas and no dark palette. Pinning the theme is
         what keeps the paper surfaces from rendering under a .dark class whose
         tokens this app never overrides. */}
@@ -2118,7 +2145,7 @@ const geistSans = Geist({
 - [ ] **Step 6: 跑测试确认绿**
 
 Run: `pnpm --filter @multica/aurora test -- aurora-theme && pnpm --filter @multica/aurora typecheck`
-Expected: PASS，5 条断言全绿。
+Expected: PASS，现阶段的 6 条断言全绿。此时允许基础 CSS 尚无消费者；零未使用类断言到 Task 11 才启用。
 
 - [ ] **Step 7: 看真实渲染**
 
@@ -3082,7 +3109,13 @@ import {
 import { AppLink, useNavigation } from "@multica/views/navigation";
 import { useT } from "@multica/views/i18n";
 import { useLogout } from "@multica/views/auth";
-import { cn } from "@multica/ui/lib/utils";
+import {
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetTitle,
+  SheetTrigger,
+} from "@multica/ui/components/ui/sheet";
 import { auroraRoutes } from "@/lib/routes";
 
 /**
@@ -3093,10 +3126,9 @@ import { auroraRoutes } from "@/lib/routes";
  * own history semantics working. Labels come from the `aurora` namespace so the
  * nav and the page it opens always name the same thing.
  *
- * Below 900px the column becomes an off-canvas drawer. CSS hides it with
- * `visibility`, not only a transform, so its links leave the tab order while it
- * is closed; the scrim is a real button, so the drawer also closes from the
- * keyboard.
+ * At 900px and below, the column lives in a modal Sheet. The primitive owns
+ * initial focus, Tab containment, Escape, outside dismissal and focus return
+ * to the SheetTrigger. Only one copy of the navigation is mounted.
  */
 export function AuroraShell({
   slug,
@@ -3111,7 +3143,20 @@ export function AuroraShell({
   const logout = useLogout();
   const routes = auroraRoutes(slug);
   const [navOpen, setNavOpen] = useState(false);
+  const [compact, setCompact] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
+
+  useEffect(() => {
+    // Match the stylesheet exactly; existing useIsMobile uses a different cutoff.
+    const media = window.matchMedia("(max-width: 900px)");
+    const sync = () => {
+      setCompact(media.matches);
+      if (!media.matches) setNavOpen(false);
+    };
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
 
   const workItems = [
     {
@@ -3145,111 +3190,113 @@ export function AuroraShell({
     setAccountOpen(false);
   }, [pathname]);
 
-  return (
-    <div className="aurora-app">
-      <button
-        type="button"
-        className={cn("aurora-scrim", navOpen && "aurora-scrim--open")}
-        aria-label={t(($) => $.shell.menu_close)}
-        onClick={() => setNavOpen(false)}
-      />
-
-      <nav
-        id="aurora-nav"
-        aria-label="Aurora"
-        className={cn("aurora-sidebar", navOpen && "aurora-sidebar--open")}
-      >
-        <div className="aurora-sidebar-top">
-          <span className="aurora-brand">
-            <span aria-hidden="true" className="aurora-brand-mark">
-              A
-            </span>
-            <span className="aurora-brand-copy">
-              <strong>Aurora</strong>
-              <small>{t(($) => $.shell.brand_tagline)}</small>
-            </span>
+  const sidebar = (
+    <nav
+      id="aurora-nav"
+      aria-label="Aurora"
+      className="aurora-sidebar"
+    >
+      <div className="aurora-sidebar-top">
+        <span className="aurora-brand">
+          <span aria-hidden="true" className="aurora-brand-mark">
+            A
           </span>
-          <button
-            type="button"
+          <span className="aurora-brand-copy">
+            <strong>Aurora</strong>
+            <small>{t(($) => $.shell.brand_tagline)}</small>
+          </span>
+        </span>
+        {compact ? (
+          <SheetClose
             className="aurora-sidebar-close"
             aria-label={t(($) => $.shell.menu_close)}
-            onClick={() => setNavOpen(false)}
           >
             <X aria-hidden="true" className="size-4" />
-          </button>
-        </div>
-
-        <AuroraAccountPanel
-          creditsHref={routes.billing()}
-          onOpenAccount={() => setAccountOpen(true)}
-        />
-
-        <div className="aurora-nav-groups">
-          <div className="aurora-nav-group">
-            <p>{t(($) => $.shell.nav_group_work)}</p>
-            <ul>
-              {workItems.map((item) => (
-                <NavLink
-                  key={item.href}
-                  {...item}
-                  selected={selected(item.href)}
-                />
-              ))}
-            </ul>
-          </div>
-          <div className="aurora-nav-group">
-            <p>{t(($) => $.shell.nav_group_account)}</p>
-            <ul>
-              {accountItems.map((item) => (
-                <NavLink
-                  key={item.href}
-                  {...item}
-                  selected={selected(item.href)}
-                />
-              ))}
-            </ul>
-          </div>
-        </div>
-
-        <div className="aurora-sidebar-footer">
-          <button type="button" className="aurora-nav-link" onClick={logout}>
-            <LogOut aria-hidden="true" />
-            {tLayout(($) => $.sidebar.log_out)}
-          </button>
-        </div>
-      </nav>
-
-      <div className="aurora-main">
-        <header className="aurora-topbar">
-          <button
-            type="button"
-            className="aurora-menu-button"
-            aria-label={t(($) => $.shell.menu_open)}
-            aria-expanded={navOpen}
-            aria-controls="aurora-nav"
-            onClick={() => setNavOpen(true)}
-          >
-            <Menu aria-hidden="true" className="size-4" />
-          </button>
-          <span className="aurora-topbar-brand">
-            Aurora <span>AI</span>
-          </span>
-          <div className="aurora-topbar-actions">
-            {/* The runtime state belongs in the chrome: every page here starts a
-                generation, and a node that is offline is the reason the next
-                one will not. */}
-            <AuroraRuntimeChip href={routes.runtime()} />
-          </div>
-        </header>
-        <main className="aurora-scroll">{children}</main>
+          </SheetClose>
+        ) : null}
       </div>
 
-      <AuroraAccountDialog
-        open={accountOpen}
-        onOpenChange={setAccountOpen}
+      <AuroraAccountPanel
         creditsHref={routes.billing()}
+        onOpenAccount={() => setAccountOpen(true)}
       />
-    </div>
+
+      <div className="aurora-nav-groups">
+        <div className="aurora-nav-group">
+          <p>{t(($) => $.shell.nav_group_work)}</p>
+          <ul>
+            {workItems.map((item) => (
+              <NavLink
+                key={item.href}
+                {...item}
+                selected={selected(item.href)}
+              />
+            ))}
+          </ul>
+        </div>
+        <div className="aurora-nav-group">
+          <p>{t(($) => $.shell.nav_group_account)}</p>
+          <ul>
+            {accountItems.map((item) => (
+              <NavLink
+                key={item.href}
+                {...item}
+                selected={selected(item.href)}
+              />
+            ))}
+          </ul>
+        </div>
+      </div>
+
+      <div className="aurora-sidebar-footer">
+        <button type="button" className="aurora-nav-link" onClick={logout}>
+          <LogOut aria-hidden="true" />
+          {tLayout(($) => $.sidebar.log_out)}
+        </button>
+      </div>
+    </nav>
+  );
+
+  return (
+    <Sheet open={compact && navOpen} onOpenChange={setNavOpen}>
+      <div className="aurora-app">
+        {compact ? (
+          <SheetContent side="left" showCloseButton={false} className="aurora-nav-drawer">
+            <SheetTitle className="sr-only">Aurora</SheetTitle>
+            {sidebar}
+          </SheetContent>
+        ) : sidebar}
+
+        <div className="aurora-main">
+          <header className="aurora-topbar">
+            {compact ? (
+              <SheetTrigger
+                className="aurora-menu-button"
+                aria-label={t(($) => $.shell.menu_open)}
+              >
+                <Menu aria-hidden="true" className="size-4" />
+              </SheetTrigger>
+            ) : null}
+            <span className="aurora-topbar-brand">
+              Aurora <span>AI</span>
+            </span>
+            <div className="aurora-topbar-actions">
+              {/* The runtime state belongs in the chrome: every page here starts a
+                  generation, and a node that is offline is the reason the next
+                  one will not. */}
+              <AuroraRuntimeChip href={routes.runtime()} />
+            </div>
+          </header>
+          <main className="aurora-scroll">{children}</main>
+        </div>
+
+        <AuroraAccountDialog
+          open={accountOpen}
+          onOpenChange={setAccountOpen}
+          creditsHref={routes.billing()}
+        />
+      </div>
+    </Sheet>
   );
 }
 
@@ -3324,10 +3371,33 @@ vi.mock("@multica/core/aurora", async (importOriginal) => {
 });
 ```
 
+测试顶部从 vitest 补 `beforeEach`/`afterEach`，从 Testing Library 补 `cleanup`/`waitFor`，再加以下媒体查询桩。每条现有测试默认桌面；移动测试显式切换到 900px 分支。Sheet 在 jsdom 中还需要 `window.matchMedia`，不能只把 `innerWidth` 改小。
+
+```tsx
+function stubCompact(compact: boolean) {
+  vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+    matches: query === "(max-width: 900px)" && compact,
+    media: query,
+    onchange: null,
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(() => true),
+  })));
+}
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+```
+
 `describe` 之前加 `beforeEach`：
 
 ```tsx
 beforeEach(() => {
+  stubCompact(false);
   // The sidebar panel names the reader, so the shell needs an identity to
   // render under. The store is real here; only the server reads are mocked.
   useAuthStore.setState({
@@ -3344,9 +3414,26 @@ beforeEach(() => {
 });
 ```
 
-`describe` 末尾追加三条（新引入 `userEvent` 与 `within`）：
+`describe` 末尾追加四条（新引入 `userEvent` 与 `within`）：
 
 ```tsx
+  it("opens the mobile navigation and returns focus after Escape", async () => {
+    stubCompact(true);
+    const user = userEvent.setup();
+    renderShell("/acme/skills");
+    const opener = await screen.findByRole("button", { name: "Open menu" });
+    expect(screen.queryByRole("navigation", { name: "Aurora" })).toBeNull();
+    opener.focus();
+    await user.keyboard("{Enter}");
+    const dialog = await screen.findByRole("dialog", { name: "Aurora" });
+    expect(within(dialog).getByRole("navigation", { name: "Aurora" })).toBeVisible();
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Aurora" })).toBeNull());
+    expect(opener).toHaveFocus();
+    expect(screen.queryByRole("navigation", { name: "Aurora" })).toBeNull();
+  });
+
   it("shows the plan, the balance and this month's usage", () => {
     renderShell("/acme/skills");
 
@@ -3394,7 +3481,7 @@ Expected: PASS。原有 7 条断言（5 个链接、选中态、尾斜杠、详�
 - [ ] **Step 8: 手动看一遍响应式与键盘**
 
 Run: `pnpm dev:aurora`。
-Expected: 侧栏深蓝 `#13223a`，选中项左侧有紫色指示条；窗口缩到 900px 以下侧栏收起，顶栏出现 ☰ 与品牌名；点 ☰ 抽屉滑入、点遮罩可关；抽屉收起时 Tab 不会跑进侧栏；账户弹窗 380px、16px 圆角、modal 阴影；顶栏右侧是状态 chip + 账户按钮。
+Expected: 侧栏深蓝 `#13223a`，选中项左侧有紫色指示条；窗口缩到 900px 及以下侧栏收起，顶栏出现 ☰ 与品牌名；点 ☰ 打开共享 Sheet，焦点进入抽屉；Tab/Shift+Tab 不进入背景，Esc/遮罩/关闭按钮可关且焦点返回 ☰；关闭时侧栏不挂载；账户弹窗 380px、16px 圆角、modal 阴影；顶栏右侧是状态 chip + 账户按钮。
 
 - [ ] **Step 9: Commit**
 
@@ -3846,21 +3933,21 @@ git commit -m "feat(aurora): rebuild the skill directory on the design system"
 | 结果下载按钮（548-553） | `inline-flex w-fit items-center gap-1.5 text-body underline …` | `aurora-file-row` |
 | "打开作品库" `AppLink`（566-570） | `inline-flex w-fit items-center gap-1 text-body underline …` | `aurora-file-row` |
 
-抽屉头部替换成（`categoryLabel` 用现成的 `auroraCategoryLabel` + `directory.categories.*`，`skill.displayName` 就是现在传给 `SheetTitle` 的那个值）：
+抽屉头部替换成（`categoryLabel` 用现成的 `auroraCategoryLabel` + `directory.categories.*`，显示名继续用现有 `skillDisplayName(skill, locale)`，消耗用 `formatCredits(skill.credits, locale)`）：
 
 ```tsx
 <SheetHeader className="aurora-drawer-head">
   <AuroraAvatar
-    name={skill.displayName}
+    name={skillDisplayName(skill, locale)}
     id={skill.id}
     size="lg"
     available={skill.available}
   />
   <div>
     <span className="aurora-drawer-head-category">{categoryLabel}</span>
-    <SheetTitle>{skill.displayName}</SheetTitle>
+    <SheetTitle>{skillDisplayName(skill, locale)}</SheetTitle>
     <SheetDescription>
-      {t(($) => $.composer.cost, { credits })}
+      {t(($) => $.composer.cost, { credits: formatCredits(skill.credits, locale) })}
     </SheetDescription>
   </div>
 </SheetHeader>```
@@ -4398,7 +4485,16 @@ git commit -m "feat(aurora): restyle the runtime page"
                     aria-label={t(($) => $.billing.topup.pack, { credits, price })}
                     disabled={topupCheckout.isPending || !returnURLs}
                     aria-busy={topupCheckout.isPending}
-                    onClick={() => void startTopup(topup.id)}
+                    onClick={() => {
+                      if (!returnURLs) return;
+                      topupCheckout.mutate(
+                        { topupId: topup.id, ...returnURLs },
+                        {
+                          onSuccess: (checkoutUrl) =>
+                            openExternal(checkoutUrl, { webTarget: "same-tab" }),
+                        },
+                      );
+                    }}
                   >
                     <strong>{t(($) => $.credits, { credits })}</strong>
                     <small>{price}</small>
@@ -4563,7 +4659,33 @@ describe("DeadEndScreen", () => {
 });
 ```
 
-- [ ] **Step 5: 全量验证**
+- [ ] **Step 5: 完成迁移后启用未使用类检查，再做全量验证**
+
+现在才在 `apps/aurora/app/aurora-theme.test.ts` 的 `describe` 末尾加入以下断言。Task 1 不加：基础 CSS 的消费者是 Tasks 2–11 的交付物。若发现未使用规则，删除对应 CSS；不要用注释、import 路径或 DOM ID 冒充消费者。
+
+```ts
+  it("declares no class left unused after the full migration", () => {
+    const used = new Set([
+      ...classesUsedIn(resolve(repoRoot, "packages/views/aurora")),
+      ...classesUsedIn(resolve(repoRoot, "apps/aurora")),
+    ]);
+    expect([...declared].filter((name) => !used.has(name))).toEqual([]);
+  });
+```
+
+同时增加 Portal 减少动态效果守卫，先核对 CSS 选择器，并在下一步通过浏览器验证实际计算样式：
+
+```ts
+  it("covers portalled Sheets and backdrops when motion is reduced", () => {
+    expect(globals).toContain("aurora.css");
+    const layout = readFileSync(resolve(repoRoot, "apps/aurora/app/layout.tsx"), "utf8");
+    expect(classesInSource(layout).has("aurora-theme")).toBe(true);
+    const reduced = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
+    expect(reduced).toContain('.aurora-theme [data-slot="sheet-content"]');
+    expect(reduced).toContain('.aurora-theme [data-slot="sheet-overlay"]');
+    expect(reduced).toContain("transition-duration: 0.01ms !important");
+  });
+```
 
 ```bash
 pnpm typecheck
@@ -4593,15 +4715,15 @@ Run: `pnpm dev:aurora`
 5. `/works/{id}`：字段在一个白色面板里两列排布，提示词跨两列；返回按钮在页头右侧。
 6. `/runtimes`：节点面板 + 进行中列表。
 7. `/billing`：三张数字卡、套餐面板（紫色进度条）、三张充值档位卡、流水行。
-8. 任意页面把窗口缩到 900px 以下：侧栏变抽屉、顶栏出现 ☰ 与品牌名；点 ☰ 能开能关；**Tab 键不会跑进收起的抽屉**。
+8. 任意页面把窗口缩到 900px 及以下：侧栏变共享 Sheet、顶栏出现 ☰ 与品牌名；键盘打开后焦点进入抽屉，Tab/Shift+Tab 留在其中，Esc/遮罩/关闭按钮关闭后焦点回到 ☰；**收起时侧栏不挂载**。随后在打开状态放大到 901px，确认 Sheet 关闭、背景恢复可交互且只剩一个桌面导航。
 9. 缩到 690px 以下：卡片单列、Hero 单列且轨道隐藏、数字卡单列。
-10. 系统开启"减少动态效果"后：抽屉与卡片的过渡时长接近 0。
+10. 系统开启"减少动态效果"后：分别打开移动导航 Sheet 和生成 Sheet，检查 Portal 内 `[data-slot="sheet-content"]` 与 `[data-slot="sheet-overlay"]` 的 computed `transition-duration` 都为 `0.00001s`；卡片过渡也接近 0。再关闭该系统选项，确认原语原有过渡恢复。
 11. 键盘走一遍抽屉与两个弹窗：Esc 能关、焦点回到触发元素、金色描边不存在（焦点环是紫色）。
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add apps/aurora/components/dead-end-screen.tsx apps/aurora/components/no-workspace-notice.tsx apps/aurora/app/login/page.tsx apps/aurora/components/dead-end-screen.test.tsx
+git add apps/aurora/components/dead-end-screen.tsx apps/aurora/components/no-workspace-notice.tsx apps/aurora/app/login/page.tsx apps/aurora/components/dead-end-screen.test.tsx apps/aurora/app/aurora-theme.test.ts
 git commit -m "feat(aurora): finish the design pass on the standalone screens"
 ```
 
@@ -4622,7 +4744,7 @@ git commit -m "feat(aurora): finish the design pass on the standalone screens"
 | 形状：按钮/输入 8px、卡片 12px、Hero/弹窗 16px、胶囊只给 pill/徽章/圆点 | Global Constraints 的半径阶梯 + Task 1 的 `--aurora-r-*` |
 | 层次：默认平卡（白底 + 1px 发丝边），悬停最多 card 阴影，弹窗用 modal 阴影，不用毛玻璃/多层光晕 | Task 1 `.aurora-card`/`.aurora-panel`/`.aurora-dialog`；唯一的 `backdrop-filter` 留在顶栏（DESIGN.md 明确允许） |
 | 渐变只允许品牌标志与 Hero 弱径向光 | Task 1 `.aurora-brand-mark` + `.aurora-hero`，其余一律纯色 |
-| 响应式断点 1120 / 900 / 690 | Task 1 三个 `@media`；Task 11 Step 6 逐条手验 |
+| 响应式断点 1120 / 900 / 690 | Task 1 三个 `@media`；Task 3 的媒体查询与 CSS 同为 `(max-width: 900px)`；Task 11 Step 6 逐条手验 |
 | 触控目标 ≥40px、输入 44px | 顶栏按钮 40px、`.aurora-plan` ≥96px；输入沿用 `Input` 的 36px——**偏差**，见下 |
 
 **2. 与参考实现的偏差（都是有意的）**
@@ -4638,7 +4760,7 @@ git commit -m "feat(aurora): finish the design pass on the standalone screens"
 
 **3. 占位符扫描**
 
-计划里的每个代码块都是可直接粘贴的内容；三处需要执行者打开被测文件确认的只有"该文件已有的渲染辅助叫什么"，已在 Global Constraints 里点明，并且新断言的编写方式不依赖具体名字（自带 wrapper 的 Task 11 测试给了完整代码）。
+计划里的每个代码块都是可直接粘贴的内容；需要执行者打开被测文件确认的是"该文件已有的渲染辅助叫什么"，已在 Global Constraints 里点明，并且新断言的编写方式不依赖具体名字（自带 wrapper 的 Task 11 测试给了完整代码）。
 
 **4. 类型/命名一致性**
 
@@ -4646,7 +4768,7 @@ git commit -m "feat(aurora): finish the design pass on the standalone screens"
 - `AuroraPageHeader` 的 props（`icon/eyebrow/title/meta/actions`）在 Task 2 定义，Task 6/7/8/9/10 使用处逐一对齐。
 - `GenerationStatusBadge` 在 Task 5 换成胶囊但仍只收 `{ status, className }`，Task 6/7/9 的调用处不需要改签名。
 - `tintIndex` / `avatarInitial` / `avatarTint` 在 Task 2 定义并导出，Task 3（`avatarInitial`）、Task 6（`tintIndex`/`avatarInitial`）使用。
-- CSS 类清单（130 个）与各 Task 的使用处做过一次双向核对：没有未定义的类，也没有未被使用的类。Task 4 回归的 `.aurora-chips`/`.aurora-card-footer`/`.aurora-card-state` 三个类正是这次首页复核的结果——第一版把卡片的 chips 与 footer 剪掉了，因为当时以为没有数据填它们；复核后确认 `skill.input` 与 `skill.available`+`skill.credits` 就是这两个位置的现成数据。
+- CSS 类清单以 Task 1 样式表为准；Task 1 检查实际使用类已定义，Task 11 完成迁移后检查未使用类并删除多余规则。Task 4 回归的 `.aurora-chips`/`.aurora-card-footer`/`.aurora-card-state` 三个类正是这次首页复核的结果——第一版把卡片的 chips 与 footer 剪掉了，因为当时以为没有数据填它们；复核后确认 `skill.input` 与 `skill.available`+`skill.credits` 就是这两个位置的现成数据。
 
 **5. 风险与回滚**
 
@@ -4658,7 +4780,7 @@ git commit -m "feat(aurora): finish the design pass on the standalone screens"
 
 计划完成，保存在 `docs/superpowers/plans/2026-10-10-aurora-ui-design-system.md`。两种执行方式：
 
-**1. Subagent-Driven（推荐）** —— 每个 Task 派一个全新的 subagent，Task 之间我来评审；Task 1 必须先单独验收通过再往下，因为它定义其余所有 Task 的类名与变量。
+**1. Subagent-Driven（推荐）** —— 每个 Task 派一个全新的 subagent，Task 之间我来评审；Task 1 必须先单独验收通过再往下，因为它定义其余所有 Task 的类名与变量；此时只验证声明与桥接，不要求后续尚未创建的消费者存在，未使用类检查到 Task 11 才加入。
 
 **2. Inline Execution** —— 在当前会话里按 executing-plans 批量执行，带检查点。
 
@@ -4668,6 +4790,8 @@ git commit -m "feat(aurora): finish the design pass on the standalone screens"
 
 - 2026-10-10 初稿：Task 1–11 覆盖设计层、外壳、五个页面、独立屏与全量验证。
 - 2026-10-10 复核回写（首页）：把参考实现首页拆成"区域 → 交互 → Aurora 落点"的对照表（见"设计基线"），据此补回三处被初稿剪掉的东西——`.directory-head` 那一段（eyebrow + h2 + 按筛选可见的条数）、卡片的能力 chips（来自 `skill.input`）与 footer（可运行/即将上线 + 消耗）、空态里的"查看全部功能"恢复动作；搜索框按参考的 `.search-box` 造型改用 `InputGroup`。i18n 增量从 14 键涨到 25 键，CSS 类从 125 涨到 130。
+
+- 2026-10-10 PR #228 复审修订：样式守卫改用 TypeScript AST，只扫描实际 `className` 与显式类名映射，有限动态类名做完整展开；未使用类检查延后到 Task 11。移动导航改为共享 Sheet + SheetTrigger，并补断点桩、键盘打开/Esc/焦点恢复回归及浏览器 Tab/遮罩/断点切换验收。Aurora body 加 `aurora-theme`，减少动态效果规则覆盖 Portal 中的 Sheet 根元素和遮罩。另将抽屉示例的不存在字段和充值示例的未定义函数改回现有显示名/积分格式化与结账回调，避免执行时丢失 wiring。
 
 ## 待确认
 
