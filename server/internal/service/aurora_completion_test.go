@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -239,5 +241,80 @@ func TestAuroraCompletionNoOpForNonAuroraTask(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("expected no generation for a non-Aurora task, found %d", n)
+	}
+}
+
+// TestAuroraFailureReasonPrefersTheDaemonsMessage pins the fix for #220. The
+// generation used to carry only the classified taxonomy code, and
+// "agent_error.unknown" tells the person who just lost their output nothing
+// while the daemon's own message names the cause.
+func TestAuroraFailureReasonPrefersTheDaemonsMessage(t *testing.T) {
+	const reported = "artifact validation failed: aurora: artifact manifest is missing: open /workspace/output: no such file or directory"
+	if got := auroraFailureReason(reported, "agent_error.unknown"); got != reported {
+		t.Fatalf("reason = %q, want the daemon's message", got)
+	}
+	// The provider-failure shape from the same sweep.
+	const provider = "artifact report failed: POST /api/daemon/tasks/01a12454/artifacts returned 500: content moderation unavailable"
+	if got := auroraFailureReason(provider, "agent_error.provider_server_error"); got != provider {
+		t.Fatalf("reason = %q, want the daemon's message", got)
+	}
+}
+
+func TestAuroraFailureReasonFallsBackToTheClassifiedCode(t *testing.T) {
+	for _, message := range []string{"", "   ", "\n\t "} {
+		got := auroraFailureReason(message, "agent_error.provider_server_error")
+		if got != "agent_error.provider_server_error" {
+			t.Errorf("for message %q the reason = %q, want the classified code", message, got)
+		}
+	}
+}
+
+func TestAuroraFailureReasonHasALastResort(t *testing.T) {
+	if got := auroraFailureReason("", ""); got != "task failed" {
+		t.Errorf("reason = %q, want %q", got, "task failed")
+	}
+}
+
+func TestAuroraFailureReasonTrimsTheMessage(t *testing.T) {
+	if got := auroraFailureReason("  artifact missing  ", "agent_error.unknown"); got != "artifact missing" {
+		t.Errorf("reason = %q, want it trimmed", got)
+	}
+}
+
+// TestAuroraFailureReasonBoundsTheMessage covers the column's real reader: the
+// generation detail view, not a log browser. A provider response body embedded
+// in the daemon's message can be arbitrarily long.
+func TestAuroraFailureReasonBoundsTheMessage(t *testing.T) {
+	got := auroraFailureReason(strings.Repeat("x", 2000), "agent_error.unknown")
+	if n := utf8.RuneCountInString(got); n != auroraFailureReasonMaxRunes+1 {
+		t.Fatalf("reason is %d runes, want %d plus the ellipsis", n, auroraFailureReasonMaxRunes)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatal("a truncated reason must say so")
+	}
+}
+
+// TestTruncateRunesKeepsTheStringValid guards the rune boundary. The
+// byte-based truncate used elsewhere in this package would split a multi-byte
+// rune and write invalid UTF-8 into a column the API returns as JSON, and these
+// messages carry Chinese.
+func TestTruncateRunesKeepsTheStringValid(t *testing.T) {
+	const message = "图片是 85% 肤色占比，已达到 60% 的显式内容阈值"
+	got := truncateRunes(message, 6)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncation produced invalid UTF-8: %q", got)
+	}
+	if n := utf8.RuneCountInString(got); n != 7 { // six runes plus the ellipsis
+		t.Fatalf("truncated to %d runes, want 6 plus the ellipsis: %q", n, got)
+	}
+}
+
+func TestTruncateRunesLeavesShortStringsAlone(t *testing.T) {
+	const message = "short enough"
+	if got := truncateRunes(message, 100); got != message {
+		t.Fatalf("truncateRunes(%q, 100) = %q, want it unchanged", message, got)
+	}
+	if got := truncateRunes(message, 0); got != message {
+		t.Fatalf("a non-positive limit must not truncate: %q", got)
 	}
 }

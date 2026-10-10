@@ -4,12 +4,50 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/redact"
 )
+
+// auroraFailureReasonMaxRunes bounds the client-facing failure reason. The
+// daemon's message can embed a whole provider response body, and this value is
+// rendered in the generation detail view rather than read in a log browser.
+const auroraFailureReasonMaxRunes = 400
+
+// auroraFailureReason renders the reason a generation carries into its terminal
+// failed state.
+//
+// The classified reason is a taxonomy code — "agent_error.unknown",
+// "agent_error.provider_server_error" — which tells the person who just lost
+// their output nothing at all. The daemon's own message is where the cause
+// actually lives ("artifact validation failed: aurora: artifact manifest is
+// missing: …"), so prefer it, redact it, bound it, and keep the code for a
+// failure reported without one. Moderation is unaffected: its blocking path
+// writes its own fixed phrase, not this.
+func auroraFailureReason(errMsg, classified string) string {
+	if message := strings.TrimSpace(redact.Text(errMsg)); message != "" {
+		return truncateRunes(message, auroraFailureReasonMaxRunes)
+	}
+	if classified = strings.TrimSpace(classified); classified != "" {
+		return classified
+	}
+	return "task failed"
+}
+
+// truncateRunes cuts on a rune boundary, unlike the byte-based truncate used for
+// ASCII-only plugin-hook values: a failure message carries whatever the daemon
+// and the provider wrote, Chinese included.
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 || utf8.RuneCountInString(value) <= limit {
+		return value
+	}
+	return string([]rune(value)[:limit]) + "…"
+}
 
 // Aurora settlement runs when an agent task that backs an Aurora generation
 // reaches a terminal state. A generation is looked up by task_id (the reverse
