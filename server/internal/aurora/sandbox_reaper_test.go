@@ -58,6 +58,10 @@ func (s *recordingSettler) FailAuroraSandboxTasksForRuntime(ctx context.Context,
 	return s.queries.FailAuroraSandboxTasksForRuntime(ctx, arg)
 }
 
+func (s *recordingSettler) FailUnclaimedAuroraTasks(ctx context.Context, arg db.FailUnclaimedAuroraTasksParams) ([]db.AgentTaskQueue, error) {
+	return s.queries.FailUnclaimedAuroraTasks(ctx, arg)
+}
+
 func (s *recordingSettler) HandleFailedTasks(_ context.Context, tasks []db.AgentTaskQueue) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -504,5 +508,45 @@ func TestSandboxReaperAddressesFleetNodeByWorkspaceNodeID(t *testing.T) {
 	// delete and silently succeeds without removing the node.
 	if got, want := fleet.owners[0], util.UUIDToString(f.owner); got != want {
 		t.Fatalf("fleet delete owner = %q, want the managed runtime owner %q", got, want)
+	}
+}
+
+func TestSandboxReaperUnclaimedQueue(t *testing.T) {
+	for _, tc := range []struct {
+		name, status          string
+		taskAge, heartbeatAge time.Duration
+		failed                bool
+	}{
+		{"dead online runtime", "queued", 6 * time.Minute, 6 * time.Minute, true},
+		{"healthy backlog", "queued", 24 * time.Hour, 0, false},
+		{"new task gets grace", "queued", time.Minute, time.Hour, false},
+		{"claimed task", "dispatched", 6 * time.Minute, 6 * time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReaperFixture(t)
+			task := f.queuedTask(t)
+			ctx := context.Background()
+			if _, err := f.pool.Exec(ctx, "UPDATE agent_task_queue SET status=$2, created_at=$3 WHERE id=$1", task, tc.status, f.now.Add(-tc.taskAge)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.pool.Exec(ctx, "UPDATE agent_runtime SET status='online', last_seen_at=$2 WHERE id=$1", f.runtimeID, f.now.Add(-tc.heartbeatAge)); err != nil {
+				t.Fatal(err)
+			}
+			settler := &recordingSettler{queries: f.queries}
+			fleet := &fakeNodeDeleter{}
+			f.sweep(t, fleet, settler)
+			status, _ := f.taskStatus(t, task)
+			if (status == "failed") != tc.failed {
+				t.Fatalf("status=%s", status)
+			}
+			before := settler.settledCount()
+			if tc.failed && before != 1 {
+				t.Fatalf("settled=%d", before)
+			}
+			f.sweep(t, fleet, settler)
+			if settler.settledCount() != before {
+				t.Fatal("duplicate settlement")
+			}
+		})
 	}
 }

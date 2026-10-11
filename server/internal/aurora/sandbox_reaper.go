@@ -19,6 +19,7 @@ import (
 // transaction (which also settles delegated failure recoveries) and the
 // post-failure side effects stay with HandleFailedTasks.
 type SandboxTaskSettler interface {
+	FailUnclaimedAuroraTasks(ctx context.Context, arg db.FailUnclaimedAuroraTasksParams) ([]db.AgentTaskQueue, error)
 	FailAuroraSandboxTasksForRuntime(ctx context.Context, arg db.FailAuroraSandboxTasksForRuntimeParams) ([]db.AgentTaskQueue, error)
 	HandleFailedTasks(ctx context.Context, tasks []db.AgentTaskQueue) int
 }
@@ -32,6 +33,9 @@ const (
 	// sandboxStartingGrace is how long a node may stay starting before the
 	// reaper concludes its daemon never arrived.
 	sandboxStartingGrace = 2 * time.Minute
+	// Managed nodes must claim queued work within five minutes of losing
+	// liveness. A live heartbeat preserves a busy runtime's backlog.
+	sandboxQueueGrace = 5 * time.Minute
 	// sandboxIdleTimeout is how long an online node may go without activity
 	// before it is stopped.
 	sandboxIdleTimeout = 15 * time.Minute
@@ -83,6 +87,16 @@ type SandboxReapStats struct {
 // action is idempotent, and only rows this call transitioned are settled.
 func (r *SandboxReaper) Sweep(ctx context.Context) (SandboxReapStats, error) {
 	now := r.now()
+	stats := SandboxReapStats{}
+	failed, err := r.tasks.FailUnclaimedAuroraTasks(ctx, db.FailUnclaimedAuroraTasksParams{
+		Cutoff: sandboxTimestamp(now.Add(-sandboxQueueGrace)), RowLimit: SandboxTaskFailBatchSize,
+	})
+	if err != nil {
+		return stats, fmt.Errorf("fail unclaimed sandbox tasks: %w", err)
+	}
+	if len(failed) > 0 {
+		stats.Settled = r.tasks.HandleFailedTasks(ctx, failed)
+	}
 	rows, err := r.queries.ListAuroraSandboxNodesForReap(ctx, db.ListAuroraSandboxNodesForReapParams{
 		StartingCutoff: sandboxTimestamp(now.Add(-sandboxStartingGrace)),
 		IdleCutoff:     sandboxTimestamp(now.Add(-sandboxIdleTimeout)),
@@ -90,10 +104,10 @@ func (r *SandboxReaper) Sweep(ctx context.Context) (SandboxReapStats, error) {
 		RowLimit:       SandboxReapBatchSize,
 	})
 	if err != nil {
-		return SandboxReapStats{}, fmt.Errorf("list sandbox nodes for reap: %w", err)
+		return stats, fmt.Errorf("list sandbox nodes for reap: %w", err)
 	}
 
-	stats := SandboxReapStats{Candidates: len(rows)}
+	stats.Candidates = len(rows)
 	for _, node := range rows {
 		var err error
 		switch node.State {

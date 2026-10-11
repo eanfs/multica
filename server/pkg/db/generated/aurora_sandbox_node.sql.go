@@ -353,6 +353,120 @@ func (q *Queries) FailAuroraSandboxTasksForRuntime(ctx context.Context, arg Fail
 	return items, nil
 }
 
+const failUnclaimedAuroraTasks = `-- name: FailUnclaimedAuroraTasks :many
+WITH victims AS (
+  SELECT task.id
+  FROM agent_task_queue task
+  JOIN agent_runtime runtime ON runtime.id = task.runtime_id
+  WHERE task.status = 'queued'
+    AND runtime.provider = 'aurora_managed'
+    AND task.created_at < $1
+    AND COALESCE(runtime.last_seen_at, runtime.updated_at) < $1
+  ORDER BY task.created_at, task.id
+  LIMIT $2
+  FOR UPDATE OF task SKIP LOCKED
+)
+UPDATE agent_task_queue AS task
+SET status = 'failed', completed_at = now(),
+    error = 'Managed runtime did not claim the generation; please retry.',
+    failure_reason = 'runtime_start_failed', wait_reason = NULL
+FROM victims
+WHERE task.id = victims.id AND task.status = 'queued'
+  AND EXISTS (
+    SELECT 1 FROM agent_runtime runtime
+    WHERE runtime.id = task.runtime_id AND runtime.provider = 'aurora_managed'
+      AND COALESCE(runtime.last_seen_at, runtime.updated_at) < $1
+  )
+RETURNING task.id, task.agent_id, task.issue_id, task.status, task.priority, task.dispatched_at, task.started_at, task.completed_at, task.result, task.error, task.created_at, task.context, task.runtime_id, task.session_id, task.work_dir, task.trigger_comment_id, task.chat_session_id, task.autopilot_run_id, task.attempt, task.max_attempts, task.parent_task_id, task.failure_reason, task.trigger_summary, task.force_fresh_session, task.is_leader_task, task.wait_reason, task.initiator_user_id, task.handoff_note, task.prepare_lease_expires_at, task.squad_id, task.runtime_mcp_overlay, task.escalation_for_task_id, task.fire_at, task.originator_user_id, task.runtime_connected_apps, task.coalesced_comment_ids, task.delivered_comment_ids, task.chat_input_task_id, task.chat_finalize_deferred_at, task.originator_source, task.delegated_from_task_id, task.retry_of_task_id, task.rerun_of_task_id, task.rule_version_id, task.trigger_evidence_kind, task.trigger_evidence_ref_id, task.accountable_user_id, task.session_rollout_missing, task.retired_session_id, task.quick_actions_disabled, task.regenerate_quick_actions_for, task.branch_name, task.durable_work_dir, task.channel_context_revision, task.comment_thread_id, task.cancelled_by_type, task.cancelled_by_id, task.cancelled_by_name, task.issue_snapshot
+`
+
+type FailUnclaimedAuroraTasksParams struct {
+	Cutoff   pgtype.Timestamptz `json:"cutoff"`
+	RowLimit int32              `json:"row_limit"`
+}
+
+// Only dead managed runtimes expire their queue. Healthy backlogs and tasks
+// already claimed by a daemon survive. Settlement uses the returned rows.
+func (q *Queries) FailUnclaimedAuroraTasks(ctx context.Context, arg FailUnclaimedAuroraTasksParams) ([]AgentTaskQueue, error) {
+	rows, err := q.db.Query(ctx, failUnclaimedAuroraTasks, arg.Cutoff, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AgentTaskQueue{}
+	for rows.Next() {
+		var i AgentTaskQueue
+		if err := rows.Scan(
+			&i.ID,
+			&i.AgentID,
+			&i.IssueID,
+			&i.Status,
+			&i.Priority,
+			&i.DispatchedAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.Result,
+			&i.Error,
+			&i.CreatedAt,
+			&i.Context,
+			&i.RuntimeID,
+			&i.SessionID,
+			&i.WorkDir,
+			&i.TriggerCommentID,
+			&i.ChatSessionID,
+			&i.AutopilotRunID,
+			&i.Attempt,
+			&i.MaxAttempts,
+			&i.ParentTaskID,
+			&i.FailureReason,
+			&i.TriggerSummary,
+			&i.ForceFreshSession,
+			&i.IsLeaderTask,
+			&i.WaitReason,
+			&i.InitiatorUserID,
+			&i.HandoffNote,
+			&i.PrepareLeaseExpiresAt,
+			&i.SquadID,
+			&i.RuntimeMcpOverlay,
+			&i.EscalationForTaskID,
+			&i.FireAt,
+			&i.OriginatorUserID,
+			&i.RuntimeConnectedApps,
+			&i.CoalescedCommentIds,
+			&i.DeliveredCommentIds,
+			&i.ChatInputTaskID,
+			&i.ChatFinalizeDeferredAt,
+			&i.OriginatorSource,
+			&i.DelegatedFromTaskID,
+			&i.RetryOfTaskID,
+			&i.RerunOfTaskID,
+			&i.RuleVersionID,
+			&i.TriggerEvidenceKind,
+			&i.TriggerEvidenceRefID,
+			&i.AccountableUserID,
+			&i.SessionRolloutMissing,
+			&i.RetiredSessionID,
+			&i.QuickActionsDisabled,
+			&i.RegenerateQuickActionsFor,
+			&i.BranchName,
+			&i.DurableWorkDir,
+			&i.ChannelContextRevision,
+			&i.CommentThreadID,
+			&i.CancelledByType,
+			&i.CancelledByID,
+			&i.CancelledByName,
+			&i.IssueSnapshot,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getAuroraRuntimeFleetNode = `-- name: GetAuroraRuntimeFleetNode :one
 SELECT id, namespace, owner_id, created_at, updated_at, container_id, daemon_id, name, spec, image, profile_ref, start_epoch, data_volume, secrets_volume, desired, status, generation, ready, health_at, active_runs, pending_reports, failed_reports, maintenance, revoked, error_code, error_message, spec_config, observation, workspace_id, runtime_id FROM fleet_nodes
 WHERE id = $1
@@ -727,6 +841,57 @@ type ReleaseAuroraManagedRuntimeParams struct {
 func (q *Queries) ReleaseAuroraManagedRuntime(ctx context.Context, arg ReleaseAuroraManagedRuntimeParams) error {
 	_, err := q.db.Exec(ctx, releaseAuroraManagedRuntime, arg.ID, arg.WorkspaceID, arg.DaemonID)
 	return err
+}
+
+const replaceAuroraSandboxIdentity = `-- name: ReplaceAuroraSandboxIdentity :one
+UPDATE aurora_sandbox_node
+SET id = $1, daemon_id = $2, state = 'failed',
+    backend_node_id = NULL, enrollment_token_hash = NULL,
+    enrollment_expires_at = NULL, enrollment_consumed_at = NULL,
+    started_at = NULL, stopped_at = NULL, drain_started_at = NULL,
+    failure_reason = NULL, created_at = now(), updated_at = now(), last_active_at = now()
+WHERE workspace_id = $3 AND id = $4
+  AND state IN ('starting', 'failed')
+RETURNING id, workspace_id, runtime_id, daemon_id, backend_node_id, image_digest, state, enrollment_token_hash, enrollment_expires_at, enrollment_consumed_at, last_active_at, drain_started_at, started_at, stopped_at, failure_reason, created_at, updated_at
+`
+
+type ReplaceAuroraSandboxIdentityParams struct {
+	NewID       pgtype.UUID `json:"new_id"`
+	NewDaemonID string      `json:"new_daemon_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	OldID       pgtype.UUID `json:"old_id"`
+}
+
+// Cross-namespace recovery preserves the old Fleet row and volumes. The old
+// daemon's credentials are revoked in the same transaction by the caller.
+func (q *Queries) ReplaceAuroraSandboxIdentity(ctx context.Context, arg ReplaceAuroraSandboxIdentityParams) (AuroraSandboxNode, error) {
+	row := q.db.QueryRow(ctx, replaceAuroraSandboxIdentity,
+		arg.NewID,
+		arg.NewDaemonID,
+		arg.WorkspaceID,
+		arg.OldID,
+	)
+	var i AuroraSandboxNode
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.RuntimeID,
+		&i.DaemonID,
+		&i.BackendNodeID,
+		&i.ImageDigest,
+		&i.State,
+		&i.EnrollmentTokenHash,
+		&i.EnrollmentExpiresAt,
+		&i.EnrollmentConsumedAt,
+		&i.LastActiveAt,
+		&i.DrainStartedAt,
+		&i.StartedAt,
+		&i.StoppedAt,
+		&i.FailureReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const rotateAuroraSandboxEnrollment = `-- name: RotateAuroraSandboxEnrollment :one

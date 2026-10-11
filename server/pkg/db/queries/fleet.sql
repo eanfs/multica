@@ -549,3 +549,13 @@ WHERE namespace= @namespace AND owner_id= @owner_id AND node_id= @node_id AND id
  AND generation= @generation AND action='create' AND phase='applying' AND NOT non_retryable
  AND bootstrap_claimed_at= @claimed_at AND bootstrap_claimed_at<=clock_timestamp()
  AND bootstrap_claimed_at+interval '5 minutes'>clock_timestamp();
+
+-- name: FleetAuroraNodeInOtherNamespace :one
+-- Only the same owner/workspace/runtime/daemon identity authorizes Aurora to
+-- replace its own API identity. Never expose or adopt another owner's node.
+SELECT EXISTS (
+ SELECT 1 FROM fleet_nodes
+ WHERE id = @node_id AND namespace <> @namespace AND owner_id = @owner_id
+   AND workspace_id = @workspace_id AND runtime_id = @runtime_id
+   AND daemon_id = @daemon_id
+);

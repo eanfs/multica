@@ -19,6 +19,8 @@ func privateOperationError(resp *Response) error {
 	}
 	_ = json.Unmarshal(resp.Body, &body)
 	switch {
+	case resp.StatusCode == 409 && body.Code == "node_namespace_conflict":
+		return model.ErrNodeNamespaceConflict
 	case resp.StatusCode == 409 && body.Code == "busy":
 		return model.ErrBusy
 	case resp.StatusCode == 409 && body.Code == "unknown_health":

@@ -239,3 +239,44 @@ SET state = 'failed',
     updated_at = now()
 WHERE id = $1 AND workspace_id = $3 AND state = 'starting'
 RETURNING *;
+
+-- name: FailUnclaimedAuroraTasks :many
+-- Only dead managed runtimes expire their queue. Healthy backlogs and tasks
+-- already claimed by a daemon survive. Settlement uses the returned rows.
+WITH victims AS (
+  SELECT task.id
+  FROM agent_task_queue task
+  JOIN agent_runtime runtime ON runtime.id = task.runtime_id
+  WHERE task.status = 'queued'
+    AND runtime.provider = 'aurora_managed'
+    AND task.created_at < sqlc.arg(cutoff)
+    AND COALESCE(runtime.last_seen_at, runtime.updated_at) < sqlc.arg(cutoff)
+  ORDER BY task.created_at, task.id
+  LIMIT sqlc.arg(row_limit)
+  FOR UPDATE OF task SKIP LOCKED
+)
+UPDATE agent_task_queue AS task
+SET status = 'failed', completed_at = now(),
+    error = 'Managed runtime did not claim the generation; please retry.',
+    failure_reason = 'runtime_start_failed', wait_reason = NULL
+FROM victims
+WHERE task.id = victims.id AND task.status = 'queued'
+  AND EXISTS (
+    SELECT 1 FROM agent_runtime runtime
+    WHERE runtime.id = task.runtime_id AND runtime.provider = 'aurora_managed'
+      AND COALESCE(runtime.last_seen_at, runtime.updated_at) < sqlc.arg(cutoff)
+  )
+RETURNING task.*;
+
+-- name: ReplaceAuroraSandboxIdentity :one
+-- Cross-namespace recovery preserves the old Fleet row and volumes. The old
+-- daemon's credentials are revoked in the same transaction by the caller.
+UPDATE aurora_sandbox_node
+SET id = sqlc.arg(new_id), daemon_id = sqlc.arg(new_daemon_id), state = 'failed',
+    backend_node_id = NULL, enrollment_token_hash = NULL,
+    enrollment_expires_at = NULL, enrollment_consumed_at = NULL,
+    started_at = NULL, stopped_at = NULL, drain_started_at = NULL,
+    failure_reason = NULL, created_at = now(), updated_at = now(), last_active_at = now()
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(old_id)
+  AND state IN ('starting', 'failed')
+RETURNING *;

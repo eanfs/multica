@@ -6160,6 +6160,14 @@ func (s *TaskService) FailAuroraSandboxTasksForRuntime(ctx context.Context, arg 
 	})
 }
 
+// FailUnclaimedAuroraTasks bounds managed-runtime queue stalls and preserves
+// the common transactional failure recovery and refund path.
+func (s *TaskService) FailUnclaimedAuroraTasks(ctx context.Context, arg db.FailUnclaimedAuroraTasksParams) ([]db.AgentTaskQueue, error) {
+	return s.terminateTasksInTx(ctx, func(qtx *db.Queries) ([]db.AgentTaskQueue, error) {
+		return qtx.FailUnclaimedAuroraTasks(ctx, arg)
+	})
+}
+
 // FailStaleTasks fails claimed work whose runtime stopped reporting.
 func (s *TaskService) FailStaleTasks(ctx context.Context, arg db.FailStaleTasksParams) ([]db.AgentTaskQueue, error) {
 	return s.terminateTasksInTx(ctx, func(qtx *db.Queries) ([]db.AgentTaskQueue, error) {

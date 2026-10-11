@@ -131,3 +131,37 @@ func TestFleetAuroraIntent(t *testing.T) {
 		t.Fatalf("cross-namespace err=%v", err)
 	}
 }
+
+func TestFleetAuroraNamespaceConflictPreservesOldResources(t *testing.T) {
+	s, f, ns := auroraStoreFixture(t, 2)
+	ctx := context.Background()
+	owner, id := uuid(t, f.UserID), uuid(t, guuid.NewString())
+	req := auroraRebootstrapRequest(t, f, "namespace-recovery")
+	before, op, _, err := s.CreateAuroraIntent(ctx, owner, id, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := s.provisioning
+	cfg.Namespace = ns + "-replacement"
+	next := New(s.pool, cfg.Namespace, WithProvisioningConfig(cfg))
+	_, _, _, err = next.CreateAuroraIntent(ctx, owner, id, req)
+	if !errors.Is(err, model.ErrNodeNamespaceConflict) {
+		t.Fatalf("got %v, want namespace conflict", err)
+	}
+	after, err := s.GetAuroraNode(ctx, owner, id)
+	if err != nil || after.DataVolume != before.DataVolume || after.SecretsVolume != before.SecretsVolume || after.Generation != before.Generation {
+		t.Fatalf("old resources changed: %+v %v", after, err)
+	}
+	if _, err := s.GetOperation(ctx, owner, op.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.Count(t, "SELECT count(*) FROM fleet_nodes WHERE namespace=$1", cfg.Namespace); n != 0 {
+		t.Fatal("foreign namespace mutated")
+	}
+	// Unrelated owners and runtime identities must never authorize replacement.
+	foreign := req
+	foreign.RuntimeID = uuid(t, guuid.NewString())
+	if _, _, _, err := next.CreateAuroraIntent(ctx, owner, id, foreign); errors.Is(err, model.ErrNodeNamespaceConflict) {
+		t.Fatal("mismatched runtime authorized rotation")
+	}
+}

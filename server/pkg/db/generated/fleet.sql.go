@@ -303,6 +303,40 @@ func (q *Queries) FleetApproveOperation(ctx context.Context, arg FleetApproveOpe
 	return result.RowsAffected(), nil
 }
 
+const fleetAuroraNodeInOtherNamespace = `-- name: FleetAuroraNodeInOtherNamespace :one
+SELECT EXISTS (
+ SELECT 1 FROM fleet_nodes
+ WHERE id = $1 AND namespace <> $2 AND owner_id = $3
+   AND workspace_id = $4 AND runtime_id = $5
+   AND daemon_id = $6
+)
+`
+
+type FleetAuroraNodeInOtherNamespaceParams struct {
+	NodeID      pgtype.UUID `json:"node_id"`
+	Namespace   string      `json:"namespace"`
+	OwnerID     pgtype.UUID `json:"owner_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	RuntimeID   pgtype.UUID `json:"runtime_id"`
+	DaemonID    pgtype.UUID `json:"daemon_id"`
+}
+
+// Only the same owner/workspace/runtime/daemon identity authorizes Aurora to
+// replace its own API identity. Never expose or adopt another owner's node.
+func (q *Queries) FleetAuroraNodeInOtherNamespace(ctx context.Context, arg FleetAuroraNodeInOtherNamespaceParams) (bool, error) {
+	row := q.db.QueryRow(ctx, fleetAuroraNodeInOtherNamespace,
+		arg.NodeID,
+		arg.Namespace,
+		arg.OwnerID,
+		arg.WorkspaceID,
+		arg.RuntimeID,
+		arg.DaemonID,
+	)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const fleetClaimBootstrap = `-- name: FleetClaimBootstrap :one
 UPDATE fleet_node_operations o SET bootstrap_claimed_at=clock_timestamp(),phase='applying',updated_at=now()
 WHERE o.namespace= $1 AND o.owner_id= $2 AND o.node_id= $3 AND o.id= $4

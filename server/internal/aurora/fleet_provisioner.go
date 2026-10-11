@@ -5,10 +5,14 @@ import (
 	"errors"
 
 	"github.com/multica-ai/multica/server/internal/cloudruntime"
+	"github.com/multica-ai/multica/server/internal/fleet/model"
 )
 
 // ErrNodeNotFound reports that the Fleet does not know the node a delete
 // targeted. The reaper treats it as success so repeated cleanup is a no-op.
+// ErrNodeNamespaceConflict authorizes a fresh identity, never adoption of old volumes.
+var ErrNodeNamespaceConflict = model.ErrNodeNamespaceConflict
+
 var ErrNodeNotFound = errors.New("fleet node not found")
 
 // The Aurora profile admits every workspace node under one fixed name and one

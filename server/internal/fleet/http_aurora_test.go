@@ -139,3 +139,22 @@ func TestHTTPAuroraRoutesAbsentWithoutProfile(t *testing.T) {
 		t.Fatalf("put without profile=%d", got.Code)
 	}
 }
+
+func TestHTTPAuroraNamespaceConflict(t *testing.T) {
+	svc, f := auroraHTTPFixture(t)
+	node, daemon, runtime := guuid.NewString(), guuid.NewString(), guuid.NewString()
+	body := auroraBody(f.WorkspaceID, runtime, daemon, "aurora-test-image", "aurora", "namespace-key")
+	token := "mse_" + strings.Repeat("a", 40)
+	auroraPut(t, svc.Handler([]byte(auroraTestSecret)), f.UserID, node, token, body).Want(http.StatusAccepted)
+	cfg := svc.cfg
+	cfg.Namespace += "-replacement"
+	next := NewService(store.New(f.Pool, cfg.Namespace, store.WithProvisioningConfig(cfg)), cfg, nil)
+	var out map[string]string
+	auroraPut(t, next.Handler([]byte(auroraTestSecret)), f.UserID, node, token, body).Want(http.StatusConflict).JSON(&out)
+	if out["error_code"] != "node_namespace_conflict" {
+		t.Fatalf("response=%v", out)
+	}
+	if _, ok := next.TakeAuroraEnrollment(mustUUID(t, node)); ok {
+		t.Fatal("failed admission retained enrollment")
+	}
+}
