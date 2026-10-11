@@ -64,6 +64,8 @@ func httpError(w http.ResponseWriter, err error) {
 		status, code = 400, "invalid_request"
 	case errors.Is(err, model.ErrForbidden), errors.Is(err, pgx.ErrNoRows):
 		status, code = 403, "forbidden"
+	case errors.Is(err, model.ErrNodeNamespaceConflict):
+		status, code = 409, "node_namespace_conflict"
 	case errors.Is(err, model.ErrConflict):
 		status, code = 409, "conflict"
 	case errors.Is(err, model.ErrBusy):

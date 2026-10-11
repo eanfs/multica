@@ -28,6 +28,8 @@ type fakeProvisioner struct {
 	err       error
 	deletes   []provisionerDelete
 	deleteErr error
+	firstErr  error
+	requests  []aurora.FleetEnsureRequest
 }
 
 type provisionerDelete struct {
@@ -39,6 +41,10 @@ func (f *fakeProvisioner) EnsureWorkspaceNode(_ context.Context, ownerID string,
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	f.requests = append(f.requests, req)
+	if f.calls == 1 && f.firstErr != nil {
+		return aurora.FleetNode{}, f.firstErr
+	}
 	f.lastOwner = ownerID
 	f.last = req
 	if f.err != nil {
@@ -415,5 +421,53 @@ func TestSandboxManagerReprovisionsAStaleOnlineNode(t *testing.T) {
 	}
 	if node.BackendNodeID.String != "backend-node-9" {
 		t.Fatalf("backend node id = %q, want the fleet's new node", node.BackendNodeID.String)
+	}
+}
+
+func TestSandboxManagerReplacesForeignNamespaceIdentity(t *testing.T) {
+	pool := auroraTestPool(t)
+	q := db.New(pool)
+	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
+	fleet := &fakeProvisioner{firstErr: aurora.ErrNodeNamespaceConflict}
+	mgr := aurora.NewSandboxManager(q, pool, fleet, validSandboxImageDigest, nil)
+	node, err := mgr.Ensure(context.Background(), ws, runtimeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fleet.calls != 2 {
+		t.Fatalf("calls=%d", fleet.calls)
+	}
+	old, next := fleet.requests[0], fleet.requests[1]
+	if old.NodeID == next.NodeID || old.DaemonID == next.DaemonID || old.EnrollmentToken == next.EnrollmentToken {
+		t.Fatal("replacement reused old identity or enrollment")
+	}
+	if node.RuntimeID != runtimeID || node.WorkspaceID != ws || util.UUIDToString(node.ID) != next.NodeID {
+		t.Fatal("replacement lost workspace/runtime binding")
+	}
+	if len(fleet.deletes) != 0 {
+		t.Fatal("replacement deleted old namespace resources")
+	}
+	if _, err := mgr.Ensure(context.Background(), ws, runtimeID); err != nil {
+		t.Fatal(err)
+	}
+	if fleet.calls != 2 {
+		t.Fatal("retry did not adopt replacement")
+	}
+}
+
+func TestSandboxManagerNamespaceRecoveryIsBounded(t *testing.T) {
+	pool := auroraTestPool(t)
+	q := db.New(pool)
+	ws, runtimeID := newSandboxNodeWorkspace(t, q, pool)
+	fleet := &fakeProvisioner{err: aurora.ErrNodeNamespaceConflict}
+	mgr := aurora.NewSandboxManager(q, pool, fleet, validSandboxImageDigest, nil)
+	if _, err := mgr.Ensure(context.Background(), ws, runtimeID); !errors.Is(err, aurora.ErrNodeNamespaceConflict) {
+		t.Fatalf("err=%v", err)
+	}
+	if fleet.calls != 2 {
+		t.Fatalf("calls=%d, want bounded retry", fleet.calls)
+	}
+	if node := sandboxNodeByWorkspace(t, pool, ws); node.State != "failed" || node.EnrollmentTokenHash.Valid {
+		t.Fatal("failed replacement retained enrollment")
 	}
 }

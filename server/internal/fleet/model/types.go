@@ -20,13 +20,14 @@ const (
 )
 
 var (
-	ErrBusy           = errors.New("fleet node busy")
-	ErrConflict       = errors.New("fleet conflict")
-	ErrForbidden      = errors.New("fleet forbidden")
-	ErrUnavailable    = errors.New("fleet unavailable")
-	ErrUnknownHealth  = errors.New("fleet health unknown")
-	ErrProfileMissing = errors.New("fleet profile missing")
-	ErrInvalidRequest = errors.New("invalid fleet request")
+	ErrBusy                  = errors.New("fleet node busy")
+	ErrNodeNamespaceConflict = errors.New("aurora node belongs to another fleet namespace")
+	ErrConflict              = errors.New("fleet conflict")
+	ErrForbidden             = errors.New("fleet forbidden")
+	ErrUnavailable           = errors.New("fleet unavailable")
+	ErrUnknownHealth         = errors.New("fleet health unknown")
+	ErrProfileMissing        = errors.New("fleet profile missing")
+	ErrInvalidRequest        = errors.New("invalid fleet request")
 )
 
 type Node struct {

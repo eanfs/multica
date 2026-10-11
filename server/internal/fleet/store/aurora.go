@@ -224,6 +224,16 @@ func (s *Store) CreateAuroraIntent(ctx context.Context, owner, nodeID pgtype.UUI
 			return model.ErrInvalidRequest
 		}
 		daemonID, _ := util.ParseUUID(req.DaemonID)
+		foreign, err := q.FleetAuroraNodeInOtherNamespace(ctx, db.FleetAuroraNodeInOtherNamespaceParams{
+			NodeID: nodeID, Namespace: s.namespace, OwnerID: owner,
+			WorkspaceID: req.WorkspaceID, RuntimeID: req.RuntimeID, DaemonID: daemonID,
+		})
+		if err != nil {
+			return err
+		}
+		if foreign {
+			return model.ErrNodeNamespaceConflict
+		}
 		nodeText := util.UUIDToString(nodeID)
 		row, err := q.InsertFleetAuroraNode(ctx, db.InsertFleetAuroraNodeParams{NodeID: nodeID, DaemonID: daemonID, Namespace: s.namespace, OwnerID: owner, WorkspaceID: req.WorkspaceID, RuntimeID: req.RuntimeID, Name: req.Name, Spec: req.Spec, Image: req.ImageDigest, SpecConfig: snapshot, DataVolume: "multica-fleet-" + nodeText + "-data", SecretsVolume: "multica-fleet-" + nodeText + "-secrets"})
 		if err != nil {

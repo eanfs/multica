@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/fleet"
+	"github.com/multica-ai/multica/server/internal/fleet/model"
 )
 
 func TestClientDoForwardsFleetRequest(t *testing.T) {
@@ -254,5 +255,18 @@ func TestDeleteAuroraWorkspaceNodeClient(t *testing.T) {
 				t.Fatalf("204 delete err = %v", err)
 			}
 		})
+	}
+}
+
+func TestAuroraNamespaceConflictTransport(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error_code":"node_namespace_conflict"}`))
+	}))
+	defer srv.Close()
+	c := NewClient(Config{BaseURL: srv.URL, ServiceSecret: []byte("private-key-012345678901234567890123456789")})
+	_, err := c.EnsureAuroraWorkspaceNode(context.Background(), "11111111-1111-4111-8111-111111111111", AuroraWorkspaceNodeRequest{NodeID: "22222222-2222-4222-8222-222222222222"})
+	if !errors.Is(err, model.ErrNodeNamespaceConflict) {
+		t.Fatalf("err=%v", err)
 	}
 }

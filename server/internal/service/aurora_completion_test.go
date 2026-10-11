@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"github.com/multica-ai/multica/server/internal/testutil"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -316,5 +318,34 @@ func TestTruncateRunesLeavesShortStringsAlone(t *testing.T) {
 	}
 	if got := truncateRunes(message, 0); got != message {
 		t.Fatalf("a non-positive limit must not truncate: %q", got)
+	}
+}
+
+func TestAuroraUnclaimedQueueFailsAndRefundsOnce(t *testing.T) {
+	svc, pool, workspaceID, userID, agentID := newAuroraCompletionService(t)
+	ctx := context.Background()
+	f := testutil.New(pool, workspaceID, userID)
+	user, ws := util.MustParseUUID(userID), util.MustParseUUID(workspaceID)
+	if err := svc.Credit.Grant(ctx, user, ws, 1_000_000_000, aurora.LedgerKindAdjustment, "queue-stall-"+userID); err != nil {
+		t.Fatal(err)
+	}
+	genID, taskID := seedAuroraTask(t, pool, workspaceID, userID, agentID, 62_000_000)
+	if err := svc.Credit.Reserve(ctx, user, ws, 62_000_000, util.UUIDToString(genID)); err != nil {
+		t.Fatal(err)
+	}
+	f.Exec(t, "UPDATE agent_runtime SET provider='aurora_managed', runtime_mode='cloud', status='online', last_seen_at=now()-interval '6 minutes' WHERE id=(SELECT runtime_id FROM agent_task_queue WHERE id=$1)", taskID)
+	f.Exec(t, "UPDATE agent_task_queue SET created_at=now()-interval '6 minutes' WHERE id=$1", taskID)
+	reaper := aurora.NewSandboxReaper(svc.Queries, pool, nil, svc, time.Now)
+	for i := 0; i < 2; i++ {
+		if _, err := reaper.Sweep(ctx); err != nil {
+			t.Fatal(err)
+		}
+		gen := auroraGenRow(t, pool, genID)
+		if gen.Status != "failed" || !strings.Contains(gen.Error.String, "did not claim") || gen.CreditsCharged != 0 {
+			t.Fatalf("generation=%+v", gen)
+		}
+		if balance, err := svc.Credit.Balance(ctx, user); err != nil || balance != 1_000_000_000 {
+			t.Fatalf("balance=%d err=%v", balance, err)
+		}
 	}
 }

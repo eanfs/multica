@@ -80,6 +80,10 @@ func newSandboxDaemonID() string {
 // failure marks the node failed with its enrollment cleared rather than leaving
 // a live secret behind.
 func (m *SandboxManager) Ensure(ctx context.Context, workspaceID, runtimeID pgtype.UUID) (db.AuroraSandboxNode, error) {
+	return m.ensure(ctx, workspaceID, runtimeID, true)
+}
+
+func (m *SandboxManager) ensure(ctx context.Context, workspaceID, runtimeID pgtype.UUID, allowReplacement bool) (db.AuroraSandboxNode, error) {
 	if !validImageDigest(m.imageDigest) {
 		return db.AuroraSandboxNode{}, fmt.Errorf("sandbox image %q must end with @sha256: and 64 lowercase hex characters", m.imageDigest)
 	}
@@ -102,6 +106,12 @@ func (m *SandboxManager) Ensure(ctx context.Context, workspaceID, runtimeID pgty
 		Name:            auroraFleetNodeName,
 		Spec:            auroraFleetNodeSpec,
 	})
+	if errors.Is(err, ErrNodeNamespaceConflict) && allowReplacement {
+		if err := m.replaceIdentity(ctx, armed.node); err != nil {
+			return db.AuroraSandboxNode{}, err
+		}
+		return m.ensure(ctx, workspaceID, runtimeID, false)
+	}
 	if err != nil {
 		m.markFailed(ctx, workspaceID, armed.node.ID, err)
 		return db.AuroraSandboxNode{}, fmt.Errorf("ensure workspace sandbox: %w", err)
@@ -371,4 +381,44 @@ func scrubEnrollment(node db.AuroraSandboxNode) db.AuroraSandboxNode {
 	node.EnrollmentTokenHash = pgtype.Text{}
 	node.EnrollmentExpiresAt = pgtype.Timestamptz{}
 	return node
+}
+
+// replaceIdentity is only reached after Fleet proves this exact durable identity
+// belongs to another namespace. It leaves that namespace's resources untouched.
+func (m *SandboxManager) replaceIdentity(ctx context.Context, old db.AuroraSandboxNode) error {
+	tx, err := m.tx.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	q := m.queries.WithTx(tx)
+	if err := q.LockAuroraSandboxEnrollmentWorkspace(ctx, old.WorkspaceID); err != nil {
+		return err
+	}
+	current, err := q.LockAuroraSandboxNodeByWorkspace(ctx, old.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	if current.ID != old.ID {
+		// A competing request already replaced it; Ensure will adopt its result.
+		return tx.Commit(ctx)
+	}
+	if _, err = q.ReplaceAuroraSandboxIdentity(ctx, db.ReplaceAuroraSandboxIdentityParams{
+		NewID: util.MustParseUUID(uuid.NewString()), NewDaemonID: newSandboxDaemonID(),
+		WorkspaceID: old.WorkspaceID, OldID: old.ID,
+	}); err != nil {
+		return fmt.Errorf("replace sandbox identity: %w", err)
+	}
+	if _, err = q.DeleteDaemonTokensByWorkspaceAndDaemons(ctx, db.DeleteDaemonTokensByWorkspaceAndDaemonsParams{
+		WorkspaceID: old.WorkspaceID, DaemonIds: []string{old.DaemonID},
+	}); err != nil {
+		return err
+	}
+	if err = q.ReleaseAuroraManagedRuntime(ctx, db.ReleaseAuroraManagedRuntimeParams{
+		ID: old.RuntimeID, WorkspaceID: old.WorkspaceID,
+		DaemonID: pgtype.Text{String: old.DaemonID, Valid: true},
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
