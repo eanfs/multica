@@ -1,5 +1,7 @@
 # Qoder Cloud Agents（QCA）代码调研 · v0.7.0
 
+> **2026-11-03 状态**：QCA 已随 upstream sync 合入主仓库（`origin/main` `764724e9f`，迁移 `586`–`588`），本文保留为 v0.7.0 时点的实现分析；主仓库当前版本及 sync PR #277 带来的 attachments/quickcreate 差异以最新代码为准。
+
 权威版本：tag `v0.7.0`（dbdbb2991）。除另注外，行号均对应 `git show v0.7.0:<path>` 的内容。
 main（HEAD 7fe2b849d）与 tag 的 qoder 差异见文末「main 相对 v0.7.0」。
 

@@ -1,5 +1,7 @@
 # Aurora cloud runtime 调研（`origin/feat/aurora-38-app`）
 
+> **2026-11-03 状态**：主仓库已删除 `server/internal/aurorafleet`，Aurora 改用 `server/internal/fleet` + `aurora/fleet_provisioner.go`（`aurora/sandbox_manager`/`enrollment`/`reaper` 保留并驱动该 provisioner）。本文保留为 2026-09-23 时点的分析，重构以最新代码为准。
+
 > 权威版本：`origin/feat/aurora-38-app` @ `91e8cee`（2026-09-23）。除另注外，行号均指 `git show origin/feat/aurora-38-app:<path>`。QCA 侧对应 `main`/`v0.7.0`，其细读见 `docs/superpowers/research/qca-v070.md`。仅源码阅读，未切分支、未跑测试。
 
 ## TL;DR
