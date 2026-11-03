@@ -1,6 +1,6 @@
 "use client";
 
-import { Frown } from "lucide-react";
+import { CircleAlert } from "@multica/ui/icons";
 import { Button } from "@multica/ui/components/ui/button";
 import { AuroraPageState } from "./aurora-page-header";
 import { useT } from "../i18n";
@@ -27,7 +27,7 @@ export function AuroraLoadFailed({
   const { t } = useT("aurora");
   return (
     <AuroraPageState
-      icon={Frown}
+      icon={CircleAlert}
       tone="destructive"
       role="alert"
       title={title}

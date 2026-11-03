@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, ChevronRight, LogOut } from "lucide-react";
+import { ChevronDown, ChevronRight, LogOut } from "@multica/ui/icons";
 import type { ReactNode } from "react";
 import {
   isAuroraDegraded,
@@ -125,7 +125,7 @@ function AccountIdentity({
 }
 
 /**
- * Wallet, allowance and the way to buy more. The meter measures the monthly
+ * CreditCard, allowance and the way to buy more. The meter measures the monthly
  * generation allowance, not the wallet: credits are the reference's decorative
  * bar there, while the allowance is the number that has a real denominator.
  */

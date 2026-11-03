@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/fleet"
@@ -51,7 +52,7 @@ func TestFleetLegacyMergeRejectsManagedSourceOrTarget(t *testing.T) {
 			ag := f.Agent(t, "merge-agent", source)
 			task := f.Task(t, ag, testutil.Cols{"runtime_id": source})
 			h := &Handler{Queries: db.New(pool), TxStarter: pool}
-			if err := h.mergeLegacyRuntime(context.Background(), util.MustParseUUID(target), util.MustParseUUID(source), "old", "claude"); err == nil {
+			if err := h.mergeLegacyRuntime(context.Background(), util.MustParseUUID(target), util.MustParseUUID(source), "old", "claude", pgtype.UUID{}); err == nil {
 				t.Fatal("managed runtime merge was allowed")
 			}
 			a, err := h.Queries.GetAgent(context.Background(), util.MustParseUUID(ag))
@@ -125,7 +126,7 @@ func TestFleetLegacyMergeMaintenanceRace(t *testing.T) {
 	h := &Handler{Queries: db.New(pool), TxStarter: starter}
 	done := make(chan error, 1)
 	go func() {
-		done <- h.mergeLegacyRuntime(ctx, util.MustParseUUID(target), util.MustParseUUID(source), "old", "claude")
+		done <- h.mergeLegacyRuntime(ctx, util.MustParseUUID(target), util.MustParseUUID(source), "old", "claude", pgtype.UUID{})
 	}()
 	select {
 	case <-starter.entered:

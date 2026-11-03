@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo } from "react";
-import { Wallet } from "lucide-react";
+import { CreditCard } from "@multica/ui/icons";
 import { Button } from "@multica/ui/components/ui/button";
 import { Progress } from "@multica/ui/components/ui/progress";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
@@ -176,7 +176,7 @@ export function AuroraBilling() {
   return (
     <div className="aurora-page">
       <AuroraPageHeader
-        icon={Wallet}
+        icon={CreditCard}
         title={t(($) => $.billing.title)}
       />
       {isLoading ? (
@@ -301,7 +301,7 @@ export function AuroraBilling() {
             </div>
             {transactions.length === 0 ? (
               <AuroraPageState
-                icon={Wallet}
+                icon={CreditCard}
                 title={t(($) => $.billing.transactions_empty_title)}
                 description={t(
                   ($) => $.billing.transactions_empty_description,

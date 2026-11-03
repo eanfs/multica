@@ -1,14 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import {
-  ArrowLeft,
-  Check,
-  CircleAlert,
-  Copy,
-  FileQuestion,
-  Sparkles,
-} from "lucide-react";
+import { ArrowLeft, Check, CircleAlert, Copy, FileQuestion, Sparkles } from "@multica/ui/icons";
 import { Button, buttonVariants } from "@multica/ui/components/ui/button";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { Spinner } from "@multica/ui/components/ui/spinner";
