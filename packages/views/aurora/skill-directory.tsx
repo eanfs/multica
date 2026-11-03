@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ArrowUpRight, LayoutGrid, Search, SearchX, Sparkles } from "lucide-react";
+import { ArrowUpRight, LayoutGrid, Search, CircleHelp, Sparkles } from "@multica/ui/icons";
 import { Button } from "@multica/ui/components/ui/button";
 import {
   InputGroup,
@@ -165,7 +165,7 @@ export function SkillDirectory({
             // apology, and it is the same recovery: clear what was typed and
             // what was selected.
             <AuroraPageState
-              icon={SearchX}
+              icon={CircleHelp}
               title={t(($) => $.directory.empty_title)}
               description={t(($) => $.directory.empty_description)}
               actions={

@@ -1,9 +1,9 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuthStore } from "../auth";
+import { setCurrentWorkspace } from "../platform/workspace-storage";
 import { configStore } from "../config";
 import type { StorageAdapter, User } from "../types";
-import { setCurrentWorkspace } from "../platform/workspace-storage";
 import { ApiClient, ApiError, CHAT_DRAFT_RESTORE_CAPABILITY, clientErrorMessage } from "./client";
 import { EMPTY_PLUGIN_PACKAGE_LIST, EMPTY_PLUGIN_PREVIEW, EMPTY_PLUGIN_SURFACE_LAUNCH } from "./schemas";
 
@@ -2424,7 +2424,7 @@ describe("ApiClient model discovery response schema", () => {
   function stubJSON(body: unknown) {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
+      vi.fn().mockImplementation(() =>
         new Response(JSON.stringify(body), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -2432,6 +2432,39 @@ describe("ApiClient model discovery response schema", () => {
       ),
     );
   }
+
+  it.each([null, "other-workspace"])(
+    "targets onboarding workspace for discovery and polling with active route %s",
+    async (activeSlug) => {
+      setCurrentWorkspace(activeSlug, null);
+      try {
+        stubJSON(completed);
+        const client = new ApiClient("https://api.example.test");
+        await client.initiateListModels("rt-1", { force: true }, "new-workspace");
+        await client.getListModelsResult("rt-1", "req-1", "new-workspace");
+        for (const [, init] of vi.mocked(fetch).mock.calls) {
+          expect(new Headers(init?.headers).get("X-Workspace-Slug")).toBe("new-workspace");
+        }
+      } finally {
+        setCurrentWorkspace(null, null);
+      }
+    },
+  );
+
+  it("keeps the active workspace header when no override is supplied", async () => {
+    setCurrentWorkspace("existing-workspace", null);
+    try {
+      stubJSON(completed);
+      const client = new ApiClient("https://api.example.test");
+      await client.initiateListModels("rt-1");
+      await client.getListModelsResult("rt-1", "req-1");
+      for (const [, init] of vi.mocked(fetch).mock.calls) {
+        expect(new Headers(init?.headers).get("X-Workspace-Slug")).toBe("existing-workspace");
+      }
+    } finally {
+      setCurrentWorkspace(null, null);
+    }
+  });
 
   it("parses a live completed discovery", async () => {
     stubJSON(completed);

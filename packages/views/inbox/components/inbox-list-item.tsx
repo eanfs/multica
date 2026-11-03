@@ -1,13 +1,14 @@
 "use client";
 
 import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
+import { isInboxItemUnread } from "@multica/core/inbox/queries";
 import { StatusIcon } from "../../issues/components";
 import {
   IssueAgentActivityIndicator,
 } from "../../issues/components/issue-agent-activity-indicator";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { DeferredTooltip } from "../../common/deferred-tooltip";
-import { Archive, ArchiveRestore } from "lucide-react";
+import { Archive, ArchiveRestore } from "@multica/ui/icons";
 import type { InboxItem } from "@multica/core/types";
 import type { InboxView } from "./inbox-view";
 import { InboxDetailLabel, useTypeLabels } from "./inbox-detail-label";
@@ -80,7 +81,7 @@ export function InboxListItem({
   // Archiving deliberately leaves `read` untouched so unarchiving restores the
   // real unread state, so archived rows would otherwise keep an unread marker
   // the user cannot clear from this view. Suppress the affordance here only.
-  const showUnread = item.read !== true && !isArchivedView;
+  const showUnread = isInboxItemUnread(item) && !isArchivedView;
   const ActionIcon = isArchivedView ? ArchiveRestore : Archive;
   const actionLabel = isArchivedView
     ? t(($) => $.list.unarchive_tooltip)
