@@ -528,9 +528,16 @@ hosted Cloud Runtime provider.
 make up C=api,web,fleet
 
 make status              # component state, ports and Fleet readiness
-make down                # stop Fleet and its nodes, keep volumes and data
+make down                # stop the Fleet control plane; leave node containers running
 make destroy             # remove this namespace's nodes/volumes, then the database
 ```
+
+`make down` only stops the Fleet service itself (`docker compose stop fleet`).
+Node containers are created through the Docker Engine API, not by Compose, so
+they keep running without their control plane; `make down` does not wait for
+busy nodes or set a claim barrier. Use `make destroy` to stop and remove this
+namespace's node containers and volumes. Inspect leftovers with the label
+filters under [Troubleshooting](#troubleshooting).
 
 Fleet runs in its own per-worktree Compose project
 (`multica-fleet-<namespace>`) and joins the PostgreSQL project's
@@ -575,9 +582,10 @@ node row you can start, stop, reboot, or delete. Stopping and rebooting keep the
 container, identity, session data and volumes; deletion revokes the node token
 and removes the container and both volumes permanently.
 
-A node that is busy or still has queued work refuses dangerous operations.
-`make down` uses the same barrier and leaves a node running rather than forcing
-it when its state is unknown.
+A node that is busy or still has queued work refuses dangerous operations
+through the API. `make down` is not a stop path for nodes: it stops only the
+Fleet control plane and leaves every node container running (see
+[Start and stop](#start-and-stop)).
 
 ### Troubleshooting
 
@@ -602,13 +610,15 @@ docker volume ls --filter label=multica.fleet.namespace=<namespace>
   `host.docker.internal`; on a plain Linux Docker daemon set a
   container-reachable `MULTICA_FLEET_API_URL` (the node network gateway).
   `curl` from inside a node container is the quickest check.
-- Node stays in `launching`: check the container logs and the daemon health on
-  port 19514 inside the container. A launching node is intentionally refused by
-  start/stop/reboot/delete to avoid racing creation. If the daemon already
-  reports `running` while Fleet still shows `launching`, the coordinator's
-  launching-to-running promotion is missing; that is a recorded known gap (see
-  design §14.6), not a credentials or network problem. Report it with the logs
-  instead of forcing operations.
+- Node stays in `launching`: while the container starts this is expected;
+  check the container logs and the daemon health on port 19514 inside the
+  container. A launching node is refused by start/stop/reboot/delete to avoid
+  racing creation. The coordinator promotes it to `running` once the container
+  and daemon are ready, or settles it as `stopped` if the container exited. If
+  the daemon already reports
+  `running` while Fleet still shows `launching`, that is a regression of the
+  promotion path (design §14.6), not a credentials or network problem; report it
+  with the logs instead of forcing operations.
 - Old shared-project Fleet container: versions before the per-worktree Compose
   project ran Fleet as `multica-fleet-1` in project `multica`. It is no longer
   managed; remove it once before starting the new project:

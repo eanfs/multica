@@ -200,10 +200,10 @@ Fleet 内部保留固定节点诊断接口；API 提供带服务认证的操作�
 
 ## 11. 开发入口与共享界面
 
-新增可选 `fleet` 环境组件，计划支持 `make up C=api,web,fleet`。节点由 Fleet 动态管理，镜像构建/服务启动纳入现有环境脚本，不另建 PostgreSQL。
+新增可选 `fleet` 环境组件，支持 `make up C=api,web,fleet`。节点由 Fleet 动态管理，镜像构建/服务启动纳入现有环境脚本，不另建 PostgreSQL。
 
-- `make status` 报告本 checkout 的 Fleet/节点、实际端口和就绪状态，无凭证输出。
-- `make down` 先建立屏障，确认无活跃运行和待回传，再停止节点、Fleet、API/Web；忙碌/状态未知不强制停机，返回恢复说明。保留卷和数据库。
+- `make status` 报告本 checkout 的 Fleet 状态、实际端口和就绪状态，无凭证输出。
+- `make down` 只停止 Fleet 控制面（`docker compose stop fleet`）并保留卷和数据库；Fleet 通过 Docker API 创建的节点容器不随 down 停止，仍在运行，也没有屏障或忙碌检查。`make destroy` 才按 namespace 标签停止并删除节点容器/卷。此缺口见 §14.6。
 - `make destroy` 对 Fleet 数据单独明确确认，先清理经标签和 Store 双重校验的自有 Docker 资源，再通过应用事务清理当前命名空间 Fleet 表数据，并遵循原 checkout 数据库销毁流程。Docker 清理未完成时保留恢复记录，不先删数据库。不得全局 prune，不删除其他 checkout 数据或共享 PostgreSQL 实例。
 - 私密配置模板提供 owner/profile/API 地址字段而非密钥，不要求聊天发送或命令参数公开密钥。
 
@@ -247,9 +247,9 @@ TanStack Query 管服务器数据，新增响应过 zod/parseWithFallback；未�
 
 ## 13. 后续步骤
 
-本文描述目标能力，不是已实现功能。最终审阅后使用 writing-plans 拆分任务，先实现 fake Provider、Store、配置分离和屏障，再接 Docker 镜像与共享界面。SQL 查询变更须重新生成 sqlc。
+阶段一已按本文实现（2026-11-09）；实现与设计的差异、补齐的约束和已知缺口集中在 §14，两者冲突时以 §14 为准。后续步骤是补齐 §14.6 的缺口，而不是从零实现本文。
 
-实现时同步更新开发环境与仓库约束说明，遵守数据保护和包边界；当前设计不修改这些工具，不启动 Docker，不读取真实私密配置，也不执行 Claude。
+修改 SQL 查询后须重新生成 sqlc；继续遵守数据保护和包边界，不启动 Docker、不读取真实私密配置，也不执行 Claude，除非显式授权。
 
 ## 14. 实现差异（2026-11-09）
 
@@ -262,7 +262,7 @@ TanStack Query 管服务器数据，新增响应过 zod/parseWithFallback；未�
 - `docker-compose.yml` 只保留 PostgreSQL，继续由 `multica` project 管理。
 - `docker-compose.fleet.yml` 通过 `scripts/fleet-env.sh` 以 `-p multica-fleet-<namespace>` 启动，namespace 来自当前 checkout 的 `.env.worktree`。
 - Fleet 只加入 PostgreSQL 所属的外部网络 `multica_default`，不创建第二个数据库、网络或 PostgreSQL 容器。
-- `make down` 停止 Fleet 和节点但保留卷；`make destroy` 先按 namespace 标签清理容器/卷，再走原有数据库销毁流程，不做全局 prune。
+- `make down` 只停止 Fleet 控制面并保留卷；节点容器继续运行（已知缺口，见 §14.6）。`make destroy` 先按 namespace 标签清理节点容器/卷，再走原有数据库销毁流程，不做全局 prune。
 - 旧版本遗留的 `multica` project 中的 Fleet 容器不再被新脚本管理，需要一次性手动 `docker rm -f`（见 CLI_AND_DAEMON.md 故障排查）。
 
 ### 14.2 凭证文件 schema
@@ -315,7 +315,8 @@ Fleet 只读取显式传入的 `MULTICA_FLEET_CREDENTIALS_FILE`，不读取用�
 ### 14.6 未覆盖项与已知缺口
 
 - **prepared 操作没有回收器**：API 崩溃留下的 `prepared` 屏障会阻止领取，当前没有后台任务自动撤销或重审；需要按设计 §10 的显式恢复流程处理。
-- **launching 目标未提升**：`CreateNode` 成功启动容器后仍把 `target_state` 留在 `launching`，Fleet 协调器的 `nextTargetState` 只提升 starting/rebooting/stopping，不处理 launching。结果是在真实环境中节点可能长期显示 `launching`，且 API 的维护准备会拒绝该节点。Task 18 的集成测试把该行为作为失败门禁记录；修复属于后续业务逻辑变更。
+- **launching 目标已提升**（R21，提交 `9bbe2aca2`）：协调器在容器与 daemon 就绪后把 `launching` 直接提升为 `running`；容器已退出或消失则结算为 `stopped`，不再永久停在 `launching`。集成测试保留为回归门禁，daemon 就绪后节点仍未 `running` 即判失败。
+- **`make down` 不停节点、无屏障**：`fleet_down` 只执行 `docker compose stop fleet`。Fleet 通过 Docker Engine API 创建的节点容器不属于该 Compose project，会继续运行；down 也没有设计 §11 描述的“确认无活跃运行和待回传”屏障。节点资源由 `make destroy` 按 `multica.fleet.namespace` 标签清理。改造 down 需要脚本直接访问 Docker（脚本无 DB 访问），本轮按实际行为对齐文档，不扩大范围。
 - **创建幂等未落库约束**：`fleet_node.idempotency_key` 有列但没有唯一索引，`ReserveNode` 也不做同键重放；创建重试可能创建第二个节点。操作表的幂等键已有部分唯一索引。
 - **旧 project 容器**：Task 11b 之前的 `multica` project Fleet 容器需要手动删除一次，脚本不会自动接管或清理。
 - **真实 Claude 烟测未执行**：没有 `agentintegration` 授权，未查找真实 CLI、未读取账户、未调用模型。

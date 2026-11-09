@@ -196,6 +196,18 @@ func TestFleetNodeLifecycleRealDocker(t *testing.T) {
 	assertNodeContainer(t, ctx, raw, image, namespace, daemonID, networkName, containerID, containerName)
 	dataVolume, secretsVolume := assertNodeVolumes(t, ctx, raw, namespace, daemonID, containerName)
 
+	// The daemon must become genuinely ready before Fleet can report running.
+	// A reachable health endpoint that still says "starting" is not readiness.
+	// Wait first: entrypoint.sh writes the CLI config before it starts the
+	// daemon, so reading the token before readiness races cold container start.
+	waitForDaemonReady(t, ctx, raw, sdk, containerID)
+	status := waitForNodeStatus(ctx, t, service, api, created.ID, fleet.StateRunning, 60*time.Second)
+	if status != fleet.StateRunning {
+		// Regression gate: a launched node that never leaves launching cannot
+		// be stopped, rebooted, or deleted through the API.
+		t.Fatalf("node stayed %q after the daemon was ready; launching-to-running promotion regressed (coordinator nextTargetState)", status)
+	}
+
 	token := readNodeToken(t, ctx, raw, containerID)
 	if !strings.HasPrefix(token, "mcn_") {
 		t.Fatalf("node token prefix = %q, want mcn_", token)
@@ -203,16 +215,6 @@ func TestFleetNodeLifecycleRealDocker(t *testing.T) {
 	identity := api.verifyPAT(ctx, token)
 	if !identity.Valid || identity.OwnerID != ownerID || identity.InstanceID != containerID || identity.InstanceRecordID != created.ID {
 		t.Fatalf("PAT verification = %+v, want owner %s node %s container %s", identity, ownerID, created.ID, containerID)
-	}
-
-	// The daemon must become genuinely ready before Fleet can report running.
-	// A reachable health endpoint that still says "starting" is not readiness.
-	waitForDaemonReady(t, ctx, raw, sdk, containerID)
-	status := waitForNodeStatus(ctx, t, service, api, created.ID, fleet.StateRunning, 60*time.Second)
-	if status != fleet.StateRunning {
-		// Keep the failure explicit: a launched node that never leaves
-		// launching cannot be stopped, rebooted, or deleted through the API.
-		t.Errorf("node stayed %q after the daemon was ready; CreateNode does not promote a successfully launched node to running (coordinator nextTargetState has no launching transition)", status)
 	}
 
 	// stop: the container is preserved, the volumes and identity survive.

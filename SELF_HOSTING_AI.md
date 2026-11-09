@@ -106,9 +106,9 @@ daemon and Claude Code:
 3. Sign in to the workspace UI, open **Runtimes**, choose **Add runtime** and
    then **Cloud Runtime**. Only the provider's allowed spec is offered.
 
-4. Stop with `make down` (keeps volumes) or clean this namespace up with
-   `make destroy` (removes the namespace's containers and volumes before the
-   database).
+4. Stop the control plane with `make down` (keeps volumes and leaves node
+   containers running) or clean this namespace up with `make destroy`
+   (removes the namespace's containers and volumes before the database).
 
 Requirements and limits:
 

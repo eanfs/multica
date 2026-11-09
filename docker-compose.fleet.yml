@@ -36,6 +36,9 @@ services:
       MULTICA_FLEET_NODE_NETWORK: multica-fleet-${MULTICA_LOCAL_FLEET_NAMESPACE:-local}
       MULTICA_FLEET_RUNTIME_IMAGE: ${MULTICA_FLEET_RUNTIME_IMAGE:-multica/runtime-claude:dev}
       MULTICA_FLEET_API_URL: ${MULTICA_FLEET_API_URL:-http://host.docker.internal:8080}
+      # Per-owner node cap. The default matches the Fleet config default, so a
+      # value in .env is actually applied inside the container.
+      MULTICA_FLEET_MAX_NODES_PER_OWNER: ${MULTICA_FLEET_MAX_NODES_PER_OWNER:-2}
       MULTICA_FLEET_CREDENTIALS_FILE: /run/secrets/fleet-credentials.json
       # Fleet must reach the same database as the API. The shared compose
       # network name replaces the host-only endpoint; MULTICA_FLEET_DATABASE_URL
