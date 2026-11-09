@@ -695,7 +695,31 @@ func (h *Handler) coordinateLocalFleet(w http.ResponseWriter, r *http.Request, o
 	if h.LocalFleet.now != nil {
 		now = h.LocalFleet.now
 	}
-	writeJSON(w, http.StatusOK, localFleetNodeJSON(node, now()))
+	// The operation is optional: a response is still useful when the journal
+	// row cannot be read, but the client should not lose the reason.
+	activeOp, opErr := h.LocalFleet.activeOperation(r.Context(), node.ID)
+	if opErr != nil {
+		slog.Warn("local fleet: read active operation failed",
+			append(logger.RequestAttrs(r), "node", uuidToString(node.ID), "error", opErr)...)
+	}
+	writeJSON(w, http.StatusOK, localFleetNodeJSON(node, now(), activeOp))
+}
+
+// activeOperation returns the node's in-flight lifecycle operation, or nil
+// when the node is settled. It runs after Prepare committed, so an approved
+// row is already visible here.
+func (c *localFleetCoordinator) activeOperation(ctx context.Context, nodeID pgtype.UUID) (*db.FleetNodeOperation, error) {
+	if c == nil || c.pool == nil {
+		return nil, nil
+	}
+	op, err := db.New(c.pool).GetActiveFleetNodeOperationForNode(ctx, nodeID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &op, nil
 }
 
 func writeLocalFleetError(w http.ResponseWriter, r *http.Request, err error) {
@@ -766,28 +790,37 @@ func (h *Handler) localFleetDiagnose(ctx context.Context, ownerID, containerID s
 	return report.PendingTerminalReportCount, nil
 }
 
+// localFleetNodeOperation mirrors Fleet's in-flight operation summary.
+type localFleetNodeOperation struct {
+	Name  string `json:"name"`
+	Phase string `json:"phase"`
+}
+
 // localFleetNodeResponse mirrors Fleet's stable client node contract so local
 // mode returns the same JSON shape as the proxied SaaS response.
 type localFleetNodeResponse struct {
-	ID           string            `json:"id"`
-	OwnerID      string            `json:"owner_id"`
-	InstanceID   string            `json:"instance_id"`
-	Region       string            `json:"region"`
-	InstanceType string            `json:"instance_type"`
-	ImageID      string            `json:"image_id"`
-	SubnetID     string            `json:"subnet_id"`
-	Name         string            `json:"name"`
-	Status       string            `json:"status"`
-	Tags         map[string]string `json:"tags"`
-	Metadata     map[string]any    `json:"metadata"`
-	CreatedAt    time.Time         `json:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at"`
-	Provider     string            `json:"provider,omitempty"`
-	Error        string            `json:"error,omitempty"`
+	ID           string                   `json:"id"`
+	OwnerID      string                   `json:"owner_id"`
+	InstanceID   string                   `json:"instance_id"`
+	Region       string                   `json:"region"`
+	InstanceType string                   `json:"instance_type"`
+	ImageID      string                   `json:"image_id"`
+	SubnetID     string                   `json:"subnet_id"`
+	Name         string                   `json:"name"`
+	Status       string                   `json:"status"`
+	DaemonID     string                   `json:"daemon_id"`
+	StatusDetail json.RawMessage          `json:"status_detail,omitempty"`
+	Operation    *localFleetNodeOperation `json:"operation,omitempty"`
+	Tags         map[string]string        `json:"tags"`
+	Metadata     map[string]any           `json:"metadata"`
+	CreatedAt    time.Time                `json:"created_at"`
+	UpdatedAt    time.Time                `json:"updated_at"`
+	Provider     string                   `json:"provider,omitempty"`
+	Error        string                   `json:"error,omitempty"`
 }
 
-func localFleetNodeJSON(node db.FleetNode, now time.Time) localFleetNodeResponse {
-	return localFleetNodeResponse{
+func localFleetNodeJSON(node db.FleetNode, now time.Time, operation *db.FleetNodeOperation) localFleetNodeResponse {
+	response := localFleetNodeResponse{
 		ID:           uuidToString(node.ID),
 		OwnerID:      uuidToString(node.OwnerID),
 		InstanceID:   node.ContainerID,
@@ -797,6 +830,7 @@ func localFleetNodeJSON(node db.FleetNode, now time.Time) localFleetNodeResponse
 		SubnetID:     "",
 		Name:         node.Name,
 		Status:       localFleetDisplayStatus(node, now),
+		DaemonID:     node.DaemonID,
 		Tags:         map[string]string{},
 		Metadata: map[string]any{
 			"provider":       "docker",
@@ -811,6 +845,16 @@ func localFleetNodeJSON(node db.FleetNode, now time.Time) localFleetNodeResponse
 		Provider:  "docker",
 		Error:     node.Error,
 	}
+	if len(node.StatusDetail) > 0 && json.Valid(node.StatusDetail) {
+		response.StatusDetail = json.RawMessage(node.StatusDetail)
+	}
+	if operation != nil {
+		response.Operation = &localFleetNodeOperation{
+			Name:  operation.Operation,
+			Phase: operation.Phase,
+		}
+	}
+	return response
 }
 
 func localFleetDisplayStatus(node db.FleetNode, now time.Time) string {

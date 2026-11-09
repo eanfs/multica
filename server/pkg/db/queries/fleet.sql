@@ -156,6 +156,25 @@ WHERE r.daemon_id = @daemon_id
 SELECT count(*) FROM fleet_node_operation
 WHERE node_id = @node_id AND phase IN ('prepared', 'approved', 'executing');
 
+-- name: GetActiveFleetNodeOperationForNode :one
+-- The one in-flight operation a node response reports. Prepare allows at most
+-- one active row per node, and created_at DESC makes an overlapping attempt
+-- from before that guard resolvable to the newest.
+SELECT * FROM fleet_node_operation
+WHERE node_id = @node_id
+  AND phase IN ('prepared', 'approved', 'executing')
+ORDER BY created_at DESC
+LIMIT 1;
+
+-- name: ListActiveFleetNodeOperationsByNamespace :many
+-- Batch read for the node list, so rendering N nodes does not issue N
+-- operation queries. Callers keep the first (newest) row per node.
+SELECT o.* FROM fleet_node_operation o
+JOIN fleet_node n ON n.id = o.node_id
+WHERE n.namespace = @namespace
+  AND o.phase IN ('prepared', 'approved', 'executing')
+ORDER BY o.created_at DESC;
+
 -- name: GetFleetCredentialProfileByOwner :one
 SELECT * FROM fleet_credential_profile WHERE owner_id = @owner_id;
 

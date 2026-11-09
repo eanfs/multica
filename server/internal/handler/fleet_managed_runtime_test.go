@@ -277,7 +277,7 @@ func TestCloudPATRegistrationMarksFleetManagedOnlyInLocalFleetMode(t *testing.T)
 	mw := newCloudPATTestMiddleware(t, testUserID, instanceRecordID)
 	ctx := context.Background()
 
-	register := func(t *testing.T, daemonID string, localFleet bool) (string, *string) {
+	register := func(t *testing.T, daemonID string, localFleet bool) (string, *string, *int32) {
 		t.Helper()
 		h := *testHandler
 		h.cfg.LocalFleetEnabled = localFleet
@@ -298,34 +298,43 @@ func TestCloudPATRegistrationMarksFleetManagedOnlyInLocalFleetMode(t *testing.T)
 
 		var runtimeID, managedBy string
 		var fleetNodeID *string
+		var maxConcurrent *int32
 		if err := testPool.QueryRow(ctx, `
-			SELECT id::text, coalesce(managed_by, ''), fleet_node_id::text
+			SELECT id::text, coalesce(managed_by, ''), fleet_node_id::text, max_concurrent_tasks
 			FROM agent_runtime
 			WHERE workspace_id = $1 AND daemon_id = $2
-		`, testWorkspaceID, daemonID).Scan(&runtimeID, &managedBy, &fleetNodeID); err != nil {
+		`, testWorkspaceID, daemonID).Scan(&runtimeID, &managedBy, &fleetNodeID, &maxConcurrent); err != nil {
 			t.Fatalf("read registered runtime: %v", err)
 		}
 		dbfx.Cleanup(t, `DELETE FROM agent_runtime WHERE id = $1`, runtimeID)
-		return managedBy, fleetNodeID
+		return managedBy, fleetNodeID, maxConcurrent
 	}
 
 	t.Run("saas-cloud", func(t *testing.T) {
-		managedBy, fleetNodeID := register(t, "daemon-cloud-pat-saas", false)
+		managedBy, fleetNodeID, maxConcurrent := register(t, "daemon-cloud-pat-saas", false)
 		if managedBy != "" {
 			t.Fatalf("managed_by = %q, want empty for a SaaS Cloud registration", managedBy)
 		}
 		if fleetNodeID != nil {
 			t.Fatalf("fleet_node_id = %q, want NULL for a SaaS Cloud registration", *fleetNodeID)
 		}
+		if maxConcurrent != nil {
+			t.Fatalf("max_concurrent_tasks = %d, want NULL for a SaaS registration", *maxConcurrent)
+		}
 	})
 
 	t.Run("local-fleet", func(t *testing.T) {
-		managedBy, fleetNodeID := register(t, "daemon-cloud-pat-local", true)
+		managedBy, fleetNodeID, maxConcurrent := register(t, "daemon-cloud-pat-local", true)
 		if managedBy != fleetManagedByLocalFleet {
 			t.Fatalf("managed_by = %q, want %q", managedBy, fleetManagedByLocalFleet)
 		}
 		if fleetNodeID == nil || *fleetNodeID != instanceRecordID {
 			t.Fatalf("fleet_node_id = %v, want %q", fleetNodeID, instanceRecordID)
+		}
+		// A Fleet node is one workspace root, so the runtime-wide claim cap is
+		// pinned to 1 at registration rather than left to the provider default.
+		if maxConcurrent == nil || *maxConcurrent != 1 {
+			t.Fatalf("max_concurrent_tasks = %v, want 1", maxConcurrent)
 		}
 	})
 }

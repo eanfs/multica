@@ -935,6 +935,9 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				ID:          registered.ID,
 				ManagedBy:   fleetManagedByLocalFleet,
 				FleetNodeID: fleetNodeID,
+				// One node runs one workspace root and one daemon, so the
+				// runtime-wide cap stays at 1; the claim path enforces it.
+				MaxConcurrentTasks: pgtype.Int4{Int32: 1, Valid: true},
 			}); err != nil {
 				// Fail the registration rather than commit a row that looks
 				// user-managed: deletable runtime rows for a live fleet node
@@ -1083,9 +1086,10 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		if fleetManaged {
 			if err := qtx.SetAgentRuntimeFleetManaged(r.Context(), db.SetAgentRuntimeFleetManagedParams{
-				ID:          prow.ID,
-				ManagedBy:   fleetManagedByLocalFleet,
-				FleetNodeID: fleetNodeID,
+				ID:                 prow.ID,
+				ManagedBy:          fleetManagedByLocalFleet,
+				FleetNodeID:        fleetNodeID,
+				MaxConcurrentTasks: pgtype.Int4{Int32: 1, Valid: true},
 			}); err != nil {
 				slog.Warn("failed to record fleet ownership for failed runtime profile",
 					"workspace_id", req.WorkspaceID, "daemon_id", req.DaemonID,

@@ -21,6 +21,24 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	return testutil.IsolatedDB(t, dsn)
 }
 
+// Readiness must not succeed on connectivity alone: a database whose
+// migrations never ran cannot serve any Fleet request.
+func TestPingRequiresFleetSchema(t *testing.T) {
+	pool := testPool(t)
+	s := New(pool)
+	ctx := context.Background()
+
+	if err := s.Ping(ctx); err != nil {
+		t.Fatalf("Ping on a migrated database: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "DROP TABLE fleet_node_operation"); err != nil {
+		t.Fatalf("drop fleet_node_operation: %v", err)
+	}
+	if err := s.Ping(ctx); !errors.Is(err, ErrSchemaMissing) {
+		t.Fatalf("Ping after dropping a required table = %v, want ErrSchemaMissing", err)
+	}
+}
+
 func TestCreateFleetNodePersistsNamespaceAndSpec(t *testing.T) {
 	pool := testPool(t)
 	q := db.New(pool)

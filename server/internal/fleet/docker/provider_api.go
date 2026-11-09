@@ -230,10 +230,11 @@ type Provider interface {
 	// PrepareVolumes seeds a node's data and secrets volumes before the node
 	// container starts. It runs a short-lived, network-less helper container as
 	// root because a fresh named volume is root-owned, while the node runs as
-	// 1000:1000 and mounts the secrets volume read-only. files are written to
-	// the secrets volume only; the data volume is created empty and owned by
-	// the node identity.
-	PrepareVolumes(ctx context.Context, dataVolume, secretsVolume, image string, files map[string][]byte) error
+	// 1000:1000 and mounts the secrets volume read-only. labels carry the
+	// namespace/node identity so the helper is attributable to the same owner
+	// as the volumes it seeds. files are written to the secrets volume only;
+	// the data volume is created empty and owned by the node identity.
+	PrepareVolumes(ctx context.Context, dataVolume, secretsVolume, image string, labels map[string]string, files map[string][]byte) error
 	Start(ctx context.Context, containerID string) error
 	Stop(ctx context.Context, containerID string, timeout time.Duration) error
 	Restart(ctx context.Context, containerID string, timeout time.Duration) error

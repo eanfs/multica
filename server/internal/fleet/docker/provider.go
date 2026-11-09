@@ -226,7 +226,13 @@ const seedCleanupTimeout = 30 * time.Second
 // the helper run the daemon as root forever and ContainerWait would never return.
 // Entrypoint is a non-nil empty slice on purpose; a nil slice inherits the image
 // entrypoint during the daemon's config merge, an empty slice does not.
-func buildSeedContainerConfig(image string) *container.Config {
+func buildSeedContainerConfig(image string, labels map[string]string) *container.Config {
+	seedLabels := make(map[string]string, len(labels)+1)
+	for key, value := range labels {
+		seedLabels[key] = value
+	}
+	// The helper is a seed container, never a node, whatever the caller passed.
+	seedLabels[LabelRole] = RoleSeed
 	return &container.Config{
 		Image:      image,
 		User:       "0:0",
@@ -234,7 +240,7 @@ func buildSeedContainerConfig(image string) *container.Config {
 		// Do not depend on the image's WORKDIR.
 		WorkingDir: "/",
 		Cmd:        []string{"sh", "-c", seedCommand},
-		Labels:     map[string]string{LabelRole: RoleSeed},
+		Labels:     seedLabels,
 	}
 }
 
@@ -257,7 +263,7 @@ func buildSeedHostConfig(dataVolume, secretsVolume string) *container.HostConfig
 // so it never needs write access to the secrets mount and never runs as root.
 // The helper is bounded by seedTimeout so a helper that fails to exit cannot
 // block this call forever.
-func (s *SDK) PrepareVolumes(ctx context.Context, dataVolume, secretsVolume, image string, files map[string][]byte) (err error) {
+func (s *SDK) PrepareVolumes(ctx context.Context, dataVolume, secretsVolume, image string, labels map[string]string, files map[string][]byte) (err error) {
 	switch {
 	case strings.TrimSpace(dataVolume) == "":
 		return errors.New("prepare volumes: data volume is required")
@@ -276,7 +282,7 @@ func (s *SDK) PrepareVolumes(ctx context.Context, dataVolume, secretsVolume, ima
 	seedCtx, cancel := context.WithTimeout(ctx, seedTimeout)
 	defer cancel()
 
-	created, err := s.cli.ContainerCreate(seedCtx, buildSeedContainerConfig(image), buildSeedHostConfig(dataVolume, secretsVolume), nil, nil, "")
+	created, err := s.cli.ContainerCreate(seedCtx, buildSeedContainerConfig(image, labels), buildSeedHostConfig(dataVolume, secretsVolume), nil, nil, "")
 	if err != nil {
 		return fmt.Errorf("create seed container: %w", err)
 	}

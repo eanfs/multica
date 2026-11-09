@@ -1823,13 +1823,20 @@ export const CloudRuntimeNodeSchema = z
     // status_detail is JSONB written by the coordinator; a malformed or
     // non-object value costs the detail only, never the whole node.
     status_detail: z.record(z.string(), z.unknown()).nullish().catch(undefined),
+    // The in-flight lifecycle operation (name/phase). Optional because a
+    // settled node has none and older backends never send it.
+    operation: z
+      .object({ name: z.string(), phase: z.string() })
+      .nullish()
+      .catch(undefined),
     error: z.string().optional(),
   })
   .loose()
-  .transform(({ daemon_id, status_detail, ...node }) => ({
+  .transform(({ daemon_id, status_detail, operation, ...node }) => ({
     ...node,
     daemonId: daemon_id,
     statusDetail: status_detail ?? undefined,
+    operation: operation ?? undefined,
   }));
 
 export const CloudRuntimeNodeListSchema = z.array(CloudRuntimeNodeSchema);

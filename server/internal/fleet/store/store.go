@@ -14,6 +14,21 @@ import (
 // fleet nodes allowed in the namespace.
 var ErrLimitReached = errors.New("fleet node limit reached")
 
+// ErrSchemaMissing reports that the shared database is reachable but the Fleet
+// tables a process needs are not there. Readiness maps it to 503 instead of
+// starting work against a half-migrated database.
+var ErrSchemaMissing = errors.New("fleet schema missing")
+
+// requiredTables are the tables every Fleet service path reads or writes. A
+// database without them cannot serve a single node request, so readiness must
+// not succeed on connectivity alone.
+var requiredTables = []string{
+	"fleet_node",
+	"fleet_node_operation",
+	"fleet_node_credential",
+	"fleet_credential_profile",
+}
+
 // Store owns the PostgreSQL transaction boundaries for fleet state.
 type Store struct {
 	pool *pgxpool.Pool
@@ -25,13 +40,29 @@ func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 // Queries returns the generated queries bound to the pool.
 func (s *Store) Queries() *db.Queries { return db.New(s.pool) }
 
-// Ping reports whether the shared PostgreSQL pool is reachable. Readiness
-// probes use it so a Fleet process with a broken database never reports ready.
+// Ping reports whether the shared PostgreSQL pool is reachable and the Fleet
+// schema is present. Readiness probes use it so a Fleet process with a broken
+// database, or one pointed at a database whose migrations never ran, never
+// reports ready. Migrations are deliberately not started here.
 func (s *Store) Ping(ctx context.Context) error {
 	if s == nil || s.pool == nil {
 		return errors.New("fleet store is not configured")
 	}
-	return s.pool.Ping(ctx)
+	if err := s.pool.Ping(ctx); err != nil {
+		return err
+	}
+	for _, table := range requiredTables {
+		var exists bool
+		// to_regclass resolves through the connection's search_path and does
+		// not raise when the relation is absent.
+		if err := s.pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", table).Scan(&exists); err != nil {
+			return fmt.Errorf("check fleet schema: %w", err)
+		}
+		if !exists {
+			return fmt.Errorf("%w: missing table %s", ErrSchemaMissing, table)
+		}
+	}
+	return nil
 }
 
 // WithinTx runs fn in a transaction and commits only when fn returns nil.

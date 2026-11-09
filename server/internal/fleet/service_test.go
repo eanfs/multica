@@ -35,6 +35,7 @@ type prepareCall struct {
 	dataVolume    string
 	secretsVolume string
 	image         string
+	labels        map[string]string
 }
 
 // fakeDocker records provider calls so tests can assert both what reached
@@ -123,11 +124,16 @@ func (f *fakeDocker) EnsureVolume(context.Context, string, map[string]string) er
 	return f.volumeErr
 }
 
-func (f *fakeDocker) PrepareVolumes(_ context.Context, dataVolume, secretsVolume, image string, files map[string][]byte) error {
+func (f *fakeDocker) PrepareVolumes(_ context.Context, dataVolume, secretsVolume, image string, labels map[string]string, files map[string][]byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.recordLocked("prepare")
-	f.prepareCalls = append(f.prepareCalls, prepareCall{dataVolume: dataVolume, secretsVolume: secretsVolume, image: image})
+	f.prepareCalls = append(f.prepareCalls, prepareCall{
+		dataVolume:    dataVolume,
+		secretsVolume: secretsVolume,
+		image:         image,
+		labels:        labels,
+	})
 	copied := make(map[string][]byte, len(files))
 	for name, body := range files {
 		copied[name] = append([]byte(nil), body...)
@@ -446,7 +452,18 @@ func TestCreateNodePreparesVolumesBeforeContainerAndStoresToken(t *testing.T) {
 		files[name] = append([]byte(nil), body...)
 	}
 	created := append([]docker.NodeSpec(nil), provider.created...)
+	preparedLabels := make(map[string]string, len(provider.prepareCalls[0].labels))
+	for key, value := range provider.prepareCalls[0].labels {
+		preparedLabels[key] = value
+	}
 	provider.mu.Unlock()
+
+	// The seed helper must be attributable to the same namespace/node as the
+	// node it prepares, so cleanup and diagnosis can find it.
+	if preparedLabels[docker.LabelNamespace] != serviceTestConfig().Namespace ||
+		preparedLabels[docker.LabelNode] != node.DaemonID {
+		t.Fatalf("prepare labels = %v, want namespace/node identity", preparedLabels)
+	}
 
 	if len(created) != 1 {
 		t.Fatalf("created containers = %d, want 1", len(created))

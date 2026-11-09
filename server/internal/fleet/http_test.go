@@ -1,13 +1,17 @@
 package fleet
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/fleet/store"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 const httpTestSecret = "top-secret"
@@ -95,6 +99,46 @@ func TestHTTPReadyzRequiresStoreAndDocker(t *testing.T) {
 	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz with unreachable store = %d, want 503", w.Code)
+	}
+}
+
+// The node contract promotes the diagnostics that used to live only in
+// metadata, so a client reads one shape from every provider.
+func TestNodeResponsePromotesDiagnosticsAndOperation(t *testing.T) {
+	now := time.Now()
+	node := db.FleetNode{
+		ID:              pgtype.UUID{Bytes: [16]byte{1}, Valid: true},
+		OwnerID:         pgtype.UUID{Bytes: [16]byte{2}, Valid: true},
+		DaemonID:        "daemon-1",
+		ContainerID:     "container-1",
+		TargetState:     StateRunning,
+		ObservedState:   StateRunning,
+		DaemonReady:     true,
+		HealthCheckedAt: pgtype.Timestamptz{Time: now, Valid: true},
+		StatusDetail:    []byte(`{"cli_installed":true}`),
+		Spec:            []byte(`{"id":"standard"}`),
+	}
+	op := &db.FleetNodeOperation{Operation: "stop", Phase: OpPhasePrepared}
+
+	response := NewService(Config{}, nil, nil, nil, "").nodeResponse(node, op)
+	if response.DaemonID != "daemon-1" {
+		t.Fatalf("daemon id = %q", response.DaemonID)
+	}
+	if string(response.StatusDetail) != `{"cli_installed":true}` {
+		t.Fatalf("status detail = %s", response.StatusDetail)
+	}
+	if response.Operation == nil || response.Operation.Name != "stop" || response.Operation.Phase != OpPhasePrepared {
+		t.Fatalf("operation = %+v", response.Operation)
+	}
+
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal node: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"daemon_id":"daemon-1"`) ||
+		!strings.Contains(string(encoded), `"status_detail":{"cli_installed":true}`) ||
+		!strings.Contains(string(encoded), `"operation":{"name":"stop","phase":"prepared"}`) {
+		t.Fatalf("encoded node lacks diagnostics: %s", encoded)
 	}
 }
 

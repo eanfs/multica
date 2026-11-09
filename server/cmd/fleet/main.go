@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -30,6 +31,20 @@ const (
 	shutdownTimeout = 5 * time.Second
 	// coordinatorInterval matches the design's five-second reconcile cycle.
 	coordinatorInterval = 5 * time.Second
+	// poolMaxConns bounds the pool. Fleet serves one HTTP listener and one
+	// coordinator loop; a handful of connections is enough and keeps a stuck
+	// query from consuming the database's whole allowance.
+	poolMaxConns = 8
+	// poolMinConns keeps one warm connection without reserving a fleet of them
+	// while the process is idle.
+	poolMinConns = 1
+	// statementTimeout bounds every statement the process issues, including
+	// coordinator passes that would otherwise scan forever.
+	statementTimeout = 30 * time.Second
+	// lockTimeout bounds advisory-lock waits so a maintainer holding a node
+	// lock cannot stall requests indefinitely; the SQL error surfaces as a
+	// normal operation failure instead of a hung process.
+	lockTimeout = 5 * time.Second
 )
 
 func main() {
@@ -145,15 +160,37 @@ func loadStartupConfig(getenv func(string) string) (fleet.Config, string, error)
 	return cfg, secret, nil
 }
 
-// newPool parses DATABASE_URL into a lazy pool. pgx embeds the raw connection
-// string in parse errors, so the cause stays out of the returned error and out
-// of the log.
+// newPool parses DATABASE_URL into a lazy, bounded pool. pgx embeds the raw
+// connection string in parse errors, so the cause stays out of the returned
+// error and out of the log.
 func newPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	cfg, err := newPoolConfig(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, errors.New("connect database: DATABASE_URL is invalid")
 	}
 	return pool, nil
+}
+
+// newPoolConfig applies Fleet's bounded pool and per-session timeouts. It is
+// separate from newPool so the limits are testable without a database.
+func newPoolConfig(databaseURL string) (*pgxpool.Config, error) {
+	cfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		// The parse error can embed the DSN, credentials included.
+		return nil, errors.New("connect database: DATABASE_URL is invalid")
+	}
+	cfg.MaxConns = poolMaxConns
+	cfg.MinConns = poolMinConns
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = make(map[string]string, 2)
+	}
+	cfg.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(statementTimeout.Milliseconds(), 10)
+	cfg.ConnConfig.RuntimeParams["lock_timeout"] = strconv.FormatInt(lockTimeout.Milliseconds(), 10)
+	return cfg, nil
 }
 
 // ping checks one startup dependency with a bounded context. The database and

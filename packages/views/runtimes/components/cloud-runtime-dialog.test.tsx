@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setApiInstance } from "@multica/core/api";
@@ -101,20 +101,24 @@ describe("CloudRuntimeDialog", () => {
     expect(screen.queryByText(/disk size/i)).not.toBeInTheDocument();
   });
 
-  it("keeps the disk size field for non-Docker providers", () => {
+  it("keeps the disk size field and legacy EC2 shapes for non-Docker providers", () => {
     renderDialog(
       dockerService({ provider: "ec2", specs: [], persistentStorage: false }),
     );
 
     expect(screen.getByText("Disk size GiB")).toBeInTheDocument();
     expect(screen.queryByText("Persistent volume")).not.toBeInTheDocument();
-    // No specs means no node shape: never fall back to the old EC2 names.
-    expect(screen.queryByText("t4g.medium")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Create node" })).toBeDisabled();
+    // EC2-era responses predate the capability document, so the old shapes
+    // remain selectable and creation stays available.
+    expect(screen.getAllByText("t4g.medium").length).toBeGreaterThan(0);
+    expect(screen.getByRole("combobox", { name: "Spec" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create node" })).toBeEnabled();
   });
 
   it("renders only the lifecycle operations the provider advertises", async () => {
-    apiMocks.listCloudRuntimeNodes.mockResolvedValue([makeNode()]);
+    apiMocks.listCloudRuntimeNodes.mockResolvedValue([
+      makeNode({ status: "stopped" }),
+    ]);
     renderDialog(
       dockerService({ operations: ["create", "start", "reboot"] }),
     );
@@ -125,6 +129,29 @@ describe("CloudRuntimeDialog", () => {
     expect(screen.getByRole("button", { name: "Reboot node" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Stop node" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete node" })).not.toBeInTheDocument();
+  });
+
+  it("hides start for running nodes and stop for stopped nodes", async () => {
+    apiMocks.listCloudRuntimeNodes.mockResolvedValue([
+      makeNode({ id: "node-running", status: "running" }),
+      makeNode({
+        id: "node-stopped",
+        instance_id: "container-2",
+        status: "stopped",
+      }),
+    ]);
+    renderDialog(
+      dockerService({ operations: ["create", "start", "stop"] }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Stop node" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Start node" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Start node" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Stop node" })).toHaveLength(1);
   });
 
   it("asks for confirmation before deleting a node permanently", async () => {
@@ -158,6 +185,80 @@ describe("CloudRuntimeDialog", () => {
     expect(
       await screen.findByText("container exited with code 1"),
     ).toBeInTheDocument();
+  });
+
+  it("surfaces top-level Fleet status details", async () => {
+    apiMocks.listCloudRuntimeNodes.mockResolvedValue([
+      makeNode({
+        status: "failed",
+        statusDetail: { cli_installed: false, credentials_valid: false },
+      }),
+    ]);
+    renderDialog(dockerService());
+
+    expect(
+      await screen.findByText("cli_installed: no · credentials_valid: no"),
+    ).toBeInTheDocument();
+  });
+
+  it("reuses the same idempotency key after a failed operation", async () => {
+    const user = userEvent.setup();
+    apiMocks.listCloudRuntimeNodes.mockResolvedValue([makeNode()]);
+    apiMocks.stopCloudRuntimeNode
+      .mockRejectedValueOnce(new Error("state uncertain"))
+      .mockResolvedValueOnce(undefined);
+    renderDialog(dockerService({ operations: ["create", "stop"] }));
+
+    await user.click(await screen.findByRole("button", { name: "Stop node" }));
+    await waitFor(() =>
+      expect(apiMocks.stopCloudRuntimeNode).toHaveBeenCalledTimes(1),
+    );
+    await user.click(screen.getByRole("button", { name: "Stop node" }));
+    await waitFor(() =>
+      expect(apiMocks.stopCloudRuntimeNode).toHaveBeenCalledTimes(2),
+    );
+
+    const first = apiMocks.stopCloudRuntimeNode.mock.calls[0]!;
+    const second = apiMocks.stopCloudRuntimeNode.mock.calls[1]!;
+    expect(first[0]).toBe("container-1");
+    expect(typeof first[1]).toBe("string");
+    expect(second[1]).toBe(first[1]);
+  });
+
+  it("deletes a failed node by node id when it has no container", async () => {
+    const user = userEvent.setup();
+    apiMocks.listCloudRuntimeNodes.mockResolvedValue([
+      makeNode({ status: "failed", instance_id: "" }),
+    ]);
+    renderDialog(dockerService({ operations: ["create", "delete"] }));
+
+    await user.click(
+      await screen.findByRole("button", { name: "Delete node" }),
+    );
+    const confirm = await screen.findByRole("alertdialog");
+    await user.click(
+      within(confirm).getByRole("button", { name: "Delete node" }),
+    );
+    await waitFor(() =>
+      expect(apiMocks.deleteCloudRuntimeNode).toHaveBeenCalledWith(
+        { instanceId: undefined, nodeId: "node-1" },
+        expect.any(String),
+      ),
+    );
+  });
+
+  it("hides delete for a terminated tombstone", async () => {
+    apiMocks.listCloudRuntimeNodes.mockResolvedValue([
+      makeNode({ status: "terminated" }),
+    ]);
+    renderDialog(dockerService({ operations: ["create", "delete"] }));
+
+    expect(
+      await screen.findByText("terminated"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Delete node" }),
+    ).not.toBeInTheDocument();
   });
 
   it("disables creation and explains why when the provider cannot create", () => {

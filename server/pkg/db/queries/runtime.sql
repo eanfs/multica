@@ -175,8 +175,12 @@ RETURNING *;
 -- Deliberately kept out of both registration upserts: a daemon re-registering
 -- the same row must not clear (or forge) these columns. Only DaemonRegister,
 -- after a verified mcn_ credential supplied an instance record, calls this.
+-- A Fleet node runs one runtime on one host with a single workspace root, so
+-- the runtime-wide cap is pinned to 1 when the node registers. That cap is
+-- enforced by the claim path (max_concurrent_tasks), not by the daemon.
 UPDATE agent_runtime
-SET managed_by = @managed_by, fleet_node_id = @fleet_node_id, updated_at = now()
+SET managed_by = @managed_by, fleet_node_id = @fleet_node_id,
+    max_concurrent_tasks = @max_concurrent_tasks, updated_at = now()
 WHERE id = @id;
 
 -- name: UpdateAgentRuntimeCustomNameByDaemon :many

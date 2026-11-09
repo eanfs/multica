@@ -1874,22 +1874,32 @@ func (q *Queries) SelectStaleOnlineRuntimes(ctx context.Context, staleSeconds fl
 
 const setAgentRuntimeFleetManaged = `-- name: SetAgentRuntimeFleetManaged :exec
 UPDATE agent_runtime
-SET managed_by = $1, fleet_node_id = $2, updated_at = now()
-WHERE id = $3
+SET managed_by = $1, fleet_node_id = $2,
+    max_concurrent_tasks = $3, updated_at = now()
+WHERE id = $4
 `
 
 type SetAgentRuntimeFleetManagedParams struct {
-	ManagedBy   string      `json:"managed_by"`
-	FleetNodeID pgtype.UUID `json:"fleet_node_id"`
-	ID          pgtype.UUID `json:"id"`
+	ManagedBy          string      `json:"managed_by"`
+	FleetNodeID        pgtype.UUID `json:"fleet_node_id"`
+	MaxConcurrentTasks pgtype.Int4 `json:"max_concurrent_tasks"`
+	ID                 pgtype.UUID `json:"id"`
 }
 
 // Server-written provenance for a runtime registered by a local Fleet node.
 // Deliberately kept out of both registration upserts: a daemon re-registering
 // the same row must not clear (or forge) these columns. Only DaemonRegister,
 // after a verified mcn_ credential supplied an instance record, calls this.
+// A Fleet node runs one runtime on one host with a single workspace root, so
+// the runtime-wide cap is pinned to 1 when the node registers. That cap is
+// enforced by the claim path (max_concurrent_tasks), not by the daemon.
 func (q *Queries) SetAgentRuntimeFleetManaged(ctx context.Context, arg SetAgentRuntimeFleetManagedParams) error {
-	_, err := q.db.Exec(ctx, setAgentRuntimeFleetManaged, arg.ManagedBy, arg.FleetNodeID, arg.ID)
+	_, err := q.db.Exec(ctx, setAgentRuntimeFleetManaged,
+		arg.ManagedBy,
+		arg.FleetNodeID,
+		arg.MaxConcurrentTasks,
+		arg.ID,
+	)
 	return err
 }
 

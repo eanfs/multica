@@ -181,7 +181,7 @@ func TestProviderExposesInspectImage(t *testing.T) {
 // Task 12's opt-in Docker integration test owns the real seeding round-trip.
 func TestProviderExposesPrepareVolumesAndClose(t *testing.T) {
 	var _ = func(p Provider) error {
-		return p.PrepareVolumes(context.Background(), "vol-data", "vol-secrets", "img:test", map[string][]byte{"bootstrap.env": []byte("X=1")})
+		return p.PrepareVolumes(context.Background(), "vol-data", "vol-secrets", "img:test", map[string]string{LabelNamespace: "wt-a", LabelNode: "node-1"}, map[string][]byte{"bootstrap.env": []byte("X=1")})
 	}
 	var _ = func(p Provider) error { return p.Close() }
 }
@@ -262,7 +262,11 @@ func TestBuildSecretsTarRejectsUnsafeNames(t *testing.T) {
 // would never return. An empty slice must therefore stay non-nil: the daemon's
 // config merge only skips the image entrypoint when the slice is non-nil.
 func TestBuildSeedContainerConfigClearsImageEntrypoint(t *testing.T) {
-	config := buildSeedContainerConfig("img:test")
+	config := buildSeedContainerConfig("img:test", map[string]string{
+		LabelNamespace: "wt-a",
+		LabelNode:      "node-1",
+		LabelRole:      RoleNode,
+	})
 	if config.Entrypoint == nil {
 		t.Fatal("entrypoint must be an empty slice, not nil: nil inherits the image entrypoint")
 	}
@@ -286,8 +290,12 @@ func TestBuildSeedContainerConfigClearsImageEntrypoint(t *testing.T) {
 	if !slices.Equal(config.Cmd, wantCmd) {
 		t.Fatalf("cmd = %q, want %q", config.Cmd, wantCmd)
 	}
-	if len(config.Labels) != 1 || config.Labels[LabelRole] != RoleSeed {
-		t.Fatalf("labels = %v, want only %s=%s", config.Labels, LabelRole, RoleSeed)
+	if config.Labels[LabelNamespace] != "wt-a" || config.Labels[LabelNode] != "node-1" {
+		t.Fatalf("labels = %v, want the namespace/node identity", config.Labels)
+	}
+	// The helper is never a node, regardless of the caller's labels.
+	if len(config.Labels) != 3 || config.Labels[LabelRole] != RoleSeed {
+		t.Fatalf("labels = %v, want role %s=%s", config.Labels, LabelRole, RoleSeed)
 	}
 }
 

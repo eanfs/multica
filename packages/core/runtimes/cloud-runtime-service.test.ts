@@ -15,6 +15,7 @@ import {
   cloudRuntimeKeys,
   cloudRuntimeServiceKeys,
   cloudRuntimeServiceOptions,
+  useDeleteCloudRuntimeNode,
   useRebootCloudRuntimeNode,
   useStartCloudRuntimeNode,
   useStopCloudRuntimeNode,
@@ -107,6 +108,7 @@ describe("CloudRuntimeNodeSchema", () => {
     provider: "docker",
     daemon_id: "daemon-1",
     status_detail: { cli_installed: true, model_configured: true },
+    operation: { name: "stop", phase: "prepared" },
     error: "",
   };
 
@@ -119,6 +121,7 @@ describe("CloudRuntimeNodeSchema", () => {
       model_configured: true,
     });
     expect(parsed.error).toBe("");
+    expect(parsed.operation).toEqual({ name: "stop", phase: "prepared" });
     expect(parsed.instance_id).toBe("container-1");
     expect(parsed.owner_id).toBe("user-1");
     expect("daemon_id" in parsed).toBe(false);
@@ -126,10 +129,12 @@ describe("CloudRuntimeNodeSchema", () => {
   });
 
   it("parses nodes from backends that predate the new optional fields", () => {
-    const { provider, daemon_id, status_detail, error, ...legacy } = nodePayload;
+    const { provider, daemon_id, status_detail, operation, error, ...legacy } =
+      nodePayload;
     const parsed = CloudRuntimeNodeSchema.parse(legacy);
     expect(parsed.daemonId).toBeUndefined();
     expect(parsed.statusDetail).toBeUndefined();
+    expect(parsed.operation).toBeUndefined();
     expect(parsed.status).toBe("running");
   });
 });
@@ -186,7 +191,10 @@ describe("ApiClient cloud runtime node operations", () => {
       expect(url).toBe(`https://api.example.test${path}`);
       expect(opts).toMatchObject({
         method: "POST",
-        body: JSON.stringify({ instance_id: "container-1" }),
+        body: JSON.stringify({
+          instance_id: "container-1",
+          idempotency_key: key,
+        }),
       });
       const headers = opts.headers as Record<string, string>;
       expect(headers["Idempotency-Key"]).toBe(key);
@@ -201,17 +209,42 @@ describe("ApiClient cloud runtime node operations", () => {
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("https://api.example.test");
 
-    await client.deleteCloudRuntimeNode("container-1", "key-delete");
+    await client.deleteCloudRuntimeNode(
+      { instanceId: "container-1" },
+      "key-delete",
+    );
 
     const [url, opts] = fetchMock.mock.calls[0]!;
     expect(url).toBe("https://api.example.test/api/cloud-runtime/nodes");
     expect(opts).toMatchObject({
       method: "DELETE",
-      body: JSON.stringify({ instance_id: "container-1" }),
+      body: JSON.stringify({
+        instance_id: "container-1",
+        idempotency_key: "key-delete",
+      }),
     });
     expect((opts.headers as Record<string, string>)["Idempotency-Key"]).toBe(
       "key-delete",
     );
+  });
+
+  it("addresses a failed node by node id when it has no container", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("https://api.example.test");
+
+    await client.deleteCloudRuntimeNode({ nodeId: "node-1" }, "key-delete");
+
+    const [, opts] = fetchMock.mock.calls[0]!;
+    expect(opts).toMatchObject({
+      method: "DELETE",
+      body: JSON.stringify({
+        node_id: "node-1",
+        idempotency_key: "key-delete",
+      }),
+    });
   });
 });
 
@@ -244,19 +277,19 @@ describe("cloud runtime node mutations", () => {
       wrapper: wrapper(qc),
     });
     await act(async () => {
-      await startHook.result.current.mutateAsync("container-1");
+      await startHook.result.current.mutateAsync({ instanceId: "container-1" });
     });
     const stopHook = renderHook(() => useStopCloudRuntimeNode("ws-1"), {
       wrapper: wrapper(qc),
     });
     await act(async () => {
-      await stopHook.result.current.mutateAsync("container-1");
+      await stopHook.result.current.mutateAsync({ instanceId: "container-1" });
     });
     const rebootHook = renderHook(() => useRebootCloudRuntimeNode("ws-1"), {
       wrapper: wrapper(qc),
     });
     await act(async () => {
-      await rebootHook.result.current.mutateAsync("container-1");
+      await rebootHook.result.current.mutateAsync({ instanceId: "container-1" });
     });
 
     expect(start).toHaveBeenCalledWith("container-1", expect.any(String));
@@ -272,6 +305,28 @@ describe("cloud runtime node mutations", () => {
     expect(invalidate).toHaveBeenCalledWith({
       queryKey: cloudRuntimeKeys.all("ws-1"),
     });
+  });
+
+  it("reuses an explicit Idempotency-Key and can delete by node id", async () => {
+    const del = vi.fn().mockResolvedValue(undefined);
+    setApiInstance({ deleteCloudRuntimeNode: del } as unknown as ApiClientType);
+
+    const qc = new QueryClient({
+      defaultOptions: { mutations: { retry: false } },
+    });
+    const hook = renderHook(() => useDeleteCloudRuntimeNode("ws-1"), {
+      wrapper: wrapper(qc),
+    });
+    await act(async () => {
+      await hook.result.current.mutateAsync({
+        nodeId: "node-1",
+        idempotencyKey: "retry-key",
+      });
+    });
+    expect(del).toHaveBeenCalledWith(
+      { instanceId: undefined, nodeId: "node-1" },
+      "retry-key",
+    );
   });
 
   it("scopes the service query to the workspace", () => {

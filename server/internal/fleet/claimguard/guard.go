@@ -23,6 +23,13 @@ var ErrFleetNodeUnavailable = errors.New("local fleet node is not accepting clai
 // claim. It matches the coordinator's stale-node window.
 const healthFreshness = 30 * time.Second
 
+// healthFutureSkew is how far ahead of the app clock a health sample may sit
+// before it is rejected. The coordinator writes health_checked_at with the
+// database's now(), so a timestamp far in the future means clock skew or a
+// corrupted row, not a fresh observation. Without this bound a future time
+// makes the age negative and the staleness check passes forever.
+const healthFutureSkew = 5 * time.Second
+
 // Guard validates local Fleet claim eligibility for one node namespace.
 type Guard struct {
 	namespace string
@@ -72,8 +79,11 @@ func (g *Guard) CheckClaim(ctx context.Context, q *db.Queries, runtimeID pgtype.
 	if node.TargetState != "running" || !node.DaemonReady {
 		return ErrFleetNodeUnavailable
 	}
-	if !node.HealthCheckedAt.Valid || node.HealthCheckedAt.Time.IsZero() ||
-		time.Since(node.HealthCheckedAt.Time) > healthFreshness {
+	if !node.HealthCheckedAt.Valid || node.HealthCheckedAt.Time.IsZero() {
+		return ErrFleetNodeUnavailable
+	}
+	age := time.Since(node.HealthCheckedAt.Time)
+	if age > healthFreshness || age < -healthFutureSkew {
 		return ErrFleetNodeUnavailable
 	}
 

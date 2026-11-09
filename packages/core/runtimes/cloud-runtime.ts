@@ -18,6 +18,8 @@ export interface CloudRuntimeNode {
   daemonId?: string;
   /** Per-node readiness signals (CLI installed, model configured, ...). */
   statusDetail?: Record<string, unknown>;
+  /** The lifecycle operation the node is currently waiting on, if any. */
+  operation?: CloudRuntimeNodeOperation;
   /** Last operation error reported for the node. */
   error?: string;
   tags: Record<string, string>;
@@ -29,6 +31,32 @@ export interface CloudRuntimeNode {
 export interface ListCloudRuntimeNodesParams {
   limit?: number;
   offset?: number;
+}
+
+/** In-flight lifecycle operation reported by the node contract. */
+export interface CloudRuntimeNodeOperation {
+  name: string;
+  phase: string;
+}
+
+/** A node addressed by Docker container id, or by fleet node id when the
+ *  launch never produced a container (failed nodes). */
+export interface CloudRuntimeNodeRef {
+  instanceId?: string;
+  nodeId?: string;
+}
+
+/** Variables for start/stop/reboot. The optional key lets a caller retry the
+ *  same request after an uncertain response without queueing a second one. */
+export interface CloudRuntimeNodeOperationVariables {
+  instanceId: string;
+  idempotencyKey?: string;
+}
+
+/** Delete can address a failed node by node id; passing the optional key makes
+ *  a prepared/uncertain request replayable instead of conflicting. */
+export interface CloudRuntimeDeleteVariables extends CloudRuntimeNodeRef {
+  idempotencyKey?: string;
 }
 
 export interface CreateCloudRuntimeNodeRequest {
@@ -144,8 +172,11 @@ export function useCreateCloudRuntimeNode(wsId: string) {
 export function useDeleteCloudRuntimeNode(wsId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (instanceId: string) =>
-      api.deleteCloudRuntimeNode(instanceId, newCloudRuntimeIdempotencyKey()),
+    mutationFn: ({ instanceId, nodeId, idempotencyKey }: CloudRuntimeDeleteVariables) =>
+      api.deleteCloudRuntimeNode(
+        { instanceId, nodeId },
+        idempotencyKey ?? newCloudRuntimeIdempotencyKey(),
+      ),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: cloudRuntimeKeys.all(wsId) });
     },
@@ -155,8 +186,11 @@ export function useDeleteCloudRuntimeNode(wsId: string) {
 export function useStartCloudRuntimeNode(wsId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (instanceId: string) =>
-      api.startCloudRuntimeNode(instanceId, newCloudRuntimeIdempotencyKey()),
+    mutationFn: ({ instanceId, idempotencyKey }: CloudRuntimeNodeOperationVariables) =>
+      api.startCloudRuntimeNode(
+        instanceId,
+        idempotencyKey ?? newCloudRuntimeIdempotencyKey(),
+      ),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: cloudRuntimeKeys.all(wsId) });
     },
@@ -166,8 +200,11 @@ export function useStartCloudRuntimeNode(wsId: string) {
 export function useStopCloudRuntimeNode(wsId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (instanceId: string) =>
-      api.stopCloudRuntimeNode(instanceId, newCloudRuntimeIdempotencyKey()),
+    mutationFn: ({ instanceId, idempotencyKey }: CloudRuntimeNodeOperationVariables) =>
+      api.stopCloudRuntimeNode(
+        instanceId,
+        idempotencyKey ?? newCloudRuntimeIdempotencyKey(),
+      ),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: cloudRuntimeKeys.all(wsId) });
     },
@@ -177,8 +214,11 @@ export function useStopCloudRuntimeNode(wsId: string) {
 export function useRebootCloudRuntimeNode(wsId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (instanceId: string) =>
-      api.rebootCloudRuntimeNode(instanceId, newCloudRuntimeIdempotencyKey()),
+    mutationFn: ({ instanceId, idempotencyKey }: CloudRuntimeNodeOperationVariables) =>
+      api.rebootCloudRuntimeNode(
+        instanceId,
+        idempotencyKey ?? newCloudRuntimeIdempotencyKey(),
+      ),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: cloudRuntimeKeys.all(wsId) });
     },

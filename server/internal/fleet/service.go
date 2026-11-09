@@ -552,7 +552,7 @@ func (s *Service) launchNode(ctx context.Context, node db.FleetNode, profile Pro
 		"config.json": []byte(buildCLIConfig(s.cfg.APIURL, s.cfg.APIURL, token)),
 		"env":         []byte(buildEnvFile(profile.Env)),
 	}
-	if err := s.provider.PrepareVolumes(ctx, dataVolume, secretsVolume, s.cfg.RuntimeImage, files); err != nil {
+	if err := s.provider.PrepareVolumes(ctx, dataVolume, secretsVolume, s.cfg.RuntimeImage, labels, files); err != nil {
 		s.cleanupLaunch(ctx, "", dataVolume, secretsVolume)
 		return err
 	}

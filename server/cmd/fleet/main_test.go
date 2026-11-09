@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -75,6 +76,29 @@ func TestNewPoolInvalidURLDoesNotEchoDSN(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "super-secret-password") || strings.Contains(err.Error(), "[::1") {
 		t.Fatal("newPool error echoed the raw DATABASE_URL")
+	}
+}
+
+// TestNewPoolConfigBoundsConnectionsAndTimeouts pins the process-level limits:
+// an unbounded pool plus no statement timeout would let one stuck coordinator
+// query occupy a database connection forever.
+func TestNewPoolConfigBoundsConnectionsAndTimeouts(t *testing.T) {
+	cfg, err := newPoolConfig("postgres://multica:multica@localhost:5432/multica?sslmode=disable")
+	if err != nil {
+		t.Fatalf("newPoolConfig: %v", err)
+	}
+	if cfg.MaxConns != poolMaxConns || cfg.MinConns != poolMinConns {
+		t.Fatalf("pool conns = %d/%d, want %d/%d", cfg.MinConns, cfg.MaxConns, poolMinConns, poolMaxConns)
+	}
+	if cfg.MaxConns <= 0 || cfg.MinConns < 0 || cfg.MinConns > cfg.MaxConns {
+		t.Fatalf("pool bounds are invalid: min=%d max=%d", cfg.MinConns, cfg.MaxConns)
+	}
+	params := cfg.ConnConfig.RuntimeParams
+	if params["statement_timeout"] != strconv.FormatInt(statementTimeout.Milliseconds(), 10) {
+		t.Fatalf("statement_timeout = %q", params["statement_timeout"])
+	}
+	if params["lock_timeout"] != strconv.FormatInt(lockTimeout.Milliseconds(), 10) {
+		t.Fatalf("lock_timeout = %q", params["lock_timeout"])
 	}
 }
 

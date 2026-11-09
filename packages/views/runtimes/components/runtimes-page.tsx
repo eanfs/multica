@@ -184,9 +184,12 @@ export function RuntimesPage({
 
   // The provider advertises its capabilities; an empty provider means this
   // deployment has no cloud runtime service, so the entrypoint stays hidden.
-  const { data: cloudRuntimeService } = useQuery(
-    cloudRuntimeServiceOptions(wsId),
-  );
+  // A deployment without the cloud runtime endpoint answers 404; retrying it
+  // would only delay the entrypoint check. Other queries keep their defaults.
+  const { data: cloudRuntimeService } = useQuery({
+    ...cloudRuntimeServiceOptions(wsId),
+    retry: false,
+  });
   const showCloudRuntime = !!cloudRuntimeService?.provider;
 
   const { data: runtimes = [], isLoading: runtimesLoading } = useQuery(

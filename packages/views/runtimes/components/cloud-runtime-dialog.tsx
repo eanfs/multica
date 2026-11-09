@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useMemo, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import type { FormEvent, HTMLAttributes } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -62,11 +62,17 @@ import { cn } from "@multica/ui/lib/utils";
 import { useT } from "../../i18n";
 import {
   cloudRuntimeNodeFailureReason,
+  cloudRuntimeNodeOperations,
+  cloudRuntimeNodeStatusDetailText,
   cloudRuntimeOperations,
   isDockerCloudRuntime,
 } from "../utils";
 
 const DEFAULT_DISK_SIZE_GB = 20;
+
+// EC2-era providers predate the capability document, so a missing spec list
+// still needs the two shapes the old dialog always offered.
+const LEGACY_EC2_SPEC_IDS = ["t4g.medium", "t4g.large"] as const;
 
 export function CloudRuntimeDialog({
   service,
@@ -85,13 +91,14 @@ export function CloudRuntimeDialog({
 
   const operations = cloudRuntimeOperations(service);
   const docker = isDockerCloudRuntime(service);
-  // The advertised allowlist is the only source of node shapes. No fallback
-  // names: a spec the provider never offered is rejected by the backend, so an
-  // empty list means there is nothing valid to submit.
-  const specOptions = useMemo(
-    () => service.specs.map((spec) => spec.id),
-    [service.specs],
-  );
+  // Docker nodes are always shaped by the advertised allowlist: a spec the
+  // provider never offered is rejected by the backend. Legacy EC2 providers
+  // keep the old t4g fallback so an older SaaS response stays usable.
+  const specOptions = useMemo(() => {
+    if (docker) return service.specs.map((spec) => spec.id);
+    if (service.specs.length > 0) return service.specs.map((spec) => spec.id);
+    return [...LEGACY_EC2_SPEC_IDS];
+  }, [docker, service.specs]);
   const spec =
     specChoice && specOptions.includes(specChoice)
       ? specChoice
@@ -377,21 +384,48 @@ function CloudRuntimeNodeRow({
   service: CloudRuntimeService;
 }) {
   const { t } = useT("runtimes");
-  const operations = cloudRuntimeOperations(service);
+  const operations = cloudRuntimeNodeOperations(
+    node.status,
+    cloudRuntimeOperations(service),
+  );
   const deleteNode = useDeleteCloudRuntimeNode(wsId);
   const startNode = useStartCloudRuntimeNode(wsId);
   const stopNode = useStopCloudRuntimeNode(wsId);
   const rebootNode = useRebootCloudRuntimeNode(wsId);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // One idempotency key per node + operation. A failed or uncertain response
+  // keeps it so the retry replays the prepared operation; success drops it so
+  // a later, independent request gets a fresh one.
+  const idempotencyKeys = useRef(new Map<string, string>());
+  const keyFor = (operation: string) => {
+    const slot = `${node.id}:${operation}`;
+    const existing = idempotencyKeys.current.get(slot);
+    if (existing) return existing;
+    const created = newCloudRuntimeIdempotencyKey();
+    idempotencyKeys.current.set(slot, created);
+    return created;
+  };
+  const forgetKey = (operation: string) => {
+    idempotencyKeys.current.delete(`${node.id}:${operation}`);
+  };
   const busy =
     deleteNode.isPending ||
     startNode.isPending ||
     stopNode.isPending ||
     rebootNode.isPending;
   const failureReason = cloudRuntimeNodeFailureReason(node);
+  // Readiness booleans explain a broken node; showing them for a healthy one
+  // only adds noise beside the status badge.
+  const nodeStatus = node.status.trim().toLowerCase();
+  const statusDetailText =
+    failureReason || nodeStatus === "failed" || nodeStatus === "instance_missing"
+      ? cloudRuntimeNodeStatusDetailText(node)
+      : null;
+  const instanceId = node.instance_id.trim();
+  const nodeRef = instanceId ? { instanceId } : { nodeId: node.id };
   const title =
     node.name.trim() ||
-    node.instance_id.trim() ||
+    instanceId ||
     t(($) => $.cloud_runtime.node_fallback_name);
   const created = formatDateTime(node.created_at);
 
@@ -430,13 +464,18 @@ function CloudRuntimeNodeRow({
               {failureReason}
             </p>
           )}
+          {statusDetailText && (
+            <p className="mt-1 font-mono text-micro text-muted-foreground">
+              {statusDetailText}
+            </p>
+          )}
         </div>
         <div
           role="group"
           aria-label={t(($) => $.cloud_runtime.operations)}
           className="flex shrink-0 items-center gap-1"
         >
-          {operations.canStart && (
+          {operations.canStart && instanceId && (
             <Button
               type="button"
               variant="ghost"
@@ -450,9 +489,13 @@ function CloudRuntimeNodeRow({
               disabled={busy}
               aria-busy={startNode.isPending}
               onClick={() =>
-                startNode.mutate(node.instance_id, {
-                  onError: reportOperationError,
-                })
+                startNode.mutate(
+                  { instanceId, idempotencyKey: keyFor("start") },
+                  {
+                    onSuccess: () => forgetKey("start"),
+                    onError: reportOperationError,
+                  },
+                )
               }
             >
               {startNode.isPending ? (
@@ -462,7 +505,7 @@ function CloudRuntimeNodeRow({
               )}
             </Button>
           )}
-          {operations.canStop && (
+          {operations.canStop && instanceId && (
             <Button
               type="button"
               variant="ghost"
@@ -476,9 +519,13 @@ function CloudRuntimeNodeRow({
               disabled={busy}
               aria-busy={stopNode.isPending}
               onClick={() =>
-                stopNode.mutate(node.instance_id, {
-                  onError: reportOperationError,
-                })
+                stopNode.mutate(
+                  { instanceId, idempotencyKey: keyFor("stop") },
+                  {
+                    onSuccess: () => forgetKey("stop"),
+                    onError: reportOperationError,
+                  },
+                )
               }
             >
               {stopNode.isPending ? (
@@ -488,7 +535,7 @@ function CloudRuntimeNodeRow({
               )}
             </Button>
           )}
-          {operations.canReboot && (
+          {operations.canReboot && instanceId && (
             <Button
               type="button"
               variant="ghost"
@@ -502,9 +549,13 @@ function CloudRuntimeNodeRow({
               disabled={busy}
               aria-busy={rebootNode.isPending}
               onClick={() =>
-                rebootNode.mutate(node.instance_id, {
-                  onError: reportOperationError,
-                })
+                rebootNode.mutate(
+                  { instanceId, idempotencyKey: keyFor("reboot") },
+                  {
+                    onSuccess: () => forgetKey("reboot"),
+                    onError: reportOperationError,
+                  },
+                )
               }
             >
               {rebootNode.isPending ? (
@@ -553,15 +604,19 @@ function CloudRuntimeNodeRow({
               disabled={deleteNode.isPending}
               aria-busy={deleteNode.isPending}
               onClick={() =>
-                deleteNode.mutate(node.instance_id, {
-                  onSuccess: () => {
-                    setConfirmingDelete(false);
-                    toast.success(t(($) => $.cloud_runtime.toast_deleted));
+                deleteNode.mutate(
+                  { ...nodeRef, idempotencyKey: keyFor("delete") },
+                  {
+                    onSuccess: () => {
+                      forgetKey("delete");
+                      setConfirmingDelete(false);
+                      toast.success(t(($) => $.cloud_runtime.toast_deleted));
+                    },
+                    onError: (err) => {
+                      reportOperationError(err);
+                    },
                   },
-                  onError: (err) => {
-                    reportOperationError(err);
-                  },
-                })
+                )
               }
             >
               {deleteNode.isPending && (

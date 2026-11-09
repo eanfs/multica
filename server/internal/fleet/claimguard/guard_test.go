@@ -177,6 +177,20 @@ func TestCheckClaimRejectsStaleHealth(t *testing.T) {
 	}
 }
 
+// A future health sample is clock skew or corrupted data, not freshness: its
+// age is negative, so only an explicit bound keeps it from validating forever.
+func TestCheckClaimRejectsFutureHealth(t *testing.T) {
+	pool, q, runtimeID, ownerID := newClaimGuardFixture(t, "local_fleet", ptr("daemon-1"))
+	nodeID := insertFleetNode(t, pool, ownerID, "daemon-1", "running", true, ptr(time.Now().Add(time.Minute)), testNamespace)
+	insertFleetCredential(t, pool, nodeID, false)
+
+	guard := New(testNamespace)
+	err := guard.CheckClaim(context.Background(), q, util.MustParseUUID(runtimeID))
+	if !errors.Is(err, ErrFleetNodeUnavailable) {
+		t.Fatalf("CheckClaim error = %v, want ErrFleetNodeUnavailable", err)
+	}
+}
+
 func TestCheckClaimRejectsNullHealth(t *testing.T) {
 	pool, q, runtimeID, ownerID := newClaimGuardFixture(t, "local_fleet", ptr("daemon-1"))
 	nodeID := insertFleetNode(t, pool, ownerID, "daemon-1", "running", true, nil, testNamespace)

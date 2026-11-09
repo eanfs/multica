@@ -291,6 +291,36 @@ func (q *Queries) GetActiveFleetNodeCredentialCount(ctx context.Context, nodeID 
 	return count, err
 }
 
+const getActiveFleetNodeOperationForNode = `-- name: GetActiveFleetNodeOperationForNode :one
+SELECT id, node_id, operation, phase, idempotency_key, request_fingerprint, approved_at, retry_count, error, created_at, updated_at FROM fleet_node_operation
+WHERE node_id = $1
+  AND phase IN ('prepared', 'approved', 'executing')
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+// The one in-flight operation a node response reports. Prepare allows at most
+// one active row per node, and created_at DESC makes an overlapping attempt
+// from before that guard resolvable to the newest.
+func (q *Queries) GetActiveFleetNodeOperationForNode(ctx context.Context, nodeID pgtype.UUID) (FleetNodeOperation, error) {
+	row := q.db.QueryRow(ctx, getActiveFleetNodeOperationForNode, nodeID)
+	var i FleetNodeOperation
+	err := row.Scan(
+		&i.ID,
+		&i.NodeID,
+		&i.Operation,
+		&i.Phase,
+		&i.IdempotencyKey,
+		&i.RequestFingerprint,
+		&i.ApprovedAt,
+		&i.RetryCount,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getFleetCredentialProfileByOwner = `-- name: GetFleetCredentialProfileByOwner :one
 SELECT id, owner_id, profile_name, config_version, created_at, updated_at FROM fleet_credential_profile WHERE owner_id = $1
 `
@@ -538,6 +568,48 @@ func (q *Queries) GetFleetNodeOperationByIdempotencyKey(ctx context.Context, ide
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const listActiveFleetNodeOperationsByNamespace = `-- name: ListActiveFleetNodeOperationsByNamespace :many
+SELECT o.id, o.node_id, o.operation, o.phase, o.idempotency_key, o.request_fingerprint, o.approved_at, o.retry_count, o.error, o.created_at, o.updated_at FROM fleet_node_operation o
+JOIN fleet_node n ON n.id = o.node_id
+WHERE n.namespace = $1
+  AND o.phase IN ('prepared', 'approved', 'executing')
+ORDER BY o.created_at DESC
+`
+
+// Batch read for the node list, so rendering N nodes does not issue N
+// operation queries. Callers keep the first (newest) row per node.
+func (q *Queries) ListActiveFleetNodeOperationsByNamespace(ctx context.Context, namespace string) ([]FleetNodeOperation, error) {
+	rows, err := q.db.Query(ctx, listActiveFleetNodeOperationsByNamespace, namespace)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FleetNodeOperation{}
+	for rows.Next() {
+		var i FleetNodeOperation
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeID,
+			&i.Operation,
+			&i.Phase,
+			&i.IdempotencyKey,
+			&i.RequestFingerprint,
+			&i.ApprovedAt,
+			&i.RetryCount,
+			&i.Error,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listFleetNodesByNamespace = `-- name: ListFleetNodesByNamespace :many

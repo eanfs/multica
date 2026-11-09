@@ -253,6 +253,7 @@ import type {
 import {
   EMPTY_CLOUD_RUNTIME_SERVICE,
   type CloudRuntimeNode,
+  type CloudRuntimeNodeRef,
   type CloudRuntimeService,
   type CreateCloudRuntimeNodeRequest,
   type ListCloudRuntimeNodesParams,
@@ -2131,14 +2132,16 @@ export class ApiClient {
   }
 
   // Local Fleet mode rejects writes without an Idempotency-Key so a retried
-  // click cannot enqueue the same container operation twice.
+  // click cannot enqueue the same container operation twice. The key travels
+  // in the header (the API coordinator reads it) and in the body (Fleet's own
+  // write contract names it there), so either hop can enforce it.
   async deleteCloudRuntimeNode(
-    instanceId: string,
+    ref: CloudRuntimeNodeRef,
     idempotencyKey: string,
   ): Promise<void> {
     await this.fetchRaw("/api/cloud-runtime/nodes", {
       method: "DELETE",
-      body: JSON.stringify({ instance_id: instanceId }),
+      body: JSON.stringify(nodeRefBody(ref, idempotencyKey)),
       extraHeaders: {
         "Content-Type": "application/json",
         "Idempotency-Key": idempotencyKey,
@@ -2152,7 +2155,7 @@ export class ApiClient {
   ): Promise<void> {
     await this.fetchRaw("/api/cloud-runtime/nodes/start", {
       method: "POST",
-      body: JSON.stringify({ instance_id: instanceId }),
+      body: JSON.stringify({ instance_id: instanceId, idempotency_key: idempotencyKey }),
       extraHeaders: {
         "Content-Type": "application/json",
         "Idempotency-Key": idempotencyKey,
@@ -2166,7 +2169,7 @@ export class ApiClient {
   ): Promise<void> {
     await this.fetchRaw("/api/cloud-runtime/nodes/stop", {
       method: "POST",
-      body: JSON.stringify({ instance_id: instanceId }),
+      body: JSON.stringify({ instance_id: instanceId, idempotency_key: idempotencyKey }),
       extraHeaders: {
         "Content-Type": "application/json",
         "Idempotency-Key": idempotencyKey,
@@ -2180,7 +2183,7 @@ export class ApiClient {
   ): Promise<void> {
     await this.fetchRaw("/api/cloud-runtime/nodes/reboot", {
       method: "POST",
-      body: JSON.stringify({ instance_id: instanceId }),
+      body: JSON.stringify({ instance_id: instanceId, idempotency_key: idempotencyKey }),
       extraHeaders: {
         "Content-Type": "application/json",
         "Idempotency-Key": idempotencyKey,
@@ -5596,4 +5599,18 @@ export class ApiClient {
       { endpoint: "POST /api/telegram/binding/redeem" },
     );
   }
+}
+
+// A node write addresses exactly one of the container id or the fleet node id.
+// A failed launch has no container, so delete must be able to use node_id; the
+// backend rejects a body carrying both.
+function nodeRefBody(
+  ref: CloudRuntimeNodeRef,
+  idempotencyKey: string,
+): Record<string, string> {
+  const body: Record<string, string> = {};
+  if (ref.instanceId) body.instance_id = ref.instanceId;
+  if (ref.nodeId) body.node_id = ref.nodeId;
+  body.idempotency_key = idempotencyKey;
+  return body;
 }

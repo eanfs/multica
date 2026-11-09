@@ -12,12 +12,54 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/cloudruntime"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 const localFleetTestNamespace = "handler-test-fleet"
+
+// The local-mode node response must expose the same promoted diagnostics as
+// the proxied Fleet response; a client reads one shape from both.
+func TestLocalFleetNodeJSONPromotesDiagnostics(t *testing.T) {
+	now := time.Now()
+	node := db.FleetNode{
+		ID:              pgtype.UUID{Bytes: [16]byte{1}, Valid: true},
+		OwnerID:         pgtype.UUID{Bytes: [16]byte{2}, Valid: true},
+		DaemonID:        "daemon-1",
+		ContainerID:     "container-1",
+		Name:            "node-1",
+		TargetState:     localFleetStateRunning,
+		ObservedState:   localFleetStateRunning,
+		DaemonReady:     true,
+		HealthCheckedAt: pgtype.Timestamptz{Time: now, Valid: true},
+		StatusDetail:    []byte(`{"credentials_valid":false}`),
+		Spec:            []byte(`{"id":"standard"}`),
+	}
+	op := &db.FleetNodeOperation{Operation: "reboot", Phase: localFleetOpPrepared}
+
+	response := localFleetNodeJSON(node, now, op)
+	if response.DaemonID != "daemon-1" {
+		t.Fatalf("daemon id = %q", response.DaemonID)
+	}
+	if string(response.StatusDetail) != `{"credentials_valid":false}` {
+		t.Fatalf("status detail = %s", response.StatusDetail)
+	}
+	if response.Operation == nil || response.Operation.Name != "reboot" || response.Operation.Phase != localFleetOpPrepared {
+		t.Fatalf("operation = %+v", response.Operation)
+	}
+
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal node: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"daemon_id":"daemon-1"`) ||
+		!strings.Contains(string(encoded), `"status_detail":{"credentials_valid":false}`) ||
+		!strings.Contains(string(encoded), `"operation":{"name":"reboot","phase":"prepared"}`) {
+		t.Fatalf("encoded node lacks diagnostics: %s", encoded)
+	}
+}
 
 type localFleetTestFixture struct {
 	NodeID      string

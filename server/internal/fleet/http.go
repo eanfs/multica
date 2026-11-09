@@ -88,6 +88,13 @@ func (s *Service) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), readyTimeout)
 	defer cancel()
 	if err := s.store.Ping(ctx); err != nil {
+		if errors.Is(err, store.ErrSchemaMissing) {
+			// Reachable but unmigrated: no node request can succeed, and
+			// starting migrations from a readiness probe is not this process's
+			// job.
+			writeErrorJSON(w, http.StatusServiceUnavailable, "store_schema_missing", "fleet schema unavailable")
+			return
+		}
 		writeErrorJSON(w, http.StatusServiceUnavailable, "store_unavailable", "database unavailable")
 		return
 	}
@@ -133,9 +140,18 @@ func (s *Service) handleListNodes(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	operations, err := s.activeNodeOperations(r.Context())
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
 	responses := make([]nodeResponse, 0, len(nodes))
 	for _, node := range nodes {
-		responses = append(responses, s.nodeResponse(node))
+		var operation *db.FleetNodeOperation
+		if active, ok := operations[node.ID]; ok {
+			operation = &active
+		}
+		responses = append(responses, s.nodeResponse(node, operation))
 	}
 	writeJSON(w, http.StatusOK, responses)
 }
@@ -155,7 +171,7 @@ func (s *Service) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.nodeResponse(node))
+	writeJSON(w, http.StatusOK, s.nodeResponse(node, nil))
 }
 
 func (s *Service) handleOperate(operation string) http.HandlerFunc {
@@ -177,8 +193,26 @@ func (s *Service) handleOperate(operation string) http.HandlerFunc {
 			writeServiceError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, s.nodeResponse(node))
+		writeJSON(w, http.StatusOK, s.nodeResponse(node, nil))
 	}
+}
+
+// activeNodeOperations returns the in-flight operation per node in this
+// namespace. Prepare allows at most one active operation per node, so the first
+// row for a node in the newest-first result is the one a client should see.
+func (s *Service) activeNodeOperations(ctx context.Context) (map[pgtype.UUID]db.FleetNodeOperation, error) {
+	ops, err := s.store.Queries().ListActiveFleetNodeOperationsByNamespace(ctx, s.cfg.Namespace)
+	if err != nil {
+		return nil, fmt.Errorf("list active node operations: %w", err)
+	}
+	byNode := make(map[pgtype.UUID]db.FleetNodeOperation, len(ops))
+	for _, op := range ops {
+		if _, ok := byNode[op.NodeID]; ok {
+			continue
+		}
+		byNode[op.NodeID] = op
+	}
+	return byNode, nil
 }
 
 func (s *Service) handleDiagnose(w http.ResponseWriter, r *http.Request) {
@@ -251,28 +285,42 @@ type patVerifyResponse struct {
 	InstanceRecordID string `json:"instance_record_id,omitempty"`
 }
 
-// nodeResponse is the stable client contract. Fleet-specific progress lives in
-// metadata so the existing runtime fields keep their meaning.
-type nodeResponse struct {
-	ID           string            `json:"id"`
-	OwnerID      string            `json:"owner_id"`
-	InstanceID   string            `json:"instance_id"`
-	Region       string            `json:"region"`
-	InstanceType string            `json:"instance_type"`
-	ImageID      string            `json:"image_id"`
-	SubnetID     string            `json:"subnet_id"`
-	Name         string            `json:"name"`
-	Status       string            `json:"status"`
-	Tags         map[string]string `json:"tags"`
-	Metadata     map[string]any    `json:"metadata"`
-	CreatedAt    time.Time         `json:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at"`
-	Provider     string            `json:"provider,omitempty"`
-	Error        string            `json:"error,omitempty"`
+// nodeOperationResponse is the in-flight lifecycle operation a node row is
+// waiting on. Phase lets the client explain why a stopped/rebooted request has
+// not taken effect yet.
+type nodeOperationResponse struct {
+	Name  string `json:"name"`
+	Phase string `json:"phase"`
 }
 
-func (s *Service) nodeResponse(node db.FleetNode) nodeResponse {
-	return nodeResponse{
+// nodeResponse is the stable client contract. Fleet-specific progress also
+// stays in metadata for clients predating the top-level diagnostics fields.
+type nodeResponse struct {
+	ID           string `json:"id"`
+	OwnerID      string `json:"owner_id"`
+	InstanceID   string `json:"instance_id"`
+	Region       string `json:"region"`
+	InstanceType string `json:"instance_type"`
+	ImageID      string `json:"image_id"`
+	SubnetID     string `json:"subnet_id"`
+	Name         string `json:"name"`
+	Status       string `json:"status"`
+	DaemonID     string `json:"daemon_id"`
+	// StatusDetail is the JSONB readiness payload written by the coordinator
+	// (CLI installed, model configured, ...). It is promoted out of metadata so
+	// clients read one shape from every provider.
+	StatusDetail json.RawMessage        `json:"status_detail,omitempty"`
+	Operation    *nodeOperationResponse `json:"operation,omitempty"`
+	Tags         map[string]string      `json:"tags"`
+	Metadata     map[string]any         `json:"metadata"`
+	CreatedAt    time.Time              `json:"created_at"`
+	UpdatedAt    time.Time              `json:"updated_at"`
+	Provider     string                 `json:"provider,omitempty"`
+	Error        string                 `json:"error,omitempty"`
+}
+
+func (s *Service) nodeResponse(node db.FleetNode, operation *db.FleetNodeOperation) nodeResponse {
+	response := nodeResponse{
 		ID:           store.UUIDText(node.ID),
 		OwnerID:      store.UUIDText(node.OwnerID),
 		InstanceID:   node.ContainerID,
@@ -282,6 +330,7 @@ func (s *Service) nodeResponse(node db.FleetNode) nodeResponse {
 		SubnetID:     "",
 		Name:         node.Name,
 		Status:       s.displayStatus(node),
+		DaemonID:     node.DaemonID,
 		Tags:         map[string]string{},
 		Metadata: map[string]any{
 			"provider":       "docker",
@@ -296,6 +345,16 @@ func (s *Service) nodeResponse(node db.FleetNode) nodeResponse {
 		Provider:  "docker",
 		Error:     node.Error,
 	}
+	if len(node.StatusDetail) > 0 && json.Valid(node.StatusDetail) {
+		response.StatusDetail = json.RawMessage(node.StatusDetail)
+	}
+	if operation != nil {
+		response.Operation = &nodeOperationResponse{
+			Name:  operation.Operation,
+			Phase: operation.Phase,
+		}
+	}
+	return response
 }
 
 // displayStatus derives the user-facing state from persisted observations. A
