@@ -24,7 +24,7 @@ LIMIT @limit_count OFFSET @offset_count;
 -- name: ListFleetNodesByNamespace :many
 SELECT * FROM fleet_node
 WHERE namespace = @namespace
-ORDER BY created_at ASC
+ORDER BY created_at ASC, id ASC
 LIMIT @limit_count OFFSET @offset_count;
 
 -- name: CountFleetNodesByOwner :one
@@ -76,9 +76,14 @@ SELECT * FROM fleet_node_operation WHERE id = @id;
 SELECT * FROM fleet_node_operation
 WHERE idempotency_key = @idempotency_key AND idempotency_key <> '';
 
--- name: UpdateFleetNodeOperationPhase :exec
+-- name: MarkFleetNodeOperationPhase :execrows
 UPDATE fleet_node_operation
-SET phase = @phase, approved_at = @approved_at, retry_count = @retry_count, error = @error, updated_at = now()
+SET phase = @phase, updated_at = now()
+WHERE id = @id AND phase = @expected_phase;
+
+-- name: RecordFleetNodeOperationFailure :exec
+UPDATE fleet_node_operation
+SET phase = @phase, retry_count = @retry_count, error = @error, updated_at = now()
 WHERE id = @id;
 
 -- name: ListPendingFleetNodeOperations :many
@@ -86,11 +91,14 @@ SELECT * FROM fleet_node_operation
 WHERE phase IN ('prepared', 'approved', 'executing')
 ORDER BY created_at ASC;
 
--- name: ListApprovedFleetNodeOperationsByNamespace :many
+-- name: ListRunnableFleetNodeOperationsByNamespace :many
 SELECT o.* FROM fleet_node_operation o
 JOIN fleet_node n ON n.id = o.node_id
-WHERE n.namespace = @namespace AND o.phase = 'approved'
-ORDER BY o.created_at ASC;
+WHERE n.namespace = @namespace
+  AND (o.phase = 'approved'
+       OR (o.phase = 'executing' AND o.updated_at < now() - interval '1 minute'))
+ORDER BY o.created_at ASC
+LIMIT 100;
 
 -- name: CountActiveTasksForDaemon :one
 SELECT count(*) FROM agent_task_queue q

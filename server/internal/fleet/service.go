@@ -46,6 +46,12 @@ const (
 	launchCleanupTimeout = 30 * time.Second
 	// operationStopTimeout is the graceful budget for stop and restart.
 	operationStopTimeout = 30 * time.Second
+	// diagnoseTimeout bounds one daemon health read so an unresponsive
+	// container cannot stall a coordination pass.
+	diagnoseTimeout = 5 * time.Second
+	// dockerCallTimeout bounds every coordinator-driven Docker call. The
+	// tick context is long-lived, so each call needs its own budget.
+	dockerCallTimeout = 30 * time.Second
 	// healthFreshWindow matches the staleness window used for claim barriers:
 	// a health sample older than this cannot make a node look executable.
 	healthFreshWindow = 30 * time.Second
@@ -242,7 +248,9 @@ func (s *Service) Diagnose(ctx context.Context, node db.FleetNode) (docker.Healt
 		// daemon state, not a missing node.
 		return docker.HealthReport{}, fmt.Errorf("%w: node has no container", ErrStateUncertain)
 	}
-	body, err := s.provider.ExecHealth(ctx, node.ContainerID)
+	healthCtx, cancel := context.WithTimeout(ctx, diagnoseTimeout)
+	defer cancel()
+	body, err := s.provider.ExecHealth(healthCtx, node.ContainerID)
 	if err != nil {
 		return docker.HealthReport{}, fmt.Errorf("%w: read daemon health: %v", ErrStateUncertain, err)
 	}
@@ -370,11 +378,31 @@ func (s *Service) applyOperation(ctx context.Context, node db.FleetNode, operati
 	}
 }
 
+// nodeObservation is the container view gathered by one refresh. exists is
+// false when the node has no container or Docker confirmed it is gone. settled
+// is the display state the signals imply once no transitional target is in the
+// way (starting/rebooting read as running, stopping reads as stopped); it is
+// what lets the coordinator retire a transitional target.
+type nodeObservation struct {
+	node    db.FleetNode
+	settled string
+	exists  bool
+}
+
+// applyStatus refreshes and persists the observed state for one node.
 func (s *Service) applyStatus(ctx context.Context, node db.FleetNode) (db.FleetNode, error) {
+	obs, err := s.observeNode(ctx, node)
+	return obs.node, err
+}
+
+// observeNode inspects the node container, records the observed state, and
+// returns the refreshed row together with the observation the coordinator uses
+// to advance transitional target states.
+func (s *Service) observeNode(ctx context.Context, node db.FleetNode) (nodeObservation, error) {
 	if node.ContainerID == "" {
 		// A failed launch never created a container. Status reports the
 		// persisted record instead of pretending the node does not exist.
-		return node, nil
+		return nodeObservation{node: node}, nil
 	}
 	observed, err := s.provider.Inspect(ctx, node.ContainerID)
 	if err != nil {
@@ -389,11 +417,15 @@ func (s *Service) applyStatus(ctx context.Context, node db.FleetNode) (db.FleetN
 				StatusDetail:  detail,
 				Error:         sanitize(err),
 			}); updateErr != nil {
-				return db.FleetNode{}, fmt.Errorf("record missing instance: %w", updateErr)
+				return nodeObservation{}, fmt.Errorf("record missing instance: %w", updateErr)
 			}
-			return s.reloadNode(ctx, node.ID)
+			refreshed, reloadErr := s.reloadNode(ctx, node.ID)
+			if reloadErr != nil {
+				return nodeObservation{}, reloadErr
+			}
+			return nodeObservation{node: refreshed, settled: StateInstanceMissing}, nil
 		}
-		return db.FleetNode{}, fmt.Errorf("%w: inspect container: %v", ErrStateUncertain, err)
+		return nodeObservation{}, fmt.Errorf("%w: inspect container: %v", ErrStateUncertain, err)
 	}
 
 	daemonReady, healthFresh := false, false
@@ -407,13 +439,14 @@ func (s *Service) applyStatus(ctx context.Context, node db.FleetNode) (db.FleetN
 			detail = statusDetailFromHealth(report)
 		}
 	}
-	display := DeriveDisplayState(node.TargetState, Observed{
+	signals := Observed{
 		ContainerExists: true,
 		ContainerState:  observed.State,
 		Healthy:         observed.Healthy,
 		DaemonReady:     daemonReady,
 		HealthFresh:     healthFresh,
-	})
+	}
+	display := DeriveDisplayState(node.TargetState, signals)
 	if err := s.store.Queries().UpdateFleetNodeObservedState(ctx, db.UpdateFleetNodeObservedStateParams{
 		ID:            node.ID,
 		Namespace:     s.cfg.Namespace,
@@ -422,9 +455,17 @@ func (s *Service) applyStatus(ctx context.Context, node db.FleetNode) (db.FleetN
 		StatusDetail:  detail,
 		Error:         "",
 	}); err != nil {
-		return db.FleetNode{}, fmt.Errorf("record node status: %w", err)
+		return nodeObservation{}, fmt.Errorf("record node status: %w", err)
 	}
-	return s.reloadNode(ctx, node.ID)
+	refreshed, err := s.reloadNode(ctx, node.ID)
+	if err != nil {
+		return nodeObservation{}, err
+	}
+	return nodeObservation{
+		node:    refreshed,
+		settled: DeriveDisplayState(StateRunning, signals),
+		exists:  true,
+	}, nil
 }
 
 // deleteNode revokes the credential first so a stopped token cannot be used
@@ -433,14 +474,16 @@ func (s *Service) deleteNode(ctx context.Context, node db.FleetNode) (db.FleetNo
 	if err := s.store.RevokeCredentials(ctx, node.ID); err != nil {
 		return db.FleetNode{}, fmt.Errorf("revoke node credentials: %w", err)
 	}
+	dockerCtx, cancel := context.WithTimeout(ctx, dockerCallTimeout)
+	defer cancel()
 	if node.ContainerID != "" {
-		if err := s.provider.Remove(ctx, node.ContainerID, false); err != nil {
+		if err := s.provider.Remove(dockerCtx, node.ContainerID, false); err != nil {
 			return db.FleetNode{}, fmt.Errorf("%w: %v", ErrDockerUnavailable, err)
 		}
 	}
 	if node.ContainerName != "" {
 		for _, volume := range []string{node.ContainerName + "-data", node.ContainerName + "-secrets"} {
-			if err := s.provider.RemoveVolume(ctx, volume); err != nil {
+			if err := s.provider.RemoveVolume(dockerCtx, volume); err != nil {
 				return db.FleetNode{}, fmt.Errorf("%w: %v", ErrDockerUnavailable, err)
 			}
 		}

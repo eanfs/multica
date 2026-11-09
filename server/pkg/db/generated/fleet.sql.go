@@ -442,49 +442,10 @@ func (q *Queries) GetFleetNodeOperationByIdempotencyKey(ctx context.Context, ide
 	return i, err
 }
 
-const listApprovedFleetNodeOperationsByNamespace = `-- name: ListApprovedFleetNodeOperationsByNamespace :many
-SELECT o.id, o.node_id, o.operation, o.phase, o.idempotency_key, o.request_fingerprint, o.approved_at, o.retry_count, o.error, o.created_at, o.updated_at FROM fleet_node_operation o
-JOIN fleet_node n ON n.id = o.node_id
-WHERE n.namespace = $1 AND o.phase = 'approved'
-ORDER BY o.created_at ASC
-`
-
-func (q *Queries) ListApprovedFleetNodeOperationsByNamespace(ctx context.Context, namespace string) ([]FleetNodeOperation, error) {
-	rows, err := q.db.Query(ctx, listApprovedFleetNodeOperationsByNamespace, namespace)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []FleetNodeOperation{}
-	for rows.Next() {
-		var i FleetNodeOperation
-		if err := rows.Scan(
-			&i.ID,
-			&i.NodeID,
-			&i.Operation,
-			&i.Phase,
-			&i.IdempotencyKey,
-			&i.RequestFingerprint,
-			&i.ApprovedAt,
-			&i.RetryCount,
-			&i.Error,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listFleetNodesByNamespace = `-- name: ListFleetNodesByNamespace :many
 SELECT id, owner_id, namespace, name, container_id, container_name, daemon_id, image, spec, target_state, observed_state, daemon_ready, health_checked_at, generation, idempotency_key, status_detail, error, created_at, updated_at FROM fleet_node
 WHERE namespace = $1
-ORDER BY created_at ASC
+ORDER BY created_at ASC, id ASC
 LIMIT $3 OFFSET $2
 `
 
@@ -631,6 +592,48 @@ func (q *Queries) ListPendingFleetNodeOperations(ctx context.Context) ([]FleetNo
 	return items, nil
 }
 
+const listRunnableFleetNodeOperationsByNamespace = `-- name: ListRunnableFleetNodeOperationsByNamespace :many
+SELECT o.id, o.node_id, o.operation, o.phase, o.idempotency_key, o.request_fingerprint, o.approved_at, o.retry_count, o.error, o.created_at, o.updated_at FROM fleet_node_operation o
+JOIN fleet_node n ON n.id = o.node_id
+WHERE n.namespace = $1
+  AND (o.phase = 'approved'
+       OR (o.phase = 'executing' AND o.updated_at < now() - interval '1 minute'))
+ORDER BY o.created_at ASC
+LIMIT 100
+`
+
+func (q *Queries) ListRunnableFleetNodeOperationsByNamespace(ctx context.Context, namespace string) ([]FleetNodeOperation, error) {
+	rows, err := q.db.Query(ctx, listRunnableFleetNodeOperationsByNamespace, namespace)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FleetNodeOperation{}
+	for rows.Next() {
+		var i FleetNodeOperation
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeID,
+			&i.Operation,
+			&i.Phase,
+			&i.IdempotencyKey,
+			&i.RequestFingerprint,
+			&i.ApprovedAt,
+			&i.RetryCount,
+			&i.Error,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStaleFleetNodes = `-- name: ListStaleFleetNodes :many
 SELECT id, owner_id, namespace, name, container_id, container_name, daemon_id, image, spec, target_state, observed_state, daemon_ready, health_checked_at, generation, idempotency_key, status_detail, error, created_at, updated_at FROM fleet_node
 WHERE namespace = $1 AND target_state IN ('running', 'starting', 'stopping', 'rebooting')
@@ -675,6 +678,49 @@ func (q *Queries) ListStaleFleetNodes(ctx context.Context, namespace string) ([]
 		return nil, err
 	}
 	return items, nil
+}
+
+const markFleetNodeOperationPhase = `-- name: MarkFleetNodeOperationPhase :execrows
+UPDATE fleet_node_operation
+SET phase = $1, updated_at = now()
+WHERE id = $2 AND phase = $3
+`
+
+type MarkFleetNodeOperationPhaseParams struct {
+	Phase         string      `json:"phase"`
+	ID            pgtype.UUID `json:"id"`
+	ExpectedPhase string      `json:"expected_phase"`
+}
+
+func (q *Queries) MarkFleetNodeOperationPhase(ctx context.Context, arg MarkFleetNodeOperationPhaseParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markFleetNodeOperationPhase, arg.Phase, arg.ID, arg.ExpectedPhase)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const recordFleetNodeOperationFailure = `-- name: RecordFleetNodeOperationFailure :exec
+UPDATE fleet_node_operation
+SET phase = $1, retry_count = $2, error = $3, updated_at = now()
+WHERE id = $4
+`
+
+type RecordFleetNodeOperationFailureParams struct {
+	Phase      string      `json:"phase"`
+	RetryCount int32       `json:"retry_count"`
+	Error      string      `json:"error"`
+	ID         pgtype.UUID `json:"id"`
+}
+
+func (q *Queries) RecordFleetNodeOperationFailure(ctx context.Context, arg RecordFleetNodeOperationFailureParams) error {
+	_, err := q.db.Exec(ctx, recordFleetNodeOperationFailure,
+		arg.Phase,
+		arg.RetryCount,
+		arg.Error,
+		arg.ID,
+	)
+	return err
 }
 
 const revokeFleetNodeCredentialsByNode = `-- name: RevokeFleetNodeCredentialsByNode :exec
@@ -734,31 +780,6 @@ func (q *Queries) UpdateFleetNodeObservedState(ctx context.Context, arg UpdateFl
 		arg.Error,
 		arg.ID,
 		arg.Namespace,
-	)
-	return err
-}
-
-const updateFleetNodeOperationPhase = `-- name: UpdateFleetNodeOperationPhase :exec
-UPDATE fleet_node_operation
-SET phase = $1, approved_at = $2, retry_count = $3, error = $4, updated_at = now()
-WHERE id = $5
-`
-
-type UpdateFleetNodeOperationPhaseParams struct {
-	Phase      string             `json:"phase"`
-	ApprovedAt pgtype.Timestamptz `json:"approved_at"`
-	RetryCount int32              `json:"retry_count"`
-	Error      string             `json:"error"`
-	ID         pgtype.UUID        `json:"id"`
-}
-
-func (q *Queries) UpdateFleetNodeOperationPhase(ctx context.Context, arg UpdateFleetNodeOperationPhaseParams) error {
-	_, err := q.db.Exec(ctx, updateFleetNodeOperationPhase,
-		arg.Phase,
-		arg.ApprovedAt,
-		arg.RetryCount,
-		arg.Error,
-		arg.ID,
 	)
 	return err
 }

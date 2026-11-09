@@ -27,6 +27,11 @@ func coordinatorTestService(t *testing.T, namespace string, provider *fakeDocker
 
 func seedCoordinatorNode(t *testing.T, st *store.Store, namespace, name, containerID string) db.FleetNode {
 	t.Helper()
+	return seedCoordinatorNodeWithTarget(t, st, namespace, name, containerID, StateRunning)
+}
+
+func seedCoordinatorNodeWithTarget(t *testing.T, st *store.Store, namespace, name, containerID, target string) db.FleetNode {
+	t.Helper()
 	return seedServiceNodeWith(t, st, db.CreateFleetNodeParams{
 		OwnerID:       testOwner(60),
 		Namespace:     namespace,
@@ -36,7 +41,7 @@ func seedCoordinatorNode(t *testing.T, st *store.Store, namespace, name, contain
 		DaemonID:      name + "-daemon",
 		Image:         "multica/runtime-claude:test",
 		Spec:          []byte("{\"id\":\"standard\"}"),
-		TargetState:   StateRunning,
+		TargetState:   target,
 	})
 }
 
@@ -211,7 +216,7 @@ func TestTickExecutesApprovedDelete(t *testing.T) {
 	}
 }
 
-func TestTickRecordsFailedOperation(t *testing.T) {
+func TestTickRequeuesFailedOperation(t *testing.T) {
 	provider := newFakeDocker()
 	provider.inspected["c-fail"] = docker.ObservedContainer{ID: "c-fail", State: "running", Healthy: true}
 	provider.stopErr = errFakeStop
@@ -222,15 +227,15 @@ func TestTickRecordsFailedOperation(t *testing.T) {
 	if err := svc.Tick(context.Background()); err != nil {
 		t.Fatalf("tick must not abort on one failed operation: %v", err)
 	}
-	failed := loadCoordinatorOperation(t, st, op.ID)
-	if failed.Phase != OpPhaseFailed {
-		t.Fatalf("phase = %q, want %q", failed.Phase, OpPhaseFailed)
+	retried := loadCoordinatorOperation(t, st, op.ID)
+	if retried.Phase != OpPhaseApproved {
+		t.Fatalf("phase = %q, want requeued %q", retried.Phase, OpPhaseApproved)
 	}
-	if failed.RetryCount != 1 {
-		t.Fatalf("retry_count = %d, want 1", failed.RetryCount)
+	if retried.RetryCount != 1 {
+		t.Fatalf("retry_count = %d, want 1", retried.RetryCount)
 	}
-	if !strings.Contains(failed.Error, errFakeStop.Error()) {
-		t.Fatalf("error = %q, want the Docker error", failed.Error)
+	if !strings.Contains(retried.Error, errFakeStop.Error()) {
+		t.Fatalf("error = %q, want the Docker error", retried.Error)
 	}
 	if len(provider.stopped) != 0 {
 		t.Fatalf("failed stop recorded as applied: %v", provider.stopped)
@@ -256,5 +261,367 @@ func TestTickSkipsTerminalNodesDuringRefresh(t *testing.T) {
 	}
 	if len(provider.calls) != 0 {
 		t.Fatalf("terminal node reached Docker: %v", provider.calls)
+	}
+}
+
+func TestNextTargetStateAdvancesSettledTargets(t *testing.T) {
+	cases := []struct {
+		name    string
+		target  string
+		settled string
+		want    string
+		changed bool
+	}{
+		{"starting ready", StateStarting, StateRunning, StateRunning, true},
+		{"rebooting ready", StateRebooting, StateRunning, StateRunning, true},
+		{"stopping exited", StateStopping, StateStopped, StateStopped, true},
+		{"starting not ready", StateStarting, StateStarting, "", false},
+		{"stopping still running", StateStopping, StateRunning, "", false},
+		{"running exited", StateRunning, StateStopped, "", false},
+		{"stopped", StateStopped, StateStopped, "", false},
+		{"terminated", StateTerminated, StateRunning, "", false},
+	}
+	for _, tc := range cases {
+		got, changed := nextTargetState(tc.target, nodeObservation{exists: true, settled: tc.settled})
+		if changed != tc.changed || got != tc.want {
+			t.Fatalf("%s: nextTargetState = %q/%v, want %q/%v", tc.name, got, changed, tc.want, tc.changed)
+		}
+	}
+	if _, changed := nextTargetState(StateStarting, nodeObservation{}); changed {
+		t.Fatal("a missing container must not advance the target state")
+	}
+}
+
+func TestTickAdvancesStartingNodeToRunning(t *testing.T) {
+	provider := newFakeDocker()
+	provider.inspected["c-starting"] = docker.ObservedContainer{ID: "c-starting", State: "running", Healthy: true}
+	svc, st := coordinatorTestService(t, "wt-op", provider)
+	node := seedCoordinatorNodeWithTarget(t, st, "wt-op", "n-starting", "c-starting", StateStarting)
+
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	advanced, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{ID: node.ID, Namespace: "wt-op"})
+	if err != nil {
+		t.Fatalf("load advanced node: %v", err)
+	}
+	if advanced.TargetState != StateRunning {
+		t.Fatalf("target = %q, want %q", advanced.TargetState, StateRunning)
+	}
+	generation := advanced.Generation
+	// The second pass observes the same settled state and must not bump the
+	// generation again.
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	settled, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{ID: node.ID, Namespace: "wt-op"})
+	if err != nil {
+		t.Fatalf("reload settled node: %v", err)
+	}
+	if settled.Generation != generation {
+		t.Fatalf("generation moved from %d to %d without a state change", generation, settled.Generation)
+	}
+}
+
+func TestTickAdvancesRebootingNodeToRunning(t *testing.T) {
+	provider := newFakeDocker()
+	provider.inspected["c-rebooting"] = docker.ObservedContainer{ID: "c-rebooting", State: "running", Healthy: true}
+	svc, st := coordinatorTestService(t, "wt-op", provider)
+	node := seedCoordinatorNodeWithTarget(t, st, "wt-op", "n-rebooting", "c-rebooting", StateRebooting)
+
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	advanced, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{ID: node.ID, Namespace: "wt-op"})
+	if err != nil {
+		t.Fatalf("load advanced node: %v", err)
+	}
+	if advanced.TargetState != StateRunning {
+		t.Fatalf("target = %q, want %q", advanced.TargetState, StateRunning)
+	}
+}
+
+func TestTickAdvancesStoppingNodeToStopped(t *testing.T) {
+	provider := newFakeDocker()
+	provider.inspected["c-stopping"] = docker.ObservedContainer{ID: "c-stopping", State: "exited"}
+	svc, st := coordinatorTestService(t, "wt-op", provider)
+	node := seedCoordinatorNodeWithTarget(t, st, "wt-op", "n-stopping", "c-stopping", StateStopping)
+
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	advanced, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{ID: node.ID, Namespace: "wt-op"})
+	if err != nil {
+		t.Fatalf("load advanced node: %v", err)
+	}
+	if advanced.TargetState != StateStopped {
+		t.Fatalf("target = %q, want %q", advanced.TargetState, StateStopped)
+	}
+	// The next pass derives the display from the settled target.
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	settled, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{ID: node.ID, Namespace: "wt-op"})
+	if err != nil {
+		t.Fatalf("reload settled node: %v", err)
+	}
+	if settled.ObservedState != StateStopped {
+		t.Fatalf("observed = %q, want %q", settled.ObservedState, StateStopped)
+	}
+}
+
+func TestTickLeavesRunningNodeWithExitedContainer(t *testing.T) {
+	provider := newFakeDocker()
+	provider.inspected["c-exited"] = docker.ObservedContainer{ID: "c-exited", State: "exited"}
+	svc, st := coordinatorTestService(t, "wt-op", provider)
+	node := seedCoordinatorNodeWithTarget(t, st, "wt-op", "n-exited", "c-exited", StateRunning)
+
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	refreshed, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{ID: node.ID, Namespace: "wt-op"})
+	if err != nil {
+		t.Fatalf("load refreshed node: %v", err)
+	}
+	if refreshed.TargetState != StateRunning {
+		t.Fatalf("target = %q, want unchanged %q", refreshed.TargetState, StateRunning)
+	}
+	if refreshed.ObservedState != StateStopped {
+		t.Fatalf("observed = %q, want %q", refreshed.ObservedState, StateStopped)
+	}
+}
+
+func TestTickDefersDeleteOfLaunchingNode(t *testing.T) {
+	provider := newFakeDocker()
+	provider.inspected["c-launching"] = docker.ObservedContainer{ID: "c-launching", State: "running", Healthy: true}
+	svc, st := coordinatorTestService(t, "wt-op", provider)
+	node := seedCoordinatorNodeWithTarget(t, st, "wt-op", "n-launching", "c-launching", StateLaunching)
+	if _, err := st.Queries().CreateFleetNodeCredential(context.Background(), db.CreateFleetNodeCredentialParams{
+		NodeID: node.ID, TokenHash: "hash-launching",
+	}); err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	op := seedCoordinatorOperation(t, st, node.ID, "delete", OpPhaseApproved, "delete-launching")
+
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(provider.removed) != 0 || len(provider.removedVolumes) != 0 {
+		t.Fatalf("launching node reached delete: containers %v volumes %v", provider.removed, provider.removedVolumes)
+	}
+	if got := loadCoordinatorOperation(t, st, op.ID).Phase; got != OpPhaseApproved {
+		t.Fatalf("phase = %q, want untouched %q", got, OpPhaseApproved)
+	}
+	still, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{ID: node.ID, Namespace: "wt-op"})
+	if err != nil {
+		t.Fatalf("load node: %v", err)
+	}
+	if still.TargetState != StateLaunching {
+		t.Fatalf("target = %q, want %q", still.TargetState, StateLaunching)
+	}
+	if _, err := st.Queries().GetFleetNodeCredentialByHash(context.Background(), "hash-launching"); err != nil {
+		t.Fatalf("deferred delete revoked the credential: %v", err)
+	}
+}
+
+func TestTickExecutesApprovedStartAndReboot(t *testing.T) {
+	provider := newFakeDocker()
+	provider.inspected["c-start"] = docker.ObservedContainer{ID: "c-start", State: "exited"}
+	provider.inspected["c-reboot"] = docker.ObservedContainer{ID: "c-reboot", State: "running", Healthy: true}
+	svc, st := coordinatorTestService(t, "wt-op", provider)
+	startNode := seedCoordinatorNodeWithTarget(t, st, "wt-op", "n-start", "c-start", StateStopped)
+	rebootNode := seedCoordinatorNodeWithTarget(t, st, "wt-op", "n-reboot", "c-reboot", StateRunning)
+	startOp := seedCoordinatorOperation(t, st, startNode.ID, "start", OpPhaseApproved, "start-1")
+	rebootOp := seedCoordinatorOperation(t, st, rebootNode.ID, "reboot", OpPhaseApproved, "reboot-1")
+
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(provider.started) != 1 || provider.started[0] != "c-start" {
+		t.Fatalf("started = %v", provider.started)
+	}
+	if len(provider.restarted) != 1 || provider.restarted[0] != "c-reboot" {
+		t.Fatalf("restarted = %v", provider.restarted)
+	}
+	if got := loadCoordinatorOperation(t, st, startOp.ID).Phase; got != OpPhaseDone {
+		t.Fatalf("start phase = %q, want %q", got, OpPhaseDone)
+	}
+	if got := loadCoordinatorOperation(t, st, rebootOp.ID).Phase; got != OpPhaseDone {
+		t.Fatalf("reboot phase = %q, want %q", got, OpPhaseDone)
+	}
+}
+
+func TestClaimOperationHasSingleWinner(t *testing.T) {
+	provider := newFakeDocker()
+	svc, st := coordinatorTestService(t, "wt-op", provider)
+	node := seedCoordinatorNode(t, st, "wt-op", "n-claim", "c-claim")
+	op := seedCoordinatorOperation(t, st, node.ID, "stop", OpPhaseApproved, "stop-claim")
+
+	claimed, err := svc.claimOperation(context.Background(), op)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("first claim lost the race")
+	}
+	// The second caller still holds the approved snapshot; its conditional
+	// update must not match the executing row.
+	claimedAgain, err := svc.claimOperation(context.Background(), op)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if claimedAgain {
+		t.Fatal("second claim matched a row another coordinator owns")
+	}
+	if got := loadCoordinatorOperation(t, st, op.ID).Phase; got != OpPhaseExecuting {
+		t.Fatalf("phase = %q, want %q", got, OpPhaseExecuting)
+	}
+}
+
+func TestTickRecoversTimedOutExecutingOperation(t *testing.T) {
+	ctx := context.Background()
+	pool := serviceTestPool(t)
+	st := store.New(pool)
+	provider := newFakeDocker()
+	provider.inspected["c-timeout"] = docker.ObservedContainer{ID: "c-timeout", State: "running", Healthy: true}
+	svc := NewService(Config{Namespace: "wt-op"}, st, provider, nil, "secret")
+	node := seedCoordinatorNode(t, st, "wt-op", "n-timeout", "c-timeout")
+	op := seedCoordinatorOperation(t, st, node.ID, "stop", OpPhaseExecuting, "stop-timeout")
+	if _, err := pool.Exec(ctx,
+		"UPDATE fleet_node_operation SET updated_at = now() - interval '2 minutes' WHERE id = $1",
+		op.ID); err != nil {
+		t.Fatalf("age operation: %v", err)
+	}
+
+	if err := svc.Tick(ctx); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(provider.stopped) != 1 || provider.stopped[0] != "c-timeout" {
+		t.Fatalf("timed-out operation was not re-executed: %v", provider.stopped)
+	}
+	if got := loadCoordinatorOperation(t, st, op.ID).Phase; got != OpPhaseDone {
+		t.Fatalf("phase = %q, want %q", got, OpPhaseDone)
+	}
+}
+
+func TestTickLeavesFreshExecutingOperationAlone(t *testing.T) {
+	provider := newFakeDocker()
+	provider.inspected["c-executing"] = docker.ObservedContainer{ID: "c-executing", State: "running", Healthy: true}
+	svc, st := coordinatorTestService(t, "wt-op", provider)
+	node := seedCoordinatorNode(t, st, "wt-op", "n-executing", "c-executing")
+	op := seedCoordinatorOperation(t, st, node.ID, "stop", OpPhaseExecuting, "stop-executing")
+
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(provider.stopped) != 0 {
+		t.Fatalf("fresh executing operation was re-executed: %v", provider.stopped)
+	}
+	if got := loadCoordinatorOperation(t, st, op.ID).Phase; got != OpPhaseExecuting {
+		t.Fatalf("phase = %q, want untouched %q", got, OpPhaseExecuting)
+	}
+}
+
+func TestTickFailsOperationAfterMaxRetries(t *testing.T) {
+	provider := newFakeDocker()
+	provider.inspected["c-retry"] = docker.ObservedContainer{ID: "c-retry", State: "running", Healthy: true}
+	provider.stopErr = errFakeStop
+	svc, st := coordinatorTestService(t, "wt-op", provider)
+	node := seedCoordinatorNode(t, st, "wt-op", "n-retry", "c-retry")
+	op := seedCoordinatorOperation(t, st, node.ID, "stop", OpPhaseApproved, "stop-retry")
+
+	for attempt := 1; attempt <= maxOperationRetries; attempt++ {
+		if err := svc.Tick(context.Background()); err != nil {
+			t.Fatalf("tick %d: %v", attempt, err)
+		}
+		got := loadCoordinatorOperation(t, st, op.ID)
+		if got.RetryCount != int32(attempt) {
+			t.Fatalf("after attempt %d retry_count = %d", attempt, got.RetryCount)
+		}
+		if attempt < maxOperationRetries && got.Phase != OpPhaseApproved {
+			t.Fatalf("after attempt %d phase = %q, want %q", attempt, got.Phase, OpPhaseApproved)
+		}
+		if attempt == maxOperationRetries {
+			if got.Phase != OpPhaseFailed {
+				t.Fatalf("phase = %q, want %q after %d attempts", got.Phase, OpPhaseFailed, attempt)
+			}
+			if !strings.Contains(got.Error, errFakeStop.Error()) {
+				t.Fatalf("error = %q, want the Docker error", got.Error)
+			}
+		}
+	}
+	// A parked failure is not picked up again.
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("post-failure tick: %v", err)
+	}
+	if got := loadCoordinatorOperation(t, st, op.ID); got.RetryCount != int32(maxOperationRetries) {
+		t.Fatalf("retry_count moved after the operation failed: %d", got.RetryCount)
+	}
+}
+
+func TestMarkOperationPhaseKeepsPreviousError(t *testing.T) {
+	ctx := context.Background()
+	pool := serviceTestPool(t)
+	st := store.New(pool)
+	svc := NewService(Config{Namespace: "wt-op"}, st, newFakeDocker(), nil, "secret")
+	node := seedCoordinatorNode(t, st, "wt-op", "n-keep-error", "c-keep-error")
+	op := seedCoordinatorOperation(t, st, node.ID, "stop", OpPhaseApproved, "stop-keep-error")
+	if _, err := pool.Exec(ctx,
+		"UPDATE fleet_node_operation SET error = 'previous failure' WHERE id = $1", op.ID); err != nil {
+		t.Fatalf("seed previous error: %v", err)
+	}
+
+	claimed, err := svc.claimOperation(ctx, op)
+	if err != nil || !claimed {
+		t.Fatalf("claim = %v/%v", claimed, err)
+	}
+	if got := loadCoordinatorOperation(t, st, op.ID).Error; got != "previous failure" {
+		t.Fatalf("error = %q, want the previous message preserved on claim", got)
+	}
+	if err := svc.completeOperation(ctx, op); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	done := loadCoordinatorOperation(t, st, op.ID)
+	if done.Phase != OpPhaseDone {
+		t.Fatalf("phase = %q, want %q", done.Phase, OpPhaseDone)
+	}
+	if done.Error != "previous failure" {
+		t.Fatalf("error = %q, want the previous message preserved on completion", done.Error)
+	}
+}
+
+func TestTickRefreshesOnlyOwnNamespaceNodes(t *testing.T) {
+	provider := newFakeDocker()
+	provider.inspected["c-own-ns"] = docker.ObservedContainer{ID: "c-own-ns", State: "running", Healthy: true}
+	provider.inspected["c-foreign-ns"] = docker.ObservedContainer{ID: "c-foreign-ns", State: "running", Healthy: true}
+	svc, st := coordinatorTestService(t, "wt-op", provider)
+	own := seedCoordinatorNode(t, st, "wt-op", "own-ns", "c-own-ns")
+	foreign := seedCoordinatorNode(t, st, "other-ns", "foreign-ns", "c-foreign-ns")
+
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	inspects := 0
+	for _, call := range provider.calls {
+		if call == "inspect" {
+			inspects++
+		}
+	}
+	if inspects != 1 {
+		t.Fatalf("inspect calls = %d, want only the namespace node", inspects)
+	}
+	refreshed, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{ID: own.ID, Namespace: "wt-op"})
+	if err != nil {
+		t.Fatalf("load own node: %v", err)
+	}
+	if refreshed.ObservedState != StateRunning {
+		t.Fatalf("own observed = %q, want %q", refreshed.ObservedState, StateRunning)
+	}
+	untouched, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{ID: foreign.ID, Namespace: "other-ns"})
+	if err != nil {
+		t.Fatalf("load foreign node: %v", err)
+	}
+	if untouched.ObservedState != "" || untouched.DaemonReady {
+		t.Fatalf("foreign node was refreshed: observed %q ready %v", untouched.ObservedState, untouched.DaemonReady)
 	}
 }
