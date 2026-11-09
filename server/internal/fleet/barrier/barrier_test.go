@@ -93,13 +93,13 @@ func TestExclusiveLockBlocksUntilHolderReleases(t *testing.T) {
 		t.Fatal("shared lock must block while exclusive holder exists")
 	}
 	// The cancelled query leaves tx2 aborted, so release both transactions and
-	// use a fresh one for the post-release check.
+	// use a fresh one for the post-release check. pgx may close tx2's connection
+	// after the cancelled query, so its rollback can return
+	// pgconn.ErrConnClosed; the deferred rollback already covers cleanup.
 	if err := tx1.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := tx2.Rollback(ctx); err != nil {
-		t.Fatal(err)
-	}
+	_ = tx2.Rollback(ctx)
 
 	tx3, err := pool.Begin(ctx)
 	if err != nil {
