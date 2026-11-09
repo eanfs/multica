@@ -3666,6 +3666,15 @@ func (s *TaskService) claimTask(ctx context.Context, agentID, runtimeID pgtype.U
 		// withholds the task without failing the daemon's poll.
 		if s.FleetGuard != nil {
 			if err := s.FleetGuard.CheckClaim(ctx, qtx, claimRuntimeID); err != nil {
+				// Expected backpressure (node not ready, stale health, revoked
+				// credential) and an unreadable barrier both withhold the claim.
+				// Debug, not warn: a node that is stopping rejects every poll
+				// until it settles. The error carries no task payload or secret.
+				slog.Debug("fleet claim guard withheld claim",
+					"agent_id", util.UUIDToString(agentID),
+					"runtime_id", util.UUIDToString(claimRuntimeID),
+					"error", err,
+				)
 				outcome = claimOutcomeFleetGuardRejected
 				return nil
 			}

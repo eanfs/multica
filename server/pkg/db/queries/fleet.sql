@@ -15,9 +15,6 @@ SELECT * FROM fleet_node WHERE id = @id AND namespace = @namespace;
 -- name: GetFleetNodeByDaemonID :one
 SELECT * FROM fleet_node WHERE daemon_id = @daemon_id AND namespace = @namespace;
 
--- name: GetFleetNodeForClaim :one
-SELECT * FROM fleet_node WHERE daemon_id = @daemon_id AND namespace = @namespace;
-
 -- name: GetFleetNodeByContainerID :one
 SELECT * FROM fleet_node WHERE container_id = @container_id AND namespace = @namespace;
 

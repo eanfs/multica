@@ -40,15 +40,19 @@ func New(namespace string) *Guard {
 // request between the read and the claim (health checks alone cannot close that
 // window).
 //
-// Ordinary runtimes skip every Fleet query: only rows explicitly marked
-// local_fleet with a daemon id participate in the barrier.
+// Ordinary runtimes skip every Fleet query. A runtime explicitly marked
+// local_fleet must prove its barrier: a missing daemon id fails closed, because
+// an incomplete fleet row must never be treated as an ordinary runtime.
 func (g *Guard) CheckClaim(ctx context.Context, q *db.Queries, runtimeID pgtype.UUID) error {
 	rt, err := q.GetAgentRuntime(ctx, runtimeID)
 	if err != nil {
 		return fmt.Errorf("load runtime: %w", err)
 	}
-	if rt.ManagedBy != "local_fleet" || !rt.DaemonID.Valid || rt.DaemonID.String == "" {
+	if rt.ManagedBy != "local_fleet" {
 		return nil
+	}
+	if !rt.DaemonID.Valid || rt.DaemonID.String == "" {
+		return fmt.Errorf("%w: runtime has no daemon id", ErrFleetNodeUnavailable)
 	}
 
 	daemonID := rt.DaemonID.String
@@ -56,7 +60,7 @@ func (g *Guard) CheckClaim(ctx context.Context, q *db.Queries, runtimeID pgtype.
 		return fmt.Errorf("fleet claim lock: %w", err)
 	}
 
-	node, err := q.GetFleetNodeForClaim(ctx, db.GetFleetNodeForClaimParams{
+	node, err := q.GetFleetNodeByDaemonID(ctx, db.GetFleetNodeByDaemonIDParams{
 		DaemonID:  daemonID,
 		Namespace: g.namespace,
 	})

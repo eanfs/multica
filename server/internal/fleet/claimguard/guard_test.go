@@ -9,12 +9,20 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/multica-ai/multica/server/internal/fleet/barrier"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
-const testNamespace = "wt-claimguard"
+const (
+	testNamespace      = "wt-claimguard"
+	testOtherNamespace = "wt-claimguard-other"
+)
+
+// ptr lets a test pass NULL/nullable fixture columns without a second helper
+// per type.
+func ptr[T any](v T) *T { return &v }
 
 func isolatedClaimPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -52,8 +60,9 @@ func insertClaimWorkspace(t *testing.T, pool *pgxpool.Pool, suffix string) strin
 
 // insertManagedRuntime creates the runtime row the guard reads. managedBy is
 // written verbatim so a test can flip a runtime between fleet-managed and
-// ordinary without another helper.
-func insertManagedRuntime(t *testing.T, pool *pgxpool.Pool, workspaceID, daemonID, managedBy string) string {
+// ordinary without another helper. A nil daemonID stores NULL, which together
+// with an empty string covers the two "missing daemon id" shapes.
+func insertManagedRuntime(t *testing.T, pool *pgxpool.Pool, workspaceID string, daemonID *string, managedBy string) string {
 	t.Helper()
 	var runtimeID string
 	if err := pool.QueryRow(context.Background(), `
@@ -68,8 +77,10 @@ func insertManagedRuntime(t *testing.T, pool *pgxpool.Pool, workspaceID, daemonI
 }
 
 // insertFleetNode writes the persisted Fleet state the barrier validates.
-// healthCheckedAt is "now" unless a test passes a stale value.
-func insertFleetNode(t *testing.T, pool *pgxpool.Pool, ownerID, workspaceID, daemonID, targetState string, daemonReady bool, healthCheckedAt time.Time, namespace string) string {
+// A nil healthCheckedAt stores NULL, the shape of a node that has never been
+// observed. namespace is explicit so a test can place the row outside the
+// guard's namespace.
+func insertFleetNode(t *testing.T, pool *pgxpool.Pool, ownerID, daemonID, targetState string, daemonReady bool, healthCheckedAt *time.Time, namespace string) string {
 	t.Helper()
 	var nodeID string
 	if err := pool.QueryRow(context.Background(), `
@@ -98,7 +109,7 @@ func insertFleetCredential(t *testing.T, pool *pgxpool.Pool, nodeID string, revo
 	}
 }
 
-func newClaimGuardFixture(t *testing.T, managedBy, daemonID string) (*pgxpool.Pool, *db.Queries, string, string) {
+func newClaimGuardFixture(t *testing.T, managedBy string, daemonID *string) (*pgxpool.Pool, *db.Queries, string, string) {
 	t.Helper()
 	pool := isolatedClaimPool(t)
 	ownerID := insertClaimUser(t, pool)
@@ -108,9 +119,8 @@ func newClaimGuardFixture(t *testing.T, managedBy, daemonID string) (*pgxpool.Po
 }
 
 func TestCheckClaimRejectsNodeNotRunning(t *testing.T) {
-	pool, q, runtimeID, ownerID := newClaimGuardFixture(t, "local_fleet", "daemon-1")
-	workspaceID := runtimeWorkspace(t, pool, runtimeID)
-	nodeID := insertFleetNode(t, pool, ownerID, workspaceID, "daemon-1", "starting", true, time.Now(), testNamespace)
+	pool, q, runtimeID, ownerID := newClaimGuardFixture(t, "local_fleet", ptr("daemon-1"))
+	nodeID := insertFleetNode(t, pool, ownerID, "daemon-1", "starting", true, ptr(time.Now()), testNamespace)
 	insertFleetCredential(t, pool, nodeID, false)
 
 	guard := New(testNamespace)
@@ -121,9 +131,8 @@ func TestCheckClaimRejectsNodeNotRunning(t *testing.T) {
 }
 
 func TestCheckClaimAllowsReadyNode(t *testing.T) {
-	pool, q, runtimeID, ownerID := newClaimGuardFixture(t, "local_fleet", "daemon-1")
-	workspaceID := runtimeWorkspace(t, pool, runtimeID)
-	nodeID := insertFleetNode(t, pool, ownerID, workspaceID, "daemon-1", "running", true, time.Now(), testNamespace)
+	pool, q, runtimeID, ownerID := newClaimGuardFixture(t, "local_fleet", ptr("daemon-1"))
+	nodeID := insertFleetNode(t, pool, ownerID, "daemon-1", "running", true, ptr(time.Now()), testNamespace)
 	insertFleetCredential(t, pool, nodeID, false)
 
 	guard := New(testNamespace)
@@ -132,10 +141,21 @@ func TestCheckClaimAllowsReadyNode(t *testing.T) {
 	}
 }
 
+func TestCheckClaimRejectsNotReadyNode(t *testing.T) {
+	pool, q, runtimeID, ownerID := newClaimGuardFixture(t, "local_fleet", ptr("daemon-1"))
+	nodeID := insertFleetNode(t, pool, ownerID, "daemon-1", "running", false, ptr(time.Now()), testNamespace)
+	insertFleetCredential(t, pool, nodeID, false)
+
+	guard := New(testNamespace)
+	err := guard.CheckClaim(context.Background(), q, util.MustParseUUID(runtimeID))
+	if !errors.Is(err, ErrFleetNodeUnavailable) {
+		t.Fatalf("CheckClaim error = %v, want ErrFleetNodeUnavailable", err)
+	}
+}
+
 func TestCheckClaimRejectsRevokedCredential(t *testing.T) {
-	pool, q, runtimeID, ownerID := newClaimGuardFixture(t, "local_fleet", "daemon-1")
-	workspaceID := runtimeWorkspace(t, pool, runtimeID)
-	nodeID := insertFleetNode(t, pool, ownerID, workspaceID, "daemon-1", "running", true, time.Now(), testNamespace)
+	pool, q, runtimeID, ownerID := newClaimGuardFixture(t, "local_fleet", ptr("daemon-1"))
+	nodeID := insertFleetNode(t, pool, ownerID, "daemon-1", "running", true, ptr(time.Now()), testNamespace)
 	insertFleetCredential(t, pool, nodeID, true)
 
 	guard := New(testNamespace)
@@ -146,9 +166,20 @@ func TestCheckClaimRejectsRevokedCredential(t *testing.T) {
 }
 
 func TestCheckClaimRejectsStaleHealth(t *testing.T) {
-	pool, q, runtimeID, ownerID := newClaimGuardFixture(t, "local_fleet", "daemon-1")
-	workspaceID := runtimeWorkspace(t, pool, runtimeID)
-	nodeID := insertFleetNode(t, pool, ownerID, workspaceID, "daemon-1", "running", true, time.Now().Add(-time.Minute), testNamespace)
+	pool, q, runtimeID, ownerID := newClaimGuardFixture(t, "local_fleet", ptr("daemon-1"))
+	nodeID := insertFleetNode(t, pool, ownerID, "daemon-1", "running", true, ptr(time.Now().Add(-time.Minute)), testNamespace)
+	insertFleetCredential(t, pool, nodeID, false)
+
+	guard := New(testNamespace)
+	err := guard.CheckClaim(context.Background(), q, util.MustParseUUID(runtimeID))
+	if !errors.Is(err, ErrFleetNodeUnavailable) {
+		t.Fatalf("CheckClaim error = %v, want ErrFleetNodeUnavailable", err)
+	}
+}
+
+func TestCheckClaimRejectsNullHealth(t *testing.T) {
+	pool, q, runtimeID, ownerID := newClaimGuardFixture(t, "local_fleet", ptr("daemon-1"))
+	nodeID := insertFleetNode(t, pool, ownerID, "daemon-1", "running", true, nil, testNamespace)
 	insertFleetCredential(t, pool, nodeID, false)
 
 	guard := New(testNamespace)
@@ -159,7 +190,7 @@ func TestCheckClaimRejectsStaleHealth(t *testing.T) {
 }
 
 func TestCheckClaimRejectsMissingNodeRow(t *testing.T) {
-	_, q, runtimeID, _ := newClaimGuardFixture(t, "local_fleet", "daemon-1")
+	_, q, runtimeID, _ := newClaimGuardFixture(t, "local_fleet", ptr("daemon-1"))
 
 	guard := New(testNamespace)
 	err := guard.CheckClaim(context.Background(), q, util.MustParseUUID(runtimeID))
@@ -168,8 +199,44 @@ func TestCheckClaimRejectsMissingNodeRow(t *testing.T) {
 	}
 }
 
+func TestCheckClaimRejectsNamespaceMismatch(t *testing.T) {
+	pool, q, runtimeID, ownerID := newClaimGuardFixture(t, "local_fleet", ptr("daemon-1"))
+	// The node exists, is healthy, and has a credential, but it belongs to a
+	// sibling worktree namespace: this API must not claim through it.
+	nodeID := insertFleetNode(t, pool, ownerID, "daemon-1", "running", true, ptr(time.Now()), testOtherNamespace)
+	insertFleetCredential(t, pool, nodeID, false)
+
+	guard := New(testNamespace)
+	err := guard.CheckClaim(context.Background(), q, util.MustParseUUID(runtimeID))
+	if !errors.Is(err, ErrFleetNodeUnavailable) {
+		t.Fatalf("CheckClaim error = %v, want ErrFleetNodeUnavailable", err)
+	}
+}
+
+// TestCheckClaimRejectsFleetRuntimeWithoutDaemonID pins the fail-closed rule:
+// a runtime already marked local_fleet may not silently fall back to ordinary
+// treatment when its daemon id is missing or NULL, because no node lock can be
+// named for it.
+func TestCheckClaimRejectsFleetRuntimeWithoutDaemonID(t *testing.T) {
+	cases := map[string]*string{
+		"empty": ptr(""),
+		"null":  nil,
+	}
+	for name, daemonID := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, q, runtimeID, _ := newClaimGuardFixture(t, "local_fleet", daemonID)
+
+			guard := New(testNamespace)
+			err := guard.CheckClaim(context.Background(), q, util.MustParseUUID(runtimeID))
+			if !errors.Is(err, ErrFleetNodeUnavailable) {
+				t.Fatalf("CheckClaim error = %v, want ErrFleetNodeUnavailable", err)
+			}
+		})
+	}
+}
+
 func TestCheckClaimSkipsOrdinaryRuntime(t *testing.T) {
-	_, q, runtimeID, _ := newClaimGuardFixture(t, "", "daemon-1")
+	_, q, runtimeID, _ := newClaimGuardFixture(t, "", ptr("daemon-1"))
 
 	guard := New(testNamespace)
 	if err := guard.CheckClaim(context.Background(), q, util.MustParseUUID(runtimeID)); err != nil {
@@ -177,11 +244,69 @@ func TestCheckClaimSkipsOrdinaryRuntime(t *testing.T) {
 	}
 }
 
-func runtimeWorkspace(t *testing.T, pool *pgxpool.Pool, runtimeID string) string {
-	t.Helper()
-	var workspaceID string
-	if err := pool.QueryRow(context.Background(), `SELECT workspace_id FROM agent_runtime WHERE id = $1`, runtimeID).Scan(&workspaceID); err != nil {
-		t.Fatalf("read runtime workspace: %v", err)
+func TestCheckClaimSkipsOrdinaryRuntimeWithoutDaemonID(t *testing.T) {
+	_, q, runtimeID, _ := newClaimGuardFixture(t, "", nil)
+
+	guard := New(testNamespace)
+	if err := guard.CheckClaim(context.Background(), q, util.MustParseUUID(runtimeID)); err != nil {
+		t.Fatalf("ordinary runtime without a daemon id must not be checked: %v", err)
 	}
-	return workspaceID
+}
+
+// TestCheckClaimWaitsForExclusiveNodeLock pins the transaction invariant the
+// claim path depends on: CheckClaim takes the node's shared advisory lock on
+// the caller's transaction and holds it until that transaction ends. A
+// maintenance transaction that already holds the exclusive lock must therefore
+// stall the claim (here until its short context expires), and releasing the
+// maintenance transaction must let the next claim through.
+func TestCheckClaimWaitsForExclusiveNodeLock(t *testing.T) {
+	pool, q, runtimeID, ownerID := newClaimGuardFixture(t, "local_fleet", ptr("daemon-1"))
+	nodeID := insertFleetNode(t, pool, ownerID, "daemon-1", "running", true, ptr(time.Now()), testNamespace)
+	insertFleetCredential(t, pool, nodeID, false)
+
+	ctx := context.Background()
+	key := barrier.Key(testNamespace, "daemon-1")
+
+	holder, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin maintenance transaction: %v", err)
+	}
+	defer func() { _ = holder.Rollback(context.Background()) }()
+	if err := barrier.AcquireExclusive(ctx, holder, key); err != nil {
+		t.Fatalf("hold exclusive node lock: %v", err)
+	}
+
+	claimCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	claimTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin claim transaction: %v", err)
+	}
+	defer func() { _ = claimTx.Rollback(context.Background()) }()
+
+	started := time.Now()
+	err = New(testNamespace).CheckClaim(claimCtx, q.WithTx(claimTx), util.MustParseUUID(runtimeID))
+	if err == nil {
+		t.Fatal("CheckClaim passed while another transaction held the exclusive node lock")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CheckClaim error = %v, want context deadline while waiting for the shared lock", err)
+	}
+	if waited := time.Since(started); waited < 250*time.Millisecond {
+		t.Fatalf("CheckClaim returned after %s; want it to wait on the node lock", waited)
+	}
+
+	// Releasing the maintenance transaction must immediately unblock the
+	// barrier for the next claim transaction.
+	if err := holder.Rollback(context.Background()); err != nil {
+		t.Fatalf("release maintenance transaction: %v", err)
+	}
+	releasedTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin released claim transaction: %v", err)
+	}
+	defer func() { _ = releasedTx.Rollback(context.Background()) }()
+	if err := New(testNamespace).CheckClaim(ctx, q.WithTx(releasedTx), util.MustParseUUID(runtimeID)); err != nil {
+		t.Fatalf("CheckClaim after the exclusive lock released: %v", err)
+	}
 }
