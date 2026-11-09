@@ -250,10 +250,12 @@ import type {
   FeedbackContext,
   FeedbackKind,
 } from "../feedback/types";
-import type {
-  CloudRuntimeNode,
-  CreateCloudRuntimeNodeRequest,
-  ListCloudRuntimeNodesParams,
+import {
+  EMPTY_CLOUD_RUNTIME_SERVICE,
+  type CloudRuntimeNode,
+  type CloudRuntimeService,
+  type CreateCloudRuntimeNodeRequest,
+  type ListCloudRuntimeNodesParams,
 } from "../runtimes/cloud-runtime";
 import { type Logger, noopLogger } from "../logger";
 import { createRequestId, createSafeId } from "../utils";
@@ -284,6 +286,7 @@ import {
   IssueTriggerPreviewSchema,
   CloudRuntimeNodeListSchema,
   CloudRuntimeNodeSchema,
+  CloudRuntimeServiceSchema,
   AgentBuilderRuntimeSwitchSchema,
   AgentBuilderSessionSchema,
   AgentBuilderSessionListSchema,
@@ -2091,6 +2094,16 @@ export class ApiClient {
     );
   }
 
+  async getCloudRuntimeService(): Promise<CloudRuntimeService> {
+    const raw = await this.fetch<unknown>("/api/cloud-runtime/");
+    return parseWithFallback(
+      raw,
+      CloudRuntimeServiceSchema,
+      EMPTY_CLOUD_RUNTIME_SERVICE,
+      { endpoint: "GET /api/cloud-runtime/" },
+    );
+  }
+
   async createCloudRuntimeNode(
     data: CreateCloudRuntimeNodeRequest,
   ): Promise<CloudRuntimeNode> {
@@ -2108,11 +2121,61 @@ export class ApiClient {
     );
   }
 
-  async deleteCloudRuntimeNode(instanceId: string): Promise<void> {
+  // Local Fleet mode rejects writes without an Idempotency-Key so a retried
+  // click cannot enqueue the same container operation twice.
+  async deleteCloudRuntimeNode(
+    instanceId: string,
+    idempotencyKey: string,
+  ): Promise<void> {
     await this.fetchRaw("/api/cloud-runtime/nodes", {
       method: "DELETE",
       body: JSON.stringify({ instance_id: instanceId }),
-      extraHeaders: { "Content-Type": "application/json" },
+      extraHeaders: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+    });
+  }
+
+  async startCloudRuntimeNode(
+    instanceId: string,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.fetchRaw("/api/cloud-runtime/nodes/start", {
+      method: "POST",
+      body: JSON.stringify({ instance_id: instanceId }),
+      extraHeaders: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+    });
+  }
+
+  async stopCloudRuntimeNode(
+    instanceId: string,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.fetchRaw("/api/cloud-runtime/nodes/stop", {
+      method: "POST",
+      body: JSON.stringify({ instance_id: instanceId }),
+      extraHeaders: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+    });
+  }
+
+  async rebootCloudRuntimeNode(
+    instanceId: string,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.fetchRaw("/api/cloud-runtime/nodes/reboot", {
+      method: "POST",
+      body: JSON.stringify({ instance_id: instanceId }),
+      extraHeaders: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
     });
   }
 

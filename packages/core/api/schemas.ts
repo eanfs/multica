@@ -1801,23 +1801,70 @@ export const ChildIssueProgressResponseSchema = z.object({
     .default([]),
 }).loose();
 
-export const CloudRuntimeNodeSchema = z.object({
-  id: z.string(),
-  owner_id: z.string(),
-  instance_id: z.string(),
-  region: z.string(),
-  instance_type: z.string(),
-  image_id: z.string(),
-  subnet_id: z.string(),
-  name: z.string(),
-  status: z.string(),
-  tags: z.record(z.string(), z.string()).default({}),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-  created_at: z.string(),
-  updated_at: z.string(),
-}).loose();
+export const CloudRuntimeNodeSchema = z
+  .object({
+    id: z.string(),
+    owner_id: z.string(),
+    instance_id: z.string(),
+    region: z.string(),
+    instance_type: z.string(),
+    image_id: z.string(),
+    subnet_id: z.string(),
+    name: z.string(),
+    status: z.string(),
+    tags: z.record(z.string(), z.string()).default({}),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+    created_at: z.string(),
+    updated_at: z.string(),
+    // Local Docker Fleet additions. They stay optional so a backend that
+    // predates the local runtime keeps every existing node readable.
+    provider: z.string().optional(),
+    daemon_id: z.string().optional(),
+    // status_detail is JSONB written by the coordinator; a malformed or
+    // non-object value costs the detail only, never the whole node.
+    status_detail: z.record(z.string(), z.unknown()).nullish().catch(undefined),
+    error: z.string().optional(),
+  })
+  .loose()
+  .transform(({ daemon_id, status_detail, ...node }) => ({
+    ...node,
+    daemonId: daemon_id,
+    statusDetail: status_detail ?? undefined,
+  }));
 
 export const CloudRuntimeNodeListSchema = z.array(CloudRuntimeNodeSchema);
+
+export const CloudRuntimeSpecSchema = z
+  .object({
+    id: z.string(),
+    cpu: z.number().default(0),
+    memory_mb: z.number().default(0),
+    max_concurrent: z.number().default(1),
+  })
+  .loose()
+  .transform((spec) => ({
+    id: spec.id,
+    cpu: spec.cpu,
+    memoryMb: spec.memory_mb,
+    maxConcurrent: spec.max_concurrent,
+  }));
+
+export const CloudRuntimeServiceSchema = z
+  .object({
+    provider: z.string().default(""),
+    operations: z.array(z.string()).default([]),
+    specs: z.array(CloudRuntimeSpecSchema).default([]),
+    persistent_storage: z.boolean().default(false),
+    disk_quota: z.boolean().default(false),
+  })
+  .loose()
+  .transform((service) => ({
+    provider: service.provider,
+    operations: service.operations,
+    specs: service.specs,
+    persistentStorage: service.persistent_storage,
+    diskQuota: service.disk_quota,
+  }));
 
 export const EMPTY_CLOUD_RUNTIME_NODE_LIST: CloudRuntimeNode[] = [];
 

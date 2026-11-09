@@ -1575,7 +1575,7 @@ describe("ApiClient", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new ApiClient("https://api.example.test");
-    await client.deleteCloudRuntimeNode("i-0123456789abcdef0");
+    await client.deleteCloudRuntimeNode("i-0123456789abcdef0", "idem-1");
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, opts] = fetchMock.mock.calls[0]!;
@@ -1586,6 +1586,9 @@ describe("ApiClient", () => {
     });
     expect((opts.headers as Record<string, string>)["Content-Type"]).toBe(
       "application/json",
+    );
+    expect((opts.headers as Record<string, string>)["Idempotency-Key"]).toBe(
+      "idem-1",
     );
   });
 
