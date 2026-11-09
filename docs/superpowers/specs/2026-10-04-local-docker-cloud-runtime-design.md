@@ -90,7 +90,7 @@ Health/ready 接口不返回敏感详情，可用于本地探针。`/api/v1/node
 
 创建只接受名称、白名单规格。拒绝客户端指定 EC2 区域/AMI/IAM/subnet/SSH key、任意镜像、tags、挂载路径或脚本，不偷偷把 EC2 规格映射成 Docker。
 
-响应保留现有核心字段。稳定 `id` 为 Fleet 节点 UUID，`instance_id` 为 Docker container ID，region 为 `local`，image 字段为批准镜像，非适用字符串为空。provider、操作进度、就绪诊断和错误码作为可选字段加入；不新增 Runtime mode 枚举。节点快照把 `daemon_id`、`status_detail` 和进行中的 `operation {name, phase}` 放在顶层，`metadata` 保留同名副本供旧客户端读取。
+响应保留现有核心字段。稳定 `id` 为 Fleet 节点 UUID，`instance_id` 为 Docker container ID，region 为 `local`，image 字段为批准镜像，非适用字符串为空。provider、操作进度、就绪诊断和错误码作为可选字段加入；不新增 Runtime mode 枚举。顶层字段是权威契约：节点快照把 `daemon_id`、`status_detail` 和进行中的 `operation {name, phase}` 放在顶层。`metadata` 只保留状态字段 `provider`、`daemon_id`、`target_state`、`observed_state`、`daemon_ready`、`generation`，不含 `status_detail`/`operation`；读不到的字段按缺失降级，不做猜测。
 
 客户端按用户意图生成幂等键，网络重试复用该键。Store 将键、所有者、请求指纹和结果原子记录；同键不同请求返回 409。异步接受意图与操作完成必须区分，不能将已接受显示为已就绪。
 

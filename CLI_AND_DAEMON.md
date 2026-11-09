@@ -584,8 +584,12 @@ server refuses to start when both are set.
 ### Operate a node
 
 In the workspace UI, open **Runtimes**, choose **Add runtime**, then
-**Cloud Runtime**. The dialog appears only when the API reports a local Fleet
-capability; it offers that provider's allowed spec and no EC2 fields. From the
+**Cloud Runtime**. When the API reports a local Fleet capability
+(`provider: docker`), the dialog renders that provider's specs from the
+capability response and hides the EC2 fields. A non-`docker` legacy SaaS
+response without `operations`/`specs` falls back to the EC2 behavior described
+under [Known limitations](#known-limitations); when `provider` is missing
+entirely, the UI hides the entry rather than guess. From the
 node row you can start, stop, reboot, or delete. Stopping and rebooting keep the
 container, identity, session data and volumes; deletion revokes the node token
 and removes the container and both volumes permanently.
@@ -597,9 +601,12 @@ Fleet control plane and leaves every node container running (see
 
 Node snapshots carry `daemon_id`, `status_detail` (the coordinator's readiness
 payload: CLI installed, model configured, and so on) and, while one is in
-flight, `operation {name, phase}` at the top level. `metadata` keeps a copy of
-the diagnostic fields for older clients. Failed nodes show the detail message
-and readiness booleans in the runtimes dialog instead of a bare status.
+flight, `operation {name, phase}` at the top level; these top-level fields are
+the authoritative contract. `metadata` only carries the state fields
+`provider`, `daemon_id`, `target_state`, `observed_state`, `daemon_ready` and
+`generation` — not `status_detail` or `operation` — and a client treats any
+field it cannot read as missing. Failed nodes show the detail message and
+readiness booleans in the runtimes dialog instead of a bare status.
 
 ### Known limitations
 
