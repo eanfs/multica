@@ -345,7 +345,6 @@ func TestCloudPATVerifier_NegativesNotCached(t *testing.T) {
 	}
 }
 
-
 // TestCloudPATVerifier_LookupRejectsUnknownOwner pins the new
 // owner-existence guard. Cloud says the token is valid, but the
 // caller's lookup says the owner_id does not exist locally — the
@@ -457,5 +456,97 @@ func TestCloudPATVerifier_LookupSuccessIsCached(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&lookupCalls); got != 1 {
 		t.Fatalf("expected 1 lookup call (second hits cache), got %d", got)
+	}
+}
+
+// fakeCloudPATCache exercises the verifier's cache path without Redis. Tests
+// in package auth may install it directly so cache behaviour is covered on
+// machines where REDIS_TEST_URL is unset.
+type fakeCloudPATCache struct {
+	identity CloudPATIdentity
+	getCalls int
+	setCalls int
+}
+
+func (c *fakeCloudPATCache) get(context.Context, string) (CloudPATIdentity, bool) {
+	c.getCalls++
+	if c.identity.OwnerID == "" {
+		return CloudPATIdentity{}, false
+	}
+	return c.identity, true
+}
+
+func (c *fakeCloudPATCache) set(_ context.Context, _ string, id CloudPATIdentity) {
+	c.setCalls++
+	c.identity = id
+}
+
+// TestVerifyDisableCacheAlwaysCallsFleet pins local-fleet mode: a warm cache
+// must not short-circuit mcn_ verification and no new result may be cached, so
+// a revocation takes effect on the very next request.
+func TestVerifyDisableCacheAlwaysCallsFleet(t *testing.T) {
+	var calls int32
+	srv := newFleetServer(t, fleetServerOpts{recordReqs: &calls})
+	defer srv.Close()
+
+	cache := &fakeCloudPATCache{identity: CloudPATIdentity{OwnerID: "stale-owner"}}
+	v := NewCloudPATVerifier(CloudPATVerifierConfig{
+		FleetBaseURL: srv.URL,
+		DisableCache: true,
+	})
+	v.cache = cache
+
+	for i := 0; i < 2; i++ {
+		id, err := v.Verify(context.Background(), "mcn_x", nil)
+		if err != nil {
+			t.Fatalf("verify %d: %v", i, err)
+		}
+		if id.OwnerID == "stale-owner" {
+			t.Fatalf("verify %d returned the cached identity", i)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("fleet calls = %d, want 2 (cache disabled)", got)
+	}
+	if cache.getCalls != 0 || cache.setCalls != 0 {
+		t.Fatalf("cache used with DisableCache: gets=%d sets=%d", cache.getCalls, cache.setCalls)
+	}
+}
+
+// TestVerifyUsesCacheWhenEnabled pins the default SaaS behaviour: the cache
+// short-circuits verification and a successful verify populates it.
+func TestVerifyUsesCacheWhenEnabled(t *testing.T) {
+	cache := &fakeCloudPATCache{identity: CloudPATIdentity{OwnerID: "cached-owner"}}
+	v := NewCloudPATVerifier(CloudPATVerifierConfig{FleetBaseURL: "http://fleet.invalid"})
+	v.cache = cache
+
+	id, err := v.Verify(context.Background(), "mcn_cached", nil)
+	if err != nil {
+		t.Fatalf("Verify failed: %v", err)
+	}
+	if id.OwnerID != "cached-owner" {
+		t.Fatalf("owner = %q, want cached-owner", id.OwnerID)
+	}
+	if cache.getCalls != 1 {
+		t.Fatalf("cache gets = %d, want 1", cache.getCalls)
+	}
+}
+
+// TestVerifyEnabledCacheStoresResult confirms an enabled cache receives a
+// freshly verified identity for the next request.
+func TestVerifyEnabledCacheStoresResult(t *testing.T) {
+	srv := newFleetServer(t, fleetServerOpts{})
+	defer srv.Close()
+
+	cache := &fakeCloudPATCache{}
+	v := NewCloudPATVerifier(CloudPATVerifierConfig{FleetBaseURL: srv.URL})
+	v.cache = cache
+
+	id, err := v.Verify(context.Background(), "mcn_new", nil)
+	if err != nil {
+		t.Fatalf("Verify failed: %v", err)
+	}
+	if cache.setCalls != 1 || cache.identity != id {
+		t.Fatalf("cache not populated: sets=%d identity=%+v want %+v", cache.setCalls, cache.identity, id)
 	}
 }

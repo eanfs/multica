@@ -36,9 +36,16 @@ func (f *fakeCloudRuntimeProxy) Do(ctx context.Context, req cloudruntime.Request
 func useCloudRuntimeProxy(t *testing.T, proxy cloudRuntimeProxy) {
 	t.Helper()
 
-	prevProxy := testHandler.CloudRuntime
+	// Node lifecycle and billing use separate clients now; tests that swap in a
+	// fake expect every cloud proxy call to hit it.
+	prevRuntime := testHandler.CloudRuntime
+	prevBilling := testHandler.CloudBilling
 	testHandler.CloudRuntime = proxy
-	t.Cleanup(func() { testHandler.CloudRuntime = prevProxy })
+	testHandler.CloudBilling = proxy
+	t.Cleanup(func() {
+		testHandler.CloudRuntime = prevRuntime
+		testHandler.CloudBilling = prevBilling
+	})
 }
 
 // TestCreateCloudRuntimeNodeForwardsBody is the post-MUL-2671 happy

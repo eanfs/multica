@@ -114,11 +114,11 @@ func (h *Handler) requireCloudSubscriptionWorkspace(w http.ResponseWriter, r *ht
 }
 
 func (h *Handler) proxyCloudSubscription(w http.ResponseWriter, r *http.Request, method, path, userID string, body []byte, headers http.Header) {
-	if h.CloudRuntime == nil || !h.CloudRuntime.Enabled() {
+	if h.CloudBilling == nil || !h.CloudBilling.Enabled() {
 		writeFeatureDisabled(w, "cloud_runtime_not_configured", "cloud runtime is not configured")
 		return
 	}
-	resp, err := h.CloudRuntime.Do(r.Context(), cloudruntime.Request{
+	resp, err := h.CloudBilling.Do(r.Context(), cloudruntime.Request{
 		Method:    method,
 		Path:      path,
 		Body:      body,
@@ -518,7 +518,7 @@ func (h *Handler) CreateCloudBillingPortalSession(w http.ResponseWriter, r *http
 //     missing-signature with 401 — so it does not change Stripe's
 //     own delivery dashboard view.
 func (h *Handler) HandleCloudBillingStripeWebhook(w http.ResponseWriter, r *http.Request) {
-	if h.CloudRuntime == nil || !h.CloudRuntime.Enabled() {
+	if h.CloudBilling == nil || !h.CloudBilling.Enabled() {
 		writeFeatureDisabled(w, "cloud_runtime_not_configured", "cloud runtime is not configured")
 		return
 	}
@@ -585,7 +585,7 @@ func (h *Handler) HandleCloudBillingStripeWebhook(w http.ResponseWriter, r *http
 		headers["Content-Type"] = cts
 	}
 
-	resp, err := h.CloudRuntime.Do(r.Context(), cloudruntime.Request{
+	resp, err := h.CloudBilling.Do(r.Context(), cloudruntime.Request{
 		Method:    http.MethodPost,
 		Path:      "/api/v1/webhooks/stripe",
 		Body:      body,

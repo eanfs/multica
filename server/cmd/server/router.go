@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/entitlement"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/featureflags"
+	"github.com/multica-ai/multica/server/internal/fleetclient"
 	"github.com/multica-ai/multica/server/internal/gitca"
 	"github.com/multica-ai/multica/server/internal/handler"
 	"github.com/multica-ai/multica/server/internal/integrations/channel"
@@ -396,6 +398,72 @@ func seatCapacityExecutor(cloudURL string) seatcapacity.Executor {
 	return seatcapacity.NewUnavailable(err)
 }
 
+// cloudRuntimeConfig is the resolved local-Fleet wiring. The secret is kept in
+// memory only: it comes from a private file and is never logged, returned, or
+// copied into another Config value.
+type cloudRuntimeConfig struct {
+	localURL       string
+	localSecret    string
+	localEnabled   bool
+	localNamespace string
+}
+
+// resolveCloudRuntimeConfig reads the local Fleet settings and fails closed on
+// every ambiguous or partial configuration:
+//
+//   - MULTICA_CLOUD_URL and MULTICA_LOCAL_FLEET_URL are mutually exclusive;
+//   - a local URL requires both a secret file and a namespace;
+//   - the secret file must be readable and non-empty.
+//
+// With no local URL the zero config is returned and neither the cloud runtime
+// proxy nor the mcn_ verifier changes its SaaS/self-hosted behaviour.
+func resolveCloudRuntimeConfig(getenv func(string) string) (cloudRuntimeConfig, error) {
+	cloudURL := strings.TrimSpace(getenv("MULTICA_CLOUD_URL"))
+	localURL := strings.TrimSpace(getenv("MULTICA_LOCAL_FLEET_URL"))
+	secretFile := strings.TrimSpace(getenv("MULTICA_LOCAL_FLEET_SECRET_FILE"))
+	namespace := strings.TrimSpace(getenv("MULTICA_LOCAL_FLEET_NAMESPACE"))
+
+	if cloudURL != "" && localURL != "" {
+		return cloudRuntimeConfig{}, fmt.Errorf("MULTICA_CLOUD_URL and MULTICA_LOCAL_FLEET_URL are mutually exclusive")
+	}
+	if localURL == "" {
+		return cloudRuntimeConfig{}, nil
+	}
+	if secretFile == "" || namespace == "" {
+		return cloudRuntimeConfig{}, fmt.Errorf("local fleet requires MULTICA_LOCAL_FLEET_SECRET_FILE and MULTICA_LOCAL_FLEET_NAMESPACE")
+	}
+	parsedURL, err := url.Parse(localURL)
+	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" ||
+		parsedURL.User != nil || parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
+		return cloudRuntimeConfig{}, fmt.Errorf("MULTICA_LOCAL_FLEET_URL must be an absolute http(s) URL without credentials, query, or fragment")
+	}
+	secret, err := os.ReadFile(secretFile)
+	if err != nil {
+		return cloudRuntimeConfig{}, fmt.Errorf("read local fleet secret: %w", err)
+	}
+	if strings.TrimSpace(string(secret)) == "" {
+		return cloudRuntimeConfig{}, fmt.Errorf("local fleet secret is empty")
+	}
+	return cloudRuntimeConfig{
+		localURL:       localURL,
+		localSecret:    strings.TrimSpace(string(secret)),
+		localEnabled:   true,
+		localNamespace: namespace,
+	}, nil
+}
+
+// firstNonEmpty returns the first trimmed non-empty value. It keeps the local
+// Fleet URL authoritative over MULTICA_CLOUD_URL without a second branch at
+// every call site; the two are mutually exclusive by configuration.
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 // NewRouterWithOptions builds the fully-configured Chi router and
 // returns the *handler.Handler it was constructed from. Callers that
 // need to drive background lifecycle on services attached to the
@@ -404,6 +472,24 @@ func seatCapacityExecutor(cloudURL string) seatcapacity.Executor {
 // callers that only need the HTTP handler (tests, the simple
 // NewRouter shim) discard the second value.
 func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analyticsClient analytics.Client, rdb redis.UniversalClient, opts RouterOptions) (chi.Router, *handler.Handler) {
+	cloudCfg, err := resolveCloudRuntimeConfig(os.Getenv)
+	if err != nil {
+		slog.Error("cloud runtime configuration invalid", "error", err)
+		os.Exit(1)
+	}
+	var fleetHTTP *http.Client
+	if cloudCfg.localEnabled {
+		// A local Fleet deployment authenticates every API->Fleet call with the
+		// shared service secret. The same client is reused by the cloud runtime
+		// proxy and the mcn_ verifier so both stamp the same credential.
+		fleetHTTP = fleetclient.New(fleetclient.Config{
+			BaseURL: cloudCfg.localURL,
+			Secret:  cloudCfg.localSecret,
+			Timeout: 35 * time.Second,
+		}).HTTPClient()
+		slog.Info("local fleet cloud runtime enabled", "url", cloudCfg.localURL, "namespace", cloudCfg.localNamespace)
+	}
+
 	queries := db.New(pool)
 	emailSvc := service.NewEmailService()
 	daemonHub := opts.DaemonHub
@@ -438,17 +524,21 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		TrustedProxies:                 parseTrustedProxies(os.Getenv("MULTICA_TRUSTED_PROXIES")),
 		CloudURL:                       strings.TrimSpace(os.Getenv("MULTICA_CLOUD_URL")),
 		CloudTimeout:                   35 * time.Second,
-		AttachmentDownloadMode:         os.Getenv("ATTACHMENT_DOWNLOAD_MODE"),
-		AttachmentDownloadURLTTL:       envDuration("ATTACHMENT_DOWNLOAD_URL_TTL", 30*time.Minute),
-		AttachmentFrameAncestors:       origins,
-		PluginSurfaceOrigin:            strings.TrimRight(strings.TrimSpace(os.Getenv("MULTICA_PLUGIN_SURFACE_ORIGIN")), "/"),
-		LLMAPIKey:                      strings.TrimSpace(os.Getenv("MULTICA_LLM_API_KEY")),
-		LLMBaseURL:                     strings.TrimSpace(os.Getenv("MULTICA_LLM_BASE_URL")),
-		LLMDefaultModel:                strings.TrimSpace(os.Getenv("MULTICA_LLM_DEFAULT_MODEL")),
-		LLMMaxRetries:                  opts.LLMMaxRetries,
-		LLMDisableThinking:             opts.LLMDisableThinking,
-		ServerVersion:                  normalizeServerVersion(version),
-		GitExtraCACerts:                gitca.Load(slog.Default()),
+		// Local Fleet overrides the node-runtime target only; CloudURL stays
+		// empty so billing, entitlement, and seat capacity remain disabled.
+		CloudRuntimeBaseURL:      cloudCfg.localURL,
+		CloudRuntimeHTTPClient:   fleetHTTP,
+		AttachmentDownloadMode:   os.Getenv("ATTACHMENT_DOWNLOAD_MODE"),
+		AttachmentDownloadURLTTL: envDuration("ATTACHMENT_DOWNLOAD_URL_TTL", 30*time.Minute),
+		AttachmentFrameAncestors: origins,
+		PluginSurfaceOrigin:      strings.TrimRight(strings.TrimSpace(os.Getenv("MULTICA_PLUGIN_SURFACE_ORIGIN")), "/"),
+		LLMAPIKey:                strings.TrimSpace(os.Getenv("MULTICA_LLM_API_KEY")),
+		LLMBaseURL:               strings.TrimSpace(os.Getenv("MULTICA_LLM_BASE_URL")),
+		LLMDefaultModel:          strings.TrimSpace(os.Getenv("MULTICA_LLM_DEFAULT_MODEL")),
+		LLMMaxRetries:            opts.LLMMaxRetries,
+		LLMDisableThinking:       opts.LLMDisableThinking,
+		ServerVersion:            normalizeServerVersion(version),
+		GitExtraCACerts:          gitca.Load(slog.Default()),
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
 	invitationRateLimits := handler.DefaultInvitationRateLimits()
@@ -489,6 +579,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// so every outbound Fleet/Gateway request feeds the
 		// multica_cloudruntime_request_* histograms.
 		if client, ok := h.CloudRuntime.(*cloudruntime.Client); ok {
+			client.SetRecorder(opts.BusinessMetrics)
+		}
+		if client, ok := h.CloudBilling.(*cloudruntime.Client); ok {
 			client.SetRecorder(opts.BusinessMetrics)
 		}
 	}
@@ -1435,15 +1528,17 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	h.DaemonTokenCache = daemonTokenCache
 	h.MembershipCache = auth.NewMembershipCache(rdb)
 
-	// Cloud PAT verifier: validates mcn_ tokens against Multica Cloud
-	// Fleet. Returns nil when no Cloud URL is configured — the Auth /
-	// DaemonAuth middlewares treat nil as "mcn_ not supported" and
-	// reject with 401, instead of falling through to mul_/JWT paths.
-	// Reuses MULTICA_CLOUD_URL (the same URL the cloud-runtime proxy uses) so a
-	// deployment has one authoritative multica-cloud connection.
+	// Cloud PAT verifier: validates mcn_ tokens against the Fleet control
+	// plane. Returns nil when neither a Cloud URL nor a local Fleet URL is
+	// configured — the Auth / DaemonAuth middlewares treat nil as "mcn_ not
+	// supported" and reject with 401, instead of falling through to mul_/JWT
+	// paths. Local Fleet mode shares the service-secret HTTP client and
+	// disables the positive cache so revocation takes effect immediately.
 	cloudPATVerifier := auth.NewCloudPATVerifier(auth.CloudPATVerifierConfig{
-		FleetBaseURL: signupConfig.CloudURL,
+		FleetBaseURL: firstNonEmpty(cloudCfg.localURL, signupConfig.CloudURL),
 		Redis:        rdb,
+		HTTPClient:   fleetHTTP,
+		DisableCache: cloudCfg.localEnabled,
 	})
 
 	// Empty-claim cache: lets the daemon poll path skip a Postgres

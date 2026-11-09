@@ -119,8 +119,16 @@ type Config struct {
 	// CloudURL enables the SaaS-only multica-cloud connection when set. Empty
 	// keeps self-hosted deployments explicit: Cloud endpoints return 403 instead
 	// of attempting to dial a hard-coded private service.
-	CloudURL                 string
-	CloudTimeout             time.Duration
+	CloudURL     string
+	CloudTimeout time.Duration
+	// CloudRuntimeBaseURL overrides CloudURL for the cloud-runtime node proxy
+	// only. Local Fleet mode sets it while leaving CloudURL empty, so billing,
+	// entitlement, and seat capacity stay disabled.
+	CloudRuntimeBaseURL string
+	// CloudRuntimeHTTPClient is the HTTP client used by the cloud-runtime node
+	// proxy. Local Fleet mode supplies the fleetclient transport that attaches
+	// the service secret; nil keeps the default client.
+	CloudRuntimeHTTPClient   *http.Client
 	AttachmentDownloadMode   string
 	AttachmentDownloadURLTTL time.Duration
 	// AttachmentFrameAncestors are trusted browser origins allowed to embed
@@ -277,7 +285,13 @@ type Handler struct {
 	WebhookAbsoluteIPRateLimiter WebhookRateLimiter
 	InvitationRateLimiters       InvitationRateLimiters
 	WebhookDeliveryWorker        *WebhookDeliveryWorker
-	CloudRuntime                 cloudRuntimeProxy
+	// CloudRuntime proxies node lifecycle requests to the configured cloud
+	// runtime. In local Fleet mode this points at the local Fleet service.
+	CloudRuntime cloudRuntimeProxy
+	// CloudBilling proxies billing and subscription requests. It is built from
+	// CloudURL only, so local Fleet mode cannot accidentally expose billing
+	// through the local service.
+	CloudBilling cloudRuntimeProxy
 	// Test-only HTTP override; nil uses the default client in production.
 	googleOAuthHTTPClient *http.Client
 	// Lark integration. All three are nil when the Lark master key
@@ -535,6 +549,11 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		WebhookAbsoluteIPRateLimiter: NewMemoryWebhookAbsoluteIPRateLimiter(DefaultWebhookAbsoluteIPRateLimit()),
 		InvitationRateLimiters:       NewMemoryInvitationRateLimiters(DefaultInvitationRateLimits()),
 		CloudRuntime: cloudruntime.NewClient(cloudruntime.Config{
+			BaseURL:    cloudRuntimeBaseURL(cfg),
+			Timeout:    cfg.CloudTimeout,
+			HTTPClient: cfg.CloudRuntimeHTTPClient,
+		}),
+		CloudBilling: cloudruntime.NewClient(cloudruntime.Config{
 			BaseURL: cfg.CloudURL,
 			Timeout: cfg.CloudTimeout,
 		}),
@@ -561,6 +580,16 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 	taskSvc.PRSnapshotsEnabled = h.PRRefresh.Enabled()
 
 	return h
+}
+
+// cloudRuntimeBaseURL resolves the node-runtime proxy target. Local Fleet mode
+// overrides CloudURL for this client alone; SaaS leaves the override empty and
+// keeps the historical single-URL wiring.
+func cloudRuntimeBaseURL(cfg Config) string {
+	if strings.TrimSpace(cfg.CloudRuntimeBaseURL) != "" {
+		return cfg.CloudRuntimeBaseURL
+	}
+	return cfg.CloudURL
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
