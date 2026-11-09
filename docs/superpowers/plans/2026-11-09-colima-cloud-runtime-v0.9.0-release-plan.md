@@ -1,8 +1,8 @@
 # v0.9.0 — Colima 本地 Cloud Runtime 版本计划
 
 日期：2026-11-09
-基线：`6ccdab922`（44 个提交，分支 `dsh-5d4b724e-22c8`）
-目标版本：**v0.9.0**（当前最新 tag `v0.8.0`，本版本是本地运行时的首个可用版本）
+基线：已合并最新 `origin/main`（`739756533`，merge commit `fd6958907`）；本分支相对 main 48 个提交、131 个文件（+21,209/−269）
+目标版本：**v0.9.0**（仓库可见最新 tag `v0.8.0`；main 已含 v0.8.1 release-notes 提交，tag 尚未在本仓库创建）
 
 ## 1. 版本目标
 
@@ -43,7 +43,8 @@ Fleet 控制面、PostgreSQL、以及装有 multica daemon + Claude Code 的节�
 
 ## 3. 已完成基线（本版本输入）
 
-- 44 个提交，126+ 文件，覆盖后端/Fleet/数据库迁移 611–624/前端/部署/测试/文档。
+- 分支相对 main 48 个提交、131 个文件，覆盖后端/Fleet/数据库迁移 611–624/前端/部署/测试/文档。
+- 已合并 `origin/main` `739756533`（2026-11-09），解决 3 处冲突：`runtimes-page.tsx`、`runtimes-page.test.tsx`、`server/cmd/server/router.go`；合并后 `go build ./...`、`@multica/views`/`@multica/core` typecheck、views runtimes 359 个测试通过。
 - 真实 Colima 手动端到端已验证：`make up C=api,fleet` → Fleet ready；创建节点 → Claude Runtime online（2.1.0）；stop/start/delete 生命周期；节点容器与卷清理。
 - `TestFleetNodeLifecycleRealDocker` 在 Colima 上 **PASS**（25.27s，隔离 DB + fake-Claude 镜像）。
 - 脚本测试（`fleet-env.test.sh`、`dev-env.test.sh`、`selfhost-config.test.sh`）、Go build/vet、前端 typecheck/相关 vitest 已通过。
@@ -66,8 +67,8 @@ Fleet 控制面、PostgreSQL、以及装有 multica daemon + Claude Code 的节�
 
 | 里程碑 | 内容 | 退出条件 | 预计 |
 | --- | --- | --- | --- |
-| M0 代码冻结 | 分支 `dsh-5d4b724e-22c8` 不再加功能 | 全分支审查通过、无 Critical/Important | 已完成 |
-| M1 Colima 验证 | G1/G2/G3/G7；修复验证中发现的 Defect | 上述门禁绿 | 已完成（G4/G5/G6/G8 待补） |
+| M0 代码冻结 | 分支 `dsh-5d4b724e-22c8` 不再加功能；合并最新 `origin/main` | 全分支审查通过、无 Critical/Important；合并冲突解决后编译/typecheck/定向测试通过 | 已完成 |
+| M1 Colima 验证 | G1/G2/G3/G7；修复验证中发现的 Defect；合并后回归 | 上述门禁绿 | 已完成（G4/G5/G6/G8 待补） |
 | M2 回归与文档 | G4/G5/G6/G8/G9；补 CHANGELOG 与 release notes | 所有门禁绿或书面豁免 | 1–2 天 |
 | M3 发布 v0.9.0 | 合并到 main、CI 绿、打 tag `v0.9.0` | Release workflow 发布成功 | 0.5 天 |
 | M4 版本后 | v0.9.1 修已知限制；v0.10 Multipass 实测/VM-provider 评估 | 各自计划 | 后续 |
@@ -86,7 +87,8 @@ Fleet 控制面、PostgreSQL、以及装有 multica daemon + Claude Code 的节�
 
 ## 7. 发布清单
 
-1. 合并分支到 `main`（PR，按仓库模板）。
+1. 开 PR 前再次合并最新 `origin/main`，解决冲突后运行 `go build ./...`、`pnpm typecheck`、views/core 定向测试（本次合并已验证该流程）。
+2. 合并分支到 `main`（PR，按仓库模板；UI 改动需附截图/录屏）。
 2. 运行 `make check`（Web/API）+ `make test`（PostgreSQL）+ fleetintegration。
 3. 更新 `CHANGELOG`/release notes：新增 Colima/Docker Desktop/Linux 后端、本地 Fleet、节点生命周期、能力驱动 UI、已知限制。
 4. 打 tag：`v0.9.0`（按 `.github/RELEASING.md`，tag push 触发 Release workflow；CI 跑 Go tests + govulncheck）。
@@ -103,6 +105,7 @@ Fleet 控制面、PostgreSQL、以及装有 multica daemon + Claude Code 的节�
 | 密钥进入镜像/build context | 凭证泄漏 | `.dockerignore` 排除 `.dev/`/`.env*`；Fleet 仅通过 secrets 卷注入 |
 | 首次镜像构建耗时 | 启动体验差 | 文档说明首次较慢；CI 预热镜像 |
 | 旧 `.env` 的 host.docker.internal | 切换 Colima 后 API 地址错误 | bind_paths 每次重新派生；旧 env 自动修正 |
+| 上游 main 快速前进，合并冲突 | 分支落后、冲突解决引入回归 | 小步合并；本次已解决 runtimes 页面/测试与 router 冲突，并跑 views/core typecheck + 定向测试；PR 前重复该流程 |
 
 ## 9. 后续版本
 
