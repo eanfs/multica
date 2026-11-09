@@ -265,6 +265,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${MULTICA_LOCAL_FLEET_SECRET_FILE:-.dev/fleet-secret}:/run/secrets/fleet-secret:ro
       - ${MULTICA_FLEET_CREDENTIALS_FILE:-.dev/fleet-credentials.json}:/run/secrets/fleet-credentials.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       MULTICA_FLEET_LISTEN: "0.0.0.0:8091"
       MULTICA_FLEET_CONTAINER: "1"

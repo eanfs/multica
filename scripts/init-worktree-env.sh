@@ -68,8 +68,9 @@ cat >> "$ENV_FILE" <<EOF
 
 # Local Fleet control plane (optional: make up C=fleet). The files below are
 # private: the service secret and the owner/profile map, both 0600.
+# The listen address is deliberately absent: the compose service binds
+# 0.0.0.0:8091 inside the container and nothing on the host consumes it.
 MULTICA_FLEET_PORT=${fleet_port}
-MULTICA_FLEET_LISTEN=127.0.0.1:${fleet_port}
 MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:${fleet_port}
 MULTICA_LOCAL_FLEET_SECRET_FILE=${fleet_secret_dir}/fleet-secret
 MULTICA_LOCAL_FLEET_NAMESPACE=${slug}

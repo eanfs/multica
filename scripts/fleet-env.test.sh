@@ -23,7 +23,7 @@ cat > "$fake_bin/docker" <<'EOF'
 #!/usr/bin/env bash
 printf 'docker %s\n' "$*" >> "$DOCKER_LOG"
 case "$*" in
-  *"ps -q fleet"*) [ "${FAKE_DOCKER_NO_CONTAINER:-0}" = 1 ] || printf 'container-id\n' ;;
+  *"ps -q fleet"*|*"ps -aq fleet"*) [ "${FAKE_DOCKER_NO_CONTAINER:-0}" = 1 ] || printf 'container-id\n' ;;
 esac
 exit 0
 EOF
@@ -75,7 +75,7 @@ source "$root/scripts/fleet-env.sh"
 # fleet_up: build both images, start the compose service, wait for readyz, and
 # leave the two private files Fleet needs on disk with owner-only access.
 # ---------------------------------------------------------------------------
-fleet_up || fail "fleet_up failed"
+FAKE_DOCKER_NO_CONTAINER=1 fleet_up || fail "fleet_up failed"
 
 require_log "$DOCKER_LOG" "docker build -f $root/docker/runtime/Dockerfile"
 require_log "$DOCKER_LOG" "docker build -f $root/docker/fleet/Dockerfile"
@@ -86,6 +86,21 @@ require_log "$CURL_LOG" "http://127.0.0.1:8092/readyz"
 [ -s "$MULTICA_FLEET_CREDENTIALS_FILE" ] || fail "fleet_up did not create the credentials file"
 [ "$(file_mode "$MULTICA_LOCAL_FLEET_SECRET_FILE")" = 600 ] || fail "fleet secret mode is not 0600"
 [ "$(file_mode "$MULTICA_FLEET_CREDENTIALS_FILE")" = 600 ] || fail "fleet credentials mode is not 0600"
+
+# ---------------------------------------------------------------------------
+# A ready service is not rebuilt or recreated by a repeated "make up C=fleet".
+# ---------------------------------------------------------------------------
+builds_before="$(grep -c 'docker build' "$DOCKER_LOG" || true)"
+ups_before="$(grep -c 'up -d fleet' "$DOCKER_LOG" || true)"
+up_output="$(fleet_up)" || fail "fleet_up on a ready service failed"
+case "$up_output" in
+  *"already running"*) ;;
+  *) fail "fleet_up did not short-circuit a ready service: $up_output" ;;
+esac
+[ "$(grep -c 'docker build' "$DOCKER_LOG" || true)" = "$builds_before" ] \
+  || fail "fleet_up rebuilt images for a ready service"
+[ "$(grep -c 'up -d fleet' "$DOCKER_LOG" || true)" = "$ups_before" ] \
+  || fail "fleet_up recreated a ready service"
 
 # ---------------------------------------------------------------------------
 # fleet_status: ask compose for the service, then report ready only when the
@@ -106,6 +121,18 @@ status="$(
   fleet_status
 )"
 [ "$status" = "stopped|-|not running" ] || fail "stopped fleet_status = $status"
+
+# "Anything to clean" is exactly what destroy needs to know before it decides
+# whether to touch Docker at all.
+fleet_resources_present || fail "a running fleet service must count as present"
+(
+  export FAKE_DOCKER_NO_CONTAINER=1
+  if fleet_resources_present; then exit 1; fi
+) || fail "an absent fleet service must not count as present"
+(
+  export PATH="$fail_bin:$PATH"
+  if fleet_resources_present; then exit 1; fi
+) || fail "an unreachable daemon must not count as fleet resources"
 
 # ---------------------------------------------------------------------------
 # docker compose is the lifecycle: stop for down, rm for destroy. Cleanup is

@@ -6,7 +6,7 @@
 #   make status                  # what is running, and is it mine
 #   make list                    # every environment on this machine
 #   make down                    # stop the processes, keep the data
-#   make destroy                 # stop, then delete database + profile + slot
+#   make destroy                 # stop, then delete fleet + database + profile + slot
 #
 # Three rules the old flow got wrong, and why they are here:
 #
@@ -340,7 +340,12 @@ ensure_dev_code() {
 }
 
 rewrite_env_ports() {
-  local file="$REPO_ROOT/$1" offset=$2 backend=$3 frontend=$4 db=$5 tmp database_url escaped_database_url
+  local file offset=$2 backend=$3 frontend=$4 db=$5 fleet=$(( $3 + 20 ))
+  local tmp database_url escaped_database_url
+  case "$1" in
+    /*) file="$1" ;;
+    *) file="$REPO_ROOT/$1" ;;
+  esac
   database_url="$(database_url_with_name "${DATABASE_URL:-}" "$db")" \
     || die "DATABASE_URL is not a valid PostgreSQL URL: ${DATABASE_URL:-<unset>}"
   escaped_database_url="$(printf '%s' "$database_url" | sed 's/[\\&|]/\\&/g')"
@@ -356,7 +361,23 @@ rewrite_env_ports() {
     -e "s|^MULTICA_APP_URL=.*|MULTICA_APP_URL=http://localhost:${frontend}|" \
     -e "s|^NEXT_PUBLIC_API_URL=.*|NEXT_PUBLIC_API_URL=http://localhost:${backend}|" \
     -e "s|^NEXT_PUBLIC_WS_URL=.*|NEXT_PUBLIC_WS_URL=ws://localhost:${backend}/ws|" \
+    -e "s|^MULTICA_FLEET_PORT=.*|MULTICA_FLEET_PORT=${fleet}|" \
+    -e "s|^MULTICA_LOCAL_FLEET_URL=.*|MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:${fleet}|" \
+    -e "s|^MULTICA_FLEET_API_URL=.*|MULTICA_FLEET_API_URL=http://host.docker.internal:${backend}|" \
     "$file" > "$tmp"
+  # A file written before Fleet existed has no variables for sed to replace, so
+  # append the allocation. A commented template line is not a definition and
+  # therefore also gets a concrete value; every other variable is untouched.
+  if ! grep -q '^MULTICA_FLEET_PORT=' "$tmp" \
+    || ! grep -q '^MULTICA_LOCAL_FLEET_URL=' "$tmp" \
+    || ! grep -q '^MULTICA_FLEET_API_URL=' "$tmp"; then
+    {
+      printf '\n# Fleet endpoints follow this environment'"'"'s allocated ports.\n'
+      grep -q '^MULTICA_FLEET_PORT=' "$tmp" || printf 'MULTICA_FLEET_PORT=%s\n' "$fleet"
+      grep -q '^MULTICA_LOCAL_FLEET_URL=' "$tmp" || printf 'MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:%s\n' "$fleet"
+      grep -q '^MULTICA_FLEET_API_URL=' "$tmp" || printf 'MULTICA_FLEET_API_URL=http://host.docker.internal:%s\n' "$backend"
+    } >> "$tmp"
+  fi
   mv "$tmp" "$file"
 }
 
@@ -1340,7 +1361,7 @@ cmd_down() {
 }
 
 cmd_destroy() {
-  local name="" assume_yes=0 reply admin_url failures=0
+  local name="" assume_yes=0 reply admin_url failures=0 destroy_fleet=0
   local expected_workspaces expected_desktop_data
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -1351,8 +1372,18 @@ cmd_destroy() {
   done
   resolve_env_for_read "$name"
 
+  # Fleet is a separate confirmation from the database: it owns node containers,
+  # volumes and networks outside the registry, and leaving them behind after the
+  # environment is gone makes them unidentifiable. Only ask when there is
+  # something to remove, so a checkout that never ran Fleet is unaffected.
+  if fleet_resources_present; then destroy_fleet=1; fi
+
   if [ "$assume_yes" != 1 ]; then
-    printf 'Destroy %s? This drops database %s and profile %s. [y/N] ' "$NAME" "$DB_NAME" "$PROFILE"
+    printf 'Destroy %s? This drops database %s and profile %s.' "$NAME" "$DB_NAME" "$PROFILE"
+    if [ "$destroy_fleet" = 1 ]; then
+      printf ' Fleet containers/volumes for namespace %s are removed too.' "$(fleet_namespace)"
+    fi
+    printf ' [y/N] '
     read -r reply || reply=n
     case "$reply" in y|Y|yes|YES) ;; *) printf 'Cancelled.\n'; return 0 ;; esac
   fi
@@ -1363,6 +1394,17 @@ cmd_destroy() {
   for comp in $ALL_COMPONENTS; do
     if ! stop_component "$comp"; then failures=$((failures + 1)); fi
   done
+
+  # Clean Fleet before the database: a partial Fleet cleanup keeps the manifest
+  # and slot, so the next "make destroy" can retry instead of dropping the only
+  # record of the node containers it failed to remove.
+  if [ "$destroy_fleet" = 1 ]; then
+    info "Fleet: removing the fleet service and namespace $(fleet_namespace) containers/volumes."
+    if ! fleet_destroy; then
+      die "$NAME Fleet cleanup failed; database $DB_NAME and the manifest were kept so 'make destroy' can retry."
+    fi
+    ok "removed Fleet resources for namespace $(fleet_namespace)"
+  fi
 
   if command -v psql >/dev/null 2>&1; then
     admin_url="$(admin_database_url "$DATABASE_URL")"
@@ -1563,7 +1605,8 @@ desktop (Electron), fleet (local Docker cloud runtime; implies api).
 Anything selected implies api.
 
 down keeps the database, the CLI profile and the allocated slot.
-destroy consumes them.
+destroy consumes them, and removes Fleet's namespace-scoped containers and
+volumes before dropping the database.
 EOF
 }
 

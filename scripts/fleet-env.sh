@@ -79,6 +79,18 @@ fleet_build_images() {
 
 fleet_up() {
   fleet_require_docker || return 1
+
+  # Short-circuit when this checkout's service is already serving traffic: a
+  # repeated "make up C=fleet" must not rebuild images or recreate a live
+  # container (which would drop the node containers attached to it).
+  local existing
+  if existing="$(docker compose -f "$(fleet_compose_file)" ps -q fleet 2>/dev/null)" \
+    && [ -n "$existing" ] \
+    && curl -fsS --max-time 2 "$(fleet_url)/readyz" >/dev/null 2>&1; then
+    printf 'fleet: already running at %s\n' "$(fleet_url)"
+    return 0
+  fi
+
   fleet_ensure_secret_files || return 1
   fleet_build_images || return 1
   docker compose -f "$(fleet_compose_file)" up -d fleet || return 1
@@ -129,36 +141,87 @@ fleet_status() {
   fi
 }
 
+# True when this checkout has anything for Fleet to remove: the compose
+# service (running or stopped) or namespace-labelled node containers, volumes or
+# networks. An unreachable daemon is "nothing to clean", so destroy can still
+# run on a machine whose Docker Desktop was closed.
+fleet_resources_present() {
+  local reason ns
+  if ! reason="$(fleet_docker_unavailable_reason)"; then
+    return 1
+  fi
+  ns="$(fleet_namespace)"
+  [ -z "$(docker compose -f "$(fleet_compose_file)" ps -aq fleet 2>/dev/null || true)" ] || return 0
+  [ -z "$(docker ps -aq --filter "label=multica.fleet.namespace=$ns" 2>/dev/null || true)" ] || return 0
+  [ -z "$(docker volume ls -q --filter "label=multica.fleet.namespace=$ns" 2>/dev/null || true)" ] || return 0
+  [ -z "$(docker network ls -q --filter "label=multica.fleet.namespace=$ns" 2>/dev/null || true)" ] || return 0
+  return 1
+}
+
 # Removes the compose service and the Docker resources Fleet created for this
 # checkout's namespace. Only namespace-labelled resources are matched; a global
 # "docker prune" would delete other checkouts' data.
+#
+# Every failure is counted instead of swallowed: dev-env.sh destroy runs this
+# before it drops the database, and a half-removed Fleet must keep the manifest
+# so the cleanup can be retried rather than silently leaking node containers.
 fleet_destroy() {
   fleet_require_docker || return 1
-  local ns containers volumes networks id
+  local ns failures=0 containers="" volumes="" networks="" id
   ns="$(fleet_namespace)"
-  docker compose -f "$(fleet_compose_file)" rm -sf fleet >/dev/null 2>&1 || true
 
-  containers="$(docker ps -aq --filter "label=multica.fleet.namespace=$ns" 2>/dev/null || true)"
+  if ! docker compose -f "$(fleet_compose_file)" rm -sf fleet >/dev/null 2>&1; then
+    printf 'fleet: failed to remove the compose fleet service\n' >&2
+    failures=$((failures + 1))
+  fi
+
+  if ! containers="$(docker ps -aq --filter "label=multica.fleet.namespace=$ns" 2>/dev/null)"; then
+    printf 'fleet: failed to list node containers for namespace %s\n' "$ns" >&2
+    failures=$((failures + 1))
+    containers=""
+  fi
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    docker rm -f "$id" >/dev/null 2>&1 || true
+    if ! docker rm -f "$id" >/dev/null 2>&1; then
+      printf 'fleet: failed to remove node container %s\n' "$id" >&2
+      failures=$((failures + 1))
+    fi
   done <<EOF
 $containers
 EOF
 
-  volumes="$(docker volume ls -q --filter "label=multica.fleet.namespace=$ns" 2>/dev/null || true)"
+  if ! volumes="$(docker volume ls -q --filter "label=multica.fleet.namespace=$ns" 2>/dev/null)"; then
+    printf 'fleet: failed to list node volumes for namespace %s\n' "$ns" >&2
+    failures=$((failures + 1))
+    volumes=""
+  fi
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    docker volume rm "$id" >/dev/null 2>&1 || true
+    if ! docker volume rm "$id" >/dev/null 2>&1; then
+      printf 'fleet: failed to remove node volume %s\n' "$id" >&2
+      failures=$((failures + 1))
+    fi
   done <<EOF
 $volumes
 EOF
 
-  networks="$(docker network ls --filter "label=multica.fleet.namespace=$ns" --format '{{.Name}}' 2>/dev/null || true)"
+  if ! networks="$(docker network ls --filter "label=multica.fleet.namespace=$ns" --format '{{.Name}}' 2>/dev/null)"; then
+    printf 'fleet: failed to list node networks for namespace %s\n' "$ns" >&2
+    failures=$((failures + 1))
+    networks=""
+  fi
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    docker network rm "$id" >/dev/null 2>&1 || true
+    if ! docker network rm "$id" >/dev/null 2>&1; then
+      printf 'fleet: failed to remove node network %s\n' "$id" >&2
+      failures=$((failures + 1))
+    fi
   done <<EOF
 $networks
 EOF
+
+  if [ "$failures" -ne 0 ]; then
+    printf 'fleet: %s cleanup failure(s); namespace %s is not fully removed\n' "$failures" "$ns" >&2
+    return 1
+  fi
 }

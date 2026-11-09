@@ -238,7 +238,7 @@ db-up: ## Start the shared PostgreSQL container used by main and worktrees
 	@$(COMPOSE) up -d postgres
 
 db-down: ## Stop the shared PostgreSQL container without removing its Docker volume
-	@$(COMPOSE) down
+	@$(COMPOSE) stop postgres
 
 db-drop: ## Permanently drop the current env's local database after confirmation
 	$(REQUIRE_ENV)

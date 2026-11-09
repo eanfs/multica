@@ -17,14 +17,38 @@ export MULTICA_DEV_PROFILES_HOME="$tmp_dir/profiles"
 
 fake_bin="$tmp_dir/bin"
 mkdir -p "$fake_bin"
+
+# destroy talks to Fleet, and Fleet talks to Docker. A fake CLI keeps every test
+# in this file away from a real daemon (and from the real "stop fleet"/"rm fleet"
+# those verbs would issue to a developer's running environment).
+export DOCKER_LOG="$tmp_dir/docker.log"
+export PSQL_LOG="$tmp_dir/psql.log"
+: > "$DOCKER_LOG"
+: > "$PSQL_LOG"
+
+cat > "$fake_bin/docker" <<'EOF'
+#!/usr/bin/env bash
+printf 'docker %s\n' "$*" >> "$DOCKER_LOG"
+if [ "${FAKE_DOCKER_FAIL_RM:-0}" = 1 ]; then
+  case "$*" in
+    *"rm -sf fleet"*) exit 1 ;;
+  esac
+fi
+case "$*" in
+  *"ps -q fleet"*|*"ps -aq fleet"*) [ "${FAKE_DOCKER_NO_CONTAINER:-0}" = 1 ] || printf 'container-id\n' ;;
+esac
+exit 0
+EOF
+
 cat > "$fake_bin/psql" <<'EOF'
 #!/usr/bin/env bash
+printf 'psql %s\n' "$*" >> "$PSQL_LOG"
 case " $* " in
   *" DROP DATABASE "*) [ "${FAIL_DROP:-0}" != 1 ] ;;
   *) printf '1\n' ;;
 esac
 EOF
-chmod +x "$fake_bin/psql"
+chmod +x "$fake_bin/docker" "$fake_bin/psql"
 export PATH="$fake_bin:$PATH"
 
 fail() {
@@ -215,6 +239,69 @@ rewritten="$(bash -c 'source "$1"; database_url_with_name "$2" "$3"' _ \
   || fail "database URL rewrite changed more than the database name: $rewritten"
 
 # ---------------------------------------------------------------------------
+# Reallocating ports moves the Fleet endpoints too: Fleet is published on
+# backend+20 and calls back to this checkout's backend. An env file that predates
+# Fleet gets the variables appended; every other value stays byte-identical.
+# ---------------------------------------------------------------------------
+fleet_env="$tmp_dir/fleet-ports.env"
+cat > "$fleet_env" <<'EOF'
+PORT=18081
+FRONTEND_PORT=13001
+FRONTEND_ORIGIN=http://localhost:13001
+POSTGRES_DB=multica_old_1
+DATABASE_URL=postgres://multica:multica@localhost:5432/multica_old_1?sslmode=disable
+MULTICA_SERVER_URL=ws://localhost:18081/ws
+MULTICA_PUBLIC_URL=http://localhost:18081
+MULTICA_APP_URL=http://localhost:13001
+NEXT_PUBLIC_API_URL=http://localhost:18081
+NEXT_PUBLIC_WS_URL=ws://localhost:18081/ws
+MULTICA_FLEET_PORT=18900
+MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:18900
+MULTICA_FLEET_API_URL=http://host.docker.internal:18081
+UNRELATED=fleet-must-not-touch
+EOF
+DATABASE_URL='postgres://multica:multica@localhost:5432/multica_old_1?sslmode=disable' \
+  bash -c 'source "$1"; rewrite_env_ports "$2" 7 18087 13007 multica_new_7' _ \
+  "$root_dir/scripts/dev-env.sh" "$fleet_env" \
+  || fail "rewrite_env_ports failed on an env file with Fleet variables"
+for expected in \
+  'MULTICA_FLEET_PORT=18107' \
+  'MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:18107' \
+  'MULTICA_FLEET_API_URL=http://host.docker.internal:18087' \
+  'UNRELATED=fleet-must-not-touch'; do
+  grep -Fqx "$expected" "$fleet_env" || fail "rewrite_env_ports did not set: $expected"
+done
+[ "$(grep -c '^MULTICA_FLEET_PORT=' "$fleet_env")" = 1 ] \
+  || fail "rewrite_env_ports duplicated MULTICA_FLEET_PORT"
+
+fleet_plain_env="$tmp_dir/fleet-plain-ports.env"
+cat > "$fleet_plain_env" <<'EOF'
+PORT=18081
+FRONTEND_PORT=13001
+FRONTEND_ORIGIN=http://localhost:13001
+POSTGRES_DB=multica_old_2
+DATABASE_URL=postgres://multica:multica@localhost:5432/multica_old_2?sslmode=disable
+MULTICA_SERVER_URL=ws://localhost:18081/ws
+MULTICA_PUBLIC_URL=http://localhost:18081
+MULTICA_APP_URL=http://localhost:13001
+NEXT_PUBLIC_API_URL=http://localhost:18081
+NEXT_PUBLIC_WS_URL=ws://localhost:18081/ws
+KEEP_ME=unchanged
+EOF
+DATABASE_URL='postgres://multica:multica@localhost:5432/multica_old_2?sslmode=disable' \
+  bash -c 'source "$1"; rewrite_env_ports "$2" 8 18088 13008 multica_new_8' _ \
+  "$root_dir/scripts/dev-env.sh" "$fleet_plain_env" \
+  || fail "rewrite_env_ports failed on an env file without Fleet variables"
+for expected in \
+  'MULTICA_FLEET_PORT=18108' \
+  'MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:18108' \
+  'MULTICA_FLEET_API_URL=http://host.docker.internal:18088' \
+  'KEEP_ME=unchanged' \
+  'PORT=18088'; do
+  grep -Fqx "$expected" "$fleet_plain_env" || fail "rewrite_env_ports did not produce: $expected"
+done
+
+# ---------------------------------------------------------------------------
 # A registered environment is visible to both renderings, and the JSON one
 # parses — agents read it, so a stray log line in it is a broken contract.
 # ---------------------------------------------------------------------------
@@ -349,11 +436,36 @@ FAIL_DROP=1 dev_env destroy drop-fails-904 --yes > "$out" 2>&1 || status=$?
 require_contains "$out" "manifest and slot were kept"
 dev_env destroy drop-fails-904 --yes > "$out" 2>&1 || fail "retrying destroy after database recovery failed"
 
+# Fleet is cleaned BEFORE the database: a partial Fleet cleanup must keep the
+# manifest/slot and must not drop a database whose node containers still exist.
+write_manifest "fleet-fails-905" "$root_dir" 905
+: > "$DOCKER_LOG"
+: > "$PSQL_LOG"
+status=0
+FAKE_DOCKER_FAIL_RM=1 dev_env destroy fleet-fails-905 --yes > "$out" 2>&1 || status=$?
+[ "$status" -ne 0 ] || fail "destroy succeeded when Fleet cleanup failed"
+[ -f "$MULTICA_DEV_HOME/envs/fleet-fails-905/manifest.env" ] \
+  || fail "destroy discarded the manifest after Fleet cleanup failed"
+require_contains "$out" "Fleet cleanup failed"
+if grep -Fq 'DROP DATABASE' "$PSQL_LOG"; then
+  fail "destroy dropped the database before Fleet cleanup succeeded"
+fi
+dev_env destroy fleet-fails-905 --yes > "$out" 2>&1 \
+  || fail "retrying destroy after Fleet recovery failed"
+[ ! -d "$MULTICA_DEV_HOME/envs/fleet-fails-905" ] \
+  || fail "retried destroy left the environment directory behind"
+
 # ---------------------------------------------------------------------------
 # destroy consumes the manifest: the slot is free afterwards, which is what
-# makes the registry an allocator rather than a second place to leak.
+# makes the registry an allocator rather than a second place to leak. It also
+# removes the Fleet compose service and namespace-scoped resources.
 # ---------------------------------------------------------------------------
+: > "$DOCKER_LOG"
+: > "$PSQL_LOG"
 dev_env destroy probe-901 --yes > "$out" 2>&1 || fail "destroy must succeed"
+require_contains "$DOCKER_LOG" "rm -sf fleet"
+require_contains "$DOCKER_LOG" "label=multica.fleet.namespace="
+require_contains "$PSQL_LOG" "DROP DATABASE"
 [ ! -d "$MULTICA_DEV_HOME/envs/probe-901" ] || fail "destroy left the environment directory behind"
 
 dev_env list > "$out" 2>&1 || fail "list must succeed after destroy"
