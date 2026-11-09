@@ -98,6 +98,14 @@ chmod +x "$colima_bin/colima"
 [ "$(PATH="$colima_bin:$no_colima_path" FAKE_DOCKER_CONTEXT=colima fleet_host_gateway)" = "192.168.5.2" ] \
   || fail "Colima must resolve the Lima host address through colima ssh"
 
+# Multipass keeps the host at 192.168.64.1 on its default network.
+[ "$(FAKE_DOCKER_CONTEXT=multica-multipass fleet_host_gateway)" = "192.168.64.1" ] \
+  || fail "Multipass must use the default host gateway 192.168.64.1"
+[ "$(FAKE_DOCKER_CONTEXT=multica-multipass fleet_api_url 8080)" = "http://192.168.64.1:8080" ] \
+  || fail "Multipass API URL is wrong"
+[ "$(FAKE_DOCKER_CONTEXT=multica-multipass MULTICA_FLEET_HOST_GATEWAY=10.9.8.7 fleet_host_gateway)" = "10.9.8.7" ] \
+  || fail "MULTICA_FLEET_HOST_GATEWAY must override the backend default"
+
 # ---------------------------------------------------------------------------
 # fleet_up: build both images, start the compose service, wait for readyz, and
 # leave the two private files Fleet needs on disk with owner-only access.

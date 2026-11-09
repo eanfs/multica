@@ -58,10 +58,29 @@ fleet_uses_colima() {
   return 1
 }
 
+fleet_uses_multipass() {
+  local context
+  context="$(fleet_docker_context)"
+  case "$context" in
+    multipass|multipass-*|multica-multipass|multica-multipass-*) return 0 ;;
+  esac
+  case "${DOCKER_HOST:-}" in
+    ssh://*multipass*) return 0 ;;
+  esac
+  return 1
+}
+
 fleet_host_gateway() {
   local ip
   if [ -n "${MULTICA_FLEET_HOST_GATEWAY:-}" ]; then
     printf '%s' "$MULTICA_FLEET_HOST_GATEWAY"
+    return 0
+  fi
+  if fleet_uses_multipass; then
+    # Multipass on macOS uses 192.168.64.0/24 and runs the host-side DHCP/DNS
+    # at 192.168.64.1, which is the address a VM's containers use to reach the
+    # host API. Override with MULTICA_FLEET_HOST_GATEWAY for a custom network.
+    printf '192.168.64.1'
     return 0
   fi
   if fleet_uses_colima; then

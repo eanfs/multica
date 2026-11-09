@@ -661,7 +661,8 @@ docker volume ls --filter label=multica.fleet.namespace=<namespace>
 - Node cannot reach the API: Docker Desktop resolves
   `host.docker.internal`; Colima (Lima) exposes the host as
   `host.lima.internal` (the launch script resolves the address through
-  `colima ssh`); on a plain Linux Docker daemon set a container-reachable
+  `colima ssh`); Multipass uses its default gateway `192.168.64.1`; on a
+  plain Linux Docker daemon set a container-reachable
   `MULTICA_FLEET_API_URL` (the node network gateway) or
   `MULTICA_FLEET_HOST_GATEWAY`. `curl` from inside a node container is the
   quickest check.

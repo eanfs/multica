@@ -167,7 +167,9 @@ environment reuses the database, the profile and any component already healthy.
 
 `make up C=api,web,fleet` adds the Fleet control plane. It requires a running
 Docker daemon — Docker Desktop, Colima on macOS (`brew install colima &&
-colima start`), or a Linux daemon — and builds `multica/fleet:dev` plus
+colima start`), Multipass (`bash deploy/multipass/setup.sh`, then
+`docker context use multica-multipass`), or a Linux daemon — and builds
+`multica/fleet:dev` plus
 `multica/runtime-claude:dev` on first start, so the first run is noticeably
 slower than later ones. Fleet manages node containers through the Docker socket;
 keep its port on loopback. `make up C=fleet` writes the empty 0600
