@@ -11,6 +11,32 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const approveFleetNodeOperation = `-- name: ApproveFleetNodeOperation :execrows
+UPDATE fleet_node_operation
+SET phase = 'approved', approved_at = now(), updated_at = now()
+WHERE id = $1 AND phase = 'prepared'
+`
+
+func (q *Queries) ApproveFleetNodeOperation(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, approveFleetNodeOperation, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const countActiveFleetNodeOperationsForNode = `-- name: CountActiveFleetNodeOperationsForNode :one
+SELECT count(*) FROM fleet_node_operation
+WHERE node_id = $1 AND phase IN ('prepared', 'approved', 'executing')
+`
+
+func (q *Queries) CountActiveFleetNodeOperationsForNode(ctx context.Context, nodeID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveFleetNodeOperationsForNode, nodeID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countActiveTasksForDaemon = `-- name: CountActiveTasksForDaemon :one
 SELECT count(*) FROM agent_task_queue q
 JOIN agent a ON a.id = q.agent_id
@@ -27,6 +53,27 @@ type CountActiveTasksForDaemonParams struct {
 
 func (q *Queries) CountActiveTasksForDaemon(ctx context.Context, arg CountActiveTasksForDaemonParams) (int64, error) {
 	row := q.db.QueryRow(ctx, countActiveTasksForDaemon, arg.WorkspaceID, arg.DaemonID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countActiveTasksForFleetDaemon = `-- name: CountActiveTasksForFleetDaemon :one
+SELECT count(*) FROM agent_task_queue q
+JOIN agent a ON a.id = q.agent_id
+JOIN agent_runtime r ON r.id = a.runtime_id
+WHERE r.daemon_id = $1
+  AND r.owner_id = $2
+  AND q.status IN ('dispatched', 'running', 'waiting_local_directory')
+`
+
+type CountActiveTasksForFleetDaemonParams struct {
+	DaemonID pgtype.Text `json:"daemon_id"`
+	OwnerID  pgtype.UUID `json:"owner_id"`
+}
+
+func (q *Queries) CountActiveTasksForFleetDaemon(ctx context.Context, arg CountActiveTasksForFleetDaemonParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveTasksForFleetDaemon, arg.DaemonID, arg.OwnerID)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -66,6 +113,27 @@ type CountQueuedTasksForDaemonParams struct {
 
 func (q *Queries) CountQueuedTasksForDaemon(ctx context.Context, arg CountQueuedTasksForDaemonParams) (int64, error) {
 	row := q.db.QueryRow(ctx, countQueuedTasksForDaemon, arg.WorkspaceID, arg.DaemonID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countQueuedTasksForFleetDaemon = `-- name: CountQueuedTasksForFleetDaemon :one
+SELECT count(*) FROM agent_task_queue q
+JOIN agent a ON a.id = q.agent_id
+JOIN agent_runtime r ON r.id = a.runtime_id
+WHERE r.daemon_id = $1
+  AND r.owner_id = $2
+  AND q.status IN ('queued', 'deferred')
+`
+
+type CountQueuedTasksForFleetDaemonParams struct {
+	DaemonID pgtype.Text `json:"daemon_id"`
+	OwnerID  pgtype.UUID `json:"owner_id"`
+}
+
+func (q *Queries) CountQueuedTasksForFleetDaemon(ctx context.Context, arg CountQueuedTasksForFleetDaemonParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countQueuedTasksForFleetDaemon, arg.DaemonID, arg.OwnerID)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -721,6 +789,25 @@ func (q *Queries) RecordFleetNodeOperationFailure(ctx context.Context, arg Recor
 		arg.ID,
 	)
 	return err
+}
+
+const recordFleetNodeOperationPrepareFailure = `-- name: RecordFleetNodeOperationPrepareFailure :execrows
+UPDATE fleet_node_operation
+SET error = $1, updated_at = now()
+WHERE id = $2 AND phase = 'prepared'
+`
+
+type RecordFleetNodeOperationPrepareFailureParams struct {
+	Error string      `json:"error"`
+	ID    pgtype.UUID `json:"id"`
+}
+
+func (q *Queries) RecordFleetNodeOperationPrepareFailure(ctx context.Context, arg RecordFleetNodeOperationPrepareFailureParams) (int64, error) {
+	result, err := q.db.Exec(ctx, recordFleetNodeOperationPrepareFailure, arg.Error, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const revokeFleetNodeCredentialsByNode = `-- name: RevokeFleetNodeCredentialsByNode :exec

@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/cloudruntime"
@@ -134,7 +135,11 @@ type Config struct {
 	// verifier is shared with SaaS Cloud, so the credential alone does not
 	// imply fleet ownership: SaaS deployments must leave this false and never
 	// write fleet provenance onto their runtimes.
-	LocalFleetEnabled        bool
+	LocalFleetEnabled bool
+	// LocalFleetNamespace scopes the fleet_node and fleet_node_operation rows
+	// this API coordinates. Empty leaves the coordinator disabled even when
+	// LocalFleetEnabled is set, because an unscoped maintenance lock is unsafe.
+	LocalFleetNamespace      string
 	AttachmentDownloadMode   string
 	AttachmentDownloadURLTTL time.Duration
 	// AttachmentFrameAncestors are trusted browser origins allowed to embed
@@ -294,6 +299,9 @@ type Handler struct {
 	// CloudRuntime proxies node lifecycle requests to the configured cloud
 	// runtime. In local Fleet mode this points at the local Fleet service.
 	CloudRuntime cloudRuntimeProxy
+	// LocalFleet coordinates local Fleet maintenance in the shared database.
+	// Nil outside local mode, where stop/reboot/delete keep proxying to Cloud.
+	LocalFleet *localFleetCoordinator
 	// CloudBilling proxies billing and subscription requests. It is built from
 	// CloudURL only and never shares the CloudRuntime client, so local Fleet
 	// mode (CloudURL empty) cannot expose billing through the local service.
@@ -565,6 +573,14 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		}),
 		LLM: llmClient,
 		cfg: cfg,
+	}
+	// Local Fleet operations are coordinated by the API against the same
+	// database Fleet reads; Cloud and self-hosted deployments keep the plain
+	// proxy because LocalFleetEnabled is false there.
+	if cfg.LocalFleetEnabled && strings.TrimSpace(cfg.LocalFleetNamespace) != "" {
+		if pool, ok := txStarter.(*pgxpool.Pool); ok && pool != nil {
+			h.LocalFleet = newLocalFleetCoordinator(pool, cfg.LocalFleetNamespace, h.localFleetDiagnose, time.Now)
+		}
 	}
 	h.WebhookDeliveryWorker = NewWebhookDeliveryWorker(h)
 	// The default passthrough scheduler reports sweeper-race recoveries so the

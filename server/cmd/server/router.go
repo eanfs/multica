@@ -480,6 +480,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// Fleet: the shared mcn_ verifier also accepts SaaS Cloud credentials,
 		// and those runtimes must stay ordinary, deletable rows.
 		LocalFleetEnabled:        cloudCfg.LocalEnabled,
+		LocalFleetNamespace:      cloudCfg.LocalNamespace,
 		AttachmentDownloadMode:   os.Getenv("ATTACHMENT_DOWNLOAD_MODE"),
 		AttachmentDownloadURLTTL: envDuration("ATTACHMENT_DOWNLOAD_URL_TTL", 30*time.Minute),
 		AttachmentFrameAncestors: origins,

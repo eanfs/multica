@@ -76,10 +76,20 @@ SELECT * FROM fleet_node_operation WHERE id = @id;
 SELECT * FROM fleet_node_operation
 WHERE idempotency_key = @idempotency_key AND idempotency_key <> '';
 
+-- name: ApproveFleetNodeOperation :execrows
+UPDATE fleet_node_operation
+SET phase = 'approved', approved_at = now(), updated_at = now()
+WHERE id = @id AND phase = 'prepared';
+
 -- name: MarkFleetNodeOperationPhase :execrows
 UPDATE fleet_node_operation
 SET phase = @phase, updated_at = now()
 WHERE id = @id AND phase = @expected_phase;
+
+-- name: RecordFleetNodeOperationPrepareFailure :execrows
+UPDATE fleet_node_operation
+SET error = @error, updated_at = now()
+WHERE id = @id AND phase = 'prepared';
 
 -- name: RecordFleetNodeOperationFailure :exec
 UPDATE fleet_node_operation
@@ -115,6 +125,26 @@ JOIN agent_runtime r ON r.id = a.runtime_id
 WHERE r.workspace_id = @workspace_id
   AND r.daemon_id = @daemon_id
   AND q.status IN ('queued', 'deferred');
+
+-- name: CountActiveTasksForFleetDaemon :one
+SELECT count(*) FROM agent_task_queue q
+JOIN agent a ON a.id = q.agent_id
+JOIN agent_runtime r ON r.id = a.runtime_id
+WHERE r.daemon_id = @daemon_id
+  AND r.owner_id = @owner_id
+  AND q.status IN ('dispatched', 'running', 'waiting_local_directory');
+
+-- name: CountQueuedTasksForFleetDaemon :one
+SELECT count(*) FROM agent_task_queue q
+JOIN agent a ON a.id = q.agent_id
+JOIN agent_runtime r ON r.id = a.runtime_id
+WHERE r.daemon_id = @daemon_id
+  AND r.owner_id = @owner_id
+  AND q.status IN ('queued', 'deferred');
+
+-- name: CountActiveFleetNodeOperationsForNode :one
+SELECT count(*) FROM fleet_node_operation
+WHERE node_id = @node_id AND phase IN ('prepared', 'approved', 'executing');
 
 -- name: GetFleetCredentialProfileByOwner :one
 SELECT * FROM fleet_credential_profile WHERE owner_id = @owner_id;

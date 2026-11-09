@@ -105,6 +105,15 @@ func (h *Handler) proxyCloudRuntime(w http.ResponseWriter, r *http.Request, meth
 		writeFeatureDisabled(w, "cloud_runtime_not_configured", "cloud runtime is not configured")
 		return
 	}
+	// In local Fleet mode the API persists the maintenance barrier and approves
+	// the operation in the shared database; Fleet's coordinator executes it.
+	// Forwarding stop/reboot/delete to Fleet would bypass that barrier.
+	if h.LocalFleet != nil {
+		if operation, ok := localFleetProxyOperation(method, path); ok {
+			h.coordinateLocalFleet(w, r, operation)
+			return
+		}
+	}
 	h.proxyCloudRequest(w, r, h.CloudRuntime, method, path, opts)
 }
 
