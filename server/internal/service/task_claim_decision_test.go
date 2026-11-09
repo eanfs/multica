@@ -31,6 +31,8 @@ func TestClaimDecisionReasonFor(t *testing.T) {
 		{name: "runtime no capacity maps to runtime cap", outcome: claimOutcomeRuntimeNoCapacity, scope: claimScope{claimPath: claimPathBatch}, want: claimReasonRuntimeConcurrencyCap},
 		{name: "no runtime maps to unbound agent", outcome: claimOutcomeNoRuntime, scope: claimScope{claimPath: claimPathAgent}, want: claimReasonAgentUnbound},
 		{name: "runtime mismatch maps to rebound agent", outcome: claimOutcomeRuntimeMismatch, scope: claimScope{claimPath: claimPathRuntime}, want: claimReasonAgentRebound},
+		{name: "fleet guard rejection is barrier backpressure", outcome: claimOutcomeFleetGuardRejected, scope: claimScope{claimPath: claimPathRuntime}, want: claimReasonFleetBarrier},
+		{name: "fleet guard rejection on batch", outcome: claimOutcomeFleetGuardRejected, scope: claimScope{claimPath: claimPathBatch}, want: claimReasonFleetBarrier},
 
 		{name: "no tasks with candidates is unclaimed", outcome: claimOutcomeNoTasks, scope: claimScope{claimPath: claimPathRuntime, candidates: 1}, want: claimReasonCandidatesUnclaimed},
 		{name: "no tasks unclaimed on batch path", outcome: claimOutcomeNoTasks, scope: claimScope{claimPath: claimPathBatch, candidates: 2}, want: claimReasonCandidatesUnclaimed},

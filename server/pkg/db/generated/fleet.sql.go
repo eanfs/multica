@@ -11,6 +11,24 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const acquireFleetNodeExclusiveLock = `-- name: AcquireFleetNodeExclusiveLock :exec
+SELECT pg_advisory_xact_lock($1)
+`
+
+func (q *Queries) AcquireFleetNodeExclusiveLock(ctx context.Context, key int64) error {
+	_, err := q.db.Exec(ctx, acquireFleetNodeExclusiveLock, key)
+	return err
+}
+
+const acquireFleetNodeSharedLock = `-- name: AcquireFleetNodeSharedLock :exec
+SELECT pg_advisory_xact_lock_shared($1)
+`
+
+func (q *Queries) AcquireFleetNodeSharedLock(ctx context.Context, key int64) error {
+	_, err := q.db.Exec(ctx, acquireFleetNodeSharedLock, key)
+	return err
+}
+
 const approveFleetNodeOperation = `-- name: ApproveFleetNodeOperation :execrows
 UPDATE fleet_node_operation
 SET phase = 'approved', approved_at = now(), error = '', updated_at = now()
@@ -261,6 +279,18 @@ func (q *Queries) CreateFleetNodeOperation(ctx context.Context, arg CreateFleetN
 	return i, err
 }
 
+const getActiveFleetNodeCredentialCount = `-- name: GetActiveFleetNodeCredentialCount :one
+SELECT count(*) FROM fleet_node_credential
+WHERE node_id = $1 AND revoked_at IS NULL
+`
+
+func (q *Queries) GetActiveFleetNodeCredentialCount(ctx context.Context, nodeID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, getActiveFleetNodeCredentialCount, nodeID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const getFleetCredentialProfileByOwner = `-- name: GetFleetCredentialProfileByOwner :one
 SELECT id, owner_id, profile_name, config_version, created_at, updated_at FROM fleet_credential_profile WHERE owner_id = $1
 `
@@ -459,6 +489,42 @@ func (q *Queries) GetFleetNodeCredentialByHash(ctx context.Context, tokenHash st
 		&i.ContainerID,
 		&i.TargetState,
 		&i.ObservedState,
+	)
+	return i, err
+}
+
+const getFleetNodeForClaim = `-- name: GetFleetNodeForClaim :one
+SELECT id, owner_id, namespace, name, container_id, container_name, daemon_id, image, spec, target_state, observed_state, daemon_ready, health_checked_at, generation, idempotency_key, status_detail, error, created_at, updated_at FROM fleet_node WHERE daemon_id = $1 AND namespace = $2
+`
+
+type GetFleetNodeForClaimParams struct {
+	DaemonID  string `json:"daemon_id"`
+	Namespace string `json:"namespace"`
+}
+
+func (q *Queries) GetFleetNodeForClaim(ctx context.Context, arg GetFleetNodeForClaimParams) (FleetNode, error) {
+	row := q.db.QueryRow(ctx, getFleetNodeForClaim, arg.DaemonID, arg.Namespace)
+	var i FleetNode
+	err := row.Scan(
+		&i.ID,
+		&i.OwnerID,
+		&i.Namespace,
+		&i.Name,
+		&i.ContainerID,
+		&i.ContainerName,
+		&i.DaemonID,
+		&i.Image,
+		&i.Spec,
+		&i.TargetState,
+		&i.ObservedState,
+		&i.DaemonReady,
+		&i.HealthCheckedAt,
+		&i.Generation,
+		&i.IdempotencyKey,
+		&i.StatusDetail,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }

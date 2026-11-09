@@ -1,3 +1,9 @@
+-- name: AcquireFleetNodeSharedLock :exec
+SELECT pg_advisory_xact_lock_shared(@key);
+
+-- name: AcquireFleetNodeExclusiveLock :exec
+SELECT pg_advisory_xact_lock(@key);
+
 -- name: CreateFleetNode :one
 INSERT INTO fleet_node (owner_id, namespace, name, container_id, container_name, daemon_id, image, spec, target_state, observed_state, idempotency_key)
 VALUES (@owner_id, @namespace, @name, @container_id, @container_name, @daemon_id, @image, @spec, @target_state, @observed_state, @idempotency_key)
@@ -7,6 +13,9 @@ RETURNING *;
 SELECT * FROM fleet_node WHERE id = @id AND namespace = @namespace;
 
 -- name: GetFleetNodeByDaemonID :one
+SELECT * FROM fleet_node WHERE daemon_id = @daemon_id AND namespace = @namespace;
+
+-- name: GetFleetNodeForClaim :one
 SELECT * FROM fleet_node WHERE daemon_id = @daemon_id AND namespace = @namespace;
 
 -- name: GetFleetNodeByContainerID :one
@@ -59,6 +68,10 @@ SELECT c.id, c.node_id, c.token_hash, c.revoked_at, c.created_at,
 FROM fleet_node_credential c
 JOIN fleet_node n ON n.id = c.node_id
 WHERE c.token_hash = @token_hash AND c.revoked_at IS NULL;
+
+-- name: GetActiveFleetNodeCredentialCount :one
+SELECT count(*) FROM fleet_node_credential
+WHERE node_id = @node_id AND revoked_at IS NULL;
 
 -- name: RevokeFleetNodeCredentialsByNode :exec
 UPDATE fleet_node_credential SET revoked_at = now()

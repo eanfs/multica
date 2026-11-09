@@ -71,6 +71,10 @@ type TaskService struct {
 	// stale dispatched task. It removes the unconditional reclaim UPDATE from
 	// idle claim polls while missing/error states preserve the DB fallback.
 	ReclaimCheck *ReclaimCheckCache
+	// FleetGuard is the local Fleet claim barrier. Nil disables it (deployments
+	// without a local Fleet); the guard itself skips ordinary runtimes, so a
+	// configured guard costs a single runtime lookup per claim.
+	FleetGuard FleetGuard
 	// Composio computes the per-task MCP overlay (Stage 3 of the Composio
 	// epic, MUL-3721) — the integration's "current user's connected apps
 	// → MCP session URL" hook called from each Enqueue* path. Optional: a
@@ -126,6 +130,14 @@ type ComposioOverlayBuilder interface {
 
 type TaskWakeupNotifier interface {
 	NotifyTaskAvailable(runtimeID, taskID string)
+}
+
+// FleetGuard validates that a runtime managed by the local Fleet may claim
+// right now. q is bound to the caller's claim transaction; the implementation
+// must take the shared node lock on it so the check cannot outlive the claim.
+// Any non-nil error withholds the claim.
+type FleetGuard interface {
+	CheckClaim(ctx context.Context, q *db.Queries, runtimeID pgtype.UUID) error
 }
 
 // triggerSummaryMaxLen caps the snapshot length so the row stays cheap to
@@ -3647,6 +3659,18 @@ func (s *TaskService) claimTask(ctx context.Context, agentID, runtimeID pgtype.U
 			return nil
 		}
 
+		// Local Fleet claims pass the advisory-lock barrier on this transaction,
+		// before any capacity work. The shared node lock is held until this
+		// transaction commits, so a concurrent stop/delete either finished
+		// before the guard read state or waits for this claim. A rejection
+		// withholds the task without failing the daemon's poll.
+		if s.FleetGuard != nil {
+			if err := s.FleetGuard.CheckClaim(ctx, qtx, claimRuntimeID); err != nil {
+				outcome = claimOutcomeFleetGuardRejected
+				return nil
+			}
+		}
+
 		t0 = time.Now()
 		running, err := qtx.CountRunningTasks(ctx, agentID)
 		countRunningMs = time.Since(t0).Milliseconds()
@@ -4265,6 +4289,9 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 
 	// 6. Claim per distinct agent through the runtime-scoped helper, preserving
 	// per-(issue, agent) serialization, capacity caps, and dispatch side effects.
+	// Every iteration is its own claim transaction, so the Fleet guard runs
+	// inside the transaction of the candidate it gates; no lock is carried
+	// across runtimes, which makes a batch deadlock-free without reordering.
 	triedAgents := make(map[string]struct{}, len(candidates))
 	// Candidate rows per agent for the claim-decision scope; see the singular
 	// path above for why it is counted before the loop.
