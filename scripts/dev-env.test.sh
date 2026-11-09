@@ -8,12 +8,32 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
+
+# Manifests below use the checkout as DIR, so bind_paths creates the Fleet
+# secret there. Remove it on exit unless it predated this run — a developer's
+# real secret must survive the suite.
+repo_secret="$root_dir/.dev/fleet-secret"
+repo_secret_preexisting=0
+[ -f "$repo_secret" ] && repo_secret_preexisting=1
+cleanup() {
+  rm -rf "$tmp_dir"
+  if [ "$repo_secret_preexisting" = 0 ]; then
+    rm -f "$repo_secret"
+    rmdir "$root_dir/.dev" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
 
 export MULTICA_DEV_HOME="$tmp_dir/dev"
 export MULTICA_DEV_WORKSPACES_PARENT="$tmp_dir/workspaces-parent"
 export MULTICA_DEV_DESKTOP_APP_DATA="$tmp_dir/app-data"
 export MULTICA_DEV_PROFILES_HOME="$tmp_dir/profiles"
+
+# The test owns Fleet's variable namespace: inheriting the caller's .env would
+# make every derived value below depend on the invoking checkout.
+unset MULTICA_LOCAL_FLEET_URL MULTICA_LOCAL_FLEET_SECRET_FILE MULTICA_LOCAL_FLEET_NAMESPACE \
+  MULTICA_FLEET_PORT MULTICA_FLEET_API_URL MULTICA_FLEET_RUNTIME_IMAGE \
+  MULTICA_FLEET_CREDENTIALS_FILE MULTICA_CLOUD_URL
 
 fake_bin="$tmp_dir/bin"
 mkdir -p "$fake_bin"
@@ -29,6 +49,10 @@ export PSQL_LOG="$tmp_dir/psql.log"
 cat > "$fake_bin/docker" <<'EOF'
 #!/usr/bin/env bash
 printf 'docker %s\n' "$*" >> "$DOCKER_LOG"
+# Simulates a stopped Docker daemon without a second fake CLI.
+if [ "${FAKE_DOCKER_UNAVAILABLE:-0}" = 1 ] && [ "${1:-}" = info ]; then
+  exit 1
+fi
 if [ "${FAKE_DOCKER_FAIL_RM:-0}" = 1 ]; then
   case "$*" in
     *"rm -sf fleet"*) exit 1 ;;
@@ -54,6 +78,10 @@ export PATH="$fake_bin:$PATH"
 fail() {
   echo "FAIL: $*" >&2
   exit 1
+}
+
+file_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
 require_contains() {
@@ -244,8 +272,10 @@ rewritten="$(bash -c 'source "$1"; database_url_with_name "$2" "$3"' _ \
 
 # ---------------------------------------------------------------------------
 # Reallocating ports moves the Fleet endpoints too: Fleet is published on
-# backend+20 and calls back to this checkout's backend. An env file that predates
-# Fleet gets the variables appended; every other value stays byte-identical.
+# backend+20 and calls back to this checkout's backend. The API also needs the
+# local URL, the secret file and the namespace at boot, so an env file that
+# predates Fleet gets all of them appended and the secret itself is generated
+# with owner-only access; every other value stays byte-identical.
 # ---------------------------------------------------------------------------
 fleet_env="$tmp_dir/fleet-ports.env"
 cat > "$fleet_env" <<'EOF'
@@ -264,6 +294,7 @@ MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:18900
 MULTICA_FLEET_API_URL=http://host.docker.internal:18081
 UNRELATED=fleet-must-not-touch
 EOF
+fleet_secret="$tmp_dir/.dev/fleet-secret"
 DATABASE_URL='postgres://multica:multica@localhost:5432/multica_old_1?sslmode=disable' \
   bash -c 'source "$1"; rewrite_env_ports "$2" 7 18087 13007 multica_new_7' _ \
   "$root_dir/scripts/dev-env.sh" "$fleet_env" \
@@ -271,12 +302,18 @@ DATABASE_URL='postgres://multica:multica@localhost:5432/multica_old_1?sslmode=di
 for expected in \
   'MULTICA_FLEET_PORT=18107' \
   'MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:18107' \
+  "MULTICA_LOCAL_FLEET_SECRET_FILE=$fleet_secret" \
   'MULTICA_FLEET_API_URL=http://host.docker.internal:18087' \
   'UNRELATED=fleet-must-not-touch'; do
   grep -Fqx "$expected" "$fleet_env" || fail "rewrite_env_ports did not set: $expected"
 done
-[ "$(grep -c '^MULTICA_FLEET_PORT=' "$fleet_env")" = 1 ] \
-  || fail "rewrite_env_ports duplicated MULTICA_FLEET_PORT"
+grep -Eq '^MULTICA_LOCAL_FLEET_NAMESPACE=[a-z0-9_]+$' "$fleet_env" \
+  || fail "rewrite_env_ports did not set MULTICA_LOCAL_FLEET_NAMESPACE"
+for key in MULTICA_FLEET_PORT MULTICA_LOCAL_FLEET_URL MULTICA_LOCAL_FLEET_SECRET_FILE MULTICA_LOCAL_FLEET_NAMESPACE; do
+  [ "$(grep -c "^$key=" "$fleet_env")" = 1 ] || fail "rewrite_env_ports duplicated $key"
+done
+[ -f "$fleet_secret" ] || fail "rewrite_env_ports did not create the Fleet service secret"
+[ "$(file_mode "$fleet_secret")" = 600 ] || fail "the Fleet service secret is not 0600"
 
 fleet_plain_env="$tmp_dir/fleet-plain-ports.env"
 cat > "$fleet_plain_env" <<'EOF'
@@ -299,42 +336,112 @@ DATABASE_URL='postgres://multica:multica@localhost:5432/multica_old_2?sslmode=di
 for expected in \
   'MULTICA_FLEET_PORT=18108' \
   'MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:18108' \
+  "MULTICA_LOCAL_FLEET_SECRET_FILE=$fleet_secret" \
   'MULTICA_FLEET_API_URL=http://host.docker.internal:18088' \
   'KEEP_ME=unchanged' \
   'PORT=18088'; do
   grep -Fqx "$expected" "$fleet_plain_env" || fail "rewrite_env_ports did not produce: $expected"
 done
+grep -Eq '^MULTICA_LOCAL_FLEET_NAMESPACE=[a-z0-9_]+$' "$fleet_plain_env" \
+  || fail "rewrite_env_ports did not add MULTICA_LOCAL_FLEET_NAMESPACE"
+
+# A Cloud URL and a local Fleet URL abort the server at boot. Cloud wins: the
+# local endpoint is never appended, and a value left by an earlier local run is
+# cleared instead of bricking the next start.
+fleet_cloud_env="$tmp_dir/cloud/fleet-cloud.env"
+mkdir -p "$tmp_dir/cloud"
+cat > "$fleet_cloud_env" <<'EOF'
+PORT=18081
+FRONTEND_PORT=13001
+POSTGRES_DB=multica_old_3
+DATABASE_URL=postgres://multica:multica@localhost:5432/multica_old_3?sslmode=disable
+MULTICA_CLOUD_URL=https://cloud.example.com
+MULTICA_FLEET_PORT=18901
+MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:18901
+MULTICA_LOCAL_FLEET_SECRET_FILE=.dev/fleet-secret
+EOF
+MULTICA_CLOUD_URL='https://cloud.example.com' \
+  DATABASE_URL='postgres://multica:multica@localhost:5432/multica_old_3?sslmode=disable' \
+  bash -c 'source "$1"; rewrite_env_ports "$2" 9 18089 13009 multica_new_9' _ \
+  "$root_dir/scripts/dev-env.sh" "$fleet_cloud_env" \
+  || fail "rewrite_env_ports failed on a Cloud-configured env file"
+if grep -Eq '^MULTICA_LOCAL_FLEET_URL=.+' "$fleet_cloud_env"; then
+  fail "rewrite_env_ports kept a local Fleet URL next to MULTICA_CLOUD_URL"
+fi
+if grep -Eq '^MULTICA_LOCAL_FLEET_SECRET_FILE=.+' "$fleet_cloud_env"; then
+  fail "rewrite_env_ports kept a local Fleet secret next to MULTICA_CLOUD_URL"
+fi
+[ ! -f "$tmp_dir/cloud/.dev/fleet-secret" ] \
+  || fail "rewrite_env_ports generated a Fleet secret for a Cloud-configured env"
+for expected in \
+  'MULTICA_FLEET_PORT=18109' \
+  'MULTICA_FLEET_API_URL=http://host.docker.internal:18089'; do
+  grep -Fqx "$expected" "$fleet_cloud_env" || fail "rewrite_env_ports did not produce: $expected"
+done
+
+# up clears a stale local endpoint on disk as well, because make re-reads the
+# env file for the child and the file outranks the exported shell value.
+stale_env="$tmp_dir/cloud/stale.env"
+printf 'MULTICA_CLOUD_URL=https://cloud.example.com\nMULTICA_LOCAL_FLEET_URL=http://127.0.0.1:18901\nMULTICA_LOCAL_FLEET_SECRET_FILE=.dev/fleet-secret\n' > "$stale_env"
+bash -c 'source "$1"; clear_local_fleet_env_file "$2"' _ \
+  "$root_dir/scripts/dev-env.sh" "$stale_env" > "$out"
+require_contains "$out" "Cleared local Fleet wiring"
+grep -Fqx 'MULTICA_LOCAL_FLEET_URL=' "$stale_env" \
+  || fail "clear_local_fleet_env_file kept the local Fleet URL"
+grep -Fqx 'MULTICA_LOCAL_FLEET_SECRET_FILE=' "$stale_env" \
+  || fail "clear_local_fleet_env_file kept the local Fleet secret path"
 
 # ---------------------------------------------------------------------------
-# up calls bind_paths before save_manifest, so a newly registered environment
-# records the Fleet namespace its Compose project and destroy labels depend on.
-# The namespace comes from that environment's DIR, not from a caller variable.
+# bind_paths is what makes an existing .env (or a manifest written before the
+# wiring) address the Fleet the API and Compose actually use: URL, secret file
+# and namespace derive from the allocated port and this environment's DIR, never
+# from the invoking shell, and the secret exists before the API reads it. up
+# calls it before save_manifest, so the manifest records the same identity.
 # ---------------------------------------------------------------------------
 (
   # shellcheck disable=SC1090
   source "$root_dir/scripts/dev-env.sh"
-  NAME=namespace-908
-  DIR="$tmp_dir/namespace-908-checkout"
-  PROFILE=dev-namespace-908
-  OFFSET=908
-  BACKEND_PORT=18988
-  FRONTEND_PORT=13908
-  DESKTOP_RENDERER_PORT=6082
-  DESKTOP_APP_SUFFIX=namespace-908
+  NAME=derive-910
+  DIR="$tmp_dir/derive-910-checkout"
+  mkdir -p "$DIR"
+  PROFILE=dev-derive-910
+  OFFSET=910
+  BACKEND_PORT=18990
+  FRONTEND_PORT=13910
+  DESKTOP_RENDERER_PORT=6084
+  DESKTOP_APP_SUFFIX=derive-910
   CREATED_AT=2026-01-01T00:00:00Z
   OWNER=human
   TTL_HOURS=0
   ENV_FILE=.env.example
-  DB_NAME=multica_namespace_908
-  DATABASE_URL=postgres://multica:multica@localhost:5432/multica_namespace_908?sslmode=disable
+  DB_NAME=multica_derive_910
+  DATABASE_URL=postgres://multica:multica@localhost:5432/multica_derive_910?sslmode=disable
   WORKSPACES_ROOT="$MULTICA_DEV_WORKSPACES_PARENT/multica_workspaces_$PROFILE"
+  EXPIRES_AT=""
   bind_paths
+  [ "$MULTICA_FLEET_PORT" = 19010 ] || fail "bind_paths did not derive the Fleet port"
+  [ "$MULTICA_LOCAL_FLEET_URL" = "http://127.0.0.1:19010" ] \
+    || fail "bind_paths did not derive the Fleet URL: $MULTICA_LOCAL_FLEET_URL"
+  [ "$MULTICA_LOCAL_FLEET_SECRET_FILE" = "$DIR/.dev/fleet-secret" ] \
+    || fail "bind_paths did not derive the Fleet secret path: $MULTICA_LOCAL_FLEET_SECRET_FILE"
+  [ -f "$MULTICA_LOCAL_FLEET_SECRET_FILE" ] || fail "bind_paths did not create the Fleet secret"
+  [ "$(file_mode "$MULTICA_LOCAL_FLEET_SECRET_FILE")" = 600 ] \
+    || fail "bind_paths created the Fleet secret with the wrong mode"
+  [ "$MULTICA_LOCAL_FLEET_NAMESPACE" = derive_910_checkout ] \
+    || fail "bind_paths derived namespace = $MULTICA_LOCAL_FLEET_NAMESPACE"
+  [ "$MULTICA_FLEET_API_URL" = "http://host.docker.internal:18990" ] \
+    || fail "bind_paths derived the Fleet API URL = $MULTICA_FLEET_API_URL"
   save_manifest
-)
-grep -Fqx 'MULTICA_LOCAL_FLEET_NAMESPACE=namespace_908_checkout' \
-  "$MULTICA_DEV_HOME/envs/namespace-908/manifest.env" \
+) || fail "bind_paths did not wire Fleet for a fresh checkout"
+
+manifest_910="$MULTICA_DEV_HOME/envs/derive-910/manifest.env"
+grep -Fqx 'MULTICA_LOCAL_FLEET_NAMESPACE=derive_910_checkout' "$manifest_910" \
   || fail "save_manifest did not record the derived Fleet namespace"
-rm -rf "$MULTICA_DEV_HOME/envs/namespace-908"
+grep -Fqx 'MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:19010' "$manifest_910" \
+  || fail "save_manifest did not record the derived Fleet URL"
+grep -Fqx "MULTICA_LOCAL_FLEET_SECRET_FILE=$tmp_dir/derive-910-checkout/.dev/fleet-secret" "$manifest_910" \
+  || fail "save_manifest did not record the Fleet secret path"
+rm -rf "$MULTICA_DEV_HOME/envs/derive-910"
 
 # ---------------------------------------------------------------------------
 # A registered environment is visible to both renderings, and the JSON one
@@ -489,6 +596,47 @@ dev_env destroy fleet-fails-905 --yes > "$out" 2>&1 \
   || fail "retrying destroy after Fleet recovery failed"
 [ ! -d "$MULTICA_DEV_HOME/envs/fleet-fails-905" ] \
   || fail "retried destroy left the environment directory behind"
+
+# ---------------------------------------------------------------------------
+# An unreachable Docker daemon is not "nothing to clean": Fleet owns node
+# containers, volumes and networks outside Compose, so dropping the database
+# now would discard the only record that could ever remove them. destroy must
+# fail closed, keep the manifest and slot, and succeed once Docker answers.
+# ---------------------------------------------------------------------------
+write_manifest "docker-down-912" "$root_dir" 912 "docker_down_ns"
+: > "$DOCKER_LOG"
+: > "$PSQL_LOG"
+status=0
+( export FAKE_DOCKER_UNAVAILABLE=1; dev_env destroy docker-down-912 --yes > "$out" 2>&1 ) || status=$?
+[ "$status" -ne 0 ] || fail "destroy succeeded while Docker was unreachable"
+[ -f "$MULTICA_DEV_HOME/envs/docker-down-912/manifest.env" ] \
+  || fail "destroy discarded the manifest while Docker was unreachable"
+if grep -Fq 'DROP DATABASE' "$PSQL_LOG"; then
+  fail "destroy dropped the database while Docker was unreachable"
+fi
+require_contains "$out" "Docker is unreachable"
+require_contains "$out" "manifest and slot were kept"
+dev_env destroy docker-down-912 --yes > "$out" 2>&1 \
+  || fail "retrying destroy after Docker recovered failed"
+[ ! -d "$MULTICA_DEV_HOME/envs/docker-down-912" ] \
+  || fail "retried destroy left the Docker-unreachable environment behind"
+
+# A manifest from before Fleet existed records no namespace, but an unreachable
+# daemon can still hide network-labelled resources; it takes the same path.
+write_manifest "docker-down-legacy-913" "$root_dir" 913
+: > "$PSQL_LOG"
+status=0
+( export FAKE_DOCKER_UNAVAILABLE=1; dev_env destroy docker-down-legacy-913 --yes > "$out" 2>&1 ) || status=$?
+[ "$status" -ne 0 ] || fail "destroy succeeded for a pre-Fleet manifest while Docker was unreachable"
+[ -f "$MULTICA_DEV_HOME/envs/docker-down-legacy-913/manifest.env" ] \
+  || fail "destroy discarded a pre-Fleet manifest while Docker was unreachable"
+if grep -Fq 'DROP DATABASE' "$PSQL_LOG"; then
+  fail "destroy dropped the database for a pre-Fleet manifest while Docker was unreachable"
+fi
+dev_env destroy docker-down-legacy-913 --yes > "$out" 2>&1 \
+  || fail "retrying destroy of a pre-Fleet manifest after Docker recovered failed"
+[ ! -d "$MULTICA_DEV_HOME/envs/docker-down-legacy-913" ] \
+  || fail "retried destroy left the pre-Fleet environment behind"
 
 # ---------------------------------------------------------------------------
 # destroy consumes the manifest: the slot is free afterwards, which is what

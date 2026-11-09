@@ -178,6 +178,13 @@ Compose project is still present, remove it once with
 `docker ps -a --filter label=com.docker.compose.project=multica --filter label=com.docker.compose.service=fleet`
 and `docker rm -f <container>` before starting the per-worktree project.
 
+`make destroy` also refuses to drop the database when Docker is unreachable or
+this namespace's Docker cleanup failed: Fleet's node containers and volumes live
+outside Compose, so the manifest and slot are kept for a retry. The remaining
+Fleet gaps (task enqueue barrier, recovery of a prepared operation after an API
+crash, node concurrency, old-project containers) are listed in the design
+document's [known gaps](docs/superpowers/specs/2026-10-04-local-docker-cloud-runtime-design.md#146-未覆盖项与已知缺口).
+
 Three properties are worth knowing because the old flow lacked them:
 
 - **API, Web and Desktop renderer ports, database names and profiles are allocated, not recomputed.** The

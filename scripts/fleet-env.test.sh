@@ -130,16 +130,13 @@ status="$(
 [ "$status" = "stopped|-|not running" ] || fail "stopped fleet_status = $status"
 
 # "Anything to clean" is exactly what destroy needs to know before it decides
-# whether to touch Docker at all.
-fleet_resources_present || fail "a running fleet service must count as present"
-(
-  export FAKE_DOCKER_NO_CONTAINER=1
-  if fleet_resources_present; then exit 1; fi
-) || fail "an absent fleet service must not count as present"
-(
-  export PATH="$fail_bin:$PATH"
-  if fleet_resources_present; then exit 1; fi
-) || fail "an unreachable daemon must not count as fleet resources"
+# whether to touch Docker at all. A daemon that cannot be reached is a third
+# state, never "absent": the node containers live outside the compose project.
+[ "$(fleet_resources_present)" = present ] || fail "a running fleet service must count as present"
+[ "$(FAKE_DOCKER_NO_CONTAINER=1 fleet_resources_present)" = absent ] \
+  || fail "an absent fleet service must count as absent"
+[ "$(PATH="$fail_bin:$PATH" fleet_resources_present)" = unknown ] \
+  || fail "an unreachable daemon must count as unknown, not absent"
 
 # ---------------------------------------------------------------------------
 # docker compose is the lifecycle: stop for down, rm for destroy. Cleanup is

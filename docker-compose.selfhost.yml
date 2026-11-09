@@ -30,6 +30,14 @@
 # read it back with `docker compose port`, so the health check and the printed
 # URL always match what was actually published.
 
+# The optional local Fleet control plane is not part of this stack. It is a
+# source-checkout component (make up C=api,web,fleet): its backend must receive
+# MULTICA_LOCAL_FLEET_URL, MULTICA_LOCAL_FLEET_SECRET_FILE and
+# MULTICA_LOCAL_FLEET_NAMESPACE at boot, and its node containers reach the API at
+# a host address rather than at the Compose service name backend. A fleet
+# profile here could only start a control plane the API ignores, so it was
+# removed instead of documented as working.
+
 name: multica
 
 services:
@@ -243,47 +251,6 @@ services:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
       NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-}
       GOOGLE_ANALYTICS_ID: ${GOOGLE_ANALYTICS_ID:-}
-    restart: unless-stopped
-
-  # Optional local Fleet control plane. Enable it with:
-  #   docker compose -f docker-compose.selfhost.yml --profile fleet up -d
-  # It shares this stack's PostgreSQL and manages node containers through the
-  # Docker socket, so the host port stays on loopback. multica/fleet:dev is a
-  # local build; build it from this checkout before enabling the profile.
-  fleet:
-    profiles: ["fleet"]
-    image: multica/fleet:dev
-    build:
-      context: .
-      dockerfile: docker/fleet/Dockerfile
-    depends_on:
-      postgres:
-        condition: service_healthy
-    ports:
-      - "127.0.0.1:${MULTICA_FLEET_PORT:-8091}:8091"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ${MULTICA_LOCAL_FLEET_SECRET_FILE:-.dev/fleet-secret}:/run/secrets/fleet-secret:ro
-      - ${MULTICA_FLEET_CREDENTIALS_FILE:-.dev/fleet-credentials.json}:/run/secrets/fleet-credentials.json:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      MULTICA_FLEET_LISTEN: "0.0.0.0:8091"
-      MULTICA_FLEET_CONTAINER: "1"
-      MULTICA_FLEET_NAMESPACE: ${MULTICA_LOCAL_FLEET_NAMESPACE:-selfhost}
-      MULTICA_FLEET_SECRET_FILE: /run/secrets/fleet-secret
-      MULTICA_FLEET_DOCKER_HOST: unix:///var/run/docker.sock
-      MULTICA_FLEET_NODE_NETWORK: multica-fleet-${MULTICA_LOCAL_FLEET_NAMESPACE:-selfhost}
-      MULTICA_FLEET_RUNTIME_IMAGE: ${MULTICA_FLEET_RUNTIME_IMAGE:-multica/runtime-claude:dev}
-      MULTICA_FLEET_API_URL: ${MULTICA_FLEET_API_URL:-http://backend:8080}
-      MULTICA_FLEET_CREDENTIALS_FILE: /run/secrets/fleet-credentials.json
-      DATABASE_URL: postgres://${POSTGRES_USER:-multica}:${POSTGRES_PASSWORD:-multica}@postgres:5432/${POSTGRES_DB:-multica}?sslmode=disable
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8091/readyz"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-      start_period: 20s
     restart: unless-stopped
 
 volumes:

@@ -189,6 +189,16 @@ write_manifest_value() {
   printf '\n'
 }
 
+# True when the manifest records the Fleet identity this environment was
+# registered with. Current tooling always does; a manifest written before Fleet
+# existed does not. Used only to explain a fail-closed destroy.
+manifest_records_fleet() {
+  local file
+  file="$(manifest_of "$NAME")"
+  [ -f "$file" ] || return 1
+  grep -qE '^MULTICA_(LOCAL_FLEET_NAMESPACE|FLEET_PORT)=' "$file"
+}
+
 env_name_for_dir() {
   local name
   while read -r name; do
@@ -345,7 +355,8 @@ ensure_dev_code() {
 
 rewrite_env_ports() {
   local file offset=$2 backend=$3 frontend=$4 db=$5 fleet=$(( $3 + 20 ))
-  local tmp database_url escaped_database_url
+  local tmp database_url escaped_database_url namespace secret_file escaped_secret_file
+  local cloud_url key fleet_missing=0
   case "$1" in
     /*) file="$1" ;;
     *) file="$REPO_ROOT/$1" ;;
@@ -353,36 +364,100 @@ rewrite_env_ports() {
   database_url="$(database_url_with_name "${DATABASE_URL:-}" "$db")" \
     || die "DATABASE_URL is not a valid PostgreSQL URL: ${DATABASE_URL:-<unset>}"
   escaped_database_url="$(printf '%s' "$database_url" | sed 's/[\\&|]/\\&/g')"
+  # Fleet's namespace names the Compose project and the label destroy filters,
+  # and must be the one bind_paths derives from this checkout.
+  namespace="$(slugify "$(basename "$REPO_ROOT")")"
+  # The API opens this path from its own working directory (server/), so it is
+  # absolute. It lives next to the env file under the git-ignored .dev/, the
+  # same layout scripts/init-worktree-env.sh already writes for worktrees.
+  secret_file="$(cd "$(dirname "$file")" && pwd)/.dev/fleet-secret"
+  escaped_secret_file="$(printf '%s' "$secret_file" | sed 's/[\\&|]/\\&/g')"
+  # Cloud and local Fleet are mutually exclusive and the server exits when both
+  # are set. Cloud wins, so no local endpoint is written for it.
+  cloud_url="$(printf '%s' "${MULTICA_CLOUD_URL:-}" | tr -d '[:space:]')"
   tmp="$(mktemp)"
-  sed \
-    -e "s|^PORT=.*|PORT=${backend}|" \
-    -e "s|^FRONTEND_PORT=.*|FRONTEND_PORT=${frontend}|" \
-    -e "s|^FRONTEND_ORIGIN=.*|FRONTEND_ORIGIN=http://localhost:${frontend}|" \
-    -e "s|^POSTGRES_DB=.*|POSTGRES_DB=${db}|" \
-    -e "s|^DATABASE_URL=.*|DATABASE_URL=${escaped_database_url}|" \
-    -e "s|^MULTICA_SERVER_URL=.*|MULTICA_SERVER_URL=ws://localhost:${backend}/ws|" \
-    -e "s|^MULTICA_PUBLIC_URL=.*|MULTICA_PUBLIC_URL=http://localhost:${backend}|" \
-    -e "s|^MULTICA_APP_URL=.*|MULTICA_APP_URL=http://localhost:${frontend}|" \
-    -e "s|^NEXT_PUBLIC_API_URL=.*|NEXT_PUBLIC_API_URL=http://localhost:${backend}|" \
-    -e "s|^NEXT_PUBLIC_WS_URL=.*|NEXT_PUBLIC_WS_URL=ws://localhost:${backend}/ws|" \
-    -e "s|^MULTICA_FLEET_PORT=.*|MULTICA_FLEET_PORT=${fleet}|" \
-    -e "s|^MULTICA_LOCAL_FLEET_URL=.*|MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:${fleet}|" \
-    -e "s|^MULTICA_FLEET_API_URL=.*|MULTICA_FLEET_API_URL=http://host.docker.internal:${backend}|" \
-    "$file" > "$tmp"
+  local sed_args=(
+    -e "s|^PORT=.*|PORT=${backend}|"
+    -e "s|^FRONTEND_PORT=.*|FRONTEND_PORT=${frontend}|"
+    -e "s|^FRONTEND_ORIGIN=.*|FRONTEND_ORIGIN=http://localhost:${frontend}|"
+    -e "s|^POSTGRES_DB=.*|POSTGRES_DB=${db}|"
+    -e "s|^DATABASE_URL=.*|DATABASE_URL=${escaped_database_url}|"
+    -e "s|^MULTICA_SERVER_URL=.*|MULTICA_SERVER_URL=ws://localhost:${backend}/ws|"
+    -e "s|^MULTICA_PUBLIC_URL=.*|MULTICA_PUBLIC_URL=http://localhost:${backend}|"
+    -e "s|^MULTICA_APP_URL=.*|MULTICA_APP_URL=http://localhost:${frontend}|"
+    -e "s|^NEXT_PUBLIC_API_URL=.*|NEXT_PUBLIC_API_URL=http://localhost:${backend}|"
+    -e "s|^NEXT_PUBLIC_WS_URL=.*|NEXT_PUBLIC_WS_URL=ws://localhost:${backend}/ws|"
+    -e "s|^MULTICA_FLEET_PORT=.*|MULTICA_FLEET_PORT=${fleet}|"
+    -e "s|^MULTICA_FLEET_API_URL=.*|MULTICA_FLEET_API_URL=http://host.docker.internal:${backend}|"
+    -e "s|^MULTICA_LOCAL_FLEET_NAMESPACE=.*|MULTICA_LOCAL_FLEET_NAMESPACE=${namespace}|"
+  )
+  if [ -z "$cloud_url" ]; then
+    sed_args+=(
+      -e "s|^MULTICA_LOCAL_FLEET_URL=.*|MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:${fleet}|"
+      -e "s|^MULTICA_LOCAL_FLEET_SECRET_FILE=.*|MULTICA_LOCAL_FLEET_SECRET_FILE=${escaped_secret_file}|"
+    )
+  else
+    # A value left in .env by an earlier local run would abort the next start
+    # together with MULTICA_CLOUD_URL, so Cloud clears it here. bind_paths
+    # derives both again once Cloud is unset.
+    sed_args+=(
+      -e "s|^MULTICA_LOCAL_FLEET_URL=.*|MULTICA_LOCAL_FLEET_URL=|"
+      -e "s|^MULTICA_LOCAL_FLEET_SECRET_FILE=.*|MULTICA_LOCAL_FLEET_SECRET_FILE=|"
+    )
+  fi
+  sed "${sed_args[@]}" "$file" > "$tmp"
+  if [ -z "$cloud_url" ]; then
+    # The API reads the secret at boot, before fleet_up creates it.
+    MULTICA_LOCAL_FLEET_SECRET_FILE="$secret_file"
+    fleet_ensure_secret_file || { rm -f "$tmp"; die "Could not create the Fleet service secret at $secret_file."; }
+  fi
   # A file written before Fleet existed has no variables for sed to replace, so
   # append the allocation. A commented template line is not a definition and
   # therefore also gets a concrete value; every other variable is untouched.
-  if ! grep -q '^MULTICA_FLEET_PORT=' "$tmp" \
-    || ! grep -q '^MULTICA_LOCAL_FLEET_URL=' "$tmp" \
-    || ! grep -q '^MULTICA_FLEET_API_URL=' "$tmp"; then
+  for key in MULTICA_FLEET_PORT MULTICA_FLEET_API_URL MULTICA_LOCAL_FLEET_NAMESPACE; do
+    grep -q "^${key}=" "$tmp" || fleet_missing=1
+  done
+  if [ -z "$cloud_url" ]; then
+    for key in MULTICA_LOCAL_FLEET_URL MULTICA_LOCAL_FLEET_SECRET_FILE; do
+      grep -q "^${key}=" "$tmp" || fleet_missing=1
+    done
+  fi
+  if [ "$fleet_missing" = 1 ]; then
     {
       printf '\n# Fleet endpoints follow this environment'"'"'s allocated ports.\n'
       grep -q '^MULTICA_FLEET_PORT=' "$tmp" || printf 'MULTICA_FLEET_PORT=%s\n' "$fleet"
-      grep -q '^MULTICA_LOCAL_FLEET_URL=' "$tmp" || printf 'MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:%s\n' "$fleet"
       grep -q '^MULTICA_FLEET_API_URL=' "$tmp" || printf 'MULTICA_FLEET_API_URL=http://host.docker.internal:%s\n' "$backend"
+      grep -q '^MULTICA_LOCAL_FLEET_NAMESPACE=' "$tmp" || printf 'MULTICA_LOCAL_FLEET_NAMESPACE=%s\n' "$namespace"
+      if [ -z "$cloud_url" ]; then
+        grep -q '^MULTICA_LOCAL_FLEET_URL=' "$tmp" || printf 'MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:%s\n' "$fleet"
+        grep -q '^MULTICA_LOCAL_FLEET_SECRET_FILE=' "$tmp" || printf 'MULTICA_LOCAL_FLEET_SECRET_FILE=%s\n' "$secret_file"
+      fi
     } >> "$tmp"
   fi
   mv "$tmp" "$file"
+}
+
+# Cloud and local Fleet are mutually exclusive: the API exits when both are set,
+# and make re-reads the env file, so the file outranks an exported shell value.
+# A stale local endpoint left by an earlier local run is therefore cleared in
+# the file itself; rewrite_env_ports does the same when it rewrites ports.
+clear_local_fleet_env_file() {
+  local file cloud_url tmp
+  case "$1" in
+    /*) file="$1" ;;
+    *) file="$REPO_ROOT/$1" ;;
+  esac
+  [ -f "$file" ] || return 0
+  cloud_url="${MULTICA_CLOUD_URL:-}"
+  [ -n "$cloud_url" ] || cloud_url="$(sed -n 's/^MULTICA_CLOUD_URL=//p' "$file" | head -1)"
+  [ -n "$cloud_url" ] || return 0
+  grep -qE '^MULTICA_LOCAL_FLEET_(URL|SECRET_FILE)=.' "$file" || return 0
+  tmp="$(mktemp)"
+  sed -e 's|^MULTICA_LOCAL_FLEET_URL=.*|MULTICA_LOCAL_FLEET_URL=|' \
+    -e 's|^MULTICA_LOCAL_FLEET_SECRET_FILE=.*|MULTICA_LOCAL_FLEET_SECRET_FILE=|' \
+    "$file" > "$tmp"
+  mv "$tmp" "$file"
+  info "Cleared local Fleet wiring in $1: MULTICA_CLOUD_URL and a local Fleet URL are mutually exclusive."
 }
 
 # ---------------------------------------------------------------- database ---
@@ -1158,7 +1233,36 @@ bind_paths() {
   if [ -z "${MULTICA_FLEET_API_URL:-}" ]; then
     MULTICA_FLEET_API_URL="http://host.docker.internal:${BACKEND_PORT}"
   fi
+  # The API reads these at boot to enable local Fleet; without them a
+  # "make up C=fleet" starts a control plane the API ignores. A fresh checkout
+  # has them commented out in .env and an existing one may predate the wiring,
+  # so both are derived from the allocation here. Cloud and local Fleet are
+  # mutually exclusive and the server exits when both are non-empty: Cloud wins,
+  # so a value left by an earlier local run is cleared instead of bricking boot.
+  if [ -n "${MULTICA_CLOUD_URL:-}" ]; then
+    MULTICA_LOCAL_FLEET_URL=""
+    MULTICA_LOCAL_FLEET_SECRET_FILE=""
+  else
+    if [ -z "${MULTICA_LOCAL_FLEET_URL:-}" ]; then
+      MULTICA_LOCAL_FLEET_URL="http://127.0.0.1:${MULTICA_FLEET_PORT}"
+    fi
+    if [ -z "${MULTICA_LOCAL_FLEET_SECRET_FILE:-}" ]; then
+      MULTICA_LOCAL_FLEET_SECRET_FILE="$DIR/.dev/fleet-secret"
+    fi
+    # The API runs from server/, so a relative path copied from .env.example
+    # would not resolve. Normalize it against the checkout instead.
+    case "$MULTICA_LOCAL_FLEET_SECRET_FILE" in
+      /*) ;;
+      *) MULTICA_LOCAL_FLEET_SECRET_FILE="$DIR/$MULTICA_LOCAL_FLEET_SECRET_FILE" ;;
+    esac
+    # fleet_up creates the secret too, but it runs after the API has already
+    # read the file, so the first run has to create it here.
+    if [ -d "$DIR" ]; then
+      fleet_ensure_secret_file >/dev/null 2>&1 || true
+    fi
+  fi
   export MULTICA_FLEET_PORT MULTICA_FLEET_API_URL MULTICA_LOCAL_FLEET_NAMESPACE
+  export MULTICA_LOCAL_FLEET_URL MULTICA_LOCAL_FLEET_SECRET_FILE
   MULTICA_BIN="$DIR/server/bin/multica"
   if [ ! -x "$MULTICA_BIN" ] && [ -x "$REPO_ROOT/server/bin/multica" ]; then
     MULTICA_BIN="$REPO_ROOT/server/bin/multica"
@@ -1265,6 +1369,10 @@ Start the rest with 'make up C=api,web', or run 'make up C=daemon' from your own
     info "Created $ENV_FILE"
   fi
   ensure_dev_code "$ENV_FILE"
+  # A stale local Fleet endpoint would abort the server together with a
+  # non-empty MULTICA_CLOUD_URL, and make re-reads this file for the child, so
+  # it has to be cleared on disk rather than only in this shell.
+  clear_local_fleet_env_file "$ENV_FILE"
   load_env_file "$ENV_FILE"
 
   acquire_lock
@@ -1399,9 +1507,20 @@ cmd_destroy() {
 
   # Fleet is a separate confirmation from the database: it owns node containers,
   # volumes and networks outside the registry, and leaving them behind after the
-  # environment is gone makes them unidentifiable. Only ask when there is
-  # something to remove, so a checkout that never ran Fleet is unaffected.
-  if fleet_resources_present; then destroy_fleet=1; fi
+  # environment is gone makes them unidentifiable. An unreachable Docker daemon
+  # is not "nothing to clean" — those resources cannot be verified or removed,
+  # so refuse to drop the database that holds the only record of them.
+  case "$(fleet_resources_present)" in
+    present) destroy_fleet=1 ;;
+    unknown)
+      if manifest_records_fleet; then
+        die "$NAME records Fleet namespace $(fleet_namespace), but Docker is unreachable, so its node containers and volumes cannot be checked or removed.
+Refusing to drop database $DB_NAME. Its manifest and slot were kept: start Docker and re-run 'make destroy', or use 'make down' to stop the processes only."
+      fi
+      die "Docker is unreachable, so Fleet resources for $NAME cannot be checked.
+Refusing to drop database $DB_NAME. Its manifest and slot were kept: start Docker and re-run 'make destroy', or use 'make down' to stop the processes only."
+      ;;
+  esac
 
   if [ "$assume_yes" != 1 ]; then
     printf 'Destroy %s? This drops database %s and profile %s.' "$NAME" "$DB_NAME" "$PROFILE"

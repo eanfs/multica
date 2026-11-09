@@ -17,6 +17,12 @@ server/tmp
 .env.*
 !.env.example
 
+# Local state. .dev/ holds the local Fleet service secret and the owner/profile
+# credential map; .superpowers/ holds agent working notes. Neither belongs in a
+# build context, even though both are git-ignored.
+.dev
+.superpowers
+
 # IDE
 .idea
 .vscode

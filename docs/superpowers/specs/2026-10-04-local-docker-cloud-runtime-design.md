@@ -205,6 +205,8 @@ Fleet 内部保留固定节点诊断接口；API 提供带服务认证的操作�
 - `make status` 报告本 checkout 的 Fleet 状态、实际端口和就绪状态，无凭证输出。
 - `make down` 只停止 Fleet 控制面（`docker compose stop fleet`）并保留卷和数据库；Fleet 通过 Docker API 创建的节点容器不随 down 停止，仍在运行，也没有屏障或忙碌检查。`make destroy` 才按 namespace 标签停止并删除节点容器/卷。此缺口见 §14.6。
 - `make destroy` 对 Fleet 数据单独明确确认，先清理经标签和 Store 双重校验的自有 Docker 资源，再通过应用事务清理当前命名空间 Fleet 表数据，并遵循原 checkout 数据库销毁流程。Docker 清理未完成时保留恢复记录，不先删数据库。不得全局 prune，不删除其他 checkout 数据或共享 PostgreSQL 实例。
+- Docker 不可达是未知状态而不是“没有资源可清理”：节点容器和卷位于 Compose project 之外，若此时删库就会丢掉唯一能定位它们的 manifest。`dev-env.sh destroy` 因此拒绝删库并保留 manifest 与 slot，Docker 恢复后重试同一条命令即可；`make down` 仍可在 Docker 关闭时成功。
+- 本地 Fleet 的 env 接线由脚本管理：全新 checkout 与已有 `.env` 都由 `rewrite_env_ports`/`bind_paths` 按分配端口写出并导出 `MULTICA_LOCAL_FLEET_URL`、`MULTICA_LOCAL_FLEET_SECRET_FILE`、`MULTICA_LOCAL_FLEET_NAMESPACE`，并在 API 启动前生成 0600 的 secret。`MULTICA_CLOUD_URL` 非空时以 Cloud 为准，不写入本地端点（服务端禁止两者并存）。
 - 私密配置模板提供 owner/profile/API 地址字段而非密钥，不要求聊天发送或命令参数公开密钥。
 
 Web/Desktop 复用节点界面，能力发现后显示 Docker 规格；新增启停、重启、失败原因及不可恢复删除确认。受管标识和普通 Runtime 删除保护在前后端都生效。
@@ -305,6 +307,7 @@ Fleet 只读取显式传入的 `MULTICA_FLEET_CREDENTIALS_FILE`，不读取用�
 - Fleet 容器通过 `extra_hosts: host.docker.internal:host-gateway` 访问宿主机 API；Linux 与 Docker Desktop 使用同一 URL。
 - 节点容器由 Fleet 动态创建，不带 `extra_hosts`。Docker Desktop 上 `host.docker.internal` 可用；普通 Linux 上需要让 `MULTICA_FLEET_API_URL` 使用节点网络网关地址，或在节点网络侧提供等价解析。集成测试默认在 Linux 上取网络网关，并允许 `MULTICA_FLEET_TEST_API_HOST` 覆盖。
 - 节点不挂 Docker socket、不 privileged、不使用 host network/PID、不发布端口；Fleet 宿主端口只绑 loopback。
+- `docker-compose.selfhost.yml` 不再包含未文档化的 `fleet` profile：self-host 的 backend 容器没有接收 `MULTICA_LOCAL_FLEET_*`，该 profile 启动的控制面会被 API 忽略，节点也解析不到 Compose 服务名 `backend`。本地 Fleet 只作为源码 checkout 的 `make up C=fleet` 组件存在。
 
 ### 14.5 镜像与测试替身
 
@@ -315,10 +318,14 @@ Fleet 只读取显式传入的 `MULTICA_FLEET_CREDENTIALS_FILE`，不读取用�
 ### 14.6 未覆盖项与已知缺口
 
 - **prepared 操作没有回收器**：API 崩溃留下的 `prepared` 屏障会阻止领取，当前没有后台任务自动撤销或重审；需要按设计 §10 的显式恢复流程处理。
+- **入队屏障未实现（R22）**：维护/删除只阻止实际领取（claim）和新的 Fleet 操作，`terminating` 期间的任务入队路径没有独立屏障。删除前的 prepare 忙碌检查会拒绝仍有排队/延后运行的节点，但 approve 之后到达的入队请求仍可能写入新的运行；这是已知竞态，本轮收尾修复不改任务入队路径。
 - **launching 目标已提升**（R21，提交 `9bbe2aca2`）：协调器在容器与 daemon 就绪后把 `launching` 直接提升为 `running`；容器已退出或消失则结算为 `stopped`，不再永久停在 `launching`。集成测试保留为回归门禁，daemon 就绪后节点仍未 `running` 即判失败。
 - **`make down` 不停节点、无屏障**：`fleet_down` 只执行 `docker compose stop fleet`。Fleet 通过 Docker Engine API 创建的节点容器不属于该 Compose project，会继续运行；down 也没有设计 §11 描述的“确认无活跃运行和待回传”屏障。节点资源由 `make destroy` 按 `multica.fleet.namespace` 标签清理。改造 down 需要脚本直接访问 Docker（脚本无 DB 访问），本轮按实际行为对齐文档，不扩大范围。
 - **创建幂等未落库约束**：`fleet_node.idempotency_key` 有列但没有唯一索引，`ReserveNode` 也不做同键重放；创建重试可能创建第二个节点。操作表的幂等键已有部分唯一索引。
 - **旧 project 容器**：Task 11b 之前的 `multica` project Fleet 容器需要手动删除一次，脚本不会自动接管或清理。
+- **SaaS 旧 capability 响应兼容风险**：`GET /api/cloud-runtime/` 若仍返回旧 SaaS 形状（缺少 `provider`/`allowed_operations`），前端按“未知能力默认不开放”降级，会隐藏创建入口而不是猜测可用；接口本身不报错，Cloud 返回新字段后自动恢复。
+- **max_concurrent 的处理方式**：Fleet 节点注册时把受管 runtime 的 `max_concurrent_tasks` 固定为 1（一个节点运行一个 daemon 和一个工作区根），由既有领取路径按 runtime 级上限执行，daemon 侧不强制并发。节点规格里的 `max_concurrent` 仍只是能力字段，客户端不能覆盖。
+- **`make destroy` 需要 Docker 可达**：Docker 不可达时无法确认节点容器、卷和网络是否已清理，destroy 将 Fleet 资源视为 unknown，拒绝删库并保留 manifest 与 slot；`make down` 不受影响。
 - **真实 Claude 烟测未执行**：没有 `agentintegration` 授权，未查找真实 CLI、未读取账户、未调用模型。
 - **完整运行链路未验证**：本环境 Docker 与 PostgreSQL 均不可用；Docker 镜像构建、fleetintegration、真实 Claude 与 Playwright E2E 均为 environment-blocked。集成测试内的最小 daemon API stub 只让 daemon 完成零 workspace 的 preflight；workspace/Runtime 注册、任务提交与结果回传需要真实 API，另行验收。
 - **Linux 节点到 API 的可达性**：依赖网关地址或显式配置，尚未在真实 Linux 主机上验证。

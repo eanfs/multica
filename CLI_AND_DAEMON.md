@@ -568,10 +568,14 @@ Only these variables are accepted: `ANTHROPIC_API_KEY`,
 cannot create a node; there is no global default profile. Restart Fleet after
 editing the file.
 
-The API also needs `MULTICA_LOCAL_FLEET_URL` and
-`MULTICA_LOCAL_FLEET_SECRET_FILE`; `make up C=fleet` derives the port and
-writes the secret under `.dev/`. A non-empty `MULTICA_LOCAL_FLEET_URL`
-together with `MULTICA_CLOUD_URL` is a startup error.
+The API also needs `MULTICA_LOCAL_FLEET_URL`,
+`MULTICA_LOCAL_FLEET_SECRET_FILE` and `MULTICA_LOCAL_FLEET_NAMESPACE` at boot.
+`make up` derives all three from the allocated port and the checkout, records
+them in the env file, and creates the 0600 secret under `.dev/` before the API
+starts, so neither a fresh checkout nor an existing `.env` needs a manual edit.
+A non-empty `MULTICA_CLOUD_URL` wins: `make up` does not add local Fleet wiring
+for it and clears a value left by an earlier local run, because the server
+refuses to start when both are set.
 
 ### Operate a node
 
@@ -586,6 +590,26 @@ A node that is busy or still has queued work refuses dangerous operations
 through the API. `make down` is not a stop path for nodes: it stops only the
 Fleet control plane and leaves every node container running (see
 [Start and stop](#start-and-stop)).
+
+### Known limitations
+
+These are accepted gaps in the local Docker runtime, not setup mistakes:
+
+- The task enqueue path has no independent barrier: deleting a node blocks
+  claims and checks queued work, but a task enqueued after the operation is
+  approved can still be written (R22).
+- A `prepared` maintenance operation left by an API crash blocks claims and
+  has no automatic reaper; recover it explicitly.
+- `make down` stops only the control plane and sets no barrier; node containers
+  keep running until `make destroy`.
+- Node concurrency is the runtime-wide `max_concurrent_tasks`, pinned to 1
+  when a Fleet node registers and enforced by the claim path, not by the daemon.
+  The spec's `max_concurrent` is presently only a capability field.
+- Fleet containers from the old shared `multica` Compose project are not taken
+  over; remove them manually (see [Troubleshooting](#troubleshooting)).
+- A Cloud Runtime endpoint that still returns the pre-capability response has no
+  `provider`/`allowed_operations`, so the UI safely hides creation instead of
+  guessing which operations are allowed.
 
 ### Troubleshooting
 
@@ -630,9 +654,10 @@ docker volume ls --filter label=multica.fleet.namespace=<namespace>
 
   Volumes from that old container are not removed automatically; inspect and
   delete them explicitly if they are no longer needed.
-- `make destroy` refuses to drop the database while this namespace's Docker
-  cleanup is incomplete. Fix the Docker error and re-run it; do not prune
-  globally.
+- `make destroy` refuses to drop the database while Docker is unreachable or
+  this namespace's Docker cleanup is incomplete. An unreachable daemon counts as
+  "unknown", never as "nothing to clean", so the manifest and slot are kept.
+  Fix Docker and re-run it; do not prune globally.
 
 ### Tests
 

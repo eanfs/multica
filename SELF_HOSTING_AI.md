@@ -86,6 +86,12 @@ The self-host stack does not include the Fleet control plane. Use it only when
 you want Multica to provision Docker node containers that already run the
 daemon and Claude Code:
 
+The self-host Compose file deliberately ships no `fleet` service. A Compose
+profile cannot hand this checkout's `MULTICA_LOCAL_FLEET_URL`,
+`MULTICA_LOCAL_FLEET_SECRET_FILE` and `MULTICA_LOCAL_FLEET_NAMESPACE` to the
+self-host backend, and node containers cannot resolve the Compose service name
+`backend`; the removed profile could only start a control plane the API ignored.
+
 1. Start it from a repository checkout, not a published image:
 
    ```bash

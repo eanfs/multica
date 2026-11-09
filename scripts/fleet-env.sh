@@ -81,22 +81,36 @@ fleet_require_network() {
   return 1
 }
 
+# The service secret must exist before the API starts: the server reads it at
+# boot to enable local Fleet, while fleet_up runs after the API. Silent on
+# purpose — bind_paths calls this on every status read, and that command's
+# stdout is a machine-readable contract.
+fleet_ensure_secret_file() {
+  local secret
+  secret="$(fleet_secret_file)"
+  if [ ! -f "$secret" ]; then
+    mkdir -p "$(dirname "$secret")" || return 1
+    ( umask 077; head -c 32 /dev/urandom | base64 > "$secret" ) || return 1
+  fi
+  chmod 600 "$secret"
+}
+
 # Both files are bind-mounted into the Fleet container. Docker creates a missing
 # bind source as a directory, which Fleet then rejects as "not a regular file",
 # so generate the local defaults up front with owner-only permissions. The
 # files live under .dev/ (git-ignored); no key is ever printed.
 fleet_ensure_secret_files() {
-  local secret creds
+  local secret creds had_secret=1
   secret="$(fleet_secret_file)"
   creds="$(fleet_credentials_file)"
-  mkdir -p "$(dirname "$secret")" "$(dirname "$creds")"
-  if [ ! -f "$secret" ]; then
-    ( umask 077; head -c 32 /dev/urandom | base64 > "$secret" )
+  [ -f "$secret" ] || had_secret=0
+  fleet_ensure_secret_file || return 1
+  if [ "$had_secret" = 0 ]; then
     printf 'fleet: generated a new service secret at %s\n' "$secret"
   fi
-  chmod 600 "$secret"
   if [ ! -f "$creds" ]; then
-    ( umask 077; printf '{"users":{},"profiles":{}}\n' > "$creds" )
+    mkdir -p "$(dirname "$creds")" || return 1
+    ( umask 077; printf '{"users":{},"profiles":{}}\n' > "$creds" ) || return 1
     printf 'fleet: wrote an empty owner/profile map at %s\n' "$creds"
   fi
   chmod 600 "$creds"
@@ -173,22 +187,27 @@ fleet_status() {
   fi
 }
 
-# True when this namespace has anything for Fleet to remove: its own compose
-# project's service (running or stopped) or namespace-labelled node containers,
-# volumes or networks. Another worktree's project is never consulted. An
-# unreachable daemon is "nothing to clean", so destroy can still run on a machine
-# whose Docker Desktop was closed.
+# Prints present, absent or unknown. "unknown" (Docker unreachable, or a listing
+# that failed halfway) is never "nothing to clean": node containers live outside
+# the Compose project, so destroying the only record of them while they cannot
+# be listed would leak them forever. dev-env.sh destroy fails closed on it.
+# fleet_down is the one lifecycle verb that tolerates an unreachable daemon.
 fleet_resources_present() {
-  local reason ns
-  if ! reason="$(fleet_docker_unavailable_reason)"; then
-    return 1
+  local ns ids
+  if ! fleet_docker_unavailable_reason >/dev/null; then
+    printf 'unknown\n'
+    return 0
   fi
   ns="$(fleet_namespace)"
-  [ -z "$(fleet_compose ps -aq fleet 2>/dev/null || true)" ] || return 0
-  [ -z "$(docker ps -aq --filter "label=multica.fleet.namespace=$ns" 2>/dev/null || true)" ] || return 0
-  [ -z "$(docker volume ls -q --filter "label=multica.fleet.namespace=$ns" 2>/dev/null || true)" ] || return 0
-  [ -z "$(docker network ls -q --filter "label=multica.fleet.namespace=$ns" 2>/dev/null || true)" ] || return 0
-  return 1
+  if ! ids="$(fleet_compose ps -aq fleet 2>/dev/null)"; then printf 'unknown\n'; return 0; fi
+  [ -z "$ids" ] || { printf 'present\n'; return 0; }
+  if ! ids="$(docker ps -aq --filter "label=multica.fleet.namespace=$ns" 2>/dev/null)"; then printf 'unknown\n'; return 0; fi
+  [ -z "$ids" ] || { printf 'present\n'; return 0; }
+  if ! ids="$(docker volume ls -q --filter "label=multica.fleet.namespace=$ns" 2>/dev/null)"; then printf 'unknown\n'; return 0; fi
+  [ -z "$ids" ] || { printf 'present\n'; return 0; }
+  if ! ids="$(docker network ls -q --filter "label=multica.fleet.namespace=$ns" 2>/dev/null)"; then printf 'unknown\n'; return 0; fi
+  [ -z "$ids" ] || { printf 'present\n'; return 0; }
+  printf 'absent\n'
 }
 
 # Removes this namespace's compose project and the Docker resources Fleet
