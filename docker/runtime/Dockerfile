@@ -23,13 +23,13 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
 
 # The node identity is fixed at 1000:1000 because Fleet creates the container
-# with User=1000:1000 and seeds the volumes for that identity. Every path under
+# with User=1000:1000 and seeds the volumes for that identity.
+# node:22-bookworm-slim already ships a group/user at 1000:1000, so this image
+# reuses that identity instead of creating a conflicting one. Every path under
 # the data volume mount must already belong to it: Docker copies image content
 # into an empty named volume with its original ownership, so a root-owned
 # workspaces/ would leave the node unable to write.
-RUN groupadd --gid 1000 multica \
-    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash multica \
-    && mkdir -p /home/multica/workspaces /run/secrets/runtime \
+RUN mkdir -p /home/multica/workspaces /run/secrets/runtime \
     && chown -R 1000:1000 /home/multica \
     && chmod 0755 /home/multica /home/multica/workspaces
 
