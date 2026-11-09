@@ -566,16 +566,20 @@ Only these variables are accepted: `ANTHROPIC_API_KEY`,
 `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`,
 `CLAUDE_CODE_USE_BEDROCK` and `API_TIMEOUT_MS`. An owner without a mapping
 cannot create a node; there is no global default profile. Restart Fleet after
-editing the file.
+editing the file. Only `make up C=fleet` writes the empty template when the
+file is missing; plain `make up` creates only the service secret, and
+`status`/`list`/`down`/`destroy` create neither file.
 
 The API also needs `MULTICA_LOCAL_FLEET_URL`,
 `MULTICA_LOCAL_FLEET_SECRET_FILE` and `MULTICA_LOCAL_FLEET_NAMESPACE` at boot.
 `make up` derives all three from the allocated port and the checkout, records
-them in the env file, and creates the 0600 secret under `.dev/` before the API
-starts, so neither a fresh checkout nor an existing `.env` needs a manual edit.
-A non-empty `MULTICA_CLOUD_URL` wins: `make up` does not add local Fleet wiring
-for it and clears a value left by an earlier local run, because the server
-refuses to start when both are set.
+them in the environment manifest and exports them to the API/Compose, and
+creates the 0600 service secret under `.dev/` before the API starts. An
+existing `.env` is not rewritten (only a fresh checkout or a re-allocated slot
+gets the allocated values written), and the read-only verbs never create the
+secret. A non-empty `MULTICA_CLOUD_URL` wins: `make up` does not add local
+Fleet wiring for it and clears a value left by an earlier local run, because the
+server refuses to start when both are set.
 
 ### Operate a node
 
@@ -591,6 +595,12 @@ through the API. `make down` is not a stop path for nodes: it stops only the
 Fleet control plane and leaves every node container running (see
 [Start and stop](#start-and-stop)).
 
+Node snapshots carry `daemon_id`, `status_detail` (the coordinator's readiness
+payload: CLI installed, model configured, and so on) and, while one is in
+flight, `operation {name, phase}` at the top level. `metadata` keeps a copy of
+the diagnostic fields for older clients. Failed nodes show the detail message
+and readiness booleans in the runtimes dialog instead of a bare status.
+
 ### Known limitations
 
 These are accepted gaps in the local Docker runtime, not setup mistakes:
@@ -603,13 +613,18 @@ These are accepted gaps in the local Docker runtime, not setup mistakes:
 - `make down` stops only the control plane and sets no barrier; node containers
   keep running until `make destroy`.
 - Node concurrency is the runtime-wide `max_concurrent_tasks`, pinned to 1
-  when a Fleet node registers and enforced by the claim path, not by the daemon.
-  The spec's `max_concurrent` is presently only a capability field.
+  every time a Fleet node registers and enforced by the claim path, not by the
+  daemon. A manual PATCH on a managed runtime is overwritten at the next
+  registration. The spec's `max_concurrent` is presently only a capability
+  field.
 - Fleet containers from the old shared `multica` Compose project are not taken
   over; remove them manually (see [Troubleshooting](#troubleshooting)).
-- A Cloud Runtime endpoint that still returns the pre-capability response has no
-  `provider`/`allowed_operations`, so the UI safely hides creation instead of
-  guessing which operations are allowed.
+- A legacy SaaS Cloud Runtime response that has a non-`docker` `provider`
+  but no `allowed_operations` is treated as EC2: create/delete stay available
+  and, when `specs` is empty, the dialog offers `t4g.medium`/`t4g.large`. When
+  `provider` is missing too, the response is indistinguishable from an unknown
+  provider, so the UI hides creation rather than guess. The upstream SaaS
+  payload has not been verified in this repository.
 
 ### Troubleshooting
 
@@ -625,6 +640,12 @@ docker ps -a --filter label=multica.fleet.namespace=<namespace>
 docker volume ls --filter label=multica.fleet.namespace=<namespace>
 ```
 
+- `/readyz` answers `503 store_schema_missing`: PostgreSQL is reachable but
+  this database has not been migrated for Fleet (the `fleet_node`,
+  `fleet_node_operation`, `fleet_node_credential` and
+  `fleet_credential_profile` tables). Fleet never migrates on its own; run the
+  checkout's migration path (`make up C=api`) and retry. `store_unavailable`
+  instead means PostgreSQL itself is unreachable.
 - `Docker daemon is not running`: start Docker Desktop (or the Linux daemon),
   then re-run `make up C=fleet`.
 - `network multica_default ... not found`: start this checkout's PostgreSQL

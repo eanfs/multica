@@ -103,9 +103,11 @@ self-host backend, and node containers cannot resolve the Compose service name
    its port on loopback and joins this checkout's `multica_default` network.
 
 2. Map at least one user to a credential profile in
-   `.dev/fleet-credentials.json` (0600, git-ignored). The file is generated
-   as an empty template; add the owner UUID, a profile name and that profile's
-   model environment. The accepted variables and the exact shape are in
+   `.dev/fleet-credentials.json` (0600, git-ignored). `make up C=fleet` writes
+   an empty template when the file is missing; plain `make up` creates only the
+   service secret, and `status`/`down`/`destroy` create neither file. Add the
+   owner UUID, a profile name and that profile's model environment. The accepted
+   variables and the exact shape are in
    [CLI_AND_DAEMON.md](CLI_AND_DAEMON.md#local-docker-cloud-runtime). No real
    key belongs in this document, `.env`, a Compose file, or Git.
 

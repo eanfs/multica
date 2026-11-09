@@ -66,7 +66,7 @@ Fleet 配置包括当前 checkout 命名空间、Docker socket、固定镜像、
 
 默认一个本地规格：2 CPU、4 GiB 内存、256 个进程，每节点同时 1 次运行，每个配置用户最多 2 个节点；管理员可调整，客户端只能选白名单。Docker named volume 不承诺硬磁盘容量配额，界面不提供 EC2 的磁盘大小参数。
 
-通过现有 `GET /api/cloud-runtime/` 代理发现能力：`provider: docker`、允许操作、规格、持久存储、磁盘配额不支持。core 用 zod/parseWithFallback 解析；Web/Desktop 使用同一能力接线，不能只靠 Web 环境变量启用本地入口。未知能力默认不开放危险操作；原 Cloud 的旧响应保持兼容。
+通过现有 `GET /api/cloud-runtime/` 代理发现能力：`provider: docker`、允许操作、规格、持久存储、磁盘配额不支持。core 用 zod/parseWithFallback 解析；Web/Desktop 使用同一能力接线，不能只靠 Web 环境变量启用本地入口。未知能力默认不开放危险操作，不猜测 operations；但旧 SaaS 的非 docker 响应即使没有 operations/specs，只要 provider 非空就按 legacy EC2 回退（见 §14.6），provider 缺失时无法区分提供方，入口保持隐藏。
 
 ## 5. API 契约
 
@@ -84,13 +84,13 @@ Fleet 所有业务及内部接口要求服务密钥；认证成功后才信任 A
 | POST | `/api/v1/nodes/status` | 实际状态、就绪诊断 |
 | POST | `/api/v1/pat/verify` | 沿用 `valid`、`owner_id`、`instance_id`、`instance_record_id` |
 | GET | `/healthz` | 进程存活 |
-| GET | `/readyz` | Store 可用且 Docker 可访问 |
+| GET | `/readyz` | Store 可用（连接 + `fleet_*` 表已迁移）且 Docker 可访问；未迁移返回 503 `store_schema_missing` |
 
 Health/ready 接口不返回敏感详情，可用于本地探针。`/api/v1/nodes/exec` 明确未支持，能力不声明它。固定健康检查不是任意命令执行。
 
 创建只接受名称、白名单规格。拒绝客户端指定 EC2 区域/AMI/IAM/subnet/SSH key、任意镜像、tags、挂载路径或脚本，不偷偷把 EC2 规格映射成 Docker。
 
-响应保留现有核心字段。稳定 `id` 为 Fleet 节点 UUID，`instance_id` 为 Docker container ID，region 为 `local`，image 字段为批准镜像，非适用字符串为空。provider、操作进度、就绪诊断和错误码作为可选字段加入；不新增 Runtime mode 枚举。
+响应保留现有核心字段。稳定 `id` 为 Fleet 节点 UUID，`instance_id` 为 Docker container ID，region 为 `local`，image 字段为批准镜像，非适用字符串为空。provider、操作进度、就绪诊断和错误码作为可选字段加入；不新增 Runtime mode 枚举。节点快照把 `daemon_id`、`status_detail` 和进行中的 `operation {name, phase}` 放在顶层，`metadata` 保留同名副本供旧客户端读取。
 
 客户端按用户意图生成幂等键，网络重试复用该键。Store 将键、所有者、请求指纹和结果原子记录；同键不同请求返回 409。异步接受意图与操作完成必须区分，不能将已接受显示为已就绪。
 
@@ -206,7 +206,7 @@ Fleet 内部保留固定节点诊断接口；API 提供带服务认证的操作�
 - `make down` 只停止 Fleet 控制面（`docker compose stop fleet`）并保留卷和数据库；Fleet 通过 Docker API 创建的节点容器不随 down 停止，仍在运行，也没有屏障或忙碌检查。`make destroy` 才按 namespace 标签停止并删除节点容器/卷。此缺口见 §14.6。
 - `make destroy` 对 Fleet 数据单独明确确认，先清理经标签和 Store 双重校验的自有 Docker 资源，再通过应用事务清理当前命名空间 Fleet 表数据，并遵循原 checkout 数据库销毁流程。Docker 清理未完成时保留恢复记录，不先删数据库。不得全局 prune，不删除其他 checkout 数据或共享 PostgreSQL 实例。
 - Docker 不可达是未知状态而不是“没有资源可清理”：节点容器和卷位于 Compose project 之外，若此时删库就会丢掉唯一能定位它们的 manifest。`dev-env.sh destroy` 因此拒绝删库并保留 manifest 与 slot，Docker 恢复后重试同一条命令即可；`make down` 仍可在 Docker 关闭时成功。
-- 本地 Fleet 的 env 接线由脚本管理：全新 checkout 与已有 `.env` 都由 `rewrite_env_ports`/`bind_paths` 按分配端口写出并导出 `MULTICA_LOCAL_FLEET_URL`、`MULTICA_LOCAL_FLEET_SECRET_FILE`、`MULTICA_LOCAL_FLEET_NAMESPACE`，并在 API 启动前生成 0600 的 secret。`MULTICA_CLOUD_URL` 非空时以 Cloud 为准，不写入本地端点（服务端禁止两者并存）。
+- 本地 Fleet 的 env 接线由脚本管理：全新 checkout 或重新分配槽位时 `rewrite_env_ports` 把分配值写进 env 文件；已有 `.env` 由 `bind_paths` 仅派生并导出 `MULTICA_LOCAL_FLEET_URL`、`MULTICA_LOCAL_FLEET_SECRET_FILE`、`MULTICA_LOCAL_FLEET_NAMESPACE`（不写回文件），同时记录到 manifest。只有 `make up` 会在 API 启动前生成 0600 的 service secret；`make up C=fleet` 另外生成空的凭证模板，而 `status`/`list`/`down`/`destroy` 等只读动词不创建这些文件。`MULTICA_CLOUD_URL` 非空时以 Cloud 为准，不写入本地端点（服务端禁止两者并存）。
 - 私密配置模板提供 owner/profile/API 地址字段而非密钥，不要求聊天发送或命令参数公开密钥。
 
 Web/Desktop 复用节点界面，能力发现后显示 Docker 规格；新增启停、重启、失败原因及不可恢复删除确认。受管标识和普通 Runtime 删除保护在前后端都生效。
@@ -308,6 +308,7 @@ Fleet 只读取显式传入的 `MULTICA_FLEET_CREDENTIALS_FILE`，不读取用�
 - 节点容器由 Fleet 动态创建，不带 `extra_hosts`。Docker Desktop 上 `host.docker.internal` 可用；普通 Linux 上需要让 `MULTICA_FLEET_API_URL` 使用节点网络网关地址，或在节点网络侧提供等价解析。集成测试默认在 Linux 上取网络网关，并允许 `MULTICA_FLEET_TEST_API_HOST` 覆盖。
 - 节点不挂 Docker socket、不 privileged、不使用 host network/PID、不发布端口；Fleet 宿主端口只绑 loopback。
 - `docker-compose.selfhost.yml` 不再包含未文档化的 `fleet` profile：self-host 的 backend 容器没有接收 `MULTICA_LOCAL_FLEET_*`，该 profile 启动的控制面会被 API 忽略，节点也解析不到 Compose 服务名 `backend`。本地 Fleet 只作为源码 checkout 的 `make up C=fleet` 组件存在。
+- 能力发现与这条本地网络路径无关：`provider: docker` 由本地 Fleet 返回，非 docker 的 provider（旧 SaaS）仍走 Cloud API，不会因本地网关配置而改变；反之本地 Docker 网关只影响 docker 节点到 API 的回连。旧响应兼容规则见 §14.6。
 
 ### 14.5 镜像与测试替身
 
@@ -323,8 +324,8 @@ Fleet 只读取显式传入的 `MULTICA_FLEET_CREDENTIALS_FILE`，不读取用�
 - **`make down` 不停节点、无屏障**：`fleet_down` 只执行 `docker compose stop fleet`。Fleet 通过 Docker Engine API 创建的节点容器不属于该 Compose project，会继续运行；down 也没有设计 §11 描述的“确认无活跃运行和待回传”屏障。节点资源由 `make destroy` 按 `multica.fleet.namespace` 标签清理。改造 down 需要脚本直接访问 Docker（脚本无 DB 访问），本轮按实际行为对齐文档，不扩大范围。
 - **创建幂等未落库约束**：`fleet_node.idempotency_key` 有列但没有唯一索引，`ReserveNode` 也不做同键重放；创建重试可能创建第二个节点。操作表的幂等键已有部分唯一索引。
 - **旧 project 容器**：Task 11b 之前的 `multica` project Fleet 容器需要手动删除一次，脚本不会自动接管或清理。
-- **SaaS 旧 capability 响应兼容风险**：`GET /api/cloud-runtime/` 若仍返回旧 SaaS 形状（缺少 `provider`/`allowed_operations`），前端按“未知能力默认不开放”降级，会隐藏创建入口而不是猜测可用；接口本身不报错，Cloud 返回新字段后自动恢复。
-- **max_concurrent 的处理方式**：Fleet 节点注册时把受管 runtime 的 `max_concurrent_tasks` 固定为 1（一个节点运行一个 daemon 和一个工作区根），由既有领取路径按 runtime 级上限执行，daemon 侧不强制并发。节点规格里的 `max_concurrent` 仍只是能力字段，客户端不能覆盖。
+- **SaaS 旧 capability 响应兼容（上游真实 payload 未在本仓库验证）**：`GET /api/cloud-runtime/` 的旧 SaaS 响应可能没有 `allowed_operations`/`specs`。当前规则是：provider 非空、不是 `docker`、operations 为空时按 legacy EC2 回退，保留 create/delete，并在 specs 为空时提供 `t4g.medium`/`t4g.large`；operations 非空时只按白名单，docker 始终只按能力加已声明 specs。provider 缺失且 operations 为空时无法与“未知能力”区分，创建入口保持隐藏。接口本身不报错，Cloud 返回新字段后自动恢复。
+- **max_concurrent 的处理方式**：Fleet 节点注册时把受管 runtime 的 `max_concurrent_tasks` 固定为 1（一个节点运行一个 daemon 和一个工作区根），由既有领取路径按 runtime 级上限执行，daemon 侧不强制并发。每次重新注册都会重写为 1，用户对受管 runtime 的 PATCH 会在下次注册时被覆盖。节点规格里的 `max_concurrent` 仍只是能力字段，客户端不能覆盖。
 - **`make destroy` 需要 Docker 可达**：Docker 不可达时无法确认节点容器、卷和网络是否已清理，destroy 将 Fleet 资源视为 unknown，拒绝删库并保留 manifest 与 slot；`make down` 不受影响。
 - **真实 Claude 烟测未执行**：没有 `agentintegration` 授权，未查找真实 CLI、未读取账户、未调用模型。
 - **完整运行链路未验证**：本环境 Docker 与 PostgreSQL 均不可用；Docker 镜像构建、fleetintegration、真实 Claude 与 Playwright E2E 均为 environment-blocked。集成测试内的最小 daemon API stub 只让 daemon 完成零 workspace 的 preflight；workspace/Runtime 注册、任务提交与结果回传需要真实 API，另行验收。

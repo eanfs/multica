@@ -1255,11 +1255,6 @@ bind_paths() {
       /*) ;;
       *) MULTICA_LOCAL_FLEET_SECRET_FILE="$DIR/$MULTICA_LOCAL_FLEET_SECRET_FILE" ;;
     esac
-    # fleet_up creates the secret too, but it runs after the API has already
-    # read the file, so the first run has to create it here.
-    if [ -d "$DIR" ]; then
-      fleet_ensure_secret_file >/dev/null 2>&1 || true
-    fi
   fi
   export MULTICA_FLEET_PORT MULTICA_FLEET_API_URL MULTICA_LOCAL_FLEET_NAMESPACE
   export MULTICA_LOCAL_FLEET_URL MULTICA_LOCAL_FLEET_SECRET_FILE
@@ -1268,6 +1263,17 @@ bind_paths() {
     MULTICA_BIN="$REPO_ROOT/server/bin/multica"
   fi
   mkdir -p "$LOG_DIR"
+}
+
+# The API reads the Fleet service secret from disk at boot. Only "up" creates
+# it: bind_paths is also used by status/list/down/destroy/exec, and a read-only
+# verb must not write into the checkout merely by deriving paths. fleet_up
+# creates or refreshes this file through fleet_ensure_secret_files as well.
+ensure_local_fleet_secret() {
+  [ -z "${MULTICA_CLOUD_URL:-}" ] || return 0
+  [ -n "${MULTICA_LOCAL_FLEET_SECRET_FILE:-}" ] || return 0
+  [ -d "$DIR" ] || return 0
+  fleet_ensure_secret_file >/dev/null 2>&1 || true
 }
 
 save_manifest() {
@@ -1446,6 +1452,9 @@ Start the rest with 'make up C=api,web', or run 'make up C=daemon' from your own
   trap - EXIT
 
   bind_paths
+  # The server opens this file before exactly the components below start; a
+  # fresh checkout and an existing .env both rely on that ordering.
+  ensure_local_fleet_secret
   # The manifest is the source of truth from here on; re-export so every child
   # sees the same values the registry recorded.
   export PORT="$BACKEND_PORT" FRONTEND_PORT DATABASE_URL POSTGRES_DB="$DB_NAME"

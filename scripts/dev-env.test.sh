@@ -9,18 +9,10 @@ set -euo pipefail
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp_dir="$(mktemp -d)"
 
-# Manifests below use the checkout as DIR, so bind_paths creates the Fleet
-# secret there. Remove it on exit unless it predated this run — a developer's
-# real secret must survive the suite.
-repo_secret="$root_dir/.dev/fleet-secret"
-repo_secret_preexisting=0
-[ -f "$repo_secret" ] && repo_secret_preexisting=1
+# bind_paths is read-only: it only derives the Fleet paths, so the suite never
+# writes the checkout's .dev/ directory (a developer's real secret survives).
 cleanup() {
   rm -rf "$tmp_dir"
-  if [ "$repo_secret_preexisting" = 0 ]; then
-    rm -f "$repo_secret"
-    rmdir "$root_dir/.dev" 2>/dev/null || true
-  fi
 }
 trap cleanup EXIT
 
@@ -395,8 +387,8 @@ grep -Fqx 'MULTICA_LOCAL_FLEET_SECRET_FILE=' "$stale_env" \
 # bind_paths is what makes an existing .env (or a manifest written before the
 # wiring) address the Fleet the API and Compose actually use: URL, secret file
 # and namespace derive from the allocated port and this environment's DIR, never
-# from the invoking shell, and the secret exists before the API reads it. up
-# calls it before save_manifest, so the manifest records the same identity.
+# from the invoking shell. It is read-only; "up" calls ensure_local_fleet_secret
+# before starting the API, and the manifest records the same identity.
 # ---------------------------------------------------------------------------
 (
   # shellcheck disable=SC1090
@@ -424,13 +416,16 @@ grep -Fqx 'MULTICA_LOCAL_FLEET_SECRET_FILE=' "$stale_env" \
     || fail "bind_paths did not derive the Fleet URL: $MULTICA_LOCAL_FLEET_URL"
   [ "$MULTICA_LOCAL_FLEET_SECRET_FILE" = "$DIR/.dev/fleet-secret" ] \
     || fail "bind_paths did not derive the Fleet secret path: $MULTICA_LOCAL_FLEET_SECRET_FILE"
-  [ -f "$MULTICA_LOCAL_FLEET_SECRET_FILE" ] || fail "bind_paths did not create the Fleet secret"
-  [ "$(file_mode "$MULTICA_LOCAL_FLEET_SECRET_FILE")" = 600 ] \
-    || fail "bind_paths created the Fleet secret with the wrong mode"
+  [ ! -e "$MULTICA_LOCAL_FLEET_SECRET_FILE" ] \
+    || fail "bind_paths must not create the Fleet secret (read-only verb)"
   [ "$MULTICA_LOCAL_FLEET_NAMESPACE" = derive_910_checkout ] \
     || fail "bind_paths derived namespace = $MULTICA_LOCAL_FLEET_NAMESPACE"
   [ "$MULTICA_FLEET_API_URL" = "http://host.docker.internal:18990" ] \
     || fail "bind_paths derived the Fleet API URL = $MULTICA_FLEET_API_URL"
+  ensure_local_fleet_secret
+  [ -f "$MULTICA_LOCAL_FLEET_SECRET_FILE" ] || fail "up did not create the Fleet secret"
+  [ "$(file_mode "$MULTICA_LOCAL_FLEET_SECRET_FILE")" = 600 ] \
+    || fail "up created the Fleet secret with the wrong mode"
   save_manifest
 ) || fail "bind_paths did not wire Fleet for a fresh checkout"
 
@@ -470,6 +465,8 @@ node -e '
   // never a reason for the status command to fail.
   if (!payload.components.fleet) throw new Error("missing component fleet");
 ' "$out" || fail "status --json is not machine-readable"
+[ ! -e "$tmp_dir/checkout/.dev/fleet-secret" ] \
+  || fail "status created the Fleet secret (read-only verb)"
 
 # ---------------------------------------------------------------------------
 # Fleet wires into the component table without forcing Docker to be reachable:
@@ -506,6 +503,8 @@ if [ "$status" -ne 0 ]; then
   fail "down on a stopped environment exited $status, want 0"
 fi
 require_contains "$out" "stopped"
+[ ! -e "$tmp_dir/checkout/.dev/fleet-secret" ] \
+  || fail "down created the Fleet secret (read-only verb)"
 
 # Commands launched through env-exec must not inherit the daemon-task identity
 # hints that make human/profile CLI commands reject --profile.
@@ -651,6 +650,8 @@ require_contains "$DOCKER_LOG" "-p multica-fleet-probe_ns rm -sf fleet"
 require_contains "$DOCKER_LOG" "label=multica.fleet.namespace=probe_ns"
 require_contains "$PSQL_LOG" "DROP DATABASE"
 [ ! -d "$MULTICA_DEV_HOME/envs/probe-901" ] || fail "destroy left the environment directory behind"
+[ ! -e "$tmp_dir/checkout/.dev/fleet-secret" ] \
+  || fail "destroy created the Fleet secret (read-only verb)"
 
 dev_env list > "$out" 2>&1 || fail "list must succeed after destroy"
 if grep -Fq "probe-901" "$out"; then

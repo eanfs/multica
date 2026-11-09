@@ -169,8 +169,11 @@ environment reuses the database, the profile and any component already healthy.
 Desktop (or a Linux daemon) and builds `multica/fleet:dev` plus
 `multica/runtime-claude:dev` on first start, so the first run is noticeably
 slower than later ones. Fleet manages node containers through the Docker socket;
-keep its port on loopback. `make down` stops only the Fleet control plane and
-keeps the volumes; node containers keep running until `make destroy`, which
+keep its port on loopback. `make up C=fleet` writes the empty 0600
+`.dev/fleet-credentials.json` template (and the service secret); plain
+`make up` writes only the service secret, and `status`, `list`, `down` and
+`destroy` create neither file. `make down` stops only the Fleet control plane
+and keeps the volumes; node containers keep running until `make destroy`, which
 removes the namespace's containers and volumes before dropping the database.
 `make down` does not wait for busy nodes or set a claim barrier. If a Fleet
 container from the old shared `multica`

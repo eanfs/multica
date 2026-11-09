@@ -82,9 +82,10 @@ fleet_require_network() {
 }
 
 # The service secret must exist before the API starts: the server reads it at
-# boot to enable local Fleet, while fleet_up runs after the API. Silent on
-# purpose — bind_paths calls this on every status read, and that command's
-# stdout is a machine-readable contract.
+# boot to enable local Fleet, while fleet_up runs after the API. "up" creates it
+# there; fleet_ensure_secret_files calls this again alongside the credentials
+# template. Silent on purpose — a caller's stdout can be a machine-readable
+# contract.
 fleet_ensure_secret_file() {
   local secret
   secret="$(fleet_secret_file)"
