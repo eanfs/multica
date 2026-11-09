@@ -1,5 +1,9 @@
 name: multica
 
+# The optional Fleet control plane is not part of this project: it lives in
+# docker-compose.fleet.yml and runs under its own per-worktree Compose project
+# (see scripts/fleet-env.sh). It joins multica_default, the network created here.
+
 services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -11,58 +15,6 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-multica} -d postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  # Optional local Fleet control plane, started by `make up C=fleet`. It shares
-  # this checkout's PostgreSQL through the compose network, so DATABASE_URL uses
-  # postgres:5432 no matter what host DATABASE_URL says. The host publishes only
-  # loopback; the container may bind 0.0.0.0 because MULTICA_FLEET_CONTAINER=1
-  # opts into that exception.
-  #
-  # The docker socket makes this a high-privilege trusted control plane: never
-  # publish the port beyond loopback or hand the socket to an untrusted tenant.
-  fleet:
-    image: multica/fleet:dev
-    build:
-      context: .
-      dockerfile: docker/fleet/Dockerfile
-    depends_on:
-      postgres:
-        condition: service_healthy
-    ports:
-      - "127.0.0.1:${MULTICA_FLEET_PORT:-8091}:8091"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ${MULTICA_LOCAL_FLEET_SECRET_FILE:-.dev/fleet-secret}:/run/secrets/fleet-secret:ro
-      - ${MULTICA_FLEET_CREDENTIALS_FILE:-.dev/fleet-credentials.json}:/run/secrets/fleet-credentials.json:ro
-    # Fleet calls back into the host API. Docker Desktop resolves this name
-    # itself; the host-gateway mapping makes the same URL work on Linux.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      MULTICA_FLEET_LISTEN: "0.0.0.0:8091"
-      MULTICA_FLEET_CONTAINER: "1"
-      MULTICA_FLEET_NAMESPACE: ${MULTICA_LOCAL_FLEET_NAMESPACE:-local}
-      MULTICA_FLEET_SECRET_FILE: /run/secrets/fleet-secret
-      MULTICA_FLEET_DOCKER_HOST: unix:///var/run/docker.sock
-      MULTICA_FLEET_NODE_NETWORK: multica-fleet-${MULTICA_LOCAL_FLEET_NAMESPACE:-local}
-      MULTICA_FLEET_RUNTIME_IMAGE: ${MULTICA_FLEET_RUNTIME_IMAGE:-multica/runtime-claude:dev}
-      MULTICA_FLEET_API_URL: ${MULTICA_FLEET_API_URL:-http://host.docker.internal:8080}
-      MULTICA_FLEET_CREDENTIALS_FILE: /run/secrets/fleet-credentials.json
-      # Fleet must reach the same database as the API. The compose network name
-      # replaces the host-only endpoint; MULTICA_FLEET_DATABASE_URL overrides it
-      # for a remote database.
-      DATABASE_URL: ${MULTICA_FLEET_DATABASE_URL:-postgres://${POSTGRES_USER:-multica}:${POSTGRES_PASSWORD:-multica}@postgres:5432/${POSTGRES_DB:-multica}?sslmode=disable}
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8091/readyz"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-      start_period: 20s
 
 volumes:
   pgdata:

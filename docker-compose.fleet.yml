@@ -1,0 +1,56 @@
+# Local Fleet control plane, in its own Compose project.
+#
+# scripts/fleet-env.sh selects the project with -p multica-fleet-<namespace>, so
+# every worktree owns a separate Fleet container instead of recreating another
+# checkout's. The service joins the network owned by this checkout's shared
+# PostgreSQL (top-level docker-compose.yml, project "multica"); it never creates
+# a second database or volume. Start the database first ("make db-up" or
+# "make up C=api"), which creates multica_default.
+#
+# The docker socket makes this a high-privilege trusted control plane: never
+# publish the port beyond loopback or hand the socket to an untrusted tenant.
+name: multica-fleet
+
+services:
+  fleet:
+    image: multica/fleet:dev
+    build:
+      context: .
+      dockerfile: docker/fleet/Dockerfile
+    ports:
+      - "127.0.0.1:${MULTICA_FLEET_PORT:-8091}:8091"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${MULTICA_LOCAL_FLEET_SECRET_FILE:-.dev/fleet-secret}:/run/secrets/fleet-secret:ro
+      - ${MULTICA_FLEET_CREDENTIALS_FILE:-.dev/fleet-credentials.json}:/run/secrets/fleet-credentials.json:ro
+    # Fleet calls back into the host API. Docker Desktop resolves this name
+    # itself; the host-gateway mapping makes the same URL work on Linux.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      MULTICA_FLEET_LISTEN: "0.0.0.0:8091"
+      MULTICA_FLEET_CONTAINER: "1"
+      MULTICA_FLEET_NAMESPACE: ${MULTICA_LOCAL_FLEET_NAMESPACE:-local}
+      MULTICA_FLEET_SECRET_FILE: /run/secrets/fleet-secret
+      MULTICA_FLEET_DOCKER_HOST: unix:///var/run/docker.sock
+      MULTICA_FLEET_NODE_NETWORK: multica-fleet-${MULTICA_LOCAL_FLEET_NAMESPACE:-local}
+      MULTICA_FLEET_RUNTIME_IMAGE: ${MULTICA_FLEET_RUNTIME_IMAGE:-multica/runtime-claude:dev}
+      MULTICA_FLEET_API_URL: ${MULTICA_FLEET_API_URL:-http://host.docker.internal:8080}
+      MULTICA_FLEET_CREDENTIALS_FILE: /run/secrets/fleet-credentials.json
+      # Fleet must reach the same database as the API. The shared compose
+      # network name replaces the host-only endpoint; MULTICA_FLEET_DATABASE_URL
+      # overrides it for a remote database.
+      DATABASE_URL: ${MULTICA_FLEET_DATABASE_URL:-postgres://${POSTGRES_USER:-multica}:${POSTGRES_PASSWORD:-multica}@postgres:5432/${POSTGRES_DB:-multica}?sslmode=disable}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8091/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+
+# PostgreSQL lives in the top-level compose project, so Fleet attaches to that
+# project's default network instead of creating one of its own.
+networks:
+  default:
+    name: multica_default
+    external: true

@@ -58,7 +58,7 @@ fail() {
 
 require_contains() {
   local file=$1 expected=$2
-  if ! grep -Fq "$expected" "$file"; then
+  if ! grep -Fq -- "$expected" "$file"; then
     echo "Expected output to contain: $expected" >&2
     echo "Observed:" >&2
     sed 's/^/  /' "$file" >&2
@@ -71,7 +71,7 @@ dev_env() {
 }
 
 write_manifest() {
-  local name=$1 dir=$2 offset=$3
+  local name=$1 dir=$2 offset=$3 namespace=${4:-}
   local profile="dev-dev-env-test-$offset"
   mkdir -p "$MULTICA_DEV_HOME/envs/$name/logs"
   cat > "$MULTICA_DEV_HOME/envs/$name/manifest.env" <<EOF
@@ -91,6 +91,10 @@ WORKSPACES_ROOT=$(printf '%q' "$MULTICA_DEV_WORKSPACES_PARENT/multica_workspaces
 DESKTOP_RENDERER_PORT=$((5174 + offset))
 DESKTOP_APP_SUFFIX=$name
 EOF
+  # Fleet-era manifests record the namespace; older ones omit it on purpose so
+  # the tests can prove destroy derives it from DIR instead of the caller.
+  [ -z "$namespace" ] || printf 'MULTICA_LOCAL_FLEET_NAMESPACE=%s\n' "$namespace" \
+    >> "$MULTICA_DEV_HOME/envs/$name/manifest.env"
 }
 
 out="$tmp_dir/out"
@@ -302,10 +306,41 @@ for expected in \
 done
 
 # ---------------------------------------------------------------------------
+# up calls bind_paths before save_manifest, so a newly registered environment
+# records the Fleet namespace its Compose project and destroy labels depend on.
+# The namespace comes from that environment's DIR, not from a caller variable.
+# ---------------------------------------------------------------------------
+(
+  # shellcheck disable=SC1090
+  source "$root_dir/scripts/dev-env.sh"
+  NAME=namespace-908
+  DIR="$tmp_dir/namespace-908-checkout"
+  PROFILE=dev-namespace-908
+  OFFSET=908
+  BACKEND_PORT=18988
+  FRONTEND_PORT=13908
+  DESKTOP_RENDERER_PORT=6082
+  DESKTOP_APP_SUFFIX=namespace-908
+  CREATED_AT=2026-01-01T00:00:00Z
+  OWNER=human
+  TTL_HOURS=0
+  ENV_FILE=.env.example
+  DB_NAME=multica_namespace_908
+  DATABASE_URL=postgres://multica:multica@localhost:5432/multica_namespace_908?sslmode=disable
+  WORKSPACES_ROOT="$MULTICA_DEV_WORKSPACES_PARENT/multica_workspaces_$PROFILE"
+  bind_paths
+  save_manifest
+)
+grep -Fqx 'MULTICA_LOCAL_FLEET_NAMESPACE=namespace_908_checkout' \
+  "$MULTICA_DEV_HOME/envs/namespace-908/manifest.env" \
+  || fail "save_manifest did not record the derived Fleet namespace"
+rm -rf "$MULTICA_DEV_HOME/envs/namespace-908"
+
+# ---------------------------------------------------------------------------
 # A registered environment is visible to both renderings, and the JSON one
 # parses — agents read it, so a stray log line in it is a broken contract.
 # ---------------------------------------------------------------------------
-write_manifest "probe-901" "$tmp_dir/checkout" 901
+write_manifest "probe-901" "$tmp_dir/checkout" 901 "probe_ns"
 mkdir -p "$tmp_dir/checkout"
 
 dev_env list > "$out" 2>&1 || fail "list must succeed with one environment"
@@ -458,13 +493,14 @@ dev_env destroy fleet-fails-905 --yes > "$out" 2>&1 \
 # ---------------------------------------------------------------------------
 # destroy consumes the manifest: the slot is free afterwards, which is what
 # makes the registry an allocator rather than a second place to leak. It also
-# removes the Fleet compose service and namespace-scoped resources.
+# removes this environment's Fleet compose project and namespace-scoped
+# resources. The recorded namespace wins over the directory basename.
 # ---------------------------------------------------------------------------
 : > "$DOCKER_LOG"
 : > "$PSQL_LOG"
 dev_env destroy probe-901 --yes > "$out" 2>&1 || fail "destroy must succeed"
-require_contains "$DOCKER_LOG" "rm -sf fleet"
-require_contains "$DOCKER_LOG" "label=multica.fleet.namespace="
+require_contains "$DOCKER_LOG" "-p multica-fleet-probe_ns rm -sf fleet"
+require_contains "$DOCKER_LOG" "label=multica.fleet.namespace=probe_ns"
 require_contains "$PSQL_LOG" "DROP DATABASE"
 [ ! -d "$MULTICA_DEV_HOME/envs/probe-901" ] || fail "destroy left the environment directory behind"
 
@@ -473,9 +509,49 @@ if grep -Fq "probe-901" "$out"; then
   fail "destroyed environment is still listed"
 fi
 
+# ---------------------------------------------------------------------------
+# A manifest created before Fleet has no namespace. destroy must then derive it
+# from that environment's DIR, never from the namespace the invoking checkout
+# exports (make includes .env.worktree and exports its variables).
+# ---------------------------------------------------------------------------
+write_manifest "orphan-ns-907" "$tmp_dir/deleted-checkout-907" 907
+: > "$DOCKER_LOG"
+: > "$PSQL_LOG"
+MULTICA_LOCAL_FLEET_NAMESPACE=caller_checkout \
+  dev_env destroy orphan-ns-907 --yes > "$out" 2>&1 \
+  || fail "destroy of a namespace-less manifest failed"
+require_contains "$DOCKER_LOG" "-p multica-fleet-deleted_checkout_907 rm -sf fleet"
+require_contains "$DOCKER_LOG" "label=multica.fleet.namespace=deleted_checkout_907"
+if grep -Fq 'namespace=caller_checkout' "$DOCKER_LOG"; then
+  fail "destroy used the caller checkout's Fleet namespace"
+fi
+if grep -Fq 'multica-fleet-caller_checkout' "$DOCKER_LOG"; then
+  fail "destroy used the caller checkout's Fleet compose project"
+fi
+[ ! -d "$MULTICA_DEV_HOME/envs/orphan-ns-907" ] \
+  || fail "destroy left the inherited-namespace environment behind"
+
 # Declining the confirmation is a successful no-op, not a failure.
 printf 'n\n' | dev_env destroy orphan-902 > "$out" 2>&1 || fail "declining destroy must exit 0"
 require_contains "$out" "Cancelled."
 [ -d "$MULTICA_DEV_HOME/envs/orphan-902" ] || fail "declined destroy removed the environment anyway"
+
+# ---------------------------------------------------------------------------
+# gc shells out to destroy for every orphaned environment. Each one must be
+# cleaned under its own namespace/project even though the invoking checkout
+# exports its own MULTICA_LOCAL_FLEET_NAMESPACE.
+# ---------------------------------------------------------------------------
+write_manifest "gc-ns-909" "$tmp_dir/gc-deleted-909" 909
+: > "$DOCKER_LOG"
+: > "$PSQL_LOG"
+MULTICA_LOCAL_FLEET_NAMESPACE=caller_checkout dev_env gc > "$out" 2>&1 \
+  || fail "gc of orphaned environments failed"
+require_contains "$out" "gc-ns-909"
+require_contains "$DOCKER_LOG" "-p multica-fleet-gc_deleted_909 rm -sf fleet"
+require_contains "$DOCKER_LOG" "label=multica.fleet.namespace=gc_deleted_909"
+if grep -Fq 'caller_checkout' "$DOCKER_LOG"; then
+  fail "gc cleaned resources under the invoking checkout's Fleet namespace"
+fi
+[ ! -d "$MULTICA_DEV_HOME/envs/gc-ns-909" ] || fail "gc left the orphaned environment behind"
 
 echo "✓ dev-env.sh registry behaviour verified"

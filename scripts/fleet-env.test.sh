@@ -24,6 +24,7 @@ cat > "$fake_bin/docker" <<'EOF'
 printf 'docker %s\n' "$*" >> "$DOCKER_LOG"
 case "$*" in
   *"ps -q fleet"*|*"ps -aq fleet"*) [ "${FAKE_DOCKER_NO_CONTAINER:-0}" = 1 ] || printf 'container-id\n' ;;
+  *"network inspect multica_default"*) [ "${FAKE_DOCKER_NO_NETWORK:-0}" = 1 ] && exit 1 ;;
 esac
 exit 0
 EOF
@@ -61,7 +62,7 @@ fail() {
 
 require_log() {
   local log=$1 expected=$2
-  grep -Fq "$expected" "$log" || fail "expected '$expected' in $log"
+  grep -Fq -- "$expected" "$log" || fail "expected '$expected' in $log"
 }
 
 file_mode() {
@@ -79,7 +80,13 @@ FAKE_DOCKER_NO_CONTAINER=1 fleet_up || fail "fleet_up failed"
 
 require_log "$DOCKER_LOG" "docker build -f $root/docker/runtime/Dockerfile"
 require_log "$DOCKER_LOG" "docker build -f $root/docker/fleet/Dockerfile"
-require_log "$DOCKER_LOG" "up -d fleet"
+# The lifecycle must use the isolated fleet file AND the per-namespace project;
+# the top-level compose project belongs to the database and every worktree.
+require_log "$DOCKER_LOG" "docker compose -f $root/docker-compose.fleet.yml -p multica-fleet-fleet-test up -d fleet"
+require_log "$DOCKER_LOG" "network inspect multica_default"
+if grep -Fq "docker compose -f $root/docker-compose.yml" "$DOCKER_LOG"; then
+  fail "fleet lifecycle used the shared docker-compose.yml project"
+fi
 require_log "$CURL_LOG" "http://127.0.0.1:8092/readyz"
 
 [ -s "$MULTICA_LOCAL_FLEET_SECRET_FILE" ] || fail "fleet_up did not create the service secret"
@@ -108,7 +115,7 @@ esac
 # ---------------------------------------------------------------------------
 status="$(fleet_status)"
 [ "$status" = "running|http://127.0.0.1:8092|ready" ] || fail "fleet_status = $status"
-require_log "$DOCKER_LOG" "ps -q fleet"
+require_log "$DOCKER_LOG" "-p multica-fleet-fleet-test ps -q fleet"
 
 status="$(
   export FAKE_CURL_FAIL=1
@@ -139,13 +146,28 @@ fleet_resources_present || fail "a running fleet service must count as present"
 # scoped to this checkout's Fleet namespace label; a global prune is forbidden.
 # ---------------------------------------------------------------------------
 fleet_down || fail "fleet_down failed"
-require_log "$DOCKER_LOG" "stop fleet"
+require_log "$DOCKER_LOG" "-p multica-fleet-fleet-test stop fleet"
 
 fleet_destroy || fail "fleet_destroy failed"
-require_log "$DOCKER_LOG" "rm -sf fleet"
+require_log "$DOCKER_LOG" "-p multica-fleet-fleet-test rm -sf fleet"
 require_log "$DOCKER_LOG" "label=multica.fleet.namespace=fleet-test"
 if grep -Fq 'prune' "$DOCKER_LOG"; then
   fail "fleet_destroy must never run a global prune"
+fi
+
+# Projects are per namespace, so another worktree's namespace addresses a
+# different project and filters labels for its own resources only.
+[ "$(fleet_project)" = "multica-fleet-fleet-test" ] || fail "fleet_project = $(fleet_project)"
+[ "$(MULTICA_LOCAL_FLEET_NAMESPACE=other-worktree fleet_project)" = "multica-fleet-other-worktree" ] \
+  || fail "fleet_project is not namespace-scoped"
+[ "$(fleet_compose_file)" = "$root/docker-compose.fleet.yml" ] \
+  || fail "fleet_compose_file = $(fleet_compose_file)"
+: > "$DOCKER_LOG"
+MULTICA_LOCAL_FLEET_NAMESPACE=other-worktree fleet_destroy || fail "fleet_destroy for another namespace failed"
+require_log "$DOCKER_LOG" "-p multica-fleet-other-worktree rm -sf fleet"
+require_log "$DOCKER_LOG" "label=multica.fleet.namespace=other-worktree"
+if grep -Fq 'namespace=fleet-test' "$DOCKER_LOG"; then
+  fail "destroy for another namespace touched fleet-test resources"
 fi
 
 # ---------------------------------------------------------------------------
@@ -187,5 +209,23 @@ rc=0
 ) >"$tmp/timeout.out" 2>&1 || rc=$?
 [ "$rc" -ne 0 ] || fail "fleet_up succeeded while readyz never answered"
 grep -Fq 'not ready' "$tmp/timeout.out" || fail "fleet_up did not report the readiness timeout"
+
+# The isolated project joins the database project's network instead of creating
+# one. A missing network must fail with the database preflight, before images
+# are built or compose starts.
+: > "$DOCKER_LOG"
+rc=0
+(
+  export FAKE_DOCKER_NO_CONTAINER=1 FAKE_DOCKER_NO_NETWORK=1
+  fleet_up
+) >"$tmp/no-network.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "fleet_up succeeded without the postgres network"
+grep -Fq 'network multica_default is missing' "$tmp/no-network.out" \
+  || fail "fleet_up did not explain the missing network"
+grep -Fq 'make db-up' "$tmp/no-network.out" \
+  || fail "fleet_up did not point at the database preflight"
+if grep -Eq 'docker build|up -d fleet' "$DOCKER_LOG"; then
+  fail "fleet_up built or started compose before the network preflight"
+fi
 
 echo "✓ fleet-env.sh compose lifecycle verified"

@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Fleet component helpers, sourced by scripts/dev-env.sh.
 #
-# Fleet runs in Docker (the Compose `fleet` service) and manages node
-# containers through the mounted Docker socket. Everything that would start,
-# stop or delete work therefore fails closed when the daemon is unreachable;
-# fleet_down is the one exception, because "make down" must still succeed on a
-# machine whose daemon was already shut down.
+# Fleet runs in Docker (the Compose `fleet` service in docker-compose.fleet.yml)
+# and manages node containers through the mounted Docker socket. Each worktree
+# gets its own Compose project (multica-fleet-<namespace>), so starting or
+# destroying one checkout never recreates another checkout's Fleet. The service
+# only joins the network of this checkout's shared PostgreSQL; it never creates
+# a second database or network.
+#
+# Everything that would start, stop or delete work therefore fails closed when
+# the daemon is unreachable; fleet_down is the one exception, because "make down"
+# must still succeed on a machine whose daemon was already shut down.
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -20,10 +25,21 @@ fleet_host_path() {
   esac
 }
 
-fleet_compose_file() { printf '%s/docker-compose.yml' "$REPO_ROOT"; }
+fleet_compose_file() { printf '%s/docker-compose.fleet.yml' "$REPO_ROOT"; }
 fleet_port() { printf '%s' "${MULTICA_FLEET_PORT:-8091}"; }
 fleet_url() { printf 'http://127.0.0.1:%s' "$(fleet_port)"; }
 fleet_namespace() { printf '%s' "${MULTICA_LOCAL_FLEET_NAMESPACE:-local}"; }
+
+# One Compose project per namespace is the isolation boundary: the compose file
+# names the project multica-fleet, and -p narrows it to this checkout. Compose
+# would otherwise share the top-level "multica" project with the database and
+# every other worktree.
+fleet_project() { printf 'multica-fleet-%s' "$(fleet_namespace)"; }
+fleet_compose() { docker compose -f "$(fleet_compose_file)" -p "$(fleet_project)" "$@"; }
+
+# The database's Compose project owns this network. It is external here so the
+# two projects can share it without either one creating or deleting it.
+fleet_network() { printf 'multica_default'; }
 fleet_secret_file() { fleet_host_path "${MULTICA_LOCAL_FLEET_SECRET_FILE:-.dev/fleet-secret}"; }
 fleet_credentials_file() { fleet_host_path "${MULTICA_FLEET_CREDENTIALS_FILE:-.dev/fleet-credentials.json}"; }
 
@@ -48,6 +64,21 @@ fleet_require_docker() {
     printf 'fleet: %s\n' "$reason" >&2
     return 1
   fi
+}
+
+# The fleet project attaches to the database project's network instead of
+# creating one. Without this preflight, "compose up" fails on a bare
+# "network multica_default declared as external, but could not be found" after
+# the images were already built, which reads like a Fleet bug.
+fleet_require_network() {
+  local network
+  network="$(fleet_network)"
+  if docker network inspect "$network" >/dev/null 2>&1; then
+    return 0
+  fi
+  printf "fleet: Docker network %s is missing. It is created by this checkout's PostgreSQL.\n" "$network" >&2
+  printf 'fleet: start the database first (make db-up, or make up C=api), then retry make up C=fleet.\n' >&2
+  return 1
 }
 
 # Both files are bind-mounted into the Fleet container. Docker creates a missing
@@ -84,23 +115,24 @@ fleet_up() {
   # repeated "make up C=fleet" must not rebuild images or recreate a live
   # container (which would drop the node containers attached to it).
   local existing
-  if existing="$(docker compose -f "$(fleet_compose_file)" ps -q fleet 2>/dev/null)" \
+  if existing="$(fleet_compose ps -q fleet 2>/dev/null)" \
     && [ -n "$existing" ] \
     && curl -fsS --max-time 2 "$(fleet_url)/readyz" >/dev/null 2>&1; then
     printf 'fleet: already running at %s\n' "$(fleet_url)"
     return 0
   fi
 
+  fleet_require_network || return 1
   fleet_ensure_secret_files || return 1
   fleet_build_images || return 1
-  docker compose -f "$(fleet_compose_file)" up -d fleet || return 1
+  fleet_compose up -d fleet || return 1
 
   local url waited=0 limit="${MULTICA_FLEET_READY_TIMEOUT:-120}"
   url="$(fleet_url)/readyz"
   until curl -fsS --max-time 2 "$url" >/dev/null 2>&1; do
     if [ "$waited" -ge "$limit" ]; then
-      printf 'fleet: not ready after %ss (%s); inspect: docker compose -f %s logs fleet\n' \
-        "$limit" "$url" "$(fleet_compose_file)" >&2
+      printf 'fleet: not ready after %ss (%s); inspect: docker compose -f %s -p %s logs fleet\n' \
+        "$limit" "$url" "$(fleet_compose_file)" "$(fleet_project)" >&2
       return 1
     fi
     sleep 1
@@ -114,7 +146,7 @@ fleet_down() {
     printf 'fleet: %s; nothing to stop.\n' "$reason"
     return 0
   fi
-  docker compose -f "$(fleet_compose_file)" stop fleet >/dev/null || return 1
+  fleet_compose stop fleet >/dev/null || return 1
 }
 
 # Output is the state|url|detail triple dev-env.sh renders for every component.
@@ -126,7 +158,7 @@ fleet_status() {
     printf 'unavailable|-|%s' "$reason"
     return 0
   fi
-  if ! container="$(docker compose -f "$(fleet_compose_file)" ps -q fleet 2>/dev/null)"; then
+  if ! container="$(fleet_compose ps -q fleet 2>/dev/null)"; then
     printf 'error|-|docker compose ps failed'
     return 0
   fi
@@ -141,26 +173,27 @@ fleet_status() {
   fi
 }
 
-# True when this checkout has anything for Fleet to remove: the compose
-# service (running or stopped) or namespace-labelled node containers, volumes or
-# networks. An unreachable daemon is "nothing to clean", so destroy can still
-# run on a machine whose Docker Desktop was closed.
+# True when this namespace has anything for Fleet to remove: its own compose
+# project's service (running or stopped) or namespace-labelled node containers,
+# volumes or networks. Another worktree's project is never consulted. An
+# unreachable daemon is "nothing to clean", so destroy can still run on a machine
+# whose Docker Desktop was closed.
 fleet_resources_present() {
   local reason ns
   if ! reason="$(fleet_docker_unavailable_reason)"; then
     return 1
   fi
   ns="$(fleet_namespace)"
-  [ -z "$(docker compose -f "$(fleet_compose_file)" ps -aq fleet 2>/dev/null || true)" ] || return 0
+  [ -z "$(fleet_compose ps -aq fleet 2>/dev/null || true)" ] || return 0
   [ -z "$(docker ps -aq --filter "label=multica.fleet.namespace=$ns" 2>/dev/null || true)" ] || return 0
   [ -z "$(docker volume ls -q --filter "label=multica.fleet.namespace=$ns" 2>/dev/null || true)" ] || return 0
   [ -z "$(docker network ls -q --filter "label=multica.fleet.namespace=$ns" 2>/dev/null || true)" ] || return 0
   return 1
 }
 
-# Removes the compose service and the Docker resources Fleet created for this
-# checkout's namespace. Only namespace-labelled resources are matched; a global
-# "docker prune" would delete other checkouts' data.
+# Removes this namespace's compose project and the Docker resources Fleet
+# created for it. Only that project's service and namespace-labelled resources
+# are matched; a global "docker prune" would delete other checkouts' data.
 #
 # Every failure is counted instead of swallowed: dev-env.sh destroy runs this
 # before it drops the database, and a half-removed Fleet must keep the manifest
@@ -170,7 +203,7 @@ fleet_destroy() {
   local ns failures=0 containers="" volumes="" networks="" id
   ns="$(fleet_namespace)"
 
-  if ! docker compose -f "$(fleet_compose_file)" rm -sf fleet >/dev/null 2>&1; then
+  if ! fleet_compose rm -sf fleet >/dev/null 2>&1; then
     printf 'fleet: failed to remove the compose fleet service\n' >&2
     failures=$((failures + 1))
   fi

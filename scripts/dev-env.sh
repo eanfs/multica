@@ -169,11 +169,15 @@ manifest_field() {
   file="$(manifest_of "$1")"
   [ -f "$file" ] || return 0
   (
+    # The caller (or make) may export a stale value for the key; only the file
+    # may answer, so clear the supported keys before sourcing it.
+    unset DIR OFFSET MULTICA_LOCAL_FLEET_NAMESPACE
     # shellcheck disable=SC1090
     . "$file"
     case "$key" in
       DIR) printf '%s' "$DIR" ;;
       OFFSET) printf '%s' "$OFFSET" ;;
+      MULTICA_LOCAL_FLEET_NAMESPACE) printf '%s' "${MULTICA_LOCAL_FLEET_NAMESPACE:-}" ;;
       *) return 1 ;;
     esac
   )
@@ -627,7 +631,7 @@ Run 'make down' here first — a leftover instance answers /health with 200 and 
 start_fleet() {
   local row state url detail
   info "building the runtime and fleet images, then starting the compose service"
-  fleet_up || die "Fleet did not start. Inspect 'docker compose -f $(fleet_compose_file) logs fleet'."
+  fleet_up || die "Fleet did not start. Inspect 'docker compose -f $(fleet_compose_file) -p $(fleet_project) logs fleet'."
   row="$(fleet_status)"
   state="${row%%|*}"; row="${row#*|}"
   url="${row%%|*}"; detail="${row#*|}"
@@ -1114,6 +1118,25 @@ resolve_env_for_read() {
   bind_paths
 }
 
+# Fleet's namespace decides its Compose project and the labels destroy cleans.
+# A recorded manifest value always wins. A manifest that predates Fleet derives
+# the namespace from this environment's DIR, never from the invoking checkout's
+# path or an inherited MULTICA_* variable — that inheritance is what made a
+# cross-checkout "gc" clean the caller's namespace. An explicit variable still
+# applies while a brand-new environment is being registered.
+bind_fleet_namespace() {
+  local manifest recorded=""
+  manifest="$(manifest_of "$NAME")"
+  if [ -f "$manifest" ]; then
+    recorded="$(manifest_field "$NAME" MULTICA_LOCAL_FLEET_NAMESPACE || true)"
+  fi
+  if [ -n "$recorded" ]; then
+    MULTICA_LOCAL_FLEET_NAMESPACE="$recorded"
+  elif [ -f "$manifest" ] || [ -z "${MULTICA_LOCAL_FLEET_NAMESPACE:-}" ]; then
+    MULTICA_LOCAL_FLEET_NAMESPACE="$(slugify "$(basename "${DIR:-$REPO_ROOT}")")"
+  fi
+}
+
 bind_paths() {
   STATE_DIR="$(env_dir "$NAME")"
   LOG_DIR="$STATE_DIR/logs"
@@ -1124,6 +1147,7 @@ bind_paths() {
   DESKTOP_USER_DATA_DIR="${DESKTOP_USER_DATA_DIR:-$(desktop_user_data_dir "$DESKTOP_APP_SUFFIX")}"
   DESKTOP_ENV_FILE="${DESKTOP_ENV_FILE:-$DIR/apps/desktop/.env.development.local}"
   EXPIRES_AT="${EXPIRES_AT:-}"
+  bind_fleet_namespace
   # Fleet defaults follow this environment's allocated ports when the env file
   # leaves them unset (a fresh .env from .env.example ships them commented out),
   # so start, status and down all address the same container. The values are
@@ -1133,9 +1157,6 @@ bind_paths() {
   fi
   if [ -z "${MULTICA_FLEET_API_URL:-}" ]; then
     MULTICA_FLEET_API_URL="http://host.docker.internal:${BACKEND_PORT}"
-  fi
-  if [ -z "${MULTICA_LOCAL_FLEET_NAMESPACE:-}" ]; then
-    MULTICA_LOCAL_FLEET_NAMESPACE="$(slugify "$(basename "$REPO_ROOT")")"
   fi
   export MULTICA_FLEET_PORT MULTICA_FLEET_API_URL MULTICA_LOCAL_FLEET_NAMESPACE
   MULTICA_BIN="$DIR/server/bin/multica"
@@ -1305,6 +1326,10 @@ Start the rest with 'make up C=api,web', or run 'make up C=daemon' from your own
     OFFSET="$offset"
     BACKEND_PORT="$PORT"
     DB_NAME="$POSTGRES_DB"
+    # bind_paths runs before save_manifest: it derives the Fleet namespace (and
+    # its port/API URL) from this environment, so the manifest records the
+    # identity that status/down/destroy/gc later rely on.
+    bind_paths
     save_manifest
     load_manifest "$NAME"
     ok "Registered environment $NAME"
