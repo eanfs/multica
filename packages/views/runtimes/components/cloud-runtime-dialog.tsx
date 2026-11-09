@@ -393,9 +393,9 @@ function CloudRuntimeNodeRow({
   const stopNode = useStopCloudRuntimeNode(wsId);
   const rebootNode = useRebootCloudRuntimeNode(wsId);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  // One idempotency key per node + operation. A failed or uncertain response
-  // keeps it so the retry replays the prepared operation; success drops it so
-  // a later, independent request gets a fresh one.
+  // One idempotency key per node + operation. An uncertain response (5xx or
+  // network failure) keeps it so the retry replays the prepared operation; a
+  // terminal 4xx or a success drops it so the next attempt prepares afresh.
   const idempotencyKeys = useRef(new Map<string, string>());
   const keyFor = (operation: string) => {
     const slot = `${node.id}:${operation}`;
@@ -429,12 +429,18 @@ function CloudRuntimeNodeRow({
     t(($) => $.cloud_runtime.node_fallback_name);
   const created = formatDateTime(node.created_at);
 
-  const reportOperationError = (error: unknown) =>
+  const reportOperationError = (operation: string, error: unknown) => {
+    // A 4xx is terminal: the prepared operation can never replay, so keeping
+    // the key would make every retry answer 409. An uncertain 5xx or a network
+    // failure may still have prepared it, so that key stays for a same-key
+    // retry.
+    if (isTerminalClientError(error)) forgetKey(operation);
     toast.error(
       error instanceof Error
         ? error.message
         : t(($) => $.cloud_runtime.toast_operation_failed),
     );
+  };
 
   return (
     <div className="rounded-md border bg-background px-3 py-2.5">
@@ -493,7 +499,7 @@ function CloudRuntimeNodeRow({
                   { instanceId, idempotencyKey: keyFor("start") },
                   {
                     onSuccess: () => forgetKey("start"),
-                    onError: reportOperationError,
+                    onError: (error) => reportOperationError("start", error),
                   },
                 )
               }
@@ -523,7 +529,7 @@ function CloudRuntimeNodeRow({
                   { instanceId, idempotencyKey: keyFor("stop") },
                   {
                     onSuccess: () => forgetKey("stop"),
-                    onError: reportOperationError,
+                    onError: (error) => reportOperationError("stop", error),
                   },
                 )
               }
@@ -553,7 +559,7 @@ function CloudRuntimeNodeRow({
                   { instanceId, idempotencyKey: keyFor("reboot") },
                   {
                     onSuccess: () => forgetKey("reboot"),
-                    onError: reportOperationError,
+                    onError: (error) => reportOperationError("reboot", error),
                   },
                 )
               }
@@ -612,8 +618,8 @@ function CloudRuntimeNodeRow({
                       setConfirmingDelete(false);
                       toast.success(t(($) => $.cloud_runtime.toast_deleted));
                     },
-                    onError: (err) => {
-                      reportOperationError(err);
+                    onError: (error) => {
+                      reportOperationError("delete", error);
                     },
                   },
                 )
@@ -702,6 +708,15 @@ function ec2CreateRequest(
 function valueOrUndefined(value: string): string | undefined {
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
+}
+
+// A 4xx answer says the prepared operation itself is unacceptable. Retrying it
+// with the same idempotency key would replay that refusal forever, so the key
+// must be released; 5xx and transport failures stay retryable under their key.
+function isTerminalClientError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const status = (error as { status?: unknown }).status;
+  return typeof status === "number" && status >= 400 && status < 500;
 }
 
 function formatDateTime(value: string): string | null {

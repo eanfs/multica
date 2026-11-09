@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -142,8 +143,10 @@ func (s *Service) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	}
 	operations, err := s.activeNodeOperations(r.Context())
 	if err != nil {
-		writeServiceError(w, err)
-		return
+		// The operation column is an annotation on the list. A failed lookup
+		// must not hide the nodes themselves, so degrade to no operation.
+		slog.Warn("fleet: list active node operations failed", "error", err)
+		operations = nil
 	}
 	responses := make([]nodeResponse, 0, len(nodes))
 	for _, node := range nodes {

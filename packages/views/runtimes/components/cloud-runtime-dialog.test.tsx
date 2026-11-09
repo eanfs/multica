@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { setApiInstance } from "@multica/core/api";
+import { ApiError, setApiInstance } from "@multica/core/api";
 import { I18nProvider } from "@multica/core/i18n/react";
 import type {
   CloudRuntimeNode,
@@ -78,6 +78,21 @@ function renderDialog(service: CloudRuntimeService) {
       </I18nProvider>
     </QueryClientProvider>,
   );
+}
+
+async function clickStopTwice(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("button", { name: "Stop node" }));
+  await waitFor(() =>
+    expect(apiMocks.stopCloudRuntimeNode).toHaveBeenCalledTimes(1),
+  );
+  await user.click(screen.getByRole("button", { name: "Stop node" }));
+  await waitFor(() =>
+    expect(apiMocks.stopCloudRuntimeNode).toHaveBeenCalledTimes(2),
+  );
+  return {
+    first: apiMocks.stopCloudRuntimeNode.mock.calls[0]!,
+    second: apiMocks.stopCloudRuntimeNode.mock.calls[1]!,
+  };
 }
 
 beforeEach(() => {
@@ -201,28 +216,50 @@ describe("CloudRuntimeDialog", () => {
     ).toBeInTheDocument();
   });
 
-  it("reuses the same idempotency key after a failed operation", async () => {
+  it("keeps the idempotency key after an uncertain 5xx failure", async () => {
     const user = userEvent.setup();
     apiMocks.listCloudRuntimeNodes.mockResolvedValue([makeNode()]);
     apiMocks.stopCloudRuntimeNode
-      .mockRejectedValueOnce(new Error("state uncertain"))
+      .mockRejectedValueOnce(
+        new ApiError("state uncertain", 503, "Service Unavailable"),
+      )
       .mockResolvedValueOnce(undefined);
     renderDialog(dockerService({ operations: ["create", "stop"] }));
 
-    await user.click(await screen.findByRole("button", { name: "Stop node" }));
-    await waitFor(() =>
-      expect(apiMocks.stopCloudRuntimeNode).toHaveBeenCalledTimes(1),
-    );
-    await user.click(screen.getByRole("button", { name: "Stop node" }));
-    await waitFor(() =>
-      expect(apiMocks.stopCloudRuntimeNode).toHaveBeenCalledTimes(2),
-    );
+    const { first, second } = await clickStopTwice(user);
 
-    const first = apiMocks.stopCloudRuntimeNode.mock.calls[0]!;
-    const second = apiMocks.stopCloudRuntimeNode.mock.calls[1]!;
     expect(first[0]).toBe("container-1");
     expect(typeof first[1]).toBe("string");
+    // A 503 may still have prepared the operation, so the retry must replay the
+    // same key instead of preparing a second one.
     expect(second[1]).toBe(first[1]);
+  });
+
+  it("drops the idempotency key after a terminal 4xx failure", async () => {
+    const user = userEvent.setup();
+    apiMocks.listCloudRuntimeNodes.mockResolvedValue([makeNode()]);
+    apiMocks.stopCloudRuntimeNode
+      .mockRejectedValueOnce(new ApiError("operation conflict", 409, "Conflict"))
+      .mockResolvedValueOnce(undefined);
+    renderDialog(dockerService({ operations: ["create", "stop"] }));
+
+    const { first, second } = await clickStopTwice(user);
+
+    expect(typeof first[1]).toBe("string");
+    // Replaying a rejected key would 409 forever; the retry prepares afresh.
+    expect(second[1]).not.toBe(first[1]);
+  });
+
+  it("drops the idempotency key after a successful operation", async () => {
+    const user = userEvent.setup();
+    apiMocks.listCloudRuntimeNodes.mockResolvedValue([makeNode()]);
+    apiMocks.stopCloudRuntimeNode.mockResolvedValue(undefined);
+    renderDialog(dockerService({ operations: ["create", "stop"] }));
+
+    const { first, second } = await clickStopTwice(user);
+
+    expect(typeof first[1]).toBe("string");
+    expect(second[1]).not.toBe(first[1]);
   });
 
   it("deletes a failed node by node id when it has no container", async () => {
