@@ -21,6 +21,12 @@ WHERE owner_id = @owner_id AND namespace = @namespace
 ORDER BY created_at DESC
 LIMIT @limit_count OFFSET @offset_count;
 
+-- name: ListFleetNodesByNamespace :many
+SELECT * FROM fleet_node
+WHERE namespace = @namespace
+ORDER BY created_at ASC
+LIMIT @limit_count OFFSET @offset_count;
+
 -- name: CountFleetNodesByOwner :one
 SELECT count(*) FROM fleet_node
 WHERE owner_id = @owner_id AND namespace = @namespace
@@ -79,6 +85,12 @@ WHERE id = @id;
 SELECT * FROM fleet_node_operation
 WHERE phase IN ('prepared', 'approved', 'executing')
 ORDER BY created_at ASC;
+
+-- name: ListApprovedFleetNodeOperationsByNamespace :many
+SELECT o.* FROM fleet_node_operation o
+JOIN fleet_node n ON n.id = o.node_id
+WHERE n.namespace = @namespace AND o.phase = 'approved'
+ORDER BY o.created_at ASC;
 
 -- name: CountActiveTasksForDaemon :one
 SELECT count(*) FROM agent_task_queue q

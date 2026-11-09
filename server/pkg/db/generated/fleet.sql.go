@@ -442,6 +442,98 @@ func (q *Queries) GetFleetNodeOperationByIdempotencyKey(ctx context.Context, ide
 	return i, err
 }
 
+const listApprovedFleetNodeOperationsByNamespace = `-- name: ListApprovedFleetNodeOperationsByNamespace :many
+SELECT o.id, o.node_id, o.operation, o.phase, o.idempotency_key, o.request_fingerprint, o.approved_at, o.retry_count, o.error, o.created_at, o.updated_at FROM fleet_node_operation o
+JOIN fleet_node n ON n.id = o.node_id
+WHERE n.namespace = $1 AND o.phase = 'approved'
+ORDER BY o.created_at ASC
+`
+
+func (q *Queries) ListApprovedFleetNodeOperationsByNamespace(ctx context.Context, namespace string) ([]FleetNodeOperation, error) {
+	rows, err := q.db.Query(ctx, listApprovedFleetNodeOperationsByNamespace, namespace)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FleetNodeOperation{}
+	for rows.Next() {
+		var i FleetNodeOperation
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeID,
+			&i.Operation,
+			&i.Phase,
+			&i.IdempotencyKey,
+			&i.RequestFingerprint,
+			&i.ApprovedAt,
+			&i.RetryCount,
+			&i.Error,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFleetNodesByNamespace = `-- name: ListFleetNodesByNamespace :many
+SELECT id, owner_id, namespace, name, container_id, container_name, daemon_id, image, spec, target_state, observed_state, daemon_ready, health_checked_at, generation, idempotency_key, status_detail, error, created_at, updated_at FROM fleet_node
+WHERE namespace = $1
+ORDER BY created_at ASC
+LIMIT $3 OFFSET $2
+`
+
+type ListFleetNodesByNamespaceParams struct {
+	Namespace   string `json:"namespace"`
+	OffsetCount int32  `json:"offset_count"`
+	LimitCount  int32  `json:"limit_count"`
+}
+
+func (q *Queries) ListFleetNodesByNamespace(ctx context.Context, arg ListFleetNodesByNamespaceParams) ([]FleetNode, error) {
+	rows, err := q.db.Query(ctx, listFleetNodesByNamespace, arg.Namespace, arg.OffsetCount, arg.LimitCount)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FleetNode{}
+	for rows.Next() {
+		var i FleetNode
+		if err := rows.Scan(
+			&i.ID,
+			&i.OwnerID,
+			&i.Namespace,
+			&i.Name,
+			&i.ContainerID,
+			&i.ContainerName,
+			&i.DaemonID,
+			&i.Image,
+			&i.Spec,
+			&i.TargetState,
+			&i.ObservedState,
+			&i.DaemonReady,
+			&i.HealthCheckedAt,
+			&i.Generation,
+			&i.IdempotencyKey,
+			&i.StatusDetail,
+			&i.Error,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listFleetNodesByOwner = `-- name: ListFleetNodesByOwner :many
 SELECT id, owner_id, namespace, name, container_id, container_name, daemon_id, image, spec, target_state, observed_state, daemon_ready, health_checked_at, generation, idempotency_key, status_detail, error, created_at, updated_at FROM fleet_node
 WHERE owner_id = $1 AND namespace = $2

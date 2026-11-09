@@ -397,10 +397,14 @@ func (s *Service) applyStatus(ctx context.Context, node db.FleetNode) (db.FleetN
 	}
 
 	daemonReady, healthFresh := false, false
+	// Keep the last known detail when no fresh health sample is readable; an
+	// unavailable daemon must not erase what was observed before.
+	detail := node.StatusDetail
 	if observed.State == "running" {
 		if report, healthErr := s.Diagnose(ctx, node); healthErr == nil {
 			daemonReady = report.Status == "running"
 			healthFresh = true
+			detail = statusDetailFromHealth(report)
 		}
 	}
 	display := DeriveDisplayState(node.TargetState, Observed{
@@ -415,7 +419,7 @@ func (s *Service) applyStatus(ctx context.Context, node db.FleetNode) (db.FleetN
 		Namespace:     s.cfg.Namespace,
 		ObservedState: display,
 		DaemonReady:   daemonReady,
-		StatusDetail:  node.StatusDetail,
+		StatusDetail:  detail,
 		Error:         "",
 	}); err != nil {
 		return db.FleetNode{}, fmt.Errorf("record node status: %w", err)
