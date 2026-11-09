@@ -297,7 +297,6 @@
     "toast_created": "云端节点已创建",
     "toast_create_failed": "创建云端节点失败",
     "delete": "删除节点",
-    "delete_confirm": "确定要删除此云节点吗？此操作无法撤销。",
     "toast_deleted": "云节点已删除",
     "toast_delete_failed": "删除云节点失败",
     "provider": "提供商",
@@ -313,9 +312,11 @@
     "delete_irreversible": "永久删除此节点？容器、数据卷和节点令牌将一并移除，无法恢复。",
     "unsupported_operation": "当前提供商不支持此操作。",
     "toast_operation_failed": "节点操作失败",
+    "status": {
+      "instance_missing": "实例不存在"
+    },
     "fields": {
       "name": "名称",
-      "instance_type": "实例规格",
       "region": "Region",
       "disk_size": "磁盘大小 GiB",
       "image_id": "AMI ID",
@@ -328,7 +329,6 @@
       "key_name": "dev-key"
     },
     "validation": {
-      "instance_type_required": "实例规格不能为空",
       "disk_size_invalid": "磁盘大小必须是正整数"
     }
   },

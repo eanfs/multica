@@ -24,8 +24,9 @@ import enLayout from "../../locales/en/layout.json";
 import enRuntimes from "../../locales/en/runtimes.json";
 import { RuntimesPage } from "./runtimes-page";
 
-const { getCloudRuntimeService } = vi.hoisted(() => ({
+const { getCloudRuntimeService, listCloudRuntimeNodes } = vi.hoisted(() => ({
   getCloudRuntimeService: vi.fn(),
+  listCloudRuntimeNodes: vi.fn(),
 }));
 
 const TEST_RESOURCES = {
@@ -121,8 +122,10 @@ function renderPage({
   service?: CloudRuntimeService;
 } = {}) {
   getCloudRuntimeService.mockResolvedValue(service);
+  listCloudRuntimeNodes.mockResolvedValue([]);
   setApiInstance({
     getCloudRuntimeService,
+    listCloudRuntimeNodes,
   } as unknown as Parameters<typeof setApiInstance>[0]);
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
@@ -349,5 +352,13 @@ describe("RuntimesPage", () => {
     expect(await screen.findByText("standard")).toBeInTheDocument();
     expect(screen.getByText("Persistent volume")).toBeInTheDocument();
     expect(screen.queryByText(/disk size/i)).not.toBeInTheDocument();
+
+    // The dialog renders the Fleet node list and the create affordance.
+    expect(await screen.findByText("No cloud nodes")).toBeInTheDocument();
+    expect(listCloudRuntimeNodes).toHaveBeenCalledWith({
+      limit: 20,
+      offset: 0,
+    });
+    expect(screen.getByRole("button", { name: "Create node" })).toBeEnabled();
   });
 });

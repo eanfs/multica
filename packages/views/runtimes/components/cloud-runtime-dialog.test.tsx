@@ -108,6 +108,9 @@ describe("CloudRuntimeDialog", () => {
 
     expect(screen.getByText("Disk size GiB")).toBeInTheDocument();
     expect(screen.queryByText("Persistent volume")).not.toBeInTheDocument();
+    // No specs means no node shape: never fall back to the old EC2 names.
+    expect(screen.queryByText("t4g.medium")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create node" })).toBeDisabled();
   });
 
   it("renders only the lifecycle operations the provider advertises", async () => {
@@ -165,15 +168,75 @@ describe("CloudRuntimeDialog", () => {
       screen.getByText("This operation is not available for this provider."),
     ).toBeInTheDocument();
   });
-  it("sends the Docker spec id and omits the EC2 disk size on create", async () => {
+  it("sends only the Docker create fields, with a fresh idempotency key", async () => {
     const user = userEvent.setup();
     renderDialog(dockerService());
 
     await user.click(screen.getByRole("button", { name: "Create node" }));
+    await waitFor(() =>
+      expect(apiMocks.createCloudRuntimeNode).toHaveBeenCalledTimes(1),
+    );
+
+    const payload = apiMocks.createCloudRuntimeNode.mock.calls[0]![0];
+    // Local Fleet decodes with DisallowUnknownFields: no EC2 field may ride
+    // along, or the create 400s.
+    expect(Object.keys(payload).sort()).toEqual(["idempotency_key", "spec_id"]);
+    expect(payload).toMatchObject({ spec_id: "standard" });
+    expect(typeof payload.idempotency_key).toBe("string");
+    expect(payload.idempotency_key).not.toBe("");
+  });
+
+  it("adds the optional node name to the Docker payload", async () => {
+    const user = userEvent.setup();
+    renderDialog(dockerService());
+
+    await user.type(screen.getByLabelText("Name"), "docker-dev");
+    await user.click(screen.getByRole("button", { name: "Create node" }));
+    await waitFor(() =>
+      expect(apiMocks.createCloudRuntimeNode).toHaveBeenCalledWith({
+        name: "docker-dev",
+        spec_id: "standard",
+        idempotency_key: expect.any(String),
+      }),
+    );
+
+    const payload = apiMocks.createCloudRuntimeNode.mock.calls[0]![0];
+    expect(Object.keys(payload).sort()).toEqual([
+      "idempotency_key",
+      "name",
+      "spec_id",
+    ]);
+  });
+
+  it("keeps the EC2 create shape and never sends spec_id", async () => {
+    const user = userEvent.setup();
+    renderDialog(
+      dockerService({
+        provider: "ec2",
+        specs: [{ id: "g5.xlarge", cpu: 4, memoryMb: 8192, maxConcurrent: 1 }],
+        persistentStorage: false,
+      }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Create node" }));
     await waitFor(() => expect(apiMocks.createCloudRuntimeNode).toHaveBeenCalled());
-    expect(apiMocks.createCloudRuntimeNode).toHaveBeenCalledWith({
-      instance_type: "standard",
-      spec_id: "standard",
+
+    const payload = apiMocks.createCloudRuntimeNode.mock.calls[0]![0];
+    expect(payload).toEqual({
+      instance_type: "g5.xlarge",
+      disk_size_gb: 20,
     });
+    expect(payload).not.toHaveProperty("spec_id");
+    expect(payload).not.toHaveProperty("idempotency_key");
+  });
+
+  it("disables creation when the provider advertises no specs", () => {
+    renderDialog(dockerService({ specs: [] }));
+
+    expect(screen.getByRole("button", { name: "Create node" })).toBeDisabled();
+    expect(
+      screen.getByText("This operation is not available for this provider."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("t4g.medium")).not.toBeInTheDocument();
   });
 });

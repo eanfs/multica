@@ -21,6 +21,7 @@ import type {
 } from "@multica/core/runtimes";
 import {
   cloudRuntimeNodeListOptions,
+  newCloudRuntimeIdempotencyKey,
   useCreateCloudRuntimeNode,
   useDeleteCloudRuntimeNode,
   useRebootCloudRuntimeNode,
@@ -65,9 +66,6 @@ import {
   isDockerCloudRuntime,
 } from "../utils";
 
-// EC2-shaped providers predate capability discovery and may not advertise
-// specs; keep the previously hard-coded instance types as a fallback only.
-const LEGACY_INSTANCE_TYPES = ["t4g.medium", "t4g.large"] as const;
 const DEFAULT_DISK_SIZE_GB = 20;
 
 export function CloudRuntimeDialog({
@@ -87,17 +85,18 @@ export function CloudRuntimeDialog({
 
   const operations = cloudRuntimeOperations(service);
   const docker = isDockerCloudRuntime(service);
+  // The advertised allowlist is the only source of node shapes. No fallback
+  // names: a spec the provider never offered is rejected by the backend, so an
+  // empty list means there is nothing valid to submit.
   const specOptions = useMemo(
-    () =>
-      service.specs.length > 0
-        ? service.specs.map((spec) => spec.id)
-        : [...LEGACY_INSTANCE_TYPES],
+    () => service.specs.map((spec) => spec.id),
     [service.specs],
   );
   const spec =
     specChoice && specOptions.includes(specChoice)
       ? specChoice
       : (specOptions[0] ?? "");
+  const canCreate = operations.canCreate && specOptions.length > 0;
 
   const nodesQuery = useQuery(
     cloudRuntimeNodeListOptions(wsId, { limit: 20, offset: 0 }),
@@ -115,29 +114,19 @@ export function CloudRuntimeDialog({
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!operations.canCreate) return;
+    if (!canCreate) return;
 
-    let diskSize: number | undefined;
-    if (!docker) {
-      diskSize = diskSizeGB.trim()
-        ? Number(diskSizeGB.trim())
-        : DEFAULT_DISK_SIZE_GB;
-      if (!Number.isInteger(diskSize) || diskSize <= 0) {
-        toast.error(t(($) => $.cloud_runtime.validation.disk_size_invalid));
-        return;
-      }
+    const trimmedName = valueOrUndefined(name);
+    const request = docker
+      ? dockerCreateRequest(trimmedName, spec)
+      : ec2CreateRequest(trimmedName, spec, diskSizeGB);
+
+    if (!request) {
+      toast.error(t(($) => $.cloud_runtime.validation.disk_size_invalid));
+      return;
     }
 
     try {
-      // The Docker Fleet API selects its allowed node shape by spec id, while
-      // the EC2-shaped request calls the same field instance_type. Send both:
-      // each backend ignores the field it does not read.
-      const request: CreateCloudRuntimeNodeRequest & { spec_id?: string } = {
-        instance_type: spec,
-        name: valueOrUndefined(name),
-        ...(diskSize === undefined ? {} : { disk_size_gb: diskSize }),
-        ...(docker ? { spec_id: spec } : {}),
-      };
       await createNode.mutateAsync(request);
       toast.success(t(($) => $.cloud_runtime.toast_created));
       setName("");
@@ -193,13 +182,15 @@ export function CloudRuntimeDialog({
                   onChange={setName}
                   placeholder={t(($) => $.cloud_runtime.placeholders.name)}
                 />
-                <LabeledInput
-                  id={`${idPrefix}-spec`}
-                  label={t(($) => $.cloud_runtime.spec)}
-                  value={spec}
-                  onChange={setSpecChoice}
-                  options={specOptions}
-                />
+                {specOptions.length > 0 && (
+                  <LabeledInput
+                    id={`${idPrefix}-spec`}
+                    label={t(($) => $.cloud_runtime.spec)}
+                    value={spec}
+                    onChange={setSpecChoice}
+                    options={specOptions}
+                  />
+                )}
                 {!docker && (
                   <LabeledInput
                     id={`${idPrefix}-disk-size`}
@@ -213,7 +204,7 @@ export function CloudRuntimeDialog({
                 )}
               </div>
 
-              {!operations.canCreate && (
+              {!canCreate && (
                 <p className="text-caption text-muted-foreground">
                   {t(($) => $.cloud_runtime.unsupported_operation)}
                 </p>
@@ -291,7 +282,7 @@ export function CloudRuntimeDialog({
             type="submit"
             size="sm"
             form={formId}
-            disabled={createNode.isPending || !operations.canCreate}
+            disabled={createNode.isPending || !canCreate}
           >
             {createNode.isPending ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -586,6 +577,7 @@ function CloudRuntimeNodeRow({
 }
 
 function CloudRuntimeStatusBadge({ status }: { status: string }) {
+  const { t } = useT("runtimes");
   const normalized = status.toLowerCase();
   const active = new Set(["running", "success"]);
   const pending = new Set([
@@ -612,9 +604,44 @@ function CloudRuntimeStatusBadge({ status }: { status: string }) {
         failed.has(normalized) && "bg-destructive/10 text-destructive",
       )}
     >
-      {status || "unknown"}
+      {normalized === "instance_missing"
+        ? t(($) => $.cloud_runtime.status.instance_missing)
+        : status || "unknown"}
     </Badge>
   );
+}
+
+// Local Fleet's CreateNodeRequest accepts exactly name, spec_id and
+// idempotency_key and decodes with DisallowUnknownFields, so no EC2-shaped
+// field may join this payload.
+function dockerCreateRequest(
+  name: string | undefined,
+  specId: string,
+): CreateCloudRuntimeNodeRequest {
+  return {
+    ...(name ? { name } : {}),
+    spec_id: specId,
+    idempotency_key: newCloudRuntimeIdempotencyKey(),
+  };
+}
+
+// EC2-shaped providers keep the pre-capability request body; spec ids are a
+// Docker Fleet concept and must not leak into it. Returns null on invalid disk
+// size so the caller can surface the validation message.
+function ec2CreateRequest(
+  name: string | undefined,
+  spec: string,
+  diskSizeGB: string,
+): CreateCloudRuntimeNodeRequest | null {
+  const diskSize = diskSizeGB.trim()
+    ? Number(diskSizeGB.trim())
+    : DEFAULT_DISK_SIZE_GB;
+  if (!Number.isInteger(diskSize) || diskSize <= 0) return null;
+  return {
+    instance_type: spec,
+    ...(name ? { name } : {}),
+    disk_size_gb: diskSize,
+  };
 }
 
 function valueOrUndefined(value: string): string | undefined {

@@ -32,7 +32,14 @@ export interface ListCloudRuntimeNodesParams {
 }
 
 export interface CreateCloudRuntimeNodeRequest {
-  instance_type: string;
+  /** Docker Fleet selects its allowed node shape with this id. */
+  spec_id?: string;
+  /** Per-submission idempotency key; the API client also mirrors it in the
+   *  Idempotency-Key header. Docker create bodies must carry exactly this,
+   *  the name and spec_id — the local Fleet rejects unknown fields. */
+  idempotency_key?: string;
+  /** EC2-shaped providers select the allowed node shape with instance_type. */
+  instance_type?: string;
   name?: string;
   region?: string;
   image_id?: string;
@@ -87,7 +94,7 @@ export function cloudRuntimeServiceOptions(wsId: string) {
 // available in browsers and Node, but older React Native (Hermes) runtimes
 // ship without it, so fall back to a random string instead of pulling in a
 // dependency for one call.
-function newIdempotencyKey(): string {
+export function newCloudRuntimeIdempotencyKey(): string {
   const uuid = globalThis.crypto?.randomUUID?.();
   if (uuid) return uuid;
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -138,7 +145,7 @@ export function useDeleteCloudRuntimeNode(wsId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (instanceId: string) =>
-      api.deleteCloudRuntimeNode(instanceId, newIdempotencyKey()),
+      api.deleteCloudRuntimeNode(instanceId, newCloudRuntimeIdempotencyKey()),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: cloudRuntimeKeys.all(wsId) });
     },
@@ -149,7 +156,7 @@ export function useStartCloudRuntimeNode(wsId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (instanceId: string) =>
-      api.startCloudRuntimeNode(instanceId, newIdempotencyKey()),
+      api.startCloudRuntimeNode(instanceId, newCloudRuntimeIdempotencyKey()),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: cloudRuntimeKeys.all(wsId) });
     },
@@ -160,7 +167,7 @@ export function useStopCloudRuntimeNode(wsId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (instanceId: string) =>
-      api.stopCloudRuntimeNode(instanceId, newIdempotencyKey()),
+      api.stopCloudRuntimeNode(instanceId, newCloudRuntimeIdempotencyKey()),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: cloudRuntimeKeys.all(wsId) });
     },
@@ -171,7 +178,7 @@ export function useRebootCloudRuntimeNode(wsId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (instanceId: string) =>
-      api.rebootCloudRuntimeNode(instanceId, newIdempotencyKey()),
+      api.rebootCloudRuntimeNode(instanceId, newCloudRuntimeIdempotencyKey()),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: cloudRuntimeKeys.all(wsId) });
     },

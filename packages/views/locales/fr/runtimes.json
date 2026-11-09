@@ -308,7 +308,6 @@
     "toast_created": "Nœud Cloud Runtime créé",
     "toast_create_failed": "Échec de la création du nœud Cloud Runtime",
     "delete": "Supprimer le nœud",
-    "delete_confirm": "Voulez-vous vraiment supprimer ce nœud cloud ? Cette action est irréversible.",
     "toast_deleted": "Nœud cloud supprimé",
     "toast_delete_failed": "Échec de la suppression du nœud cloud",
     "provider": "Fournisseur",
@@ -324,9 +323,11 @@
     "delete_irreversible": "Supprimer définitivement ce nœud ? Son conteneur, ses volumes et son jeton de nœud seront supprimés sans possibilité de récupération.",
     "unsupported_operation": "Cette opération n'est pas disponible pour ce fournisseur.",
     "toast_operation_failed": "Échec de l'opération sur le nœud",
+    "status": {
+      "instance_missing": "Instance introuvable"
+    },
     "fields": {
       "name": "Nom",
-      "instance_type": "Type d'instance",
       "region": "Région",
       "disk_size": "Taille du disque (Gio)",
       "image_id": "ID d'AMI",
@@ -339,7 +340,6 @@
       "key_name": "dev-key"
     },
     "validation": {
-      "instance_type_required": "Le type d'instance est obligatoire",
       "disk_size_invalid": "La taille du disque doit être un entier positif"
     }
   },

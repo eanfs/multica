@@ -2107,10 +2107,19 @@ export class ApiClient {
   async createCloudRuntimeNode(
     data: CreateCloudRuntimeNodeRequest,
   ): Promise<CloudRuntimeNode> {
+    // The body is forwarded verbatim: the local Fleet decodes it with
+    // DisallowUnknownFields, so callers shape it per provider. The key travels
+    // in both places because the Fleet contract names it in the body while the
+    // rest of the write endpoints use the header.
     const res = await this.fetchRaw("/api/cloud-runtime/nodes", {
       method: "POST",
       body: JSON.stringify(data),
-      extraHeaders: { "Content-Type": "application/json" },
+      extraHeaders: {
+        "Content-Type": "application/json",
+        ...(data.idempotency_key
+          ? { "Idempotency-Key": data.idempotency_key }
+          : {}),
+      },
     });
     const raw = await res.json() as unknown;
     return parseWithFallback(

@@ -297,7 +297,6 @@
     "toast_created": "클라우드 런타임 노드를 만들었습니다",
     "toast_create_failed": "클라우드 런타임 노드를 만들지 못했습니다",
     "delete": "노드 삭제",
-    "delete_confirm": "이 클라우드 노드를 삭제할까요? 이 작업은 되돌릴 수 없습니다.",
     "toast_deleted": "클라우드 노드를 삭제했습니다",
     "toast_delete_failed": "클라우드 노드를 삭제하지 못했습니다",
     "provider": "공급자",
@@ -313,9 +312,11 @@
     "delete_irreversible": "이 노드를 영구적으로 삭제할까요? 컨테이너, 볼륨, 노드 토큰이 함께 제거되며 복구할 수 없습니다.",
     "unsupported_operation": "이 공급자에서는 이 작업을 사용할 수 없습니다.",
     "toast_operation_failed": "노드 작업에 실패했습니다",
+    "status": {
+      "instance_missing": "인스턴스를 찾을 수 없습니다"
+    },
     "fields": {
       "name": "이름",
-      "instance_type": "인스턴스 유형",
       "region": "리전",
       "disk_size": "디스크 크기 GiB",
       "image_id": "AMI ID",
@@ -328,7 +329,6 @@
       "key_name": "dev-key"
     },
     "validation": {
-      "instance_type_required": "인스턴스 유형은 필수입니다",
       "disk_size_invalid": "디스크 크기는 양의 정수여야 합니다"
     }
   },

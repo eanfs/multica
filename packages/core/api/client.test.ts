@@ -1543,6 +1543,52 @@ describe("ApiClient", () => {
     });
   });
 
+  it("posts the Docker create body verbatim and mirrors the idempotency key", async () => {
+    const node = {
+      id: "node-1",
+      owner_id: "user-1",
+      instance_id: "container-1",
+      region: "local",
+      instance_type: "standard",
+      image_id: "multica/runtime:latest",
+      subnet_id: "",
+      name: "docker-dev",
+      status: "launching",
+      tags: {},
+      metadata: {},
+      created_at: "2026-11-09T08:30:00Z",
+      updated_at: "2026-11-09T08:30:00Z",
+    };
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify(node), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient("https://api.example.test");
+    await client.createCloudRuntimeNode({
+      name: "docker-dev",
+      spec_id: "standard",
+      idempotency_key: "idem-create-1",
+    });
+
+    const [url, opts] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("https://api.example.test/api/cloud-runtime/nodes");
+    expect(opts).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({
+        name: "docker-dev",
+        spec_id: "standard",
+        idempotency_key: "idem-create-1",
+      }),
+    });
+    const headers = opts.headers as Record<string, string>;
+    expect(headers["Content-Type"]).toBe("application/json");
+    expect(headers["Idempotency-Key"]).toBe("idem-create-1");
+  });
+
   it("falls back when Cloud Runtime node responses drift", async () => {
     const fetchMock = vi
       .fn()

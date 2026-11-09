@@ -297,7 +297,6 @@
     "toast_created": "クラウドランタイムノードを作成しました",
     "toast_create_failed": "クラウドランタイムノードを作成できませんでした",
     "delete": "ノードを削除",
-    "delete_confirm": "このクラウドノードを削除してもよろしいですか? この操作は元に戻せません。",
     "toast_deleted": "クラウドノードを削除しました",
     "toast_delete_failed": "クラウドノードを削除できませんでした",
     "provider": "プロバイダー",
@@ -313,9 +312,11 @@
     "delete_irreversible": "このノードを完全に削除しますか? コンテナ、ボリューム、ノードトークンも削除され、復元できません。",
     "unsupported_operation": "この操作はこのプロバイダーでは利用できません。",
     "toast_operation_failed": "ノードの操作に失敗しました",
+    "status": {
+      "instance_missing": "インスタンスが見つかりません"
+    },
     "fields": {
       "name": "名前",
-      "instance_type": "インスタンスタイプ",
       "region": "リージョン",
       "disk_size": "ディスクサイズ GiB",
       "image_id": "AMI ID",
@@ -328,7 +329,6 @@
       "key_name": "dev-key"
     },
     "validation": {
-      "instance_type_required": "インスタンスタイプは必須です",
       "disk_size_invalid": "ディスクサイズは正の整数である必要があります"
     }
   },
