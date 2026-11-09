@@ -756,6 +756,7 @@ SELECT EXISTS (
   SELECT 1 FROM agent_runtime
   WHERE agent_runtime.id = $1
     AND status = 'offline'
+    AND managed_by <> 'local_fleet'
     AND last_seen_at < now() - make_interval(secs => $2::double precision)
     AND NOT EXISTS (
       SELECT 1
@@ -1246,6 +1247,7 @@ func (q *Queries) ListSharedAgentRuntimesForUpdate(ctx context.Context, arg List
 const listStaleOfflineRuntimeGCCandidates = `-- name: ListStaleOfflineRuntimeGCCandidates :many
 SELECT id FROM agent_runtime
 WHERE status = 'offline'
+  AND managed_by <> 'local_fleet'
   AND last_seen_at < now() - make_interval(secs => $1::double precision)
   AND NOT EXISTS (
     SELECT 1
@@ -1868,6 +1870,27 @@ func (q *Queries) SelectStaleOnlineRuntimes(ctx context.Context, staleSeconds fl
 		return nil, err
 	}
 	return items, nil
+}
+
+const setAgentRuntimeFleetManaged = `-- name: SetAgentRuntimeFleetManaged :exec
+UPDATE agent_runtime
+SET managed_by = $1, fleet_node_id = $2, updated_at = now()
+WHERE id = $3
+`
+
+type SetAgentRuntimeFleetManagedParams struct {
+	ManagedBy   string      `json:"managed_by"`
+	FleetNodeID pgtype.UUID `json:"fleet_node_id"`
+	ID          pgtype.UUID `json:"id"`
+}
+
+// Server-written provenance for a runtime registered by a local Fleet node.
+// Deliberately kept out of both registration upserts: a daemon re-registering
+// the same row must not clear (or forge) these columns. Only DaemonRegister,
+// after a verified mcn_ credential supplied an instance record, calls this.
+func (q *Queries) SetAgentRuntimeFleetManaged(ctx context.Context, arg SetAgentRuntimeFleetManagedParams) error {
+	_, err := q.db.Exec(ctx, setAgentRuntimeFleetManaged, arg.ManagedBy, arg.FleetNodeID, arg.ID)
+	return err
 }
 
 const setAgentRuntimeOffline = `-- name: SetAgentRuntimeOffline :exec

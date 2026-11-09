@@ -170,6 +170,15 @@ SET custom_name = @custom_name, updated_at = now()
 WHERE id = @id
 RETURNING *;
 
+-- name: SetAgentRuntimeFleetManaged :exec
+-- Server-written provenance for a runtime registered by a local Fleet node.
+-- Deliberately kept out of both registration upserts: a daemon re-registering
+-- the same row must not clear (or forge) these columns. Only DaemonRegister,
+-- after a verified mcn_ credential supplied an instance record, calls this.
+UPDATE agent_runtime
+SET managed_by = @managed_by, fleet_node_id = @fleet_node_id, updated_at = now()
+WHERE id = @id;
+
 -- name: UpdateAgentRuntimeCustomNameByDaemon :many
 -- Machine-level rename (MUL-4217): applies one custom name to every runtime
 -- sharing a daemon_id in the workspace, since a single machine hosts one
@@ -618,6 +627,7 @@ WHERE id = $1;
 -- efficiency filter rather than the correctness boundary.
 SELECT id FROM agent_runtime
 WHERE status = 'offline'
+  AND managed_by <> 'local_fleet'
   AND last_seen_at < now() - make_interval(secs => @stale_seconds::double precision)
   AND NOT EXISTS (
     SELECT 1
@@ -644,6 +654,7 @@ SELECT EXISTS (
   SELECT 1 FROM agent_runtime
   WHERE agent_runtime.id = @id
     AND status = 'offline'
+    AND managed_by <> 'local_fleet'
     AND last_seen_at < now() - make_interval(secs => @stale_seconds::double precision)
     AND NOT EXISTS (
       SELECT 1

@@ -48,6 +48,11 @@ import (
 // state poll interval.
 const claimPollHintMinDelay = time.Second
 
+// fleetManagedByLocalFleet is the server-written provenance value for a
+// runtime registered by a local Fleet node. It is load-bearing for deletion
+// protection: only this server-side value (never a client claim) may set it.
+const fleetManagedByLocalFleet = "local_fleet"
+
 // Daemon workspace ownership helpers
 
 // requireDaemonWorkspaceAccess verifies the caller has access to the given workspace.
@@ -747,6 +752,11 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Fleet node attribution comes from the verified mcn_ credential, never
+	// from the registration body (design §7.6): the daemon cannot nominate
+	// another node, and a malformed record just leaves the row unmarked.
+	fleetNodeID, fleetManaged := fleetNodeFromCloudPAT(r.Context())
+
 	resp := make([]AgentRuntimeResponse, 0, len(req.Runtimes))
 	for _, runtime := range req.Runtimes {
 		provider := normalizeProvider(runtime.Type)
@@ -920,6 +930,23 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if fleetManaged {
+			if err := qtx.SetAgentRuntimeFleetManaged(r.Context(), db.SetAgentRuntimeFleetManagedParams{
+				ID:          registered.ID,
+				ManagedBy:   fleetManagedByLocalFleet,
+				FleetNodeID: fleetNodeID,
+			}); err != nil {
+				// Fail the registration rather than commit a row that looks
+				// user-managed: deletable runtime rows for a live fleet node
+				// would defeat the deletion barrier this metadata backs.
+				slog.Warn("register runtime failed to record fleet ownership", append(logger.RequestAttrs(r), "error", err)...)
+				writeError(w, http.StatusInternalServerError, "failed to register runtime")
+				return
+			}
+			registered.ManagedBy = fleetManagedByLocalFleet
+			registered.FleetNodeID = fleetNodeID
+		}
+
 		// A brand-new runtime on an already-named machine inherits the machine's
 		// shared custom name so the machine title stays stable as providers come
 		// and go (MUL-4217). Shared with the failed-profile path below.
@@ -1054,6 +1081,19 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				"profile_id", profileID, "error", err)
 			continue
 		}
+		if fleetManaged {
+			if err := qtx.SetAgentRuntimeFleetManaged(r.Context(), db.SetAgentRuntimeFleetManagedParams{
+				ID:          prow.ID,
+				ManagedBy:   fleetManagedByLocalFleet,
+				FleetNodeID: fleetNodeID,
+			}); err != nil {
+				slog.Warn("failed to record fleet ownership for failed runtime profile",
+					"workspace_id", req.WorkspaceID, "daemon_id", req.DaemonID,
+					"profile_id", profileID, "error", err)
+				writeError(w, http.StatusInternalServerError, "failed to register runtime")
+				return
+			}
+		}
 		// Keep the failed-profile row consistent with the machine's name so it
 		// doesn't drag the machine title back to the hostname (MUL-4217).
 		h.inheritMachineCustomName(r.Context(), qtx, db.AgentRuntime{
@@ -1091,6 +1131,27 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		body["ca_certs"] = repoResp.CACerts
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// fleetNodeFromCloudPAT returns the local Fleet node UUID carried by a
+// verified mcn_ credential. DaemonAuth attaches the identity only after the
+// Fleet service approved the token, so a present instance record is trusted;
+// an absent or unparseable one simply leaves the registration unmarked.
+func fleetNodeFromCloudPAT(ctx context.Context) (pgtype.UUID, bool) {
+	identity, ok := middleware.CloudPATIdentityFromContext(ctx)
+	if !ok {
+		return pgtype.UUID{}, false
+	}
+	recordID := strings.TrimSpace(identity.InstanceRecordID)
+	if recordID == "" {
+		return pgtype.UUID{}, false
+	}
+	nodeID, err := util.ParseUUID(recordID)
+	if err != nil {
+		slog.Warn("register: cloud pat carried an invalid instance record id", "error", err)
+		return pgtype.UUID{}, false
+	}
+	return nodeID, true
 }
 
 // mergeLegacyRuntimes folds every runtime row keyed on a prior hostname-derived

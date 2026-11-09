@@ -1326,6 +1326,26 @@ func (h *Handler) publishRuntimeTeardown(ctx context.Context, res service.Runtim
 	h.PublishRuntimeTeardown(ctx, res, wsID, "member", userID, "delete", true)
 }
 
+// refuseFleetManagedRuntime writes the shared 409 for a runtime whose
+// lifecycle belongs to a local fleet node. Ordinary runtime deletion must not
+// tear the row down behind the Fleet state machine: the node's own delete
+// operation revokes credentials and cleans containers first, and the runtime
+// row is the tombstone users rebind agents away from.
+//
+// Every runtime-scoped delete entry point calls this after loading the row and
+// checking permissions, so an installed client using the legacy route sees the
+// same refusal as the current UI.
+func refuseFleetManagedRuntime(w http.ResponseWriter, rt db.AgentRuntime) bool {
+	if strings.TrimSpace(rt.ManagedBy) != fleetManagedByLocalFleet {
+		return false
+	}
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error": "this runtime is managed by a local fleet node; delete it from the Cloud Runtime page",
+		"code":  "runtime_managed_by_fleet",
+	})
+	return true
+}
+
 func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
 	runtimeID := chi.URLParam(r, "runtimeId")
 	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
@@ -1348,6 +1368,9 @@ func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
 	// Permission: owner/admin can delete any runtime; members can only delete their own.
 	if !canEditRuntime(member, rt) {
 		writeError(w, http.StatusForbidden, "you can only delete your own runtimes")
+		return
+	}
+	if refuseFleetManagedRuntime(w, rt) {
 		return
 	}
 	if h.refuseQoderManagedRuntime(w, r.Context(), rt, "disconnect Qoder to remove its runtime") {
@@ -1569,6 +1592,9 @@ func (h *Handler) UnbindAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.Re
 	}
 	if !canEditRuntime(member, rt) {
 		writeError(w, http.StatusForbidden, "you can only delete your own runtimes")
+		return
+	}
+	if refuseFleetManagedRuntime(w, rt) {
 		return
 	}
 	if h.refuseQoderManagedRuntime(w, r.Context(), rt, "disconnect Qoder to remove its runtime") {

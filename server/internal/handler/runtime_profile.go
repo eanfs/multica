@@ -533,6 +533,22 @@ func (h *Handler) DeleteRuntimeProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "runtime profile not found")
 		return
 	}
+	// The profile cascade is a bulk runtime delete. A fleet-managed instance is
+	// owned by its node's lifecycle, so refuse the whole cascade rather than
+	// leaving a half-managed profile behind: the node deletes its own runtime
+	// from the Cloud Runtime page and the profile can be retired afterwards.
+	if len(runtimeIDs) > 0 {
+		runtimes, err := qtx.GetAgentRuntimes(r.Context(), runtimeIDs)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to check runtime ownership")
+			return
+		}
+		for _, rt := range runtimes {
+			if refuseFleetManagedRuntime(w, rt) {
+				return
+			}
+		}
+	}
 	for _, runtimeID := range runtimeIDs {
 		if _, err := qtx.ListUserAgentsByRuntimeForUpdate(r.Context(), runtimeID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to lock profile dependencies")

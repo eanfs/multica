@@ -272,6 +272,60 @@ func TestDaemonAuth_MCN_ValidTokenSetsUserID(t *testing.T) {
 	}
 }
 
+// TestDaemonAuth_MCN_StashesIdentityInContext pins the hand-off Task 13
+// relies on: the cloud_pat branch attaches the verified identity so daemon
+// handlers can write fleet node metadata from the credential, never from the
+// registration body.
+func TestDaemonAuth_MCN_StashesIdentityInContext(t *testing.T) {
+	const (
+		ownerID      = "01972f7e-7e8d-77ef-a13d-1b0ce3e9c001"
+		instanceID   = "i-01"
+		instanceUUID = "01972f7e-8a13-72a1-bbb0-0874ed4e8e67"
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"valid": true,
+			"owner_id": "` + ownerID + `",
+			"instance_id": "` + instanceID + `",
+			"instance_record_id": "` + instanceUUID + `"
+		}`))
+	}))
+	defer srv.Close()
+
+	verifier := auth.NewCloudPATVerifier(auth.CloudPATVerifierConfig{FleetBaseURL: srv.URL})
+	var identity auth.CloudPATIdentity
+	var ok bool
+	mw := DaemonAuth(nil, nil, nil, verifier)
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		identity, ok = CloudPATIdentityFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("POST", "/api/daemon/register", nil)
+	req.Header.Set("Authorization", "Bearer mcn_some_token")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !ok {
+		t.Fatal("cloud_pat identity missing from context")
+	}
+	if identity.OwnerID != ownerID || identity.InstanceID != instanceID || identity.InstanceRecordID != instanceUUID {
+		t.Fatalf("unexpected identity: %+v", identity)
+	}
+}
+
+// TestCloudPATIdentityFromContextAbsent makes the default fail-closed: a
+// context that did not pass through the cloud_pat branch reports no identity.
+func TestCloudPATIdentityFromContextAbsent(t *testing.T) {
+	if identity, ok := CloudPATIdentityFromContext(context.Background()); ok {
+		t.Fatalf("expected no identity, got %+v", identity)
+	}
+}
+
 // TestDaemonAuth_MCN_FleetSaysInvalid confirms that a valid:false
 // Fleet response maps to 401 (not 503) — the token IS known to be bad,
 // retrying won't help.
@@ -323,7 +377,6 @@ func TestDaemonAuth_MCN_FleetUnreachable(t *testing.T) {
 		t.Fatalf("expected 503 when fleet is unavailable, got %d", w.Code)
 	}
 }
-
 
 // TestDaemonAuth_MCN_OwnerNotInLocalDB pins the new owner-existence
 // guard end-to-end through the middleware. Cloud verifies the token
