@@ -237,7 +237,29 @@ node -e '
       throw new Error(key + " state = " + payload.components[key].state);
     }
   }
+  // Fleet is optional but always rendered; its state depends on Docker and is
+  // never a reason for the status command to fail.
+  if (!payload.components.fleet) throw new Error("missing component fleet");
 ' "$out" || fail "status --json is not machine-readable"
+
+# ---------------------------------------------------------------------------
+# Fleet wires into the component table without forcing Docker to be reachable:
+# a status read must render the state fleet_status reports, never abort.
+# ---------------------------------------------------------------------------
+fleet_state="$(bash -c '
+  # shellcheck disable=SC1090
+  source "$1"
+  fleet_status() { printf "running|http://127.0.0.1:9|stub"; }
+  component_state fleet
+' _ "$root_dir/scripts/dev-env.sh")"
+[ "$fleet_state" = "running|http://127.0.0.1:9|stub" ] \
+  || fail "component_state fleet = $fleet_state"
+
+bash -c '
+  # shellcheck disable=SC1090
+  source "$1"
+  case " $ALL_COMPONENTS " in *" fleet "*) ;; *) exit 1 ;; esac
+' _ "$root_dir/scripts/dev-env.sh" || fail "ALL_COMPONENTS does not include fleet"
 
 # ---------------------------------------------------------------------------
 # Stopping an environment that is not running is a no-op that SUCCEEDS.

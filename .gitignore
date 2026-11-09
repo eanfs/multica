@@ -19,6 +19,8 @@ dist-electron
 
 # env
 .env*
+# local Fleet secrets (service secret, owner/profile credentials)
+.dev/
 !.env.example
 # Desktop production config is public (backend URL, etc.) — track it so
 # `pnpm package` produces a release-ready build without extra setup.

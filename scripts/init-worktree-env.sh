@@ -23,6 +23,14 @@ backend_port=$((18080 + offset))
 frontend_port=$((13000 + offset))
 frontend_origin="http://localhost:${frontend_port}"
 
+# Fleet is an optional component (`make up C=fleet`). Its service secret and
+# owner/profile map live next to the env file under .dev/, which .gitignore
+# excludes, and are created with owner-only permissions. No key is written into
+# the env file itself.
+env_file_dir="$(cd "$(dirname "$ENV_FILE")" && pwd)"
+fleet_secret_dir="$env_file_dir/.dev"
+fleet_port=$((backend_port + 20))
+
 cat > "$ENV_FILE" <<EOF
 POSTGRES_DB=${postgres_db}
 POSTGRES_USER=multica
@@ -47,11 +55,36 @@ NEXT_PUBLIC_API_URL=http://localhost:${backend_port}
 NEXT_PUBLIC_WS_URL=ws://localhost:${backend_port}/ws
 EOF
 
+mkdir -p "$fleet_secret_dir"
+if [ ! -f "$fleet_secret_dir/fleet-secret" ]; then
+  ( umask 077; head -c 32 /dev/urandom | base64 > "$fleet_secret_dir/fleet-secret" )
+fi
+if [ ! -f "$fleet_secret_dir/fleet-credentials.json" ]; then
+  ( umask 077; printf '{"users":{},"profiles":{}}\n' > "$fleet_secret_dir/fleet-credentials.json" )
+fi
+chmod 600 "$fleet_secret_dir/fleet-secret" "$fleet_secret_dir/fleet-credentials.json"
+
+cat >> "$ENV_FILE" <<EOF
+
+# Local Fleet control plane (optional: make up C=fleet). The files below are
+# private: the service secret and the owner/profile map, both 0600.
+MULTICA_FLEET_PORT=${fleet_port}
+MULTICA_FLEET_LISTEN=127.0.0.1:${fleet_port}
+MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:${fleet_port}
+MULTICA_LOCAL_FLEET_SECRET_FILE=${fleet_secret_dir}/fleet-secret
+MULTICA_LOCAL_FLEET_NAMESPACE=${slug}
+MULTICA_FLEET_RUNTIME_IMAGE=multica/runtime-claude:dev
+MULTICA_FLEET_CREDENTIALS_FILE=${fleet_secret_dir}/fleet-credentials.json
+MULTICA_FLEET_API_URL=http://host.docker.internal:${backend_port}
+EOF
+
 echo "Generated $ENV_FILE for worktree '$worktree_name'"
 echo "  Shared Postgres: localhost:${postgres_port}"
 echo "  Database: ${postgres_db}"
 echo "  Backend:  http://localhost:${backend_port}"
 echo "  Frontend: ${frontend_origin}"
+echo "  Fleet:    http://127.0.0.1:${fleet_port} (optional: make up C=fleet)"
+echo "  Fleet secrets: ${fleet_secret_dir} (0600, git-ignored)"
 echo ""
 echo "Next steps:"
 echo "  make setup-worktree"

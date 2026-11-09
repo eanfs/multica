@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# scripts/fleet-env.sh behaviour, with a fake Docker CLI and a fake curl.
+#
+# Nothing here starts a container, reaches a Docker daemon, or opens a network
+# socket: the fake docker only appends its argv to a log, and the fake curl
+# answers the readyz probe. That keeps the suite runnable on a machine where
+# Docker Desktop is closed (which is exactly where fleet_up must fail loudly).
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+fake_bin="$tmp/bin"
+mkdir -p "$fake_bin"
+
+export DOCKER_LOG="$tmp/docker.log"
+export CURL_LOG="$tmp/curl.log"
+: > "$DOCKER_LOG"
+: > "$CURL_LOG"
+
+cat > "$fake_bin/docker" <<'EOF'
+#!/usr/bin/env bash
+printf 'docker %s\n' "$*" >> "$DOCKER_LOG"
+case "$*" in
+  *"ps -q fleet"*) [ "${FAKE_DOCKER_NO_CONTAINER:-0}" = 1 ] || printf 'container-id\n' ;;
+esac
+exit 0
+EOF
+
+cat > "$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf 'curl %s\n' "$*" >> "$CURL_LOG"
+[ "${FAKE_CURL_FAIL:-0}" != 1 ]
+EOF
+
+chmod +x "$fake_bin/docker" "$fake_bin/curl"
+
+fail_bin="$tmp/fail-bin"
+mkdir -p "$fail_bin"
+cat > "$fail_bin/docker" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = info ] && exit 1
+exit 0
+EOF
+chmod +x "$fail_bin/docker"
+
+export PATH="$fake_bin:$PATH"
+export MULTICA_FLEET_PORT=8092
+export MULTICA_FLEET_RUNTIME_IMAGE=multica/runtime-claude:dev
+export MULTICA_LOCAL_FLEET_SECRET_FILE="$tmp/dev/fleet-secret"
+export MULTICA_FLEET_CREDENTIALS_FILE="$tmp/dev/fleet-credentials.json"
+export MULTICA_LOCAL_FLEET_NAMESPACE=fleet-test
+unset ENV_FILE || true
+unset MULTICA_FLEET_READY_TIMEOUT || true
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+require_log() {
+  local log=$1 expected=$2
+  grep -Fq "$expected" "$log" || fail "expected '$expected' in $log"
+}
+
+file_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
+# shellcheck disable=SC1090
+source "$root/scripts/fleet-env.sh"
+
+# ---------------------------------------------------------------------------
+# fleet_up: build both images, start the compose service, wait for readyz, and
+# leave the two private files Fleet needs on disk with owner-only access.
+# ---------------------------------------------------------------------------
+fleet_up || fail "fleet_up failed"
+
+require_log "$DOCKER_LOG" "docker build -f $root/docker/runtime/Dockerfile"
+require_log "$DOCKER_LOG" "docker build -f $root/docker/fleet/Dockerfile"
+require_log "$DOCKER_LOG" "up -d fleet"
+require_log "$CURL_LOG" "http://127.0.0.1:8092/readyz"
+
+[ -s "$MULTICA_LOCAL_FLEET_SECRET_FILE" ] || fail "fleet_up did not create the service secret"
+[ -s "$MULTICA_FLEET_CREDENTIALS_FILE" ] || fail "fleet_up did not create the credentials file"
+[ "$(file_mode "$MULTICA_LOCAL_FLEET_SECRET_FILE")" = 600 ] || fail "fleet secret mode is not 0600"
+[ "$(file_mode "$MULTICA_FLEET_CREDENTIALS_FILE")" = 600 ] || fail "fleet credentials mode is not 0600"
+
+# ---------------------------------------------------------------------------
+# fleet_status: ask compose for the service, then report ready only when the
+# readyz endpoint actually answers. It prints state|url|detail.
+# ---------------------------------------------------------------------------
+status="$(fleet_status)"
+[ "$status" = "running|http://127.0.0.1:8092|ready" ] || fail "fleet_status = $status"
+require_log "$DOCKER_LOG" "ps -q fleet"
+
+status="$(
+  export FAKE_CURL_FAIL=1
+  fleet_status
+)"
+[ "$status" = "running|http://127.0.0.1:8092|starting" ] || fail "unready fleet_status = $status"
+
+status="$(
+  export FAKE_DOCKER_NO_CONTAINER=1
+  fleet_status
+)"
+[ "$status" = "stopped|-|not running" ] || fail "stopped fleet_status = $status"
+
+# ---------------------------------------------------------------------------
+# docker compose is the lifecycle: stop for down, rm for destroy. Cleanup is
+# scoped to this checkout's Fleet namespace label; a global prune is forbidden.
+# ---------------------------------------------------------------------------
+fleet_down || fail "fleet_down failed"
+require_log "$DOCKER_LOG" "stop fleet"
+
+fleet_destroy || fail "fleet_destroy failed"
+require_log "$DOCKER_LOG" "rm -sf fleet"
+require_log "$DOCKER_LOG" "label=multica.fleet.namespace=fleet-test"
+if grep -Fq 'prune' "$DOCKER_LOG"; then
+  fail "fleet_destroy must never run a global prune"
+fi
+
+# ---------------------------------------------------------------------------
+# An unreachable daemon is a hard error for anything that would start or delete
+# work, and a successful no-op for stop (down/destroy must not wedge on it).
+# ---------------------------------------------------------------------------
+: > "$DOCKER_LOG"
+set +e
+(
+  export PATH="$fail_bin:$PATH"
+  fleet_up
+) >"$tmp/unavailable.out" 2>"$tmp/unavailable.err"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "fleet_up succeeded without a Docker daemon"
+grep -Fq 'Docker daemon is not running' "$tmp/unavailable.err" \
+  || fail "fleet_up did not explain the unreachable Docker daemon"
+if grep -Fq 'up -d fleet' "$DOCKER_LOG"; then
+  fail "fleet_up touched compose without a Docker daemon"
+fi
+
+status="$(
+  export PATH="$fail_bin:$PATH"
+  fleet_status
+)"
+[ "$status" = "unavailable|-|Docker daemon is not running" ] || fail "unavailable fleet_status = $status"
+
+(
+  export PATH="$fail_bin:$PATH"
+  fleet_down
+) >/dev/null || fail "fleet_down must be a no-op when Docker is unreachable"
+
+# Ready wait is bounded: a container that never answers readyz must fail fast
+# instead of hanging the environment start.
+rc=0
+(
+  export FAKE_CURL_FAIL=1 MULTICA_FLEET_READY_TIMEOUT=0
+  fleet_up
+) >"$tmp/timeout.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "fleet_up succeeded while readyz never answered"
+grep -Fq 'not ready' "$tmp/timeout.out" || fail "fleet_up did not report the readiness timeout"
+
+echo "✓ fleet-env.sh compose lifecycle verified"

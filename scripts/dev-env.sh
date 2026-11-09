@@ -27,6 +27,11 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Fleet lives in its own file so the same helpers can be sourced (and tested)
+# without the whole environment machinery.
+# shellcheck disable=SC1091
+. "$REPO_ROOT/scripts/fleet-env.sh"
+
 DEV_HOME="${MULTICA_DEV_HOME:-$HOME/.multica/dev}"
 ENVS_DIR="$DEV_HOME/envs"
 LOCK_DIR="$DEV_HOME/lock.d"
@@ -39,7 +44,7 @@ DEV_CODE_DEFAULT=888888
 WORKSPACE_NAME="${MULTICA_DEV_WORKSPACE_NAME:-Dev}"
 WORKSPACE_SLUG="${MULTICA_DEV_WORKSPACE_SLUG:-dev}"
 
-ALL_COMPONENTS="api web daemon desktop"
+ALL_COMPONENTS="api web daemon desktop fleet"
 DEFAULT_COMPONENTS="api web"
 
 # An agent runs with TMPDIR=/tmp/multica-task-<id>, deleted when the run ends.
@@ -595,6 +600,20 @@ Run 'make down' here first — a leftover instance answers /health with 200 and 
   die "api never became healthy. Log: $(log_file api)"
 }
 
+# Fleet is a Docker Compose service, not a host process: its readiness is the
+# container's /readyz, never a pid. fleet_up already waits for it, so this only
+# reports the same state "make status" will show afterwards.
+start_fleet() {
+  local row state url detail
+  info "building the runtime and fleet images, then starting the compose service"
+  fleet_up || die "Fleet did not start. Inspect 'docker compose -f $(fleet_compose_file) logs fleet'."
+  row="$(fleet_status)"
+  state="${row%%|*}"; row="${row#*|}"
+  url="${row%%|*}"; detail="${row#*|}"
+  [ "$state" = running ] || die "Fleet is '$state' after startup${detail:+ ($detail)}."
+  ok "fleet ready at $url ($detail)"
+}
+
 start_web() {
   local waited=0 listener
   if curl -sf --max-time 15 "http://localhost:${FRONTEND_PORT}" >/dev/null 2>&1; then
@@ -824,6 +843,17 @@ desktop_env_matches() {
 stop_component() {
   local name=$1 pid launcher="" status state recorded_listener="" port="" listener=""
   case "$name" in
+    fleet)
+      # fleet_down is a successful no-op when Docker is unreachable, so
+      # "make down" still works after the daemon was shut down.
+      if fleet_down; then
+        ok "fleet stopped"
+      else
+        warn "fleet could not be stopped"
+        return 1
+      fi
+      return 0
+      ;;
     daemon)
       if [ -x "$MULTICA_BIN" ]; then
         if "${CLEAN_ENV[@]}" MULTICA_WORKSPACES_ROOT="$WORKSPACES_ROOT" \
@@ -943,6 +973,9 @@ component_state() {
       else
         printf 'stopped|http://localhost:%s|' "$FRONTEND_PORT"
       fi
+      ;;
+    fleet)
+      fleet_status
       ;;
     daemon)
       local status state
@@ -1070,6 +1103,20 @@ bind_paths() {
   DESKTOP_USER_DATA_DIR="${DESKTOP_USER_DATA_DIR:-$(desktop_user_data_dir "$DESKTOP_APP_SUFFIX")}"
   DESKTOP_ENV_FILE="${DESKTOP_ENV_FILE:-$DIR/apps/desktop/.env.development.local}"
   EXPIRES_AT="${EXPIRES_AT:-}"
+  # Fleet defaults follow this environment's allocated ports when the env file
+  # leaves them unset (a fresh .env from .env.example ships them commented out),
+  # so start, status and down all address the same container. The values are
+  # deterministic from the manifest, so they do not need to be persisted.
+  if [ -z "${MULTICA_FLEET_PORT:-}" ]; then
+    MULTICA_FLEET_PORT=$((BACKEND_PORT + 20))
+  fi
+  if [ -z "${MULTICA_FLEET_API_URL:-}" ]; then
+    MULTICA_FLEET_API_URL="http://host.docker.internal:${BACKEND_PORT}"
+  fi
+  if [ -z "${MULTICA_LOCAL_FLEET_NAMESPACE:-}" ]; then
+    MULTICA_LOCAL_FLEET_NAMESPACE="$(slugify "$(basename "$REPO_ROOT")")"
+  fi
+  export MULTICA_FLEET_PORT MULTICA_FLEET_API_URL MULTICA_LOCAL_FLEET_NAMESPACE
   MULTICA_BIN="$DIR/server/bin/multica"
   if [ ! -x "$MULTICA_BIN" ] && [ -x "$REPO_ROOT/server/bin/multica" ]; then
     MULTICA_BIN="$REPO_ROOT/server/bin/multica"
@@ -1097,6 +1144,16 @@ save_manifest() {
     write_manifest_value DESKTOP_APP_SUFFIX "$DESKTOP_APP_SUFFIX"
     write_manifest_value DESKTOP_USER_DATA_DIR "$DESKTOP_USER_DATA_DIR"
     write_manifest_value DESKTOP_ENV_FILE "$DESKTOP_ENV_FILE"
+    # Fleet settings are part of the environment identity: status/down/destroy
+    # read the manifest without loading the env file, and the allocated port is
+    # what makes "make status" check the right container.
+    write_manifest_value MULTICA_FLEET_PORT "${MULTICA_FLEET_PORT:-}"
+    write_manifest_value MULTICA_LOCAL_FLEET_URL "${MULTICA_LOCAL_FLEET_URL:-}"
+    write_manifest_value MULTICA_LOCAL_FLEET_SECRET_FILE "${MULTICA_LOCAL_FLEET_SECRET_FILE:-}"
+    write_manifest_value MULTICA_LOCAL_FLEET_NAMESPACE "${MULTICA_LOCAL_FLEET_NAMESPACE:-}"
+    write_manifest_value MULTICA_FLEET_RUNTIME_IMAGE "${MULTICA_FLEET_RUNTIME_IMAGE:-}"
+    write_manifest_value MULTICA_FLEET_CREDENTIALS_FILE "${MULTICA_FLEET_CREDENTIALS_FILE:-}"
+    write_manifest_value MULTICA_FLEET_API_URL "${MULTICA_FLEET_API_URL:-}"
   } > "$(manifest_of "$NAME")"
 }
 
@@ -1120,7 +1177,7 @@ cmd_up() {
   for comp in $requested; do
     case " $ALL_COMPONENTS " in *" $comp "*) ;; *) die "Unknown component '$comp'. Valid: $ALL_COMPONENTS" ;; esac
   done
-  # web, daemon and desktop are all clients of the backend; selecting one
+  # web, daemon, desktop and fleet are all clients of the backend; selecting one
   # without api would produce an environment that cannot serve a single request.
   case " $requested " in *" api "*) ;; *) requested="api $requested" ;; esac
   COMPONENTS="$requested"
@@ -1134,6 +1191,7 @@ cmd_up() {
   # pnpm is only required by the components that actually build JavaScript, so
   # `up C=api` works on a checkout that has never run an install.
   if component_selected web || component_selected desktop; then needed="$needed pnpm"; fi
+  if component_selected fleet; then needed="$needed docker"; fi
   for tool in $needed; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
   done
@@ -1250,6 +1308,9 @@ Start the rest with 'make up C=api,web', or run 'make up C=daemon' from your own
 
   step "Components: $COMPONENTS"
   component_selected api && start_api
+  # Fleet launches node containers that talk back to this API, so it starts
+  # after the API and never before it.
+  component_selected fleet && start_fleet
   component_selected web && start_web
   component_selected daemon && start_daemon
   component_selected desktop && start_desktop
@@ -1488,7 +1549,7 @@ usage() {
   cat <<'EOF'
 Local development environments: named, listable, deletable.
 
-  dev-env.sh up      [--components api,web,daemon,desktop] [--all]
+  dev-env.sh up      [--components api,web,daemon,desktop,fleet] [--all]
                      [--name N] [--ephemeral] [--ttl HOURS]
   dev-env.sh status  [name] [--json]
   dev-env.sh list    [--json]
@@ -1498,7 +1559,8 @@ Local development environments: named, listable, deletable.
   dev-env.sh exec    [name] -- <command> [args...]
 
 Components: api (Go backend), web (Next.js), daemon (agent daemon),
-desktop (Electron). Anything selected implies api.
+desktop (Electron), fleet (local Docker cloud runtime; implies api).
+Anything selected implies api.
 
 down keeps the database, the CLI profile and the allocated slot.
 destroy consumes them.
