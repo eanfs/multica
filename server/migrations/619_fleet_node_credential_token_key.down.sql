@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS fleet_node_credential_token_hash_key;

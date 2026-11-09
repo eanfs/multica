@@ -100,6 +100,8 @@ type AgentRuntime struct {
 	CustomName         pgtype.Text        `json:"custom_name"`
 	SharedWith         []pgtype.UUID      `json:"shared_with"`
 	MaxConcurrentTasks pgtype.Int4        `json:"max_concurrent_tasks"`
+	ManagedBy          string             `json:"managed_by"`
+	FleetNodeID        pgtype.UUID        `json:"fleet_node_id"`
 }
 
 type AgentSkill struct {
@@ -715,6 +717,59 @@ type Feedback struct {
 	Message     string             `json:"message"`
 	Metadata    []byte             `json:"metadata"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type FleetCredentialProfile struct {
+	ID            pgtype.UUID        `json:"id"`
+	OwnerID       pgtype.UUID        `json:"owner_id"`
+	ProfileName   string             `json:"profile_name"`
+	ConfigVersion string             `json:"config_version"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
+type FleetNode struct {
+	ID              pgtype.UUID        `json:"id"`
+	OwnerID         pgtype.UUID        `json:"owner_id"`
+	Namespace       string             `json:"namespace"`
+	Name            string             `json:"name"`
+	ContainerID     string             `json:"container_id"`
+	ContainerName   string             `json:"container_name"`
+	DaemonID        string             `json:"daemon_id"`
+	Image           string             `json:"image"`
+	Spec            []byte             `json:"spec"`
+	TargetState     string             `json:"target_state"`
+	ObservedState   string             `json:"observed_state"`
+	DaemonReady     bool               `json:"daemon_ready"`
+	HealthCheckedAt pgtype.Timestamptz `json:"health_checked_at"`
+	Generation      int64              `json:"generation"`
+	IdempotencyKey  string             `json:"idempotency_key"`
+	StatusDetail    []byte             `json:"status_detail"`
+	Error           string             `json:"error"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type FleetNodeCredential struct {
+	ID        pgtype.UUID        `json:"id"`
+	NodeID    pgtype.UUID        `json:"node_id"`
+	TokenHash string             `json:"token_hash"`
+	RevokedAt pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type FleetNodeOperation struct {
+	ID                 pgtype.UUID        `json:"id"`
+	NodeID             pgtype.UUID        `json:"node_id"`
+	Operation          string             `json:"operation"`
+	Phase              string             `json:"phase"`
+	IdempotencyKey     string             `json:"idempotency_key"`
+	RequestFingerprint string             `json:"request_fingerprint"`
+	ApprovedAt         pgtype.Timestamptz `json:"approved_at"`
+	RetryCount         int32              `json:"retry_count"`
+	Error              string             `json:"error"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
 }
 
 type GithubInstallation struct {

@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS fleet_node_operation_idempotency_key_key;

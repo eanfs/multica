@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS fleet_node_credential (id UUID NOT NULL DEFAULT gen_random_uuid(), node_id UUID NOT NULL, token_hash TEXT NOT NULL, revoked_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
