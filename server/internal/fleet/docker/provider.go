@@ -211,13 +211,52 @@ var seedCommand = fmt.Sprintf(
 	nodeUID, nodeGID, seedDataMountPath, secretsMountPath, secretsMountPath,
 )
 
+// seedTimeout bounds the seed helper's whole lifecycle so a helper that never
+// exits cannot block PrepareVolumes forever when the caller context has no
+// deadline of its own.
+const seedTimeout = 60 * time.Second
+
 // seedCleanupTimeout bounds removal of the helper after the caller's context is
 // gone (for example on shutdown or cancellation).
 const seedCleanupTimeout = 30 * time.Second
 
+// buildSeedContainerConfig returns the configuration of the short-lived helper
+// that seeds node volumes. It must run seedCommand directly: the runtime image's
+// entrypoint starts the node daemon and never exits, so inheriting it would make
+// the helper run the daemon as root forever and ContainerWait would never return.
+// Entrypoint is a non-nil empty slice on purpose; a nil slice inherits the image
+// entrypoint during the daemon's config merge, an empty slice does not.
+func buildSeedContainerConfig(image string) *container.Config {
+	return &container.Config{
+		Image:      image,
+		User:       "0:0",
+		Entrypoint: []string{},
+		// Do not depend on the image's WORKDIR.
+		WorkingDir: "/",
+		Cmd:        []string{"sh", "-c", seedCommand},
+		Labels:     map[string]string{LabelRole: RoleSeed},
+	}
+}
+
+// buildSeedHostConfig returns the helper's host configuration: both volumes
+// mounted read-write and no network access.
+func buildSeedHostConfig(dataVolume, secretsVolume string) *container.HostConfig {
+	return &container.HostConfig{
+		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled},
+		// The helper only touches local volumes; it must not reach a network.
+		NetworkMode: container.NetworkMode("none"),
+		Mounts: []mount.Mount{
+			{Type: mount.TypeVolume, Source: dataVolume, Target: seedDataMountPath},
+			{Type: mount.TypeVolume, Source: secretsVolume, Target: secretsMountPath},
+		},
+	}
+}
+
 // PrepareVolumes seeds a node's volumes with a short-lived helper container
 // that runs as root and has no network. The node itself is created afterwards,
 // so it never needs write access to the secrets mount and never runs as root.
+// The helper is bounded by seedTimeout so a helper that fails to exit cannot
+// block this call forever.
 func (s *SDK) PrepareVolumes(ctx context.Context, dataVolume, secretsVolume, image string, files map[string][]byte) (err error) {
 	switch {
 	case strings.TrimSpace(dataVolume) == "":
@@ -234,41 +273,28 @@ func (s *SDK) PrepareVolumes(ctx context.Context, dataVolume, secretsVolume, ima
 		return err
 	}
 
-	created, err := s.cli.ContainerCreate(ctx,
-		&container.Config{
-			Image:  image,
-			User:   "0:0",
-			Cmd:    []string{"sh", "-c", seedCommand},
-			Labels: map[string]string{LabelRole: RoleSeed},
-		},
-		&container.HostConfig{
-			RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled},
-			// The helper only touches local volumes; it must not reach a network.
-			NetworkMode: container.NetworkMode("none"),
-			Mounts: []mount.Mount{
-				{Type: mount.TypeVolume, Source: dataVolume, Target: seedDataMountPath},
-				{Type: mount.TypeVolume, Source: secretsVolume, Target: secretsMountPath},
-			},
-		},
-		nil, nil, "")
+	seedCtx, cancel := context.WithTimeout(ctx, seedTimeout)
+	defer cancel()
+
+	created, err := s.cli.ContainerCreate(seedCtx, buildSeedContainerConfig(image), buildSeedHostConfig(dataVolume, secretsVolume), nil, nil, "")
 	if err != nil {
 		return fmt.Errorf("create seed container: %w", err)
 	}
 	defer func() {
-		removeErr := s.removeSeedContainer(ctx, created.ID)
+		removeErr := s.removeSeedContainer(seedCtx, created.ID)
 		if removeErr != nil && err == nil {
 			err = removeErr
 		}
 	}()
 
-	if err := s.cli.CopyToContainer(ctx, created.ID, secretsMountPath, bytes.NewReader(archive), container.CopyToContainerOptions{CopyUIDGID: true}); err != nil {
+	if err := s.cli.CopyToContainer(seedCtx, created.ID, secretsMountPath, bytes.NewReader(archive), container.CopyToContainerOptions{CopyUIDGID: true}); err != nil {
 		return fmt.Errorf("copy secrets into seed container %q: %w", created.ID, err)
 	}
-	if err := s.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
+	if err := s.cli.ContainerStart(seedCtx, created.ID, container.StartOptions{}); err != nil {
 		return fmt.Errorf("start seed container %q: %w", created.ID, err)
 	}
 
-	waitCh, errCh := s.cli.ContainerWait(ctx, created.ID, container.WaitConditionNotRunning)
+	waitCh, errCh := s.cli.ContainerWait(seedCtx, created.ID, container.WaitConditionNotRunning)
 	select {
 	case result, ok := <-waitCh:
 		if !ok {
@@ -288,8 +314,27 @@ func (s *SDK) PrepareVolumes(ctx context.Context, dataVolume, secretsVolume, ima
 		if waitErr == nil {
 			waitErr = errors.New("wait ended without a status")
 		}
+		if seedCtx.Err() != nil {
+			return seedWaitError(ctx, created.ID, waitErr)
+		}
 		return fmt.Errorf("wait for seed container %q: %w", created.ID, waitErr)
+	case <-seedCtx.Done():
+		// Fallback for a wait that does not surface the canceled request.
+		return seedWaitError(ctx, created.ID, nil)
 	}
+}
+
+// seedWaitError turns an interrupted helper wait into a diagnosable error. It
+// reports caller cancellation as such, and anything else as the helper's own
+// seedTimeout, so the two are distinguishable in logs.
+func seedWaitError(callerCtx context.Context, containerID string, waitErr error) error {
+	if err := callerCtx.Err(); err != nil {
+		return fmt.Errorf("wait for seed container %q: %w", containerID, err)
+	}
+	if waitErr != nil && !errors.Is(waitErr, context.DeadlineExceeded) {
+		return fmt.Errorf("wait for seed container %q: helper did not exit within %s: %v: %w", containerID, seedTimeout, waitErr, context.DeadlineExceeded)
+	}
+	return fmt.Errorf("wait for seed container %q: helper did not exit within %s: %w", containerID, seedTimeout, context.DeadlineExceeded)
 }
 
 // removeSeedContainer force-removes the helper even when the caller's context

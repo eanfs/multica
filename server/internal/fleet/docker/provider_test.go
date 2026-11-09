@@ -4,11 +4,16 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"math"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
 )
 
 func TestBuildNodeSpecSetsIdentityLabelsAndResources(t *testing.T) {
@@ -249,5 +254,94 @@ func TestBuildSecretsTarRejectsUnsafeNames(t *testing.T) {
 	}
 	if _, err := buildSecretsTar(nil); err == nil {
 		t.Fatal("expected empty file set to fail")
+	}
+}
+
+// The runtime image's entrypoint starts the node daemon and never exits, so a
+// helper that inherits it would run the daemon as root forever and ContainerWait
+// would never return. An empty slice must therefore stay non-nil: the daemon's
+// config merge only skips the image entrypoint when the slice is non-nil.
+func TestBuildSeedContainerConfigClearsImageEntrypoint(t *testing.T) {
+	config := buildSeedContainerConfig("img:test")
+	if config.Entrypoint == nil {
+		t.Fatal("entrypoint must be an empty slice, not nil: nil inherits the image entrypoint")
+	}
+	if len(config.Entrypoint) != 0 {
+		t.Fatalf("entrypoint = %v, want empty", config.Entrypoint)
+	}
+	if config.Image != "img:test" {
+		t.Fatalf("image = %q", config.Image)
+	}
+	if config.User != "0:0" {
+		t.Fatalf("user = %q, want root for chown", config.User)
+	}
+	if config.WorkingDir != "/" {
+		t.Fatalf("working dir = %q, want /: the helper must not depend on the image WORKDIR", config.WorkingDir)
+	}
+	// Locking the command also locks the helper's mount paths: it sees the data
+	// volume at seedDataMountPath and the secrets volume at secretsMountPath.
+	wantCmd := []string{"sh", "-c", "chown -R 1000:1000 /data /run/secrets/runtime && chmod -R go-rwx /run/secrets/runtime"}
+	// config.Cmd is a strslice.StrSlice, so reflect.DeepEqual would report a
+	// difference on the named slice type alone; compare the elements instead.
+	if !slices.Equal(config.Cmd, wantCmd) {
+		t.Fatalf("cmd = %q, want %q", config.Cmd, wantCmd)
+	}
+	if len(config.Labels) != 1 || config.Labels[LabelRole] != RoleSeed {
+		t.Fatalf("labels = %v, want only %s=%s", config.Labels, LabelRole, RoleSeed)
+	}
+}
+
+func TestBuildSeedHostConfigMountsBothVolumesReadWriteWithoutNetwork(t *testing.T) {
+	hostConfig := buildSeedHostConfig("vol-data", "vol-secrets")
+	if hostConfig.NetworkMode != container.NetworkMode("none") {
+		t.Fatalf("network mode = %q, want none", hostConfig.NetworkMode)
+	}
+	if hostConfig.RestartPolicy.Name != container.RestartPolicyDisabled {
+		t.Fatalf("restart policy = %q, want disabled", hostConfig.RestartPolicy.Name)
+	}
+	if hostConfig.Privileged {
+		t.Fatal("helper must not be privileged")
+	}
+	want := []mount.Mount{
+		{Type: mount.TypeVolume, Source: "vol-data", Target: seedDataMountPath},
+		{Type: mount.TypeVolume, Source: "vol-secrets", Target: secretsMountPath},
+	}
+	if len(hostConfig.Mounts) != len(want) {
+		t.Fatalf("mounts = %+v, want %+v", hostConfig.Mounts, want)
+	}
+	for i, got := range hostConfig.Mounts {
+		if got.Type != want[i].Type || got.Source != want[i].Source || got.Target != want[i].Target {
+			t.Fatalf("mount %d = %+v, want %+v", i, got, want[i])
+		}
+		if got.ReadOnly {
+			t.Fatalf("mount %d must be writable for the seed command", i)
+		}
+	}
+}
+
+func TestSeedWaitErrorDistinguishesTimeoutFromCancellation(t *testing.T) {
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := seedWaitError(canceledCtx, "helper-1", nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("caller cancellation not preserved: %v", err)
+	}
+
+	err = seedWaitError(context.Background(), "helper-1", nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("helper timeout must be a deadline error: %v", err)
+	}
+	if !strings.Contains(err.Error(), seedTimeout.String()) {
+		t.Fatalf("helper timeout error must report %s: %v", seedTimeout, err)
+	}
+
+	// The SDK can surface a transport error when the wait request is canceled;
+	// the helper timeout must still be recognizable while keeping the cause.
+	err = seedWaitError(context.Background(), "helper-1", errors.New("connection reset"))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("helper timeout with cause must remain a deadline error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("helper timeout must keep the underlying cause: %v", err)
 	}
 }
