@@ -128,7 +128,13 @@ type Config struct {
 	// CloudRuntimeHTTPClient is the HTTP client used by the cloud-runtime node
 	// proxy. Local Fleet mode supplies the fleetclient transport that attaches
 	// the service secret; nil keeps the default client.
-	CloudRuntimeHTTPClient   *http.Client
+	CloudRuntimeHTTPClient *http.Client
+	// LocalFleetEnabled marks this deployment as a local Fleet, where an mcn_
+	// registration comes from a Fleet node this server manages. The cloud_pat
+	// verifier is shared with SaaS Cloud, so the credential alone does not
+	// imply fleet ownership: SaaS deployments must leave this false and never
+	// write fleet provenance onto their runtimes.
+	LocalFleetEnabled        bool
 	AttachmentDownloadMode   string
 	AttachmentDownloadURLTTL time.Duration
 	// AttachmentFrameAncestors are trusted browser origins allowed to embed

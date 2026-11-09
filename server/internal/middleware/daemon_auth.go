@@ -94,6 +94,18 @@ func CloudPATIdentityFromContext(ctx context.Context) (auth.CloudPATIdentity, bo
 	return identity, ok
 }
 
+// LocalFleetIdentityFromContext returns the verified mcn_ identity only when
+// this deployment runs the local Fleet. The cloud_pat verifier is shared with
+// SaaS Cloud, so identity presence alone must not let a caller claim fleet
+// ownership: SaaS runtimes registered through the same credential stay
+// ordinary, deletable rows.
+func LocalFleetIdentityFromContext(ctx context.Context, localFleetEnabled bool) (auth.CloudPATIdentity, bool) {
+	if !localFleetEnabled {
+		return auth.CloudPATIdentity{}, false
+	}
+	return CloudPATIdentityFromContext(ctx)
+}
+
 // WithDaemonTokenHash attaches the authenticating mdt_ token hash. The WS
 // RPC bridge uses it to carry the connection's credential into the
 // synthetic request it hands to the HTTP handler.

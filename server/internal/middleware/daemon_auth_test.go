@@ -326,6 +326,35 @@ func TestCloudPATIdentityFromContextAbsent(t *testing.T) {
 	}
 }
 
+// TestCloudPATLocalFleetIdentityGate pins the shared-verifier boundary at the
+// layer that owns the identity: a verified mcn_ credential is readable only
+// when this deployment runs the local Fleet. SaaS Cloud uses the same verifier,
+// and its runtimes must not be marked fleet-managed.
+func TestCloudPATLocalFleetIdentityGate(t *testing.T) {
+	identity := auth.CloudPATIdentity{
+		OwnerID:          "01972f7e-7e8d-77ef-a13d-1b0ce3e9c001",
+		InstanceID:       "i-01",
+		InstanceRecordID: "01972f7e-8a13-72a1-bbb0-0874ed4e8e67",
+	}
+	ctx := context.WithValue(context.Background(), ctxKeyCloudPATIdentity, identity)
+
+	if got, ok := LocalFleetIdentityFromContext(ctx, false); ok {
+		t.Fatalf("SaaS mode exposed the fleet identity: %+v", got)
+	}
+
+	got, ok := LocalFleetIdentityFromContext(ctx, true)
+	if !ok {
+		t.Fatal("local Fleet mode dropped the verified identity")
+	}
+	if got.InstanceRecordID != identity.InstanceRecordID {
+		t.Fatalf("instance record = %q, want %q", got.InstanceRecordID, identity.InstanceRecordID)
+	}
+
+	if got, ok := LocalFleetIdentityFromContext(context.Background(), true); ok {
+		t.Fatalf("local Fleet mode invented an identity: %+v", got)
+	}
+}
+
 // TestDaemonAuth_MCN_FleetSaysInvalid confirms that a valid:false
 // Fleet response maps to 401 (not 503) — the token IS known to be bad,
 // retrying won't help.

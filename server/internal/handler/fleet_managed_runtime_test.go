@@ -3,40 +3,35 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/middleware"
+	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/testutil"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 // fleetManagedRuntimeFixture inserts a runtime already owned by a local fleet
-// node. There is no dbfx.AgentRuntime builder, and managed_by/fleet_node_id are
-// server-written columns, so the fixture inserts the row with direct SQL rather
-// than routing it through a handler. testUserID/testWorkspaceID are the
-// direct-SQL user/workspace fixtures created by TestMain.
+// node. managed_by/fleet_node_id are server-written columns, so the row is
+// inserted through the shared dbfx.Runtime builder with explicit overrides
+// rather than routing it through a handler.
 func fleetManagedRuntimeFixture(t *testing.T) string {
 	t.Helper()
-	if testPool == nil {
+	if dbfx == nil {
 		t.Skip("database not available")
 	}
-	var runtimeID string
-	if err := testPool.QueryRow(context.Background(), `
-		INSERT INTO agent_runtime (
-			workspace_id, daemon_id, name, runtime_mode, provider, status,
-			device_info, metadata, owner_id, managed_by
-		)
-		VALUES ($1, 'daemon-managed', 'claude', 'local', 'claude', 'online',
-			'node', '{}'::jsonb, $2, 'local_fleet')
-		RETURNING id
-	`, testWorkspaceID, testUserID).Scan(&runtimeID); err != nil {
-		t.Fatalf("insert fleet-managed runtime fixture: %v", err)
-	}
-	t.Cleanup(func() {
-		ctx := context.Background()
-		testPool.Exec(ctx, `DELETE FROM agent WHERE runtime_id = $1`, runtimeID)
-		testPool.Exec(ctx, `DELETE FROM agent_runtime WHERE id = $1`, runtimeID)
+	return dbfx.Runtime(t, "claude", testutil.Cols{
+		"daemon_id":    "daemon-managed",
+		"runtime_mode": "local",
+		"provider":     "claude",
+		"device_info":  "node",
+		"managed_by":   "local_fleet",
 	})
-	return runtimeID
 }
 
 func assertFleetManagedDeleteRefusal(t *testing.T, w *httptest.ResponseRecorder) {
@@ -197,4 +192,202 @@ func TestDeleteManagedRuntimeIsRejected(t *testing.T) {
 			t.Fatalf("profile row was deleted despite the refusal (count=%d)", profileRows)
 		}
 	})
+}
+
+// newCloudPATTestMiddleware returns DaemonAuth backed by a fake Fleet service.
+// It passes nil queries on purpose: the verifier then skips the local-owner
+// lookup, so the context it produces is usable without PostgreSQL.
+func newCloudPATTestMiddleware(t *testing.T, ownerID, instanceRecordID string) func(http.Handler) http.Handler {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"valid":true,"owner_id":%q,"instance_id":"i-01","instance_record_id":%q}`, ownerID, instanceRecordID)
+	}))
+	t.Cleanup(srv.Close)
+	verifier := auth.NewCloudPATVerifier(auth.CloudPATVerifierConfig{FleetBaseURL: srv.URL})
+	return middleware.DaemonAuth(nil, nil, nil, verifier)
+}
+
+// cloudPATRequestContext drives a request through DaemonAuth and returns the
+// authenticated context, i.e. the context DaemonRegister would see.
+func cloudPATRequestContext(t *testing.T, mw func(http.Handler) http.Handler) context.Context {
+	t.Helper()
+	var captured context.Context
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Context()
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/api/daemon/register", nil)
+	req.Header.Set("Authorization", "Bearer mcn_test_token")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("cloud pat middleware status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("cloud pat middleware did not reach the downstream handler")
+	}
+	return captured
+}
+
+// TestCloudPATFleetMarkingRequiresLocalFleetMode pins the shared-verifier
+// boundary: DaemonAuth attaches an mcn_ identity for SaaS Cloud and local
+// Fleet alike, but only a local Fleet deployment may turn it into fleet
+// provenance. Without this gate a SaaS runtime registered by a Cloud node
+// would become undeletable and exempt from GC.
+func TestCloudPATFleetMarkingRequiresLocalFleetMode(t *testing.T) {
+	const (
+		ownerID          = "01972f7e-7e8d-77ef-a13d-1b0ce3e9c001"
+		instanceRecordID = "01972f7e-8a13-72a1-bbb0-0874ed4e8e67"
+	)
+	identityCtx := cloudPATRequestContext(t, newCloudPATTestMiddleware(t, ownerID, instanceRecordID))
+
+	saas := &Handler{cfg: Config{LocalFleetEnabled: false}}
+	if node, ok := saas.fleetNodeFromCloudPAT(identityCtx); ok {
+		t.Fatalf("SaaS mode marked the runtime fleet-managed: node = %v", node)
+	}
+
+	local := &Handler{cfg: Config{LocalFleetEnabled: true}}
+	node, ok := local.fleetNodeFromCloudPAT(identityCtx)
+	if !ok {
+		t.Fatal("local Fleet mode did not mark the runtime")
+	}
+	if got := uuidToString(node); got != instanceRecordID {
+		t.Fatalf("fleet node = %q, want %q", got, instanceRecordID)
+	}
+
+	// A verified credential without a node record stays unmarked even in
+	// local Fleet mode: a guessed node would attribute the runtime to the
+	// wrong machine.
+	noRecordCtx := cloudPATRequestContext(t, newCloudPATTestMiddleware(t, ownerID, ""))
+	if node, ok := local.fleetNodeFromCloudPAT(noRecordCtx); ok {
+		t.Fatalf("missing instance record marked the runtime: node = %v", node)
+	}
+}
+
+// TestCloudPATRegistrationMarksFleetManagedOnlyInLocalFleetMode proves the
+// full registration path, not just the helper: the same mcn_ credential
+// registers an ordinary runtime in SaaS mode and a fleet-managed one in local
+// Fleet mode.
+func TestCloudPATRegistrationMarksFleetManagedOnlyInLocalFleetMode(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	const instanceRecordID = "01972f7e-8a13-72a1-bbb0-0874ed4e8e67"
+	mw := newCloudPATTestMiddleware(t, testUserID, instanceRecordID)
+	ctx := context.Background()
+
+	register := func(t *testing.T, daemonID string, localFleet bool) (string, *string) {
+		t.Helper()
+		h := *testHandler
+		h.cfg.LocalFleetEnabled = localFleet
+		w := httptest.NewRecorder()
+		req := newRequest(http.MethodPost, "/api/daemon/register", map[string]any{
+			"workspace_id": testWorkspaceID,
+			"daemon_id":    daemonID,
+			"device_name":  "cloud-pat-node",
+			"runtimes": []any{map[string]any{
+				"name": "claude", "type": "claude", "status": "online", "runtime_mode": "local",
+			}},
+		})
+		req.Header.Set("Authorization", "Bearer mcn_test_token")
+		mw(http.HandlerFunc(h.DaemonRegister)).ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("register status = %d, body = %s", w.Code, w.Body.String())
+		}
+
+		var runtimeID, managedBy string
+		var fleetNodeID *string
+		if err := testPool.QueryRow(ctx, `
+			SELECT id::text, coalesce(managed_by, ''), fleet_node_id::text
+			FROM agent_runtime
+			WHERE workspace_id = $1 AND daemon_id = $2
+		`, testWorkspaceID, daemonID).Scan(&runtimeID, &managedBy, &fleetNodeID); err != nil {
+			t.Fatalf("read registered runtime: %v", err)
+		}
+		dbfx.Cleanup(t, `DELETE FROM agent_runtime WHERE id = $1`, runtimeID)
+		return managedBy, fleetNodeID
+	}
+
+	t.Run("saas-cloud", func(t *testing.T) {
+		managedBy, fleetNodeID := register(t, "daemon-cloud-pat-saas", false)
+		if managedBy != "" {
+			t.Fatalf("managed_by = %q, want empty for a SaaS Cloud registration", managedBy)
+		}
+		if fleetNodeID != nil {
+			t.Fatalf("fleet_node_id = %q, want NULL for a SaaS Cloud registration", *fleetNodeID)
+		}
+	})
+
+	t.Run("local-fleet", func(t *testing.T) {
+		managedBy, fleetNodeID := register(t, "daemon-cloud-pat-local", true)
+		if managedBy != fleetManagedByLocalFleet {
+			t.Fatalf("managed_by = %q, want %q", managedBy, fleetManagedByLocalFleet)
+		}
+		if fleetNodeID == nil || *fleetNodeID != instanceRecordID {
+			t.Fatalf("fleet_node_id = %v, want %q", fleetNodeID, instanceRecordID)
+		}
+	})
+}
+
+// TestDeleteManagedRuntimeGCExcluded keeps the background runtime GC from
+// physically deleting the tombstones that deletion protection relies on. The
+// ordinary stale runtime is the control: without it an empty candidate batch
+// would pass the test vacuously.
+func TestDeleteManagedRuntimeGCExcluded(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+
+	managedID := dbfx.Runtime(t, "fleet-managed gc candidate", testutil.Cols{
+		"runtime_mode": "local",
+		"provider":     "claude",
+		"status":       "offline",
+		"last_seen_at": testutil.Raw("now() - interval '30 days'"),
+		"managed_by":   "local_fleet",
+	})
+	plainID := dbfx.Runtime(t, "ordinary stale runtime", testutil.Cols{
+		"status":       "offline",
+		"last_seen_at": testutil.Raw("now() - interval '30 days'"),
+	})
+
+	candidates, err := testHandler.Queries.ListStaleOfflineRuntimeGCCandidates(ctx, db.ListStaleOfflineRuntimeGCCandidatesParams{
+		StaleSeconds: service.OfflineRuntimeTTLSeconds,
+		MaxPerTick:   10000,
+	})
+	if err != nil {
+		t.Fatalf("list GC candidates: %v", err)
+	}
+	seen := make(map[string]bool, len(candidates))
+	for _, id := range candidates {
+		seen[uuidToString(id)] = true
+	}
+	if seen[managedID] {
+		t.Fatal("fleet-managed runtime entered the GC candidate batch")
+	}
+	if !seen[plainID] {
+		t.Fatal("ordinary stale runtime missing from the GC batch; test would pass vacuously")
+	}
+
+	eligible, err := testHandler.Queries.IsAgentRuntimeEligibleForGC(ctx, db.IsAgentRuntimeEligibleForGCParams{
+		ID:           parseUUID(managedID),
+		StaleSeconds: service.OfflineRuntimeTTLSeconds,
+	})
+	if err != nil {
+		t.Fatalf("check managed runtime GC eligibility: %v", err)
+	}
+	if eligible {
+		t.Fatal("fleet-managed runtime passed the locked GC re-check")
+	}
+	plainEligible, err := testHandler.Queries.IsAgentRuntimeEligibleForGC(ctx, db.IsAgentRuntimeEligibleForGCParams{
+		ID:           parseUUID(plainID),
+		StaleSeconds: service.OfflineRuntimeTTLSeconds,
+	})
+	if err != nil {
+		t.Fatalf("check ordinary runtime GC eligibility: %v", err)
+	}
+	if !plainEligible {
+		t.Fatal("ordinary stale runtime is not GC-eligible; fixture is wrong")
+	}
 }

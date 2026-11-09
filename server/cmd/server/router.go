@@ -474,8 +474,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		CloudTimeout:                   35 * time.Second,
 		// Local Fleet overrides the node-runtime target only; CloudURL stays
 		// empty so billing, entitlement, and seat capacity remain disabled.
-		CloudRuntimeBaseURL:      cloudCfg.LocalURL,
-		CloudRuntimeHTTPClient:   fleetHTTP,
+		CloudRuntimeBaseURL:    cloudCfg.LocalURL,
+		CloudRuntimeHTTPClient: fleetHTTP,
+		// Fleet provenance is only meaningful when this server runs the local
+		// Fleet: the shared mcn_ verifier also accepts SaaS Cloud credentials,
+		// and those runtimes must stay ordinary, deletable rows.
+		LocalFleetEnabled:        cloudCfg.LocalEnabled,
 		AttachmentDownloadMode:   os.Getenv("ATTACHMENT_DOWNLOAD_MODE"),
 		AttachmentDownloadURLTTL: envDuration("ATTACHMENT_DOWNLOAD_URL_TTL", 30*time.Minute),
 		AttachmentFrameAncestors: origins,

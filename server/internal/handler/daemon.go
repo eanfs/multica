@@ -755,7 +755,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 	// Fleet node attribution comes from the verified mcn_ credential, never
 	// from the registration body (design §7.6): the daemon cannot nominate
 	// another node, and a malformed record just leaves the row unmarked.
-	fleetNodeID, fleetManaged := fleetNodeFromCloudPAT(r.Context())
+	fleetNodeID, fleetManaged := h.fleetNodeFromCloudPAT(r.Context())
 
 	resp := make([]AgentRuntimeResponse, 0, len(req.Runtimes))
 	for _, runtime := range req.Runtimes {
@@ -1137,13 +1137,22 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 // verified mcn_ credential. DaemonAuth attaches the identity only after the
 // Fleet service approved the token, so a present instance record is trusted;
 // an absent or unparseable one simply leaves the registration unmarked.
-func fleetNodeFromCloudPAT(ctx context.Context) (pgtype.UUID, bool) {
-	identity, ok := middleware.CloudPATIdentityFromContext(ctx)
+//
+// Identity presence is not enough: the same cloud_pat verifier serves SaaS
+// Cloud, where a runtime registered by a Cloud node must remain an ordinary,
+// deletable row. Only a deployment running the local Fleet (and therefore the
+// Fleet node it manages) may stamp fleet provenance.
+func (h *Handler) fleetNodeFromCloudPAT(ctx context.Context) (pgtype.UUID, bool) {
+	identity, ok := middleware.LocalFleetIdentityFromContext(ctx, h.cfg.LocalFleetEnabled)
 	if !ok {
 		return pgtype.UUID{}, false
 	}
 	recordID := strings.TrimSpace(identity.InstanceRecordID)
 	if recordID == "" {
+		// The Fleet service verified the credential but sent no node record;
+		// treat it as unmarked rather than guessing a node. Never log the
+		// token, which is not part of the identity.
+		slog.Warn("register: cloud pat carried no instance record id; leaving runtime unmanaged")
 		return pgtype.UUID{}, false
 	}
 	nodeID, err := util.ParseUUID(recordID)
