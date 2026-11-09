@@ -25,6 +25,15 @@ func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 // Queries returns the generated queries bound to the pool.
 func (s *Store) Queries() *db.Queries { return db.New(s.pool) }
 
+// Ping reports whether the shared PostgreSQL pool is reachable. Readiness
+// probes use it so a Fleet process with a broken database never reports ready.
+func (s *Store) Ping(ctx context.Context) error {
+	if s == nil || s.pool == nil {
+		return errors.New("fleet store is not configured")
+	}
+	return s.pool.Ping(ctx)
+}
+
 // WithinTx runs fn in a transaction and commits only when fn returns nil.
 // Errors from fn are returned unchanged so callers can match sentinel values.
 func (s *Store) WithinTx(ctx context.Context, fn func(q *db.Queries) error) error {

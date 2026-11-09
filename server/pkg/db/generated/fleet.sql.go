@@ -245,6 +245,42 @@ func (q *Queries) GetFleetNode(ctx context.Context, arg GetFleetNodeParams) (Fle
 	return i, err
 }
 
+const getFleetNodeByContainerID = `-- name: GetFleetNodeByContainerID :one
+SELECT id, owner_id, namespace, name, container_id, container_name, daemon_id, image, spec, target_state, observed_state, daemon_ready, health_checked_at, generation, idempotency_key, status_detail, error, created_at, updated_at FROM fleet_node WHERE container_id = $1 AND namespace = $2
+`
+
+type GetFleetNodeByContainerIDParams struct {
+	ContainerID string `json:"container_id"`
+	Namespace   string `json:"namespace"`
+}
+
+func (q *Queries) GetFleetNodeByContainerID(ctx context.Context, arg GetFleetNodeByContainerIDParams) (FleetNode, error) {
+	row := q.db.QueryRow(ctx, getFleetNodeByContainerID, arg.ContainerID, arg.Namespace)
+	var i FleetNode
+	err := row.Scan(
+		&i.ID,
+		&i.OwnerID,
+		&i.Namespace,
+		&i.Name,
+		&i.ContainerID,
+		&i.ContainerName,
+		&i.DaemonID,
+		&i.Image,
+		&i.Spec,
+		&i.TargetState,
+		&i.ObservedState,
+		&i.DaemonReady,
+		&i.HealthCheckedAt,
+		&i.Generation,
+		&i.IdempotencyKey,
+		&i.StatusDetail,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getFleetNodeByDaemonID = `-- name: GetFleetNodeByDaemonID :one
 SELECT id, owner_id, namespace, name, container_id, container_name, daemon_id, image, spec, target_state, observed_state, daemon_ready, health_checked_at, generation, idempotency_key, status_detail, error, created_at, updated_at FROM fleet_node WHERE daemon_id = $1 AND namespace = $2
 `
