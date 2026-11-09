@@ -157,60 +157,152 @@ func (s *SDK) CreateContainer(ctx context.Context, spec NodeSpec) (string, error
 	return resp.ID, nil
 }
 
-func (s *SDK) WriteSecrets(ctx context.Context, containerID string, files map[string][]byte) error {
-	if containerID == "" {
-		return errors.New("write secrets: container id is required")
-	}
+// buildSecretsTar returns a flat tar archive of the secrets files, sorted by
+// name. Entries are regular files owned by the node identity with mode 0600 and
+// carry no directory component, so extraction is confined to the seeds volume.
+func buildSecretsTar(files map[string][]byte) ([]byte, error) {
 	if len(files) == 0 {
-		return errors.New("write secrets: no files")
+		return nil, errors.New("secrets tar: no files")
 	}
 	names := make([]string, 0, len(files))
 	for name := range files {
-		if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
-			return fmt.Errorf("write secrets: invalid file name %q", name)
+		// A flat archive cannot escape its extraction directory, so any path
+		// separator or parent reference is rejected instead of normalized.
+		if name == "" || name == "." || name == ".." || strings.Contains(name, "..") || strings.ContainsAny(name, "/\\") {
+			return nil, fmt.Errorf("secrets tar: invalid file name %q", name)
 		}
 		names = append(names, name)
 	}
 	sort.Strings(names)
 
-	// Copy the files while the container is created but not started; the tar
-	// headers make them readable by the node UID and nobody else.
-	dir := strings.TrimPrefix(secretsMountPath, "/") + "/"
-	now := time.Now()
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	if err := tw.WriteHeader(&tar.Header{
-		Typeflag: tar.TypeDir,
-		Name:     dir,
-		Mode:     0o750,
-		Uid:      nodeUID,
-		Gid:      nodeGID,
-		ModTime:  now,
-	}); err != nil {
-		return fmt.Errorf("write secrets: %w", err)
-	}
 	for _, name := range names {
 		body := files[name]
+		// The fixed epoch mtime keeps the archive deterministic; Docker does
+		// not use it for secrets.
 		if err := tw.WriteHeader(&tar.Header{
 			Typeflag: tar.TypeReg,
-			Name:     dir + name,
+			Name:     name,
 			Mode:     0o600,
 			Uid:      nodeUID,
 			Gid:      nodeGID,
 			Size:     int64(len(body)),
-			ModTime:  now,
+			ModTime:  time.Unix(0, 0),
 		}); err != nil {
-			return fmt.Errorf("write secrets: %w", err)
+			return nil, fmt.Errorf("secrets tar: %w", err)
 		}
 		if _, err := tw.Write(body); err != nil {
-			return fmt.Errorf("write secrets: %w", err)
+			return nil, fmt.Errorf("secrets tar: %w", err)
 		}
 	}
 	if err := tw.Close(); err != nil {
-		return fmt.Errorf("write secrets: %w", err)
+		return nil, fmt.Errorf("secrets tar: %w", err)
 	}
-	if err := s.cli.CopyToContainer(ctx, containerID, "/", &buf, container.CopyToContainerOptions{CopyUIDGID: true}); err != nil {
-		return fmt.Errorf("write secrets to container %q: %w", containerID, err)
+	return buf.Bytes(), nil
+}
+
+// seedCommand prepares both volumes for the node identity. Docker keeps volume
+// contents root-owned on first use, and the node's secrets mount is read-only
+// once it starts, so the permissions can only be fixed from a helper that
+// mounts both volumes read-write.
+var seedCommand = fmt.Sprintf(
+	"chown -R %d:%d %s %s && chmod -R go-rwx %s",
+	nodeUID, nodeGID, seedDataMountPath, secretsMountPath, secretsMountPath,
+)
+
+// seedCleanupTimeout bounds removal of the helper after the caller's context is
+// gone (for example on shutdown or cancellation).
+const seedCleanupTimeout = 30 * time.Second
+
+// PrepareVolumes seeds a node's volumes with a short-lived helper container
+// that runs as root and has no network. The node itself is created afterwards,
+// so it never needs write access to the secrets mount and never runs as root.
+func (s *SDK) PrepareVolumes(ctx context.Context, dataVolume, secretsVolume, image string, files map[string][]byte) (err error) {
+	switch {
+	case strings.TrimSpace(dataVolume) == "":
+		return errors.New("prepare volumes: data volume is required")
+	case strings.TrimSpace(secretsVolume) == "":
+		return errors.New("prepare volumes: secrets volume is required")
+	case dataVolume == secretsVolume:
+		return errors.New("prepare volumes: data and secrets volumes must differ")
+	case strings.TrimSpace(image) == "":
+		return errors.New("prepare volumes: image is required")
+	}
+	archive, err := buildSecretsTar(files)
+	if err != nil {
+		return err
+	}
+
+	created, err := s.cli.ContainerCreate(ctx,
+		&container.Config{
+			Image:  image,
+			User:   "0:0",
+			Cmd:    []string{"sh", "-c", seedCommand},
+			Labels: map[string]string{LabelRole: RoleSeed},
+		},
+		&container.HostConfig{
+			RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyDisabled},
+			// The helper only touches local volumes; it must not reach a network.
+			NetworkMode: container.NetworkMode("none"),
+			Mounts: []mount.Mount{
+				{Type: mount.TypeVolume, Source: dataVolume, Target: seedDataMountPath},
+				{Type: mount.TypeVolume, Source: secretsVolume, Target: secretsMountPath},
+			},
+		},
+		nil, nil, "")
+	if err != nil {
+		return fmt.Errorf("create seed container: %w", err)
+	}
+	defer func() {
+		removeErr := s.removeSeedContainer(ctx, created.ID)
+		if removeErr != nil && err == nil {
+			err = removeErr
+		}
+	}()
+
+	if err := s.cli.CopyToContainer(ctx, created.ID, secretsMountPath, bytes.NewReader(archive), container.CopyToContainerOptions{CopyUIDGID: true}); err != nil {
+		return fmt.Errorf("copy secrets into seed container %q: %w", created.ID, err)
+	}
+	if err := s.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
+		return fmt.Errorf("start seed container %q: %w", created.ID, err)
+	}
+
+	waitCh, errCh := s.cli.ContainerWait(ctx, created.ID, container.WaitConditionNotRunning)
+	select {
+	case result, ok := <-waitCh:
+		if !ok {
+			return fmt.Errorf("wait for seed container %q: no status", created.ID)
+		}
+		if result.Error != nil {
+			return fmt.Errorf("seed container %q failed: %s", created.ID, result.Error.Message)
+		}
+		if result.StatusCode != 0 {
+			return fmt.Errorf("seed container %q exited with code %d", created.ID, result.StatusCode)
+		}
+		return nil
+	case waitErr, ok := <-errCh:
+		if !ok {
+			return fmt.Errorf("wait for seed container %q: no status", created.ID)
+		}
+		if waitErr == nil {
+			waitErr = errors.New("wait ended without a status")
+		}
+		return fmt.Errorf("wait for seed container %q: %w", created.ID, waitErr)
+	}
+}
+
+// removeSeedContainer force-removes the helper even when the caller's context
+// is canceled. A leaked helper keeps the role=seed label so cleanup can reclaim
+// it later.
+func (s *SDK) removeSeedContainer(ctx context.Context, containerID string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), seedCleanupTimeout)
+	defer cancel()
+	if err := s.cli.ContainerRemove(cleanupCtx, containerID, container.RemoveOptions{Force: true}); err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("remove seed container %q: %w", containerID, err)
 	}
 	return nil
 }

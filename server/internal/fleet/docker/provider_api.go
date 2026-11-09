@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -15,6 +16,15 @@ const (
 	LabelNode      = "multica.fleet.node"
 	LabelRole      = "multica.fleet.role"
 	RoleNode       = "node"
+	// RoleSeed marks the short-lived helper container that seeds node volumes.
+	// A crashed seed helper can be found and force-removed by this label.
+	RoleSeed = "seed"
+)
+
+const (
+	// maxNodeMemoryMB bounds the memory limit so a caller cannot overflow the
+	// MB-to-bytes conversion or hand one node an implausible share of the host.
+	maxNodeMemoryMB = 64 * 1024
 )
 
 const (
@@ -26,9 +36,14 @@ const (
 	// dataMountPath holds CLI configuration, the daemon identity, sessions,
 	// and run working directories.
 	dataMountPath = "/home/multica"
-	// secretsMountPath holds bootstrap and model credentials. It is mounted
-	// read-only; only the fixed entrypoint reads it.
+	// secretsMountPath holds bootstrap and model credentials. In the node it is
+	// mounted read-only; only the fixed entrypoint reads it. The seed helper
+	// mounts the same volume read-write before the node is created.
 	secretsMountPath = "/run/secrets/runtime"
+	// seedDataMountPath is where the seed helper mounts the data volume. It is
+	// deliberately different from dataMountPath so it cannot be confused with
+	// the node's own mount.
+	seedDataMountPath = "/data"
 	// healthURL is the fixed loopback address the node daemon health tool
 	// listens on. No management port is published to the host.
 	healthURL = "http://127.0.0.1:19514/health"
@@ -84,7 +99,7 @@ type NodeSpec struct {
 
 // BuildNodeSpec returns the standard node spec for one Fleet node. Environment
 // variables are left empty: platform variables are set by the caller and
-// credentials are written through Provider.WriteSecrets, never through Env.
+// credentials are seeded through Provider.PrepareVolumes, never through Env.
 func BuildNodeSpec(nodeID, namespace, name, image, dataVolume, secretsVolume, network string, memoryMB int64, cpu float64, pids int64) NodeSpec {
 	return NodeSpec{
 		NodeID:        nodeID,
@@ -165,6 +180,12 @@ func validateNodeSpec(spec NodeSpec) error {
 		return fmt.Errorf("node spec: network mode %q is not allowed", spec.Network)
 	case spec.MemoryMB <= 0:
 		return fmt.Errorf("node spec: memory limit is required")
+	case spec.MemoryMB > maxNodeMemoryMB:
+		return fmt.Errorf("node spec: memory limit %d MB exceeds %d MB", spec.MemoryMB, maxNodeMemoryMB)
+	// NaN compares false with everything, so it must be rejected explicitly
+	// before the positivity check; Inf likewise cannot become NanoCPUs.
+	case math.IsNaN(spec.CPU) || math.IsInf(spec.CPU, 0):
+		return fmt.Errorf("node spec: cpu limit must be finite")
 	case spec.CPU <= 0:
 		return fmt.Errorf("node spec: cpu limit is required")
 	case spec.PidsLimit <= 0:
@@ -206,9 +227,13 @@ type Provider interface {
 	EnsureNetwork(ctx context.Context, name string, labels map[string]string) error
 	EnsureVolume(ctx context.Context, name string, labels map[string]string) error
 	CreateContainer(ctx context.Context, spec NodeSpec) (string, error)
-	// WriteSecrets writes the bootstrap and credential files into the node's
-	// secrets volume before the container starts.
-	WriteSecrets(ctx context.Context, containerID string, files map[string][]byte) error
+	// PrepareVolumes seeds a node's data and secrets volumes before the node
+	// container starts. It runs a short-lived, network-less helper container as
+	// root because a fresh named volume is root-owned, while the node runs as
+	// 1000:1000 and mounts the secrets volume read-only. files are written to
+	// the secrets volume only; the data volume is created empty and owned by
+	// the node identity.
+	PrepareVolumes(ctx context.Context, dataVolume, secretsVolume, image string, files map[string][]byte) error
 	Start(ctx context.Context, containerID string) error
 	Stop(ctx context.Context, containerID string, timeout time.Duration) error
 	Restart(ctx context.Context, containerID string, timeout time.Duration) error
@@ -218,4 +243,6 @@ type Provider interface {
 	ListByLabels(ctx context.Context, labels map[string]string) ([]string, error)
 	// ExecHealth runs the fixed loopback health command and returns its stdout.
 	ExecHealth(ctx context.Context, containerID string) ([]byte, error)
+	// Close releases the Docker API client.
+	Close() error
 }

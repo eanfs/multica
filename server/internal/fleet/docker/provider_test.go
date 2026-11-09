@@ -1,7 +1,13 @@
 package docker
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
+	"io"
+	"math"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -115,6 +121,10 @@ func TestValidateNodeSpec(t *testing.T) {
 	if err := validateNodeSpec(valid); err != nil {
 		t.Fatalf("valid spec rejected: %v", err)
 	}
+	atLimit := BuildNodeSpec("node-1", "wt-a", "n1", "img:test", "vol-data", "vol-secrets", "net-a", maxNodeMemoryMB, 2, 256)
+	if err := validateNodeSpec(atLimit); err != nil {
+		t.Fatalf("memory at limit rejected: %v", err)
+	}
 
 	cases := map[string]func(*NodeSpec){
 		"empty image":         func(s *NodeSpec) { s.Image = "" },
@@ -130,7 +140,13 @@ func TestValidateNodeSpec(t *testing.T) {
 		"default network":     func(s *NodeSpec) { s.Network = "bridge" },
 		"shared network":      func(s *NodeSpec) { s.Network = "container:abc" },
 		"zero memory":         func(s *NodeSpec) { s.MemoryMB = 0 },
+		"negative memory":     func(s *NodeSpec) { s.MemoryMB = -1 },
+		"oversized memory":    func(s *NodeSpec) { s.MemoryMB = maxNodeMemoryMB + 1 },
 		"zero cpu":            func(s *NodeSpec) { s.CPU = 0 },
+		"negative cpu":        func(s *NodeSpec) { s.CPU = -1 },
+		"nan cpu":             func(s *NodeSpec) { s.CPU = math.NaN() },
+		"positive inf cpu":    func(s *NodeSpec) { s.CPU = math.Inf(1) },
+		"negative inf cpu":    func(s *NodeSpec) { s.CPU = math.Inf(-1) },
 		"zero pids":           func(s *NodeSpec) { s.PidsLimit = 0 },
 		"missing role label":  func(s *NodeSpec) { delete(s.Labels, "multica.fleet.role") },
 		"wrong node label":    func(s *NodeSpec) { s.Labels["multica.fleet.node"] = "other" },
@@ -153,5 +169,85 @@ func TestValidateNodeSpec(t *testing.T) {
 func TestProviderExposesInspectImage(t *testing.T) {
 	var _ = func(p Provider) error {
 		return p.InspectImage(context.Background(), "img:test")
+	}
+}
+
+// PrepareVolumes needs a live daemon, so only the contract is asserted here.
+// Task 12's opt-in Docker integration test owns the real seeding round-trip.
+func TestProviderExposesPrepareVolumesAndClose(t *testing.T) {
+	var _ = func(p Provider) error {
+		return p.PrepareVolumes(context.Background(), "vol-data", "vol-secrets", "img:test", map[string][]byte{"bootstrap.env": []byte("X=1")})
+	}
+	var _ = func(p Provider) error { return p.Close() }
+}
+
+func TestBuildSecretsTarWritesSortedOwnerOnlyFiles(t *testing.T) {
+	files := map[string][]byte{
+		"zeta.env":  []byte("Z=1\n"),
+		"alpha.env": []byte("A=1\n"),
+		"mid.json":  []byte("{}\n"),
+	}
+	archive, err := buildSecretsTar(files)
+	if err != nil {
+		t.Fatalf("build secrets tar: %v", err)
+	}
+
+	tr := tar.NewReader(bytes.NewReader(archive))
+	var names []string
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read tar: %v", err)
+		}
+		names = append(names, hdr.Name)
+		if hdr.Typeflag != tar.TypeReg {
+			t.Fatalf("%s: typeflag = %v, want regular file", hdr.Name, hdr.Typeflag)
+		}
+		if hdr.Mode != 0o600 {
+			t.Fatalf("%s: mode = %#o, want 0600", hdr.Name, hdr.Mode)
+		}
+		if hdr.Uid != nodeUID || hdr.Gid != nodeGID {
+			t.Fatalf("%s: owner = %d:%d, want %d:%d", hdr.Name, hdr.Uid, hdr.Gid, nodeUID, nodeGID)
+		}
+		if strings.ContainsAny(hdr.Name, "/\\") {
+			t.Fatalf("%s: archive entries must be flat", hdr.Name)
+		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatalf("%s: read body: %v", hdr.Name, err)
+		}
+		if !bytes.Equal(body, files[hdr.Name]) {
+			t.Fatalf("%s: body = %q, want %q", hdr.Name, body, files[hdr.Name])
+		}
+	}
+	want := []string{"alpha.env", "mid.json", "zeta.env"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("entries = %v, want %v", names, want)
+	}
+}
+
+func TestBuildSecretsTarRejectsUnsafeNames(t *testing.T) {
+	cases := [][]string{
+		{"../escape.env"},
+		{"dir/file.env"},
+		{".."},
+		{""},
+		{"a\\b"},
+		{"a..b"},
+	}
+	for _, names := range cases {
+		files := make(map[string][]byte, len(names))
+		for _, name := range names {
+			files[name] = []byte("x")
+		}
+		if _, err := buildSecretsTar(files); err == nil {
+			t.Fatalf("expected rejection for %q", names)
+		}
+	}
+	if _, err := buildSecretsTar(nil); err == nil {
+		t.Fatal("expected empty file set to fail")
 	}
 }
