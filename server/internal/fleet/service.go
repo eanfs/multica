@@ -49,9 +49,15 @@ const (
 	// diagnoseTimeout bounds one daemon health read so an unresponsive
 	// container cannot stall a coordination pass.
 	diagnoseTimeout = 5 * time.Second
-	// dockerCallTimeout bounds every coordinator-driven Docker call. The
-	// tick context is long-lived, so each call needs its own budget.
+	// dockerCallTimeout bounds one routine Docker mutation issued by the
+	// coordinator: start, stop, restart, or delete.
 	dockerCallTimeout = 30 * time.Second
+	// inspectTimeout bounds one node container inspection. The Docker SDK's
+	// default client sets no overall timeout, so a daemon that accepts the
+	// connection without responding would otherwise stall the coordinator.
+	// Diagnosis (5s), routine mutations (30s), and inspection (10s) are each
+	// bounded because the tick context is long-lived.
+	inspectTimeout = 10 * time.Second
 	// healthFreshWindow matches the staleness window used for claim barriers:
 	// a health sample older than this cannot make a node look executable.
 	healthFreshWindow = 30 * time.Second
@@ -404,7 +410,9 @@ func (s *Service) observeNode(ctx context.Context, node db.FleetNode) (nodeObser
 		// persisted record instead of pretending the node does not exist.
 		return nodeObservation{node: node}, nil
 	}
-	observed, err := s.provider.Inspect(ctx, node.ContainerID)
+	inspectCtx, cancelInspect := context.WithTimeout(ctx, inspectTimeout)
+	defer cancelInspect()
+	observed, err := s.provider.Inspect(inspectCtx, node.ContainerID)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
 			// Only a confirmed missing container becomes instance_missing;
