@@ -514,6 +514,128 @@ multica daemon start
 
 Each profile gets its own config directory (`~/.multica/profiles/<name>/`), daemon state, health port, and workspace root. Daemon state means that profile's own `daemon.log`, `daemon.err.log`, `daemon.pid`, and `daemon.port` live in that directory too — see [Start](#start) for the layout, and pass `--profile <name>` to `daemon status` / `daemon logs` to act on it. The daemon normally uses the profile-derived health port. If the OS refuses that port, it binds an available loopback port and records the actual port in `daemon.port` for lifecycle commands. The record is valid only while its daemon is alive; do not edit it to configure a port.
 
+## Local Docker Cloud Runtime
+
+The optional `fleet` component runs a Fleet control plane in Docker and creates
+node containers that already contain the Multica daemon and Claude Code. It is
+for local development, not a production sandbox, and it is unrelated to the
+hosted Cloud Runtime provider.
+
+### Start and stop
+
+```bash
+# Requires a running Docker daemon. The first run builds both images.
+make up C=api,web,fleet
+
+make status              # component state, ports and Fleet readiness
+make down                # stop Fleet and its nodes, keep volumes and data
+make destroy             # remove this namespace's nodes/volumes, then the database
+```
+
+Fleet runs in its own per-worktree Compose project
+(`multica-fleet-<namespace>`) and joins the PostgreSQL project's
+`multica_default` network. The first build of `multica/fleet:dev` and
+`multica/runtime-claude:dev` can take several minutes. The host port is
+published on loopback only.
+
+### Configure model credentials
+
+Fleet never reads your shell history, `~/.claude`, OAuth state or user home.
+Credentials live in the file named by `MULTICA_FLEET_CREDENTIALS_FILE`
+(default `.dev/fleet-credentials.json`, mode 0600, git-ignored):
+
+```json
+{
+  "users": { "<user-uuid>": "default" },
+  "profiles": {
+    "default": {
+      "env": { "ANTHROPIC_API_KEY": "<key>" }
+    }
+  }
+}
+```
+
+Only these variables are accepted: `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`,
+`CLAUDE_CODE_USE_BEDROCK` and `API_TIMEOUT_MS`. An owner without a mapping
+cannot create a node; there is no global default profile. Restart Fleet after
+editing the file.
+
+The API also needs `MULTICA_LOCAL_FLEET_URL` and
+`MULTICA_LOCAL_FLEET_SECRET_FILE`; `make up C=fleet` derives the port and
+writes the secret under `.dev/`. A non-empty `MULTICA_LOCAL_FLEET_URL`
+together with `MULTICA_CLOUD_URL` is a startup error.
+
+### Operate a node
+
+In the workspace UI, open **Runtimes**, choose **Add runtime**, then
+**Cloud Runtime**. The dialog appears only when the API reports a local Fleet
+capability; it offers that provider's allowed spec and no EC2 fields. From the
+node row you can start, stop, reboot, or delete. Stopping and rebooting keep the
+container, identity, session data and volumes; deletion revokes the node token
+and removes the container and both volumes permanently.
+
+A node that is busy or still has queued work refuses dangerous operations.
+`make down` uses the same barrier and leaves a node running rather than forcing
+it when its state is unknown.
+
+### Troubleshooting
+
+```bash
+# Is this checkout's Fleet ready?
+curl -fsS http://127.0.0.1:<MULTICA_FLEET_PORT>/readyz
+
+# Fleet logs for this worktree's Compose project
+docker compose -f docker-compose.fleet.yml -p multica-fleet-<namespace> logs fleet
+
+# Node resources (all carry the namespace label)
+docker ps -a --filter label=multica.fleet.namespace=<namespace>
+docker volume ls --filter label=multica.fleet.namespace=<namespace>
+```
+
+- `Docker daemon is not running`: start Docker Desktop (or the Linux daemon),
+  then re-run `make up C=fleet`.
+- `network multica_default ... not found`: start this checkout's PostgreSQL
+  first (`make db-up` or `make up C=api`); Fleet joins that network instead of
+  creating one.
+- Node cannot reach the API: Docker Desktop resolves
+  `host.docker.internal`; on a plain Linux Docker daemon set a
+  container-reachable `MULTICA_FLEET_API_URL` (the node network gateway).
+  `curl` from inside a node container is the quickest check.
+- Node stays in `launching`: check the container logs and the daemon health on
+  port 19514 inside the container. A launching node is intentionally refused by
+  start/stop/reboot/delete to avoid racing creation. If the daemon already
+  reports `running` while Fleet still shows `launching`, the coordinator's
+  launching-to-running promotion is missing; that is a recorded known gap (see
+  design §14.6), not a credentials or network problem. Report it with the logs
+  instead of forcing operations.
+- Old shared-project Fleet container: versions before the per-worktree Compose
+  project ran Fleet as `multica-fleet-1` in project `multica`. It is no longer
+  managed; remove it once before starting the new project:
+
+  ```bash
+  docker ps -a --filter label=com.docker.compose.project=multica --filter label=com.docker.compose.service=fleet
+  docker rm -f <container-id>
+  ```
+
+  Volumes from that old container are not removed automatically; inspect and
+  delete them explicitly if they are no longer needed.
+- `make destroy` refuses to drop the database while this namespace's Docker
+  cleanup is incomplete. Fix the Docker error and re-run it; do not prune
+  globally.
+
+### Tests
+
+Defaults never start Docker or call a model:
+
+```bash
+# Real Docker lifecycle, opt-in
+(cd server && MULTICA_FLEET_INTEGRATION=1 go test -tags=fleetintegration ./internal/fleet -run TestFleetNodeLifecycleRealDocker -count=1 -v)
+
+# Browser entry, opt-in
+MULTICA_RUN_FLEET_E2E=1 pnpm exec playwright test e2e/cloud-runtime-docker.spec.ts
+```
+
 ## Workspaces
 
 ### Working with multiple workspaces

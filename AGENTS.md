@@ -31,7 +31,8 @@ Multica is a task management platform where people and agents collaborate on iss
 Use `Makefile`, workspace `package.json` files, and `pnpm-workspace.yaml` for current commands and versions. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and worktree operations.
 
 - Use the checkout's managed environment: `make up`, `make status`, `make down`. `make down` preserves data; `make destroy` removes the environment and its data.
-- Worktrees share PostgreSQL but have isolated databases/ports. Use the environment scripts and `.env.worktree`; do not copy the main checkout's `.env` or manually create a database through an assumed PostgreSQL instance.
+- The optional local Docker Fleet is a component: `make up C=api,web,fleet`. It needs a running Docker daemon, builds `multica/fleet:dev` and `multica/runtime-claude:dev` on first use, and manages node containers through the Docker Engine API. It is not part of the default environment.
+- Worktrees share PostgreSQL but have isolated databases/ports. Use the environment scripts and `.env.worktree`; do not copy the main checkout's `.env` or manually create a database through an assumed PostgreSQL instance. The Fleet component is the exception: each worktree runs its own per-namespace Compose project (`multica-fleet-<namespace>`) and node namespace, so two checkouts never recreate each other's Fleet container or nodes.
 - Regenerate sqlc with `make sqlc` after SQL changes.
 - Run the narrowest useful checks while iterating, then broaden when risk warrants it. Report what actually ran and any skipped checks.
 
@@ -117,6 +118,7 @@ Workspace-scoped queries filter by `workspace_id`; membership gates access and `
 - DB-backed Go tests use `server/internal/testutil` fixtures (`dbfx.Issue`, `dbfx.Task`, `dbfx.Insert`) and `testutil.Call(h, req).Want(status).JSON(&out)`. Keep product assertions and case-specific diagnostics in the test, not fixture helpers.
 - Default tests must not resolve or execute user-installed agent CLIs; pass test-created fake or missing executable paths. New default agent commands go in `scripts/agent-cli-command-names.txt`.
 - Only run real-agent smoke tests when explicitly authorized. Gate them behind `agentintegration` and check `MULTICA_RUN_REAL_AGENT_SMOKE=1` before executable lookup/account access. Run the specific test: `(cd server && MULTICA_RUN_REAL_AGENT_SMOKE=1 go test -tags=agentintegration ./pkg/agent -run '<test-name>' -count=1 -v)`.
+- Docker/Fleet integration is opt-in. Default tests must not require a Docker daemon or a model account. Gate real-Docker tests behind the `fleetintegration` tag plus `MULTICA_FLEET_INTEGRATION=1`, and build the test-only fake-Claude image from `docker/runtime/Dockerfile.test`: `(cd server && MULTICA_FLEET_INTEGRATION=1 go test -tags=fleetintegration ./internal/fleet -run TestFleetNodeLifecycleRealDocker -count=1 -v)`. Gate the browser suite behind `MULTICA_RUN_FLEET_E2E=1`.
 
 ## Change and Delivery Rules
 

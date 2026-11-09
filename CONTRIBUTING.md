@@ -35,8 +35,10 @@ Local development uses one shared PostgreSQL container and one database per chec
 - the main checkout usually uses `.env` and `POSTGRES_DB=multica`
 - each Git worktree uses its own `.env.worktree`
 - every checkout connects to the same PostgreSQL host: `localhost:5432`
-- isolation happens at the database level, not by starting a separate Docker Compose project
+- isolation happens at the database level, not by starting a separate Docker Compose project for the application
 - backend and frontend ports are still unique per worktree
+
+The optional Fleet component (local Docker cloud runtime) is the one exception: each worktree runs its own `multica-fleet-<namespace>` Compose project and creates only resources carrying that namespace label. It joins the shared PostgreSQL's `multica_default` network; it never creates a second database or PostgreSQL container.
 
 This keeps Docker simple while still isolating schema and data.
 
@@ -158,10 +160,21 @@ make destroy                 # stop, then drop the database and free the slot
 make gc                      # collect expired environments or ones whose checkout is gone
 ```
 
-Components are `api` (Go backend), `web` (Next.js), `daemon` (agent daemon) and
-`desktop` (Electron). Selecting any of them implies `api`. `make up` is
-idempotent: re-running it against a live environment reuses the database, the
-profile and any component already healthy.
+Components are `api` (Go backend), `web` (Next.js), `daemon` (agent daemon),
+`desktop` (Electron) and `fleet` (optional local Docker cloud runtime). Selecting
+any of them implies `api`. `make up` is idempotent: re-running it against a live
+environment reuses the database, the profile and any component already healthy.
+
+`make up C=api,web,fleet` adds the Fleet control plane. It requires Docker
+Desktop (or a Linux daemon) and builds `multica/fleet:dev` plus
+`multica/runtime-claude:dev` on first start, so the first run is noticeably
+slower than later ones. Fleet manages node containers through the Docker socket;
+keep its port on loopback. `make down` stops Fleet and its nodes but keeps the
+volumes; `make destroy` removes the namespace's containers and volumes before
+dropping the database. If a Fleet container from the old shared `multica`
+Compose project is still present, remove it once with
+`docker ps -a --filter label=com.docker.compose.project=multica --filter label=com.docker.compose.service=fleet`
+and `docker rm -f <container>` before starting the per-worktree project.
 
 Three properties are worth knowing because the old flow lacked them:
 
@@ -446,6 +459,22 @@ Notes:
 - Go tests create their own fixture data
 - E2E tests create their own workspace and issue fixtures
 - the check flow starts backend/frontend only if they are not already running
+- default checks do not require Docker, a running Fleet service, or a model account
+
+Docker/Fleet coverage is opt-in:
+
+```bash
+# Real Docker lifecycle; needs Docker, DATABASE_URL and the fake-Claude image
+docker build -f docker/runtime/Dockerfile -t multica/runtime-claude:dev .
+docker build -f docker/runtime/Dockerfile.test -t multica/runtime-claude:test .
+(cd server && MULTICA_FLEET_INTEGRATION=1 go test -tags=fleetintegration ./internal/fleet -run TestFleetNodeLifecycleRealDocker -count=1 -v)
+
+# Browser entry; needs make up C=api,web,fleet and a signed-in worktree
+MULTICA_RUN_FLEET_E2E=1 pnpm exec playwright test e2e/cloud-runtime-docker.spec.ts
+```
+
+Both suites skip themselves without their environment variable, so a missing
+Docker daemon never turns into a false pass.
 
 ## Local Codex Daemon
 

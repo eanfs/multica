@@ -1,7 +1,7 @@
 # 本地 Docker Cloud Runtime 设计
 
 日期：2026-10-04
-状态：四节方案已逐节确认；按用户要求改为复用现有 PostgreSQL 数据库，修订版等待最终审阅。尚未开始实现。
+状态：阶段一已实现（2026-11-09）；与本文的实际差异和未覆盖项见 §14。
 
 ## 1. 目标与已确认决策
 
@@ -250,3 +250,74 @@ TanStack Query 管服务器数据，新增响应过 zod/parseWithFallback；未�
 本文描述目标能力，不是已实现功能。最终审阅后使用 writing-plans 拆分任务，先实现 fake Provider、Store、配置分离和屏障，再接 Docker 镜像与共享界面。SQL 查询变更须重新生成 sqlc。
 
 实现时同步更新开发环境与仓库约束说明，遵守数据保护和包边界；当前设计不修改这些工具，不启动 Docker，不读取真实私密配置，也不执行 Claude。
+
+## 14. 实现差异（2026-11-09）
+
+以下记录已实现内容与上文设计的差异、实施中补齐的约束和明确未覆盖项。设计仍是目标契约；本节只解释落地方式。
+
+### 14.1 Fleet 的 Compose project 隔离
+
+原环境脚本把 Fleet 作为共享 `multica` Compose project 的一个服务，导致多 worktree 并发时互相重建 Fleet 容器。实现改为：
+
+- `docker-compose.yml` 只保留 PostgreSQL，继续由 `multica` project 管理。
+- `docker-compose.fleet.yml` 通过 `scripts/fleet-env.sh` 以 `-p multica-fleet-<namespace>` 启动，namespace 来自当前 checkout 的 `.env.worktree`。
+- Fleet 只加入 PostgreSQL 所属的外部网络 `multica_default`，不创建第二个数据库、网络或 PostgreSQL 容器。
+- `make down` 停止 Fleet 和节点但保留卷；`make destroy` 先按 namespace 标签清理容器/卷，再走原有数据库销毁流程，不做全局 prune。
+- 旧版本遗留的 `multica` project 中的 Fleet 容器不再被新脚本管理，需要一次性手动 `docker rm -f`（见 CLI_AND_DAEMON.md 故障排查）。
+
+### 14.2 凭证文件 schema
+
+Fleet 只读取显式传入的 `MULTICA_FLEET_CREDENTIALS_FILE`，不读取用户 home、OAuth 或 Claude 登录态。文件形状：
+
+```json
+{
+  "users": { "<user-uuid>": "<profile-name>" },
+  "profiles": {
+    "<profile-name>": {
+      "env": {
+        "ANTHROPIC_API_KEY": "sk-ant-...",
+        "ANTHROPIC_BASE_URL": "https://...",
+        "ANTHROPIC_MODEL": "claude-sonnet-4-5"
+      }
+    }
+  }
+}
+```
+
+实施约束：
+
+- `env` 只接受 allowlist：`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL`、`CLAUDE_CODE_USE_BEDROCK`、`API_TIMEOUT_MS`。
+- 文件由 `make up C=fleet` 在 `.dev/` 下生成空模板（0600，git-ignored）；模板和仓库不包含真实密钥。
+- 每个节点把凭证写进只读 secrets 卷，节点进程以固定 1000:1000 运行；密钥不进入镜像层、Docker Config.Env、PostgreSQL、日志或浏览器响应。
+- 未映射 owner 返回 `credential_profile_missing`，映射到不存在的 profile 返回 `credential_profile_invalid`；没有全局默认 profile。
+
+### 14.3 API 与 Fleet 的 prepare / approve 分工
+
+节点创建仍由 Fleet 直接完成（同步创建容器、卷和凭证）。维护操作（stop / reboot / delete）采用两段式：
+
+1. API 的 `localFleetCoordinator.Prepare` 在节点排他 advisory lock 下校验 owner、幂等键、目标状态和忙碌/待回传条件，写入 `prepared` 操作并持久化过渡目标。
+2. 事务与数据库锁之外，API 通过 Fleet 固定诊断接口 `POST /api/v1/nodes/diagnose` 读取待回传结果。
+3. 第二个短事务重新校验 operation ID/代次，批准 `approved` 或撤销回原目标；Fleet 协调器只执行 `approved` 行，不自行授权。
+4. Fleet 的直通 HTTP 操作保留给集成/单元测试和受控管理路径；产品路径以 API 的 prepare/approve 为准。数据库事务内不调用 Docker 或 Fleet HTTP。
+
+### 14.4 Fleet 与节点的网络
+
+- Fleet 容器通过 `extra_hosts: host.docker.internal:host-gateway` 访问宿主机 API；Linux 与 Docker Desktop 使用同一 URL。
+- 节点容器由 Fleet 动态创建，不带 `extra_hosts`。Docker Desktop 上 `host.docker.internal` 可用；普通 Linux 上需要让 `MULTICA_FLEET_API_URL` 使用节点网络网关地址，或在节点网络侧提供等价解析。集成测试默认在 Linux 上取网络网关，并允许 `MULTICA_FLEET_TEST_API_HOST` 覆盖。
+- 节点不挂 Docker socket、不 privileged、不使用 host network/PID、不发布端口；Fleet 宿主端口只绑 loopback。
+
+### 14.5 镜像与测试替身
+
+- `docker/runtime/Dockerfile` 复用基础镜像已有的 1000:1000 身份（`node:22-bookworm-slim` 自带），没有新建 `multica` 用户。
+- `docker/runtime/Dockerfile.test` 基于 `multica/runtime-claude:dev`，只把 `/usr/local/bin/claude` 覆盖为立即退出的 `docker/runtime/fake-claude`。该镜像仅用于 opt-in 集成测试，不发布、不用于生产。
+- 默认测试不构建、不启动任何容器；集成测试使用 `fleetintegration` tag + `MULTICA_FLEET_INTEGRATION=1`，E2E 使用 `MULTICA_RUN_FLEET_E2E=1`，缺少环境时明确 skip。
+
+### 14.6 未覆盖项与已知缺口
+
+- **prepared 操作没有回收器**：API 崩溃留下的 `prepared` 屏障会阻止领取，当前没有后台任务自动撤销或重审；需要按设计 §10 的显式恢复流程处理。
+- **launching 目标未提升**：`CreateNode` 成功启动容器后仍把 `target_state` 留在 `launching`，Fleet 协调器的 `nextTargetState` 只提升 starting/rebooting/stopping，不处理 launching。结果是在真实环境中节点可能长期显示 `launching`，且 API 的维护准备会拒绝该节点。Task 18 的集成测试把该行为作为失败门禁记录；修复属于后续业务逻辑变更。
+- **创建幂等未落库约束**：`fleet_node.idempotency_key` 有列但没有唯一索引，`ReserveNode` 也不做同键重放；创建重试可能创建第二个节点。操作表的幂等键已有部分唯一索引。
+- **旧 project 容器**：Task 11b 之前的 `multica` project Fleet 容器需要手动删除一次，脚本不会自动接管或清理。
+- **真实 Claude 烟测未执行**：没有 `agentintegration` 授权，未查找真实 CLI、未读取账户、未调用模型。
+- **完整运行链路未验证**：本环境 Docker 与 PostgreSQL 均不可用；Docker 镜像构建、fleetintegration、真实 Claude 与 Playwright E2E 均为 environment-blocked。集成测试内的最小 daemon API stub 只让 daemon 完成零 workspace 的 preflight；workspace/Runtime 注册、任务提交与结果回传需要真实 API，另行验收。
+- **Linux 节点到 API 的可达性**：依赖网关地址或显式配置，尚未在真实 Linux 主机上验证。
