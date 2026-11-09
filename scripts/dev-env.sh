@@ -356,6 +356,7 @@ ensure_dev_code() {
 rewrite_env_ports() {
   local file offset=$2 backend=$3 frontend=$4 db=$5 fleet=$(( $3 + 20 ))
   local tmp database_url escaped_database_url namespace secret_file escaped_secret_file
+  local fleet_api escaped_fleet_api
   local cloud_url key fleet_missing=0
   case "$1" in
     /*) file="$1" ;;
@@ -367,6 +368,10 @@ rewrite_env_ports() {
   # Fleet's namespace names the Compose project and the label destroy filters,
   # and must be the one bind_paths derives from this checkout.
   namespace="$(slugify "$(basename "$REPO_ROOT")")"
+  # The container-to-host address depends on the Docker backend (Docker Desktop
+  # vs Colima/Lima); scripts/fleet-env.sh owns that decision.
+  fleet_api="$(fleet_api_url "$backend")"
+  escaped_fleet_api="$(printf '%s' "$fleet_api" | sed 's/[\\&|]/\\&/g')"
   # The API opens this path from its own working directory (server/), so it is
   # absolute. It lives next to the env file under the git-ignored .dev/, the
   # same layout scripts/init-worktree-env.sh already writes for worktrees.
@@ -388,7 +393,7 @@ rewrite_env_ports() {
     -e "s|^NEXT_PUBLIC_API_URL=.*|NEXT_PUBLIC_API_URL=http://localhost:${backend}|"
     -e "s|^NEXT_PUBLIC_WS_URL=.*|NEXT_PUBLIC_WS_URL=ws://localhost:${backend}/ws|"
     -e "s|^MULTICA_FLEET_PORT=.*|MULTICA_FLEET_PORT=${fleet}|"
-    -e "s|^MULTICA_FLEET_API_URL=.*|MULTICA_FLEET_API_URL=http://host.docker.internal:${backend}|"
+    -e "s|^MULTICA_FLEET_API_URL=.*|MULTICA_FLEET_API_URL=${escaped_fleet_api}|"
     -e "s|^MULTICA_LOCAL_FLEET_NAMESPACE=.*|MULTICA_LOCAL_FLEET_NAMESPACE=${namespace}|"
   )
   if [ -z "$cloud_url" ]; then
@@ -426,7 +431,7 @@ rewrite_env_ports() {
     {
       printf '\n# Fleet endpoints follow this environment'"'"'s allocated ports.\n'
       grep -q '^MULTICA_FLEET_PORT=' "$tmp" || printf 'MULTICA_FLEET_PORT=%s\n' "$fleet"
-      grep -q '^MULTICA_FLEET_API_URL=' "$tmp" || printf 'MULTICA_FLEET_API_URL=http://host.docker.internal:%s\n' "$backend"
+      grep -q '^MULTICA_FLEET_API_URL=' "$tmp" || printf 'MULTICA_FLEET_API_URL=%s\n' "$fleet_api"
       grep -q '^MULTICA_LOCAL_FLEET_NAMESPACE=' "$tmp" || printf 'MULTICA_LOCAL_FLEET_NAMESPACE=%s\n' "$namespace"
       if [ -z "$cloud_url" ]; then
         grep -q '^MULTICA_LOCAL_FLEET_URL=' "$tmp" || printf 'MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:%s\n' "$fleet"
@@ -1230,9 +1235,10 @@ bind_paths() {
   if [ -z "${MULTICA_FLEET_PORT:-}" ]; then
     MULTICA_FLEET_PORT=$((BACKEND_PORT + 20))
   fi
-  if [ -z "${MULTICA_FLEET_API_URL:-}" ]; then
-    MULTICA_FLEET_API_URL="http://host.docker.internal:${BACKEND_PORT}"
-  fi
+  # Derived, not stored: the address follows the active Docker backend, and a
+  # stale value from an older env file must not pin it to the wrong host.
+  # MULTICA_FLEET_HOST_GATEWAY is the explicit override.
+  MULTICA_FLEET_API_URL="$(fleet_api_url "$BACKEND_PORT")"
   # The API reads these at boot to enable local Fleet; without them a
   # "make up C=fleet" starts a control plane the API ignores. A fresh checkout
   # has them commented out in .env and an existing one may predate the wiring,

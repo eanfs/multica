@@ -659,9 +659,12 @@ docker volume ls --filter label=multica.fleet.namespace=<namespace>
   first (`make db-up` or `make up C=api`); Fleet joins that network instead of
   creating one.
 - Node cannot reach the API: Docker Desktop resolves
-  `host.docker.internal`; on a plain Linux Docker daemon set a
-  container-reachable `MULTICA_FLEET_API_URL` (the node network gateway).
-  `curl` from inside a node container is the quickest check.
+  `host.docker.internal`; Colima (Lima) exposes the host as
+  `host.lima.internal` (the launch script resolves the address through
+  `colima ssh`); on a plain Linux Docker daemon set a container-reachable
+  `MULTICA_FLEET_API_URL` (the node network gateway) or
+  `MULTICA_FLEET_HOST_GATEWAY`. `curl` from inside a node container is the
+  quickest check.
 - Node stays in `launching`: while the container starts this is expected;
   check the container logs and the daemon health on port 19514 inside the
   container. A launching node is refused by start/stop/reboot/delete to avoid

@@ -23,6 +23,7 @@ cat > "$fake_bin/docker" <<'EOF'
 #!/usr/bin/env bash
 printf 'docker %s\n' "$*" >> "$DOCKER_LOG"
 case "$*" in
+  *"context show"*) printf '%s\n' "${FAKE_DOCKER_CONTEXT:-desktop-linux}" ;;
   *"ps -q fleet"*|*"ps -aq fleet"*) [ "${FAKE_DOCKER_NO_CONTAINER:-0}" = 1 ] || printf 'container-id\n' ;;
   *"network inspect multica_default"*) [ "${FAKE_DOCKER_NO_NETWORK:-0}" = 1 ] && exit 1 ;;
 esac
@@ -71,6 +72,31 @@ file_mode() {
 
 # shellcheck disable=SC1090
 source "$root/scripts/fleet-env.sh"
+
+# ---------------------------------------------------------------------------
+# The container-to-host address follows the Docker backend: Docker Desktop
+# resolves host.docker.internal, Colima resolves the Lima host (through the
+# colima CLI when available, host.lima.internal otherwise). Compose receives
+# the derived URL from fleet_up.
+# ---------------------------------------------------------------------------
+[ "$(FAKE_DOCKER_CONTEXT=desktop-linux fleet_host_gateway)" = "host.docker.internal" ] \
+  || fail "Docker Desktop must use host.docker.internal"
+[ "$(FAKE_DOCKER_CONTEXT=desktop-linux fleet_api_url 8080)" = "http://host.docker.internal:8080" ] \
+  || fail "Docker Desktop API URL is wrong"
+
+no_colima_path="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin"
+[ "$(PATH="$no_colima_path" FAKE_DOCKER_CONTEXT=colima fleet_host_gateway)" = "host.lima.internal" ] \
+  || fail "Colima without the CLI must fall back to host.lima.internal"
+
+colima_bin="$tmp/colima-bin"
+mkdir -p "$colima_bin"
+cat > "$colima_bin/colima" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = ssh ] && printf '192.168.5.2 host.lima.internal\n'
+EOF
+chmod +x "$colima_bin/colima"
+[ "$(PATH="$colima_bin:$no_colima_path" FAKE_DOCKER_CONTEXT=colima fleet_host_gateway)" = "192.168.5.2" ] \
+  || fail "Colima must resolve the Lima host address through colima ssh"
 
 # ---------------------------------------------------------------------------
 # fleet_up: build both images, start the compose service, wait for readyz, and

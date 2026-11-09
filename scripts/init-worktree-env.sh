@@ -31,6 +31,11 @@ env_file_dir="$(cd "$(dirname "$ENV_FILE")" && pwd)"
 fleet_secret_dir="$env_file_dir/.dev"
 fleet_port=$((backend_port + 20))
 
+# The container-to-host address depends on the active Docker backend
+# (Docker Desktop vs Colima/Lima); scripts/fleet-env.sh owns that decision.
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fleet-env.sh"
+
 cat > "$ENV_FILE" <<EOF
 POSTGRES_DB=${postgres_db}
 POSTGRES_USER=multica
@@ -76,7 +81,7 @@ MULTICA_LOCAL_FLEET_SECRET_FILE=${fleet_secret_dir}/fleet-secret
 MULTICA_LOCAL_FLEET_NAMESPACE=${slug}
 MULTICA_FLEET_RUNTIME_IMAGE=multica/runtime-claude:dev
 MULTICA_FLEET_CREDENTIALS_FILE=${fleet_secret_dir}/fleet-credentials.json
-MULTICA_FLEET_API_URL=http://host.docker.internal:${backend_port}
+MULTICA_FLEET_API_URL=$(fleet_api_url "${backend_port}")
 EOF
 
 echo "Generated $ENV_FILE for worktree '$worktree_name'"

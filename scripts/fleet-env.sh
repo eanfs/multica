@@ -37,6 +37,51 @@ fleet_namespace() { printf '%s' "${MULTICA_LOCAL_FLEET_NAMESPACE:-local}"; }
 fleet_project() { printf 'multica-fleet-%s' "$(fleet_namespace)"; }
 fleet_compose() { docker compose -f "$(fleet_compose_file)" -p "$(fleet_project)" "$@"; }
 
+# Docker backends differ in how a container reaches the host. Docker Desktop
+# resolves host.docker.internal itself; Colima (Lima) exposes the host as
+# host.lima.internal inside the VM, and a node container may not inherit that
+# hosts entry, so the address is resolved through colima when possible. An
+# explicit MULTICA_FLEET_HOST_GATEWAY wins for any other backend.
+fleet_docker_context() {
+  docker context show 2>/dev/null || true
+}
+
+fleet_uses_colima() {
+  local context
+  context="$(fleet_docker_context)"
+  case "$context" in
+    colima|colima-*) return 0 ;;
+  esac
+  case "${DOCKER_HOST:-}" in
+    */.colima/*|*colima*) return 0 ;;
+  esac
+  return 1
+}
+
+fleet_host_gateway() {
+  local ip
+  if [ -n "${MULTICA_FLEET_HOST_GATEWAY:-}" ]; then
+    printf '%s' "$MULTICA_FLEET_HOST_GATEWAY"
+    return 0
+  fi
+  if fleet_uses_colima; then
+    if command -v colima >/dev/null 2>&1; then
+      ip="$(colima ssh -- sh -c 'getent hosts host.lima.internal' 2>/dev/null | awk 'NR==1 {print $1}')"
+      if [ -n "$ip" ]; then
+        printf '%s' "$ip"
+        return 0
+      fi
+    fi
+    printf 'host.lima.internal'
+    return 0
+  fi
+  printf 'host.docker.internal'
+}
+
+fleet_api_url() {
+  printf 'http://%s:%s' "$(fleet_host_gateway)" "${1:-${BACKEND_PORT:-8080}}"
+}
+
 # The database's Compose project owns this network. It is external here so the
 # two projects can share it without either one creating or deleting it.
 fleet_network() { printf 'multica_default'; }
@@ -125,6 +170,12 @@ fleet_build_images() {
 
 fleet_up() {
   fleet_require_docker || return 1
+  # Compose substitutes this into the Fleet container and node containers call
+  # back to it. Derive it for the active Docker backend unless pinned.
+  if [ -z "${MULTICA_FLEET_API_URL:-}" ]; then
+    MULTICA_FLEET_API_URL="$(fleet_api_url "${PORT:-8080}")"
+  fi
+  export MULTICA_FLEET_API_URL
 
   # Short-circuit when this checkout's service is already serving traffic: a
   # repeated "make up C=fleet" must not rebuild images or recreate a live

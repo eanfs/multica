@@ -304,8 +304,8 @@ Fleet 只读取显式传入的 `MULTICA_FLEET_CREDENTIALS_FILE`，不读取用�
 
 ### 14.4 Fleet 与节点的网络
 
-- Fleet 容器通过 `extra_hosts: host.docker.internal:host-gateway` 访问宿主机 API；Linux 与 Docker Desktop 使用同一 URL。
-- 节点容器由 Fleet 动态创建，不带 `extra_hosts`。Docker Desktop 上 `host.docker.internal` 可用；普通 Linux 上需要让 `MULTICA_FLEET_API_URL` 使用节点网络网关地址，或在节点网络侧提供等价解析。集成测试默认在 Linux 上取网络网关，并允许 `MULTICA_FLEET_TEST_API_HOST` 覆盖。
+- 容器到宿主机 API 的地址由 `scripts/fleet-env.sh` 按当前 Docker 后端派生：Docker Desktop 使用 `host.docker.internal`；Colima（Lima）通过 `colima ssh` 解析 `host.lima.internal` 的宿主地址；可用 `MULTICA_FLEET_HOST_GATEWAY` 覆盖。compose 不写死 `extra_hosts: host.docker.internal:host-gateway`（Colima 下该网关是 VM 网桥而非 macOS 宿主）。
+- 节点容器由 Fleet 动态创建，不带 `extra_hosts`。Docker Desktop 与 Colima 均能解析上述地址；普通 Linux 上需要让 `MULTICA_FLEET_API_URL` 使用节点网络网关地址，或在节点网络侧提供等价解析。集成测试默认在 Linux 上取网络网关，并允许 `MULTICA_FLEET_TEST_API_HOST` 覆盖。
 - 节点不挂 Docker socket、不 privileged、不使用 host network/PID、不发布端口；Fleet 宿主端口只绑 loopback。
 - `docker-compose.selfhost.yml` 不再包含未文档化的 `fleet` profile：self-host 的 backend 容器没有接收 `MULTICA_LOCAL_FLEET_*`，该 profile 启动的控制面会被 API 忽略，节点也解析不到 Compose 服务名 `backend`。本地 Fleet 只作为源码 checkout 的 `make up C=fleet` 组件存在。
 - 能力发现与这条本地网络路径无关：`provider: docker` 由本地 Fleet 返回，非 docker 的 provider（旧 SaaS）仍走 Cloud API，不会因本地网关配置而改变；反之本地 Docker 网关只影响 docker 节点到 API 的回连。旧响应兼容规则见 §14.6。

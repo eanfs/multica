@@ -51,6 +51,7 @@ if [ "${FAKE_DOCKER_FAIL_RM:-0}" = 1 ]; then
   esac
 fi
 case "$*" in
+  *"context show"*) printf '%s\n' "${FAKE_DOCKER_CONTEXT:-desktop-linux}" ;;
   *"ps -q fleet"*|*"ps -aq fleet"*) [ "${FAKE_DOCKER_NO_CONTAINER:-0}" = 1 ] || printf 'container-id\n' ;;
 esac
 exit 0
@@ -422,6 +423,16 @@ grep -Fqx 'MULTICA_LOCAL_FLEET_SECRET_FILE=' "$stale_env" \
     || fail "bind_paths derived namespace = $MULTICA_LOCAL_FLEET_NAMESPACE"
   [ "$MULTICA_FLEET_API_URL" = "http://host.docker.internal:18990" ] \
     || fail "bind_paths derived the Fleet API URL = $MULTICA_FLEET_API_URL"
+  # Colima exposes the host as host.lima.internal; bind_paths must derive that
+  # address instead of Docker Desktop's host.docker.internal.
+  (
+    export FAKE_DOCKER_CONTEXT=colima
+    export PATH="$fake_bin:/usr/bin:/bin"
+    unset MULTICA_FLEET_API_URL
+    bind_paths
+    [ "$MULTICA_FLEET_API_URL" = "http://host.lima.internal:18990" ] \
+      || fail "bind_paths derived the Colima Fleet API URL = $MULTICA_FLEET_API_URL"
+  ) || fail "bind_paths did not derive the Colima host address"
   ensure_local_fleet_secret
   [ -f "$MULTICA_LOCAL_FLEET_SECRET_FILE" ] || fail "up did not create the Fleet secret"
   [ "$(file_mode "$MULTICA_LOCAL_FLEET_SECRET_FILE")" = 600 ] \
