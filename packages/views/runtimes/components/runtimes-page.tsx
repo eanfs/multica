@@ -25,7 +25,10 @@ import {
 } from "@multica/core/paths";
 import { agentTaskSnapshotOptions } from "@multica/core/agents";
 import { chatSessionsOptions } from "@multica/core/chat/queries";
-import { runtimeProfileListOptions } from "@multica/core/runtimes";
+import {
+  cloudRuntimeServiceOptions,
+  runtimeProfileListOptions,
+} from "@multica/core/runtimes";
 import {
   runtimeListOptions,
   runtimeKeys,
@@ -102,8 +105,6 @@ export interface RuntimesPageProps {
   hasLocalMachine?: boolean;
   /** The bundled daemon is starting but has not registered yet. */
   bootstrapping?: boolean;
-  /** Web SaaS-only Cloud Runtime entrypoint. */
-  cloudRuntimeEnabled?: boolean;
 }
 
 type StatusFilter = "all" | "online" | "offline";
@@ -167,7 +168,6 @@ export function RuntimesPage({
   localMachineName,
   hasLocalMachine,
   bootstrapping,
-  cloudRuntimeEnabled = false,
 }: RuntimesPageProps = {}) {
   const { t } = useT("runtimes");
   const isAuthLoading = useAuthStore((state) => state.isLoading);
@@ -181,6 +181,13 @@ export function RuntimesPage({
   const [showConnectDialog, setShowConnectDialog] = useState(false);
   const [showCloudRuntimeDialog, setShowCloudRuntimeDialog] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+
+  // The provider advertises its capabilities; an empty provider means this
+  // deployment has no cloud runtime service, so the entrypoint stays hidden.
+  const { data: cloudRuntimeService } = useQuery(
+    cloudRuntimeServiceOptions(wsId),
+  );
+  const showCloudRuntime = !!cloudRuntimeService?.provider;
 
   const { data: runtimes = [], isLoading: runtimesLoading } = useQuery(
     runtimeListOptions(wsId),
@@ -471,7 +478,7 @@ export function RuntimesPage({
             isDesktop={isDesktop}
             localMachineName={localMachineName ?? localMachine?.title ?? null}
             qoder={qoder}
-            cloudRuntimeEnabled={cloudRuntimeEnabled}
+            showCloudRuntime={showCloudRuntime}
             onAddMachine={() => setShowConnectDialog(true)}
             onQoder={openQoder}
             onCloudRuntime={() => setShowCloudRuntimeDialog(true)}
@@ -533,8 +540,11 @@ export function RuntimesPage({
       {showConnectDialog && (
         <ConnectRemoteDialog onClose={() => setShowConnectDialog(false)} />
       )}
-      {cloudRuntimeEnabled && showCloudRuntimeDialog && (
-        <CloudRuntimeDialog onClose={() => setShowCloudRuntimeDialog(false)} />
+      {showCloudRuntime && cloudRuntimeService && showCloudRuntimeDialog && (
+        <CloudRuntimeDialog
+          service={cloudRuntimeService}
+          onClose={() => setShowCloudRuntimeDialog(false)}
+        />
       )}
     </div>
   );
@@ -544,7 +554,7 @@ function AddRuntimeMenu({
   isDesktop,
   localMachineName,
   qoder,
-  cloudRuntimeEnabled,
+  showCloudRuntime,
   onAddMachine,
   onQoder,
   onCloudRuntime,
@@ -552,7 +562,7 @@ function AddRuntimeMenu({
   isDesktop: boolean;
   localMachineName: string | null;
   qoder: QoderConnection | null;
-  cloudRuntimeEnabled: boolean;
+  showCloudRuntime: boolean;
   onAddMachine: () => void;
   onQoder: () => void;
   onCloudRuntime: () => void;
@@ -615,7 +625,7 @@ function AddRuntimeMenu({
               onClick={onQoder}
             />
           )}
-          {cloudRuntimeEnabled && (
+          {showCloudRuntime && (
             <AddMenuItem
               icon={<Cloud className="size-4 text-muted-foreground" />}
               title={t(($) => $.cloud_runtime.action)}

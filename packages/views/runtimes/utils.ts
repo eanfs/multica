@@ -3,6 +3,10 @@ import type {
   RuntimeUsage,
   RuntimeUsageByAgent,
 } from "@multica/core/types";
+import type {
+  CloudRuntimeNode,
+  CloudRuntimeService,
+} from "@multica/core/runtimes";
 import { getCustomPricing } from "@multica/core/runtimes/custom-pricing-store";
 
 // A live local daemon re-registers itself within seconds of a server-side
@@ -1543,4 +1547,69 @@ export function computeCostInWindow(
 export function pctChange(current: number, previous: number): number | null {
   if (previous <= 0) return null;
   return Math.round(((current - previous) / previous) * 100);
+}
+
+// Cloud runtime capabilities
+
+// The provider advertises which lifecycle operations it accepts, so the UI
+// never renders a button the current backend cannot serve. An unknown provider
+// or a failed capability fetch yields a service with no operations, which
+// disables every control instead of guessing.
+export interface CloudRuntimeOperations {
+  canCreate: boolean;
+  canStart: boolean;
+  canStop: boolean;
+  canReboot: boolean;
+  canDelete: boolean;
+}
+
+export function cloudRuntimeOperations(
+  service: CloudRuntimeService | undefined | null,
+): CloudRuntimeOperations {
+  const ops = new Set(service?.operations ?? []);
+  return {
+    canCreate: ops.has("create"),
+    canStart: ops.has("start"),
+    canStop: ops.has("stop"),
+    canReboot: ops.has("reboot"),
+    canDelete: ops.has("delete"),
+  };
+}
+
+// Local Docker nodes own their image, subnet and disk layout, so the create
+// form hides the EC2-shaped fields for this provider.
+export function isDockerCloudRuntime(
+  service: Pick<CloudRuntimeService, "provider"> | undefined | null,
+): boolean {
+  return service?.provider === "docker";
+}
+
+const NODE_DETAIL_MESSAGE_KEYS = ["error", "message", "reason", "last_error"] as const;
+
+function detailMessage(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed || null;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  for (const key of NODE_DETAIL_MESSAGE_KEYS) {
+    const message = detailMessage(record[key]);
+    if (message) return message;
+  }
+  return null;
+}
+
+// The advertised node contract puts status_detail at the top level, but the
+// local Fleet response still nests it (and its daemon id) inside metadata.
+// Read both shapes and degrade to null rather than throwing on JSONB drift.
+export function cloudRuntimeNodeFailureReason(
+  node: Pick<CloudRuntimeNode, "error" | "statusDetail" | "metadata">,
+): string | null {
+  return (
+    detailMessage(node.error) ??
+    detailMessage(node.statusDetail) ??
+    detailMessage(node.metadata?.status_detail) ??
+    detailMessage(node.metadata?.error)
+  );
 }

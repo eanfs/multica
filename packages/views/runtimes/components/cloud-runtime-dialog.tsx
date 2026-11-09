@@ -3,15 +3,41 @@
 import { useId, useMemo, useState } from "react";
 import type { FormEvent, HTMLAttributes } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Cloud, Loader2, RefreshCw, Rocket, Trash2 } from "@multica/ui/icons";
+import {
+  Cloud,
+  Loader2,
+  Play,
+  RefreshCw,
+  Rocket,
+  RotateCcw,
+  Square,
+  Trash2,
+} from "@multica/ui/icons";
 import { toast } from "sonner";
-import type { CloudRuntimeNode } from "@multica/core/runtimes";
+import type {
+  CloudRuntimeNode,
+  CloudRuntimeService,
+  CreateCloudRuntimeNodeRequest,
+} from "@multica/core/runtimes";
 import {
   cloudRuntimeNodeListOptions,
   useCreateCloudRuntimeNode,
   useDeleteCloudRuntimeNode,
+  useRebootCloudRuntimeNode,
+  useStartCloudRuntimeNode,
+  useStopCloudRuntimeNode,
 } from "@multica/core/runtimes";
 import { useWorkspaceId } from "@multica/core/hooks";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@multica/ui/components/ui/alert-dialog";
 import { Badge } from "@multica/ui/components/ui/badge";
 import { Button } from "@multica/ui/components/ui/button";
 import {
@@ -33,21 +59,45 @@ import {
 } from "@multica/ui/components/ui/select";
 import { cn } from "@multica/ui/lib/utils";
 import { useT } from "../../i18n";
+import {
+  cloudRuntimeNodeFailureReason,
+  cloudRuntimeOperations,
+  isDockerCloudRuntime,
+} from "../utils";
 
-const CLOUD_RUNTIME_INSTANCE_TYPES = ["t4g.medium", "t4g.large"] as const;
-const DEFAULT_INSTANCE_TYPE = CLOUD_RUNTIME_INSTANCE_TYPES[0];
+// EC2-shaped providers predate capability discovery and may not advertise
+// specs; keep the previously hard-coded instance types as a fallback only.
+const LEGACY_INSTANCE_TYPES = ["t4g.medium", "t4g.large"] as const;
 const DEFAULT_DISK_SIZE_GB = 20;
 
-export function CloudRuntimeDialog({ onClose }: { onClose: () => void }) {
+export function CloudRuntimeDialog({
+  service,
+  onClose,
+}: {
+  service: CloudRuntimeService;
+  onClose: () => void;
+}) {
   const { t } = useT("runtimes");
   const wsId = useWorkspaceId();
   const idPrefix = `cloud-runtime-${useId().replace(/:/g, "")}`;
   const formId = `${idPrefix}-form`;
   const [name, setName] = useState("");
-  const [instanceType, setInstanceType] = useState<string>(
-    DEFAULT_INSTANCE_TYPE,
-  );
+  const [specChoice, setSpecChoice] = useState<string | null>(null);
   const [diskSizeGB, setDiskSizeGB] = useState(String(DEFAULT_DISK_SIZE_GB));
+
+  const operations = cloudRuntimeOperations(service);
+  const docker = isDockerCloudRuntime(service);
+  const specOptions = useMemo(
+    () =>
+      service.specs.length > 0
+        ? service.specs.map((spec) => spec.id)
+        : [...LEGACY_INSTANCE_TYPES],
+    [service.specs],
+  );
+  const spec =
+    specChoice && specOptions.includes(specChoice)
+      ? specChoice
+      : (specOptions[0] ?? "");
 
   const nodesQuery = useQuery(
     cloudRuntimeNodeListOptions(wsId, { limit: 20, offset: 0 }),
@@ -65,23 +115,33 @@ export function CloudRuntimeDialog({ onClose }: { onClose: () => void }) {
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const diskSize = diskSizeGB.trim()
-      ? Number(diskSizeGB.trim())
-      : DEFAULT_DISK_SIZE_GB;
-    if (!Number.isInteger(diskSize) || diskSize <= 0) {
-      toast.error(t(($) => $.cloud_runtime.validation.disk_size_invalid));
-      return;
+    if (!operations.canCreate) return;
+
+    let diskSize: number | undefined;
+    if (!docker) {
+      diskSize = diskSizeGB.trim()
+        ? Number(diskSizeGB.trim())
+        : DEFAULT_DISK_SIZE_GB;
+      if (!Number.isInteger(diskSize) || diskSize <= 0) {
+        toast.error(t(($) => $.cloud_runtime.validation.disk_size_invalid));
+        return;
+      }
     }
 
     try {
-      await createNode.mutateAsync({
-        instance_type: instanceType,
+      // The Docker Fleet API selects its allowed node shape by spec id, while
+      // the EC2-shaped request calls the same field instance_type. Send both:
+      // each backend ignores the field it does not read.
+      const request: CreateCloudRuntimeNodeRequest & { spec_id?: string } = {
+        instance_type: spec,
         name: valueOrUndefined(name),
-        disk_size_gb: diskSize,
-      });
+        ...(diskSize === undefined ? {} : { disk_size_gb: diskSize }),
+        ...(docker ? { spec_id: spec } : {}),
+      };
+      await createNode.mutateAsync(request);
       toast.success(t(($) => $.cloud_runtime.toast_created));
       setName("");
-      setInstanceType(DEFAULT_INSTANCE_TYPE);
+      setSpecChoice(null);
       setDiskSizeGB(String(DEFAULT_DISK_SIZE_GB));
     } catch (error) {
       toast.error(
@@ -103,6 +163,17 @@ export function CloudRuntimeDialog({ onClose }: { onClose: () => void }) {
           <DialogDescription className="text-caption">
             {t(($) => $.cloud_runtime.description)}
           </DialogDescription>
+          <div className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground">
+            <span>
+              {t(($) => $.cloud_runtime.provider)}:{" "}
+              <span className="font-mono">{service.provider}</span>
+            </span>
+            {service.persistentStorage && (
+              <Badge variant="secondary">
+                {t(($) => $.cloud_runtime.persistent_volume)}
+              </Badge>
+            )}
+          </div>
         </DialogHeader>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
@@ -123,22 +194,30 @@ export function CloudRuntimeDialog({ onClose }: { onClose: () => void }) {
                   placeholder={t(($) => $.cloud_runtime.placeholders.name)}
                 />
                 <LabeledInput
-                  id={`${idPrefix}-instance-type`}
-                  label={t(($) => $.cloud_runtime.fields.instance_type)}
-                  value={instanceType}
-                  onChange={setInstanceType}
-                  options={CLOUD_RUNTIME_INSTANCE_TYPES}
+                  id={`${idPrefix}-spec`}
+                  label={t(($) => $.cloud_runtime.spec)}
+                  value={spec}
+                  onChange={setSpecChoice}
+                  options={specOptions}
                 />
-                <LabeledInput
-                  id={`${idPrefix}-disk-size`}
-                  label={t(($) => $.cloud_runtime.fields.disk_size)}
-                  value={diskSizeGB}
-                  onChange={setDiskSizeGB}
-                  placeholder={String(DEFAULT_DISK_SIZE_GB)}
-                  type="number"
-                  inputMode="numeric"
-                />
+                {!docker && (
+                  <LabeledInput
+                    id={`${idPrefix}-disk-size`}
+                    label={t(($) => $.cloud_runtime.fields.disk_size)}
+                    value={diskSizeGB}
+                    onChange={setDiskSizeGB}
+                    placeholder={String(DEFAULT_DISK_SIZE_GB)}
+                    type="number"
+                    inputMode="numeric"
+                  />
+                )}
               </div>
+
+              {!operations.canCreate && (
+                <p className="text-caption text-muted-foreground">
+                  {t(($) => $.cloud_runtime.unsupported_operation)}
+                </p>
+              )}
             </form>
 
             <section className="min-h-0 rounded-md border bg-muted/20">
@@ -190,7 +269,12 @@ export function CloudRuntimeDialog({ onClose }: { onClose: () => void }) {
                 <div className="max-h-[410px] overflow-y-auto p-2">
                   <div className="space-y-2">
                     {sortedNodes.map((node) => (
-                      <CloudRuntimeNodeRow key={node.id} node={node} wsId={wsId} />
+                      <CloudRuntimeNodeRow
+                        key={node.id}
+                        node={node}
+                        wsId={wsId}
+                        service={service}
+                      />
                     ))}
                   </div>
                 </div>
@@ -207,7 +291,7 @@ export function CloudRuntimeDialog({ onClose }: { onClose: () => void }) {
             type="submit"
             size="sm"
             form={formId}
-            disabled={createNode.isPending}
+            disabled={createNode.isPending || !operations.canCreate}
           >
             {createNode.isPending ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -292,14 +376,41 @@ function LabeledInput({
   );
 }
 
-function CloudRuntimeNodeRow({ node, wsId }: { node: CloudRuntimeNode; wsId: string }) {
+function CloudRuntimeNodeRow({
+  node,
+  wsId,
+  service,
+}: {
+  node: CloudRuntimeNode;
+  wsId: string;
+  service: CloudRuntimeService;
+}) {
   const { t } = useT("runtimes");
+  const operations = cloudRuntimeOperations(service);
   const deleteNode = useDeleteCloudRuntimeNode(wsId);
+  const startNode = useStartCloudRuntimeNode(wsId);
+  const stopNode = useStopCloudRuntimeNode(wsId);
+  const rebootNode = useRebootCloudRuntimeNode(wsId);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const busy =
+    deleteNode.isPending ||
+    startNode.isPending ||
+    stopNode.isPending ||
+    rebootNode.isPending;
+  const failureReason = cloudRuntimeNodeFailureReason(node);
   const title =
     node.name.trim() ||
     node.instance_id.trim() ||
     t(($) => $.cloud_runtime.node_fallback_name);
   const created = formatDateTime(node.created_at);
+
+  const reportOperationError = (error: unknown) =>
+    toast.error(
+      error instanceof Error
+        ? error.message
+        : t(($) => $.cloud_runtime.toast_operation_failed),
+    );
+
   return (
     <div className="rounded-md border bg-background px-3 py-2.5">
       <div className="flex min-w-0 items-start justify-between gap-3">
@@ -310,8 +421,12 @@ function CloudRuntimeNodeRow({ node, wsId }: { node: CloudRuntimeNode; wsId: str
           </div>
           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-caption text-muted-foreground">
             <span>{node.instance_type}</span>
-            <span className="text-faint-foreground">/</span>
-            <span>{node.region}</span>
+            {node.region && (
+              <>
+                <span className="text-faint-foreground">/</span>
+                <span>{node.region}</span>
+              </>
+            )}
             {created && (
               <>
                 <span className="text-faint-foreground">/</span>
@@ -319,39 +434,153 @@ function CloudRuntimeNodeRow({ node, wsId }: { node: CloudRuntimeNode; wsId: str
               </>
             )}
           </div>
-        </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-7 w-7 shrink-0 p-0 text-muted-foreground hover:text-destructive"
-          disabled={deleteNode.isPending}
-          onClick={() => {
-            if (!confirm(t(($) => $.cloud_runtime.delete_confirm))) return;
-            deleteNode.mutate(node.instance_id, {
-              onSuccess: () => toast.success(t(($) => $.cloud_runtime.toast_deleted)),
-              onError: (err) =>
-                toast.error(
-                  err instanceof Error
-                    ? err.message
-                    : t(($) => $.cloud_runtime.toast_delete_failed),
-                ),
-            });
-          }}
-          aria-label={t(($) => $.cloud_runtime.delete)}
-        >
-          {deleteNode.isPending ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Trash2 className="h-3.5 w-3.5" />
+          {failureReason && (
+            <p className="mt-1 text-caption text-destructive" role="alert">
+              {failureReason}
+            </p>
           )}
-        </Button>
+        </div>
+        <div
+          role="group"
+          aria-label={t(($) => $.cloud_runtime.operations)}
+          className="flex shrink-0 items-center gap-1"
+        >
+          {operations.canStart && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={
+                startNode.isPending
+                  ? t(($) => $.cloud_runtime.starting)
+                  : t(($) => $.cloud_runtime.start)
+              }
+              title={t(($) => $.cloud_runtime.start)}
+              disabled={busy}
+              aria-busy={startNode.isPending}
+              onClick={() =>
+                startNode.mutate(node.instance_id, {
+                  onError: reportOperationError,
+                })
+              }
+            >
+              {startNode.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Play className="h-3.5 w-3.5" />
+              )}
+            </Button>
+          )}
+          {operations.canStop && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={
+                stopNode.isPending
+                  ? t(($) => $.cloud_runtime.stopping)
+                  : t(($) => $.cloud_runtime.stop)
+              }
+              title={t(($) => $.cloud_runtime.stop)}
+              disabled={busy}
+              aria-busy={stopNode.isPending}
+              onClick={() =>
+                stopNode.mutate(node.instance_id, {
+                  onError: reportOperationError,
+                })
+              }
+            >
+              {stopNode.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Square className="h-3.5 w-3.5" />
+              )}
+            </Button>
+          )}
+          {operations.canReboot && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={
+                rebootNode.isPending
+                  ? t(($) => $.cloud_runtime.rebooting)
+                  : t(($) => $.cloud_runtime.reboot)
+              }
+              title={t(($) => $.cloud_runtime.reboot)}
+              disabled={busy}
+              aria-busy={rebootNode.isPending}
+              onClick={() =>
+                rebootNode.mutate(node.instance_id, {
+                  onError: reportOperationError,
+                })
+              }
+            >
+              {rebootNode.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RotateCcw className="h-3.5 w-3.5" />
+              )}
+            </Button>
+          )}
+          {operations.canDelete && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="text-muted-foreground hover:text-destructive"
+              disabled={busy}
+              onClick={() => setConfirmingDelete(true)}
+              aria-label={t(($) => $.cloud_runtime.delete)}
+              title={t(($) => $.cloud_runtime.delete)}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          )}
+        </div>
       </div>
       {node.instance_id && (
         <div className="mt-2 truncate font-mono text-micro text-muted-foreground">
           {node.instance_id}
         </div>
       )}
+
+      <AlertDialog open={confirmingDelete} onOpenChange={setConfirmingDelete}>
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t(($) => $.cloud_runtime.delete)}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t(($) => $.cloud_runtime.delete_irreversible)}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteNode.isPending}>
+              {t(($) => $.cloud_runtime.cancel)}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={deleteNode.isPending}
+              aria-busy={deleteNode.isPending}
+              onClick={() =>
+                deleteNode.mutate(node.instance_id, {
+                  onSuccess: () => {
+                    setConfirmingDelete(false);
+                    toast.success(t(($) => $.cloud_runtime.toast_deleted));
+                  },
+                  onError: (err) => {
+                    reportOperationError(err);
+                  },
+                })
+              }
+            >
+              {deleteNode.isPending && (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              )}
+              {t(($) => $.cloud_runtime.delete)}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -367,7 +596,12 @@ function CloudRuntimeStatusBadge({ status }: { status: string }) {
     "rebooting",
     "terminating",
   ]);
-  const failed = new Set(["failed", "terminated", "error"]);
+  const failed = new Set([
+    "failed",
+    "terminated",
+    "error",
+    "instance_missing",
+  ]);
   return (
     <Badge
       variant="secondary"
