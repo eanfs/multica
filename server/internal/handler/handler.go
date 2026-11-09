@@ -289,8 +289,8 @@ type Handler struct {
 	// runtime. In local Fleet mode this points at the local Fleet service.
 	CloudRuntime cloudRuntimeProxy
 	// CloudBilling proxies billing and subscription requests. It is built from
-	// CloudURL only, so local Fleet mode cannot accidentally expose billing
-	// through the local service.
+	// CloudURL only and never shares the CloudRuntime client, so local Fleet
+	// mode (CloudURL empty) cannot expose billing through the local service.
 	CloudBilling cloudRuntimeProxy
 	// Test-only HTTP override; nil uses the default client in production.
 	googleOAuthHTTPClient *http.Client

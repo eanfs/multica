@@ -13,10 +13,12 @@ import (
 	"github.com/multica-ai/multica/server/internal/util"
 )
 
-// Cloud billing endpoints proxy to the same multica-cloud HTTP service
-// that backs cloud-runtime (Fleet and Billing share `:8080` per the
-// upstream README). All paths here forward verbatim to /api/v1/billing/*
-// on the cloud side, mirroring the cloud-runtime handler shape:
+// Cloud billing endpoints proxy to the multica-cloud HTTP service through
+// the dedicated h.CloudBilling client. Billing never borrows the cloud-runtime
+// (Fleet) client: local Fleet mode configures a local node-runtime target while
+// leaving CloudURL empty, and sharing a client would silently expose billing
+// against the local service. All paths here forward verbatim to
+// /api/v1/billing/* on the cloud side:
 //
 //   - Owner-credit endpoints sit under /api/cloud-billing/* in our router.
 //     Workspace subscription endpoints sit under /api/cloud-subscriptions/*
@@ -30,9 +32,11 @@ import (
 //     upstream contract is explicit about this:
 //     "webhook 使用原始请求体进行签名校验，不要在反向代理里改写 body."
 //
-// Owner-credit paths share `proxyCloudRuntime`. Workspace subscriptions use a
+// Owner-credit paths share `proxyCloudBilling`. Workspace subscriptions use a
 // small stricter wrapper to inject workspace_id and allowlist Idempotency-Key;
-// the webhook remains the only raw-body forwarder.
+// the webhook remains the only raw-body forwarder. All three require
+// h.CloudBilling; when it is nil or disabled they answer 403 instead of
+// dialing anything.
 
 // maxStripeWebhookBodySize bounds the raw body we'll forward upstream.
 // Stripe's documented event payload upper bound is well under this;
@@ -132,6 +136,18 @@ func (h *Handler) proxyCloudSubscription(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	writeCloudRuntimeResponse(w, resp)
+}
+
+// proxyCloudBilling forwards owner-credit billing calls through the billing
+// client. h.CloudBilling is built from MULTICA_CLOUD_URL alone, so a local
+// Fleet deployment (which leaves CloudURL empty) answers a non-retryable 403
+// instead of reaching the local node-runtime service.
+func (h *Handler) proxyCloudBilling(w http.ResponseWriter, r *http.Request, method, path string, opts cloudRuntimeProxyOptions) {
+	if h.CloudBilling == nil || !h.CloudBilling.Enabled() {
+		writeFeatureDisabled(w, "cloud_billing_not_configured", "cloud billing is not configured")
+		return
+	}
+	h.proxyCloudRequest(w, r, h.CloudBilling, method, path, opts)
 }
 
 func cloudSubscriptionIdempotencyHeaders(r *http.Request) http.Header {
@@ -354,7 +370,7 @@ func (h *Handler) CreateCloudWorkspaceSubscriptionPortal(w http.ResponseWriter, 
 // Returns the caller's wallet balance. Cloud reads `X-User-ID`; we
 // stamp it from the authenticated context.
 func (h *Handler) GetCloudBillingBalance(w http.ResponseWriter, r *http.Request) {
-	h.proxyCloudRuntime(w, r, http.MethodGet, "/api/v1/billing/balance", cloudRuntimeProxyOptions{
+	h.proxyCloudBilling(w, r, http.MethodGet, "/api/v1/billing/balance", cloudRuntimeProxyOptions{
 		withUserID: true,
 	})
 }
@@ -364,7 +380,7 @@ func (h *Handler) GetCloudBillingBalance(w http.ResponseWriter, r *http.Request)
 // The upstream supports `page` / `page_size`; we forward the query
 // string unchanged.
 func (h *Handler) ListCloudBillingTransactions(w http.ResponseWriter, r *http.Request) {
-	h.proxyCloudRuntime(w, r, http.MethodGet, "/api/v1/billing/transactions", cloudRuntimeProxyOptions{
+	h.proxyCloudBilling(w, r, http.MethodGet, "/api/v1/billing/transactions", cloudRuntimeProxyOptions{
 		withUserID: true,
 		withQuery:  true,
 	})
@@ -375,7 +391,7 @@ func (h *Handler) ListCloudBillingTransactions(w http.ResponseWriter, r *http.Re
 // Returns paginated topup / bonus batches for the owner; same query
 // shape as transactions.
 func (h *Handler) ListCloudBillingBatches(w http.ResponseWriter, r *http.Request) {
-	h.proxyCloudRuntime(w, r, http.MethodGet, "/api/v1/billing/batches", cloudRuntimeProxyOptions{
+	h.proxyCloudBilling(w, r, http.MethodGet, "/api/v1/billing/batches", cloudRuntimeProxyOptions{
 		withUserID: true,
 		withQuery:  true,
 	})
@@ -383,7 +399,7 @@ func (h *Handler) ListCloudBillingBatches(w http.ResponseWriter, r *http.Request
 
 // ListCloudBillingTopups forwards GET /api/v1/billing/topups.
 func (h *Handler) ListCloudBillingTopups(w http.ResponseWriter, r *http.Request) {
-	h.proxyCloudRuntime(w, r, http.MethodGet, "/api/v1/billing/topups", cloudRuntimeProxyOptions{
+	h.proxyCloudBilling(w, r, http.MethodGet, "/api/v1/billing/topups", cloudRuntimeProxyOptions{
 		withUserID: true,
 		withQuery:  true,
 	})
@@ -397,7 +413,7 @@ func (h *Handler) ListCloudBillingTopups(w http.ResponseWriter, r *http.Request)
 // header so cloud can audit who's listing tiers — and so the contract
 // stays uniform if pricing later differentiates per-customer.
 func (h *Handler) ListCloudBillingPriceTiers(w http.ResponseWriter, r *http.Request) {
-	h.proxyCloudRuntime(w, r, http.MethodGet, "/api/v1/billing/price-tiers", cloudRuntimeProxyOptions{
+	h.proxyCloudBilling(w, r, http.MethodGet, "/api/v1/billing/price-tiers", cloudRuntimeProxyOptions{
 		withUserID: true,
 	})
 }
@@ -405,10 +421,10 @@ func (h *Handler) ListCloudBillingPriceTiers(w http.ResponseWriter, r *http.Requ
 // CreateCloudBillingCheckoutSession forwards POST /api/v1/billing/checkout-sessions.
 //
 // Body shape (per upstream): `{tier_id, customer_email?}`. We don't
-// care about its contents — proxyCloudRuntime validates only that
+// care about its contents — proxyCloudBilling validates only that
 // it's syntactically JSON and forwards the bytes.
 func (h *Handler) CreateCloudBillingCheckoutSession(w http.ResponseWriter, r *http.Request) {
-	h.proxyCloudRuntime(w, r, http.MethodPost, "/api/v1/billing/checkout-sessions", cloudRuntimeProxyOptions{
+	h.proxyCloudBilling(w, r, http.MethodPost, "/api/v1/billing/checkout-sessions", cloudRuntimeProxyOptions{
 		withUserID: true,
 		withBody:   true,
 	})
@@ -436,7 +452,7 @@ func (h *Handler) GetCloudBillingCheckoutSession(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusBadRequest, "invalid session_id")
 		return
 	}
-	h.proxyCloudRuntime(w, r, http.MethodGet, "/api/v1/billing/checkout-sessions/"+sessionID, cloudRuntimeProxyOptions{
+	h.proxyCloudBilling(w, r, http.MethodGet, "/api/v1/billing/checkout-sessions/"+sessionID, cloudRuntimeProxyOptions{
 		withUserID: true,
 	})
 }
@@ -474,14 +490,14 @@ func isValidStripeSessionID(s string) bool {
 // later requires a body, switch this to withBody and let cloud
 // validate.
 func (h *Handler) CreateCloudBillingPortalSession(w http.ResponseWriter, r *http.Request) {
-	h.proxyCloudRuntime(w, r, http.MethodPost, "/api/v1/billing/portal-sessions", cloudRuntimeProxyOptions{
+	h.proxyCloudBilling(w, r, http.MethodPost, "/api/v1/billing/portal-sessions", cloudRuntimeProxyOptions{
 		withUserID: true,
 	})
 }
 
 // HandleCloudBillingStripeWebhook is the public ingress for Stripe
 // webhook deliveries. Three things are critical here and are *not*
-// shared with the standard proxyCloudRuntime path:
+// shared with the standard proxyCloudBilling path:
 //
 //  1. NO authentication. Stripe POSTs from its own infrastructure;
 //     we don't have a user context and don't try to invent one.

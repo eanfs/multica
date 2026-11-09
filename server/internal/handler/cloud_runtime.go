@@ -105,7 +105,13 @@ func (h *Handler) proxyCloudRuntime(w http.ResponseWriter, r *http.Request, meth
 		writeFeatureDisabled(w, "cloud_runtime_not_configured", "cloud runtime is not configured")
 		return
 	}
+	h.proxyCloudRequest(w, r, h.CloudRuntime, method, path, opts)
+}
 
+// proxyCloudRequest is the shared request shape behind both cloud proxies. The
+// caller has already established that its client is configured, so every
+// remaining branch is request validation or transport.
+func (h *Handler) proxyCloudRequest(w http.ResponseWriter, r *http.Request, client cloudRuntimeProxy, method, path string, opts cloudRuntimeProxyOptions) {
 	var userID string
 	if opts.withUserID {
 		var ok bool
@@ -129,7 +135,7 @@ func (h *Handler) proxyCloudRuntime(w http.ResponseWriter, r *http.Request, meth
 		query = r.URL.Query()
 	}
 
-	resp, err := h.CloudRuntime.Do(r.Context(), cloudruntime.Request{
+	resp, err := client.Do(r.Context(), cloudruntime.Request{
 		Method:    method,
 		Path:      path,
 		Query:     query,

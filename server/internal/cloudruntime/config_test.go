@@ -1,4 +1,4 @@
-package main
+package cloudruntime
 
 import (
 	"os"
@@ -9,6 +9,7 @@ import (
 // TestResolveCloudRuntimeConfig covers the local-fleet configuration matrix.
 // The resolver is the only place that turns environment variables plus one
 // secret file into the runtime wiring, so every rejection path is pinned here.
+// It lives in this package (not cmd/server) so it runs without a database.
 func TestResolveCloudRuntimeConfig(t *testing.T) {
 	dir := t.TempDir()
 	secretPath := filepath.Join(dir, "fleet-secret")
@@ -17,6 +18,10 @@ func TestResolveCloudRuntimeConfig(t *testing.T) {
 	}
 	emptyPath := filepath.Join(dir, "empty-secret")
 	if err := os.WriteFile(emptyPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blankPath := filepath.Join(dir, "blank-secret")
+	if err := os.WriteFile(blankPath, []byte(" \n\t\r\n  "), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	missingPath := filepath.Join(dir, "missing-secret")
@@ -44,13 +49,31 @@ func TestResolveCloudRuntimeConfig(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "blank local URL behaves as unset",
+			env:  map[string]string{"MULTICA_LOCAL_FLEET_URL": "  \n\t ", "MULTICA_LOCAL_FLEET_NAMESPACE": "ns"},
+		},
+		{
+			name: "blank local URL with cloud keeps SaaS",
+			env:  map[string]string{"MULTICA_CLOUD_URL": "http://cloud", "MULTICA_LOCAL_FLEET_URL": "   "},
+		},
+		{
 			name:    "local without secret file",
 			env:     map[string]string{"MULTICA_LOCAL_FLEET_URL": "http://fleet", "MULTICA_LOCAL_FLEET_NAMESPACE": "ns"},
 			wantErr: true,
 		},
 		{
+			name:    "local with blank secret file path",
+			env:     map[string]string{"MULTICA_LOCAL_FLEET_URL": "http://fleet", "MULTICA_LOCAL_FLEET_SECRET_FILE": "  ", "MULTICA_LOCAL_FLEET_NAMESPACE": "ns"},
+			wantErr: true,
+		},
+		{
 			name:    "local with malformed URL",
 			env:     map[string]string{"MULTICA_LOCAL_FLEET_URL": "file:///etc/passwd", "MULTICA_LOCAL_FLEET_SECRET_FILE": secretPath, "MULTICA_LOCAL_FLEET_NAMESPACE": "ns"},
+			wantErr: true,
+		},
+		{
+			name:    "local with URL query is rejected",
+			env:     map[string]string{"MULTICA_LOCAL_FLEET_URL": "http://fleet?x=1", "MULTICA_LOCAL_FLEET_SECRET_FILE": secretPath, "MULTICA_LOCAL_FLEET_NAMESPACE": "ns"},
 			wantErr: true,
 		},
 		{
@@ -69,8 +92,13 @@ func TestResolveCloudRuntimeConfig(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "local with whitespace-only secret file",
+			env:     map[string]string{"MULTICA_LOCAL_FLEET_URL": "http://fleet", "MULTICA_LOCAL_FLEET_SECRET_FILE": blankPath, "MULTICA_LOCAL_FLEET_NAMESPACE": "ns"},
+			wantErr: true,
+		},
+		{
 			name:          "local valid trims whitespace",
-			env:           map[string]string{"MULTICA_LOCAL_FLEET_URL": "  http://fleet  ", "MULTICA_LOCAL_FLEET_SECRET_FILE": secretPath, "MULTICA_LOCAL_FLEET_NAMESPACE": "  ns  "},
+			env:           map[string]string{"MULTICA_LOCAL_FLEET_URL": "  http://fleet  ", "MULTICA_LOCAL_FLEET_SECRET_FILE": "  " + secretPath + "  ", "MULTICA_LOCAL_FLEET_NAMESPACE": "  ns  "},
 			wantEnabled:   true,
 			wantURL:       "http://fleet",
 			wantSecret:    "s3cret",
@@ -80,24 +108,24 @@ func TestResolveCloudRuntimeConfig(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := resolveCloudRuntimeConfig(func(key string) string { return tc.env[key] })
+			cfg, err := ResolveLocalFleetConfig(func(key string) string { return tc.env[key] })
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
 			}
 			if err != nil {
 				return
 			}
-			if cfg.localEnabled != tc.wantEnabled {
-				t.Fatalf("localEnabled = %v, want %v", cfg.localEnabled, tc.wantEnabled)
+			if cfg.LocalEnabled != tc.wantEnabled {
+				t.Fatalf("LocalEnabled = %v, want %v", cfg.LocalEnabled, tc.wantEnabled)
 			}
-			if cfg.localURL != tc.wantURL {
-				t.Fatalf("localURL = %q, want %q", cfg.localURL, tc.wantURL)
+			if cfg.LocalURL != tc.wantURL {
+				t.Fatalf("LocalURL = %q, want %q", cfg.LocalURL, tc.wantURL)
 			}
-			if cfg.localSecret != tc.wantSecret {
-				t.Fatalf("localSecret = %q, want %q", cfg.localSecret, tc.wantSecret)
+			if cfg.LocalSecret != tc.wantSecret {
+				t.Fatalf("LocalSecret = %q, want %q", cfg.LocalSecret, tc.wantSecret)
 			}
-			if cfg.localNamespace != tc.wantNamespace {
-				t.Fatalf("localNamespace = %q, want %q", cfg.localNamespace, tc.wantNamespace)
+			if cfg.LocalNamespace != tc.wantNamespace {
+				t.Fatalf("LocalNamespace = %q, want %q", cfg.LocalNamespace, tc.wantNamespace)
 			}
 		})
 	}
