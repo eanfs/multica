@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,8 +24,13 @@ const (
 )
 
 // NewHTTP returns the Fleet HTTP handler. Every /api/v1 route requires the
-// service secret; health endpoints stay open for local probes.
-func NewHTTP(s *Service, secret string) http.Handler {
+// service secret held by the Service; health endpoints stay open for local
+// probes.
+func NewHTTP(s *Service) http.Handler {
+	secret := ""
+	if s != nil {
+		secret = s.secret
+	}
 	router := chi.NewRouter()
 	router.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -156,13 +162,17 @@ func (s *Service) handleOperate(operation string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			InstanceID     string `json:"instance_id"`
+			NodeID         string `json:"node_id"`
 			IdempotencyKey string `json:"idempotency_key"`
 		}
 		if err := decodeJSON(w, r, &req); err != nil {
 			writeServiceError(w, err)
 			return
 		}
-		node, err := s.Operate(r.Context(), r.Header.Get("X-User-ID"), req.InstanceID, operation, req.IdempotencyKey)
+		node, err := s.OperateRef(r.Context(), r.Header.Get("X-User-ID"), NodeRef{
+			InstanceID: req.InstanceID,
+			NodeID:     req.NodeID,
+		}, operation, req.IdempotencyKey)
 		if err != nil {
 			writeServiceError(w, err)
 			return
@@ -178,12 +188,16 @@ func (s *Service) handleDiagnose(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		InstanceID string `json:"instance_id"`
+		NodeID     string `json:"node_id"`
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeServiceError(w, err)
 		return
 	}
-	node, err := s.findNode(r.Context(), r.Header.Get("X-User-ID"), req.InstanceID)
+	node, err := s.findNode(r.Context(), r.Header.Get("X-User-ID"), NodeRef{
+		InstanceID: req.InstanceID,
+		NodeID:     req.NodeID,
+	})
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -355,6 +369,11 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dest any) error {
 			return fmt.Errorf("%w: request body is too large", ErrInvalidRequest)
 		}
 		return fmt.Errorf("%w: invalid request body", ErrInvalidRequest)
+	}
+	// A request body holds exactly one JSON value. Anything after it is a
+	// client bug, not another request to silently ignore.
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("%w: trailing data in request body", ErrInvalidRequest)
 	}
 	return nil
 }

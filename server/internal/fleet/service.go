@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -192,15 +193,21 @@ func (s *Service) ListNodes(ctx context.Context, ownerID string, limit, offset i
 	if limit > maxListLimit {
 		limit = maxListLimit
 	}
-	if offset < 0 {
-		offset = 0
-	}
 	return s.store.Queries().ListFleetNodesByOwner(ctx, db.ListFleetNodesByOwnerParams{
 		OwnerID:     ownerUUID,
 		Namespace:   s.cfg.Namespace,
 		LimitCount:  int32(limit),
-		OffsetCount: int32(offset),
+		OffsetCount: clampOffset(offset),
 	})
+}
+
+// NodeRef selects one node by Docker container id (the client-facing instance
+// id) or by fleet node id. A node whose launch failed has no container, so
+// delete/status/diagnose must be able to address it by node id. Exactly one
+// field may be set.
+type NodeRef struct {
+	InstanceID string
+	NodeID     string
 }
 
 // Operate applies start/stop/reboot/status/delete to one owner's node. The
@@ -208,10 +215,16 @@ func (s *Service) ListNodes(ctx context.Context, ownerID string, limit, offset i
 // as not found. The direct implementation applies the operation immediately;
 // idempotencyKey is carried for the journaled operation path.
 func (s *Service) Operate(ctx context.Context, ownerID, instanceID, operation, idempotencyKey string) (db.FleetNode, error) {
+	return s.OperateRef(ctx, ownerID, NodeRef{InstanceID: instanceID}, operation, idempotencyKey)
+}
+
+// OperateRef is Operate with a node reference, so a failed launch that never
+// produced a container can still be deleted by its fleet node id.
+func (s *Service) OperateRef(ctx context.Context, ownerID string, ref NodeRef, operation, idempotencyKey string) (db.FleetNode, error) {
 	if s == nil || s.store == nil || s.provider == nil {
 		return db.FleetNode{}, ErrNotConfigured
 	}
-	node, err := s.findNode(ctx, ownerID, instanceID)
+	node, err := s.findNode(ctx, ownerID, ref)
 	if err != nil {
 		return db.FleetNode{}, err
 	}
@@ -225,7 +238,9 @@ func (s *Service) Diagnose(ctx context.Context, node db.FleetNode) (docker.Healt
 		return docker.HealthReport{}, ErrNotConfigured
 	}
 	if node.ContainerID == "" {
-		return docker.HealthReport{}, ErrNotFound
+		// The node exists but never started a container. That is an unknown
+		// daemon state, not a missing node.
+		return docker.HealthReport{}, fmt.Errorf("%w: node has no container", ErrStateUncertain)
 	}
 	body, err := s.provider.ExecHealth(ctx, node.ContainerID)
 	if err != nil {
@@ -254,6 +269,11 @@ func (s *Service) VerifyPAT(ctx context.Context, token string) (PATIdentity, boo
 		}
 		return PATIdentity{}, false, fmt.Errorf("verify node credential: %w", err)
 	}
+	// A token minted for another namespace's Fleet must not validate here,
+	// even though the hash lookup itself is namespace-agnostic.
+	if row.Namespace != s.cfg.Namespace {
+		return PATIdentity{Valid: false}, false, nil
+	}
 	return PATIdentity{
 		Valid:            true,
 		OwnerID:          store.UUIDText(row.OwnerID),
@@ -262,12 +282,42 @@ func (s *Service) VerifyPAT(ctx context.Context, token string) (PATIdentity, boo
 	}, true, nil
 }
 
-func (s *Service) findNode(ctx context.Context, ownerID, instanceID string) (db.FleetNode, error) {
+// findNode loads one node by container id or node id, always scoped to the
+// service namespace and the caller's ownership. A foreign node and a missing
+// node are indistinguishable to the caller.
+func (s *Service) findNode(ctx context.Context, ownerID string, ref NodeRef) (db.FleetNode, error) {
 	if s == nil || s.store == nil {
 		return db.FleetNode{}, ErrNotConfigured
 	}
-	if strings.TrimSpace(instanceID) == "" {
-		return db.FleetNode{}, fmt.Errorf("%w: instance id is required", ErrInvalidRequest)
+	instanceID := strings.TrimSpace(ref.InstanceID)
+	nodeID := strings.TrimSpace(ref.NodeID)
+	if instanceID != "" && nodeID != "" {
+		return db.FleetNode{}, fmt.Errorf("%w: send either instance_id or node_id, not both", ErrInvalidRequest)
+	}
+	if nodeID != "" {
+		nodeUUID, err := util.ParseUUID(nodeID)
+		if err != nil {
+			return db.FleetNode{}, fmt.Errorf("%w: node id is not a UUID", ErrInvalidRequest)
+		}
+		ownerUUID, err := util.ParseUUID(ownerID)
+		if err != nil {
+			return db.FleetNode{}, fmt.Errorf("%w: owner id is not a UUID", ErrInvalidRequest)
+		}
+		node, err := s.store.Queries().GetFleetNodeByIDAndOwner(ctx, db.GetFleetNodeByIDAndOwnerParams{
+			ID:        nodeUUID,
+			Namespace: s.cfg.Namespace,
+			OwnerID:   ownerUUID,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return db.FleetNode{}, ErrNotFound
+			}
+			return db.FleetNode{}, fmt.Errorf("load node: %w", err)
+		}
+		return node, nil
+	}
+	if instanceID == "" {
+		return db.FleetNode{}, fmt.Errorf("%w: instance_id or node_id is required", ErrInvalidRequest)
 	}
 	node, err := s.store.Queries().GetFleetNodeByContainerID(ctx, db.GetFleetNodeByContainerIDParams{
 		ContainerID: instanceID,
@@ -279,8 +329,6 @@ func (s *Service) findNode(ctx context.Context, ownerID, instanceID string) (db.
 		}
 		return db.FleetNode{}, fmt.Errorf("load node: %w", err)
 	}
-	// Ownership is checked after loading the node so a foreign node and a
-	// missing node are indistinguishable to the caller.
 	if store.UUIDText(node.OwnerID) != ownerID {
 		return db.FleetNode{}, ErrNotFound
 	}
@@ -324,7 +372,9 @@ func (s *Service) applyOperation(ctx context.Context, node db.FleetNode, operati
 
 func (s *Service) applyStatus(ctx context.Context, node db.FleetNode) (db.FleetNode, error) {
 	if node.ContainerID == "" {
-		return db.FleetNode{}, ErrNotFound
+		// A failed launch never created a container. Status reports the
+		// persisted record instead of pretending the node does not exist.
+		return node, nil
 	}
 	observed, err := s.provider.Inspect(ctx, node.ContainerID)
 	if err != nil {
@@ -559,15 +609,31 @@ func buildEnvFile(env map[string]string) string {
 	return builder.String()
 }
 
+// clampOffset keeps a caller-supplied offset inside the non-negative int32
+// range the SQL query binds, so an oversized or negative value cannot become a
+// negative or wrapped OFFSET.
+func clampOffset(offset int) int32 {
+	switch {
+	case offset < 0:
+		return 0
+	case offset > math.MaxInt32:
+		return math.MaxInt32
+	default:
+		return int32(offset)
+	}
+}
+
 // sanitize bounds an error string before it is stored, so a Docker error cannot
-// grow the row or carry an unbounded payload.
+// grow the row or carry an unbounded payload. The limit counts runes so a
+// multibyte message is never cut into invalid UTF-8.
 func sanitize(err error) string {
 	if err == nil {
 		return ""
 	}
-	message := err.Error()
-	if len(message) > 300 {
-		message = message[:300]
+	const maxRunes = 300
+	runes := []rune(err.Error())
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes])
 	}
-	return message
+	return string(runes)
 }

@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -259,9 +261,18 @@ func testOwner(b byte) pgtype.UUID {
 
 func testUUIDString(id pgtype.UUID) string { return store.UUIDText(id) }
 
+func seedServiceNodeWith(t *testing.T, st *store.Store, p db.CreateFleetNodeParams) db.FleetNode {
+	t.Helper()
+	node, err := st.Queries().CreateFleetNode(context.Background(), p)
+	if err != nil {
+		t.Fatalf("seed node: %v", err)
+	}
+	return node
+}
+
 func seedServiceNode(t *testing.T, st *store.Store, owner pgtype.UUID, name, containerID string) db.FleetNode {
 	t.Helper()
-	node, err := st.Queries().CreateFleetNode(context.Background(), db.CreateFleetNodeParams{
+	return seedServiceNodeWith(t, st, db.CreateFleetNodeParams{
 		OwnerID:       owner,
 		Namespace:     "wt-svc",
 		Name:          name,
@@ -272,10 +283,21 @@ func seedServiceNode(t *testing.T, st *store.Store, owner pgtype.UUID, name, con
 		Spec:          []byte("{\"id\":\"standard\"}"),
 		TargetState:   StateRunning,
 	})
-	if err != nil {
-		t.Fatalf("seed node: %v", err)
-	}
-	return node
+}
+
+// seedFailedServiceNode mimics a launch that failed before any container or
+// volume was recorded: no container id and no container name.
+func seedFailedServiceNode(t *testing.T, st *store.Store, owner pgtype.UUID, name string) db.FleetNode {
+	t.Helper()
+	return seedServiceNodeWith(t, st, db.CreateFleetNodeParams{
+		OwnerID:     owner,
+		Namespace:   "wt-svc",
+		Name:        name,
+		DaemonID:    name + "-daemon",
+		Image:       "multica/runtime-claude:test",
+		Spec:        []byte("{\"id\":\"standard\"}"),
+		TargetState: StateFailed,
+	})
 }
 
 func TestCreateNodeRejectsUnknownSpecBeforeSideEffects(t *testing.T) {
@@ -332,9 +354,36 @@ func TestSanitizeBoundsError(t *testing.T) {
 		t.Fatalf("sanitize(nil) = %q", got)
 	}
 	long := strings.Repeat("x", 400)
-	got := sanitize(errors.New(long))
-	if len(got) != 300 {
+	if got := sanitize(errors.New(long)); len(got) != 300 {
 		t.Fatalf("sanitized length = %d, want 300", len(got))
+	}
+	// Truncating at a byte boundary would split the 3-byte rune and store
+	// invalid UTF-8.
+	multibyte := strings.Repeat("界", 400)
+	got := sanitize(errors.New(multibyte))
+	if !utf8.ValidString(got) {
+		t.Fatalf("sanitized message is not valid UTF-8: %q", got)
+	}
+	if runes := utf8.RuneCountInString(got); runes != 300 {
+		t.Fatalf("sanitized runes = %d, want 300", runes)
+	}
+}
+
+func TestClampOffset(t *testing.T) {
+	cases := []struct {
+		in   int
+		want int32
+	}{
+		{-100, 0},
+		{0, 0},
+		{42, 42},
+		{math.MaxInt32, math.MaxInt32},
+		{math.MaxInt32 + 1, math.MaxInt32},
+	}
+	for _, tc := range cases {
+		if got := clampOffset(tc.in); got != tc.want {
+			t.Fatalf("clampOffset(%d) = %d, want %d", tc.in, got, tc.want)
+		}
 	}
 }
 
@@ -611,6 +660,150 @@ func TestVerifyPATReturnsNodeIdentity(t *testing.T) {
 	unknown, found, err := svc.VerifyPAT(context.Background(), "mcn_unknown")
 	if err != nil || found || unknown.Valid {
 		t.Fatalf("unknown token = %+v found %v err %v", unknown, found, err)
+	}
+}
+
+func TestVerifyPATRejectsOtherNamespace(t *testing.T) {
+	pool := serviceTestPool(t)
+	st := store.New(pool)
+	owner := testOwner(41)
+	node := seedServiceNodeWith(t, st, db.CreateFleetNodeParams{
+		OwnerID:     owner,
+		Namespace:   "other-ns",
+		Name:        "node-other-ns",
+		DaemonID:    "daemon-other-ns",
+		Image:       "multica/runtime-claude:test",
+		Spec:        []byte("{\"id\":\"standard\"}"),
+		TargetState: StateRunning,
+	})
+	token := "mcn_other_namespace_token"
+	if _, err := st.Queries().CreateFleetNodeCredential(context.Background(), db.CreateFleetNodeCredentialParams{
+		NodeID: node.ID, TokenHash: auth.HashToken(token),
+	}); err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	svc := NewService(serviceTestConfig(), st, newFakeDocker(), nil, "secret")
+
+	identity, found, err := svc.VerifyPAT(context.Background(), token)
+	if err != nil {
+		t.Fatalf("verify other-namespace token: %v", err)
+	}
+	if found || identity.Valid {
+		t.Fatalf("other-namespace token validated: %+v", identity)
+	}
+	if identity.OwnerID != "" || identity.InstanceID != "" || identity.InstanceRecordID != "" {
+		t.Fatalf("invalid namespace leaked identity: %+v", identity)
+	}
+}
+
+func TestDeleteFailedNodeByNodeID(t *testing.T) {
+	pool := serviceTestPool(t)
+	st := store.New(pool)
+	owner := testOwner(42)
+	ownerText := testUUIDString(owner)
+	node := seedFailedServiceNode(t, st, owner, "node-failed")
+	token := "mcn_failed_node_token"
+	if _, err := st.Queries().CreateFleetNodeCredential(context.Background(), db.CreateFleetNodeCredentialParams{
+		NodeID: node.ID, TokenHash: auth.HashToken(token),
+	}); err != nil {
+		t.Fatalf("create credential: %v", err)
+	}
+	provider := newFakeDocker()
+	svc := NewService(serviceTestConfig(), st, provider, nil, "secret")
+
+	// status resolves a container-less node by node id and reports the
+	// persisted state instead of not-found.
+	status, err := svc.OperateRef(context.Background(), ownerText, NodeRef{NodeID: testUUIDString(node.ID)}, "status", "")
+	if err != nil {
+		t.Fatalf("status by node id: %v", err)
+	}
+	if status.TargetState != StateFailed || status.ID != node.ID {
+		t.Fatalf("status = %+v, want the failed node", status)
+	}
+	if _, err := svc.Diagnose(context.Background(), status); !errors.Is(err, ErrStateUncertain) {
+		t.Fatalf("diagnose without a container = %v, want ErrStateUncertain", err)
+	}
+
+	// A foreign owner cannot address the node by id.
+	if _, err := svc.OperateRef(context.Background(), testUUIDString(testOwner(43)), NodeRef{NodeID: testUUIDString(node.ID)}, "delete", ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-owner delete = %v, want ErrNotFound", err)
+	}
+
+	deleted, err := svc.OperateRef(context.Background(), ownerText, NodeRef{NodeID: testUUIDString(node.ID)}, "delete", "")
+	if err != nil {
+		t.Fatalf("delete failed node by node id: %v", err)
+	}
+	if deleted.TargetState != StateTerminated {
+		t.Fatalf("target = %q, want %q", deleted.TargetState, StateTerminated)
+	}
+	if len(provider.calls) != 0 {
+		t.Fatalf("deleting a container-less node touched Docker: %v", provider.calls)
+	}
+	if _, err := st.Queries().GetFleetNodeCredentialByHash(context.Background(), auth.HashToken(token)); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("credential still active after delete: %v", err)
+	}
+	// The row stays as a terminated tombstone; only the state changes.
+	tombstone, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{
+		ID: node.ID, Namespace: "wt-svc",
+	})
+	if err != nil {
+		t.Fatalf("load tombstone: %v", err)
+	}
+	if tombstone.TargetState != StateTerminated {
+		t.Fatalf("tombstone target = %q, want %q", tombstone.TargetState, StateTerminated)
+	}
+}
+
+func TestTerminalNodesDoNotCountTowardLimit(t *testing.T) {
+	pool := serviceTestPool(t)
+	st := store.New(pool)
+	owner := testOwner(44)
+	ownerText := testUUIDString(owner)
+	cfg := serviceTestConfig()
+	cfg.MaxNodesPerOwner = 1
+	provider := newFakeDocker()
+	svc := NewService(cfg, st, provider, serviceTestCredentials(ownerText), "secret")
+
+	failed := seedFailedServiceNode(t, st, owner, "node-failed-limit")
+	seedServiceNodeWith(t, st, db.CreateFleetNodeParams{
+		OwnerID:     owner,
+		Namespace:   "wt-svc",
+		Name:        "node-terminated-limit",
+		DaemonID:    "daemon-terminated-limit",
+		Image:       "multica/runtime-claude:test",
+		Spec:        []byte("{\"id\":\"standard\"}"),
+		TargetState: StateTerminated,
+	})
+	count, err := st.Queries().CountFleetNodesByOwner(context.Background(), db.CountFleetNodesByOwnerParams{
+		OwnerID: owner, Namespace: "wt-svc",
+	})
+	if err != nil {
+		t.Fatalf("count nodes: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("failed/terminated count = %d, want 0", count)
+	}
+
+	created, err := svc.CreateNode(context.Background(), ownerText, CreateNodeRequest{Name: "node-live", SpecID: "standard"})
+	if err != nil {
+		t.Fatalf("failed/terminated nodes must not consume the limit: %v", err)
+	}
+	if _, err := svc.CreateNode(context.Background(), ownerText, CreateNodeRequest{Name: "node-over-limit", SpecID: "standard"}); !errors.Is(err, store.ErrLimitReached) {
+		t.Fatalf("second live node = %v, want ErrLimitReached", err)
+	}
+
+	if _, err := svc.OperateRef(context.Background(), ownerText, NodeRef{NodeID: testUUIDString(failed.ID)}, "delete", ""); err != nil {
+		t.Fatalf("delete failed node: %v", err)
+	}
+	if _, err := svc.CreateNode(context.Background(), ownerText, CreateNodeRequest{Name: "node-still-limited", SpecID: "standard"}); !errors.Is(err, store.ErrLimitReached) {
+		t.Fatalf("deleting the failed node freed a live slot: %v", err)
+	}
+
+	if _, err := svc.Operate(context.Background(), ownerText, created.ContainerID, "delete", ""); err != nil {
+		t.Fatalf("delete live node: %v", err)
+	}
+	if _, err := svc.CreateNode(context.Background(), ownerText, CreateNodeRequest{Name: "node-after-delete", SpecID: "standard"}); err != nil {
+		t.Fatalf("terminated tombstone must not consume the limit: %v", err)
 	}
 }
 

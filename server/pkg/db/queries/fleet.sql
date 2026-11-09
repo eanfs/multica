@@ -12,6 +12,9 @@ SELECT * FROM fleet_node WHERE daemon_id = @daemon_id AND namespace = @namespace
 -- name: GetFleetNodeByContainerID :one
 SELECT * FROM fleet_node WHERE container_id = @container_id AND namespace = @namespace;
 
+-- name: GetFleetNodeByIDAndOwner :one
+SELECT * FROM fleet_node WHERE id = @id AND namespace = @namespace AND owner_id = @owner_id;
+
 -- name: ListFleetNodesByOwner :many
 SELECT * FROM fleet_node
 WHERE owner_id = @owner_id AND namespace = @namespace
@@ -19,7 +22,9 @@ ORDER BY created_at DESC
 LIMIT @limit_count OFFSET @offset_count;
 
 -- name: CountFleetNodesByOwner :one
-SELECT count(*) FROM fleet_node WHERE owner_id = @owner_id AND namespace = @namespace;
+SELECT count(*) FROM fleet_node
+WHERE owner_id = @owner_id AND namespace = @namespace
+  AND target_state NOT IN ('terminated', 'failed');
 
 -- name: UpdateFleetNodeContainer :exec
 UPDATE fleet_node

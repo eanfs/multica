@@ -24,7 +24,7 @@ func serviceRequest(method, path, body, authorization, userID string) *http.Requ
 }
 
 func TestHTTPRejectsMissingOrWrongServiceSecret(t *testing.T) {
-	handler := NewHTTP(nil, httpTestSecret)
+	handler := NewHTTP(&Service{secret: httpTestSecret})
 	cases := []struct {
 		name          string
 		authorization string
@@ -48,7 +48,7 @@ func TestHTTPRejectsMissingOrWrongServiceSecret(t *testing.T) {
 }
 
 func TestHTTPRequiresUserHeaderAfterServiceAuth(t *testing.T) {
-	handler := NewHTTP(nil, httpTestSecret)
+	handler := NewHTTP(&Service{secret: httpTestSecret})
 	req := serviceRequest(http.MethodGet, "/api/v1/nodes", "", "Bearer "+httpTestSecret, "")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -58,7 +58,7 @@ func TestHTTPRequiresUserHeaderAfterServiceAuth(t *testing.T) {
 }
 
 func TestHTTPHealthzNeedsNoServiceSecret(t *testing.T) {
-	handler := NewHTTP(nil, httpTestSecret)
+	handler := NewHTTP(nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if w.Code != http.StatusOK {
@@ -67,7 +67,7 @@ func TestHTTPHealthzNeedsNoServiceSecret(t *testing.T) {
 }
 
 func TestHTTPReadyzWithoutDockerIsUnavailable(t *testing.T) {
-	handler := NewHTTP(nil, httpTestSecret)
+	handler := NewHTTP(nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if w.Code != http.StatusServiceUnavailable {
@@ -76,21 +76,21 @@ func TestHTTPReadyzWithoutDockerIsUnavailable(t *testing.T) {
 }
 
 func TestHTTPReadyzRequiresStoreAndDocker(t *testing.T) {
-	handler := NewHTTP(nil, httpTestSecret)
+	handler := NewHTTP(nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz without service = %d, want 503", w.Code)
 	}
 
-	handler = NewHTTP(&Service{provider: newFakeDocker()}, httpTestSecret)
+	handler = NewHTTP(&Service{provider: newFakeDocker()})
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz without store = %d, want 503", w.Code)
 	}
 
-	handler = NewHTTP(&Service{store: &store.Store{}, provider: newFakeDocker()}, httpTestSecret)
+	handler = NewHTTP(&Service{store: &store.Store{}, provider: newFakeDocker()})
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if w.Code != http.StatusServiceUnavailable {
@@ -101,7 +101,7 @@ func TestHTTPReadyzRequiresStoreAndDocker(t *testing.T) {
 func TestHTTPReadyzPingsDependencies(t *testing.T) {
 	pool := serviceTestPool(t)
 	provider := newFakeDocker()
-	handler := NewHTTP(&Service{store: store.New(pool), provider: provider}, httpTestSecret)
+	handler := NewHTTP(&Service{store: store.New(pool), provider: provider})
 
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
@@ -117,8 +117,15 @@ func TestHTTPReadyzPingsDependencies(t *testing.T) {
 	}
 }
 
-func TestHTTPNilServiceWriteEndpointsReturn503(t *testing.T) {
-	handler := NewHTTP(nil, httpTestSecret)
+func TestHTTPUnconfiguredWriteEndpointsReturn503(t *testing.T) {
+	handler := NewHTTP(&Service{
+		secret: httpTestSecret,
+		cfg: Config{
+			MaxNodesPerOwner: 2,
+			Specs:            []Spec{{ID: "standard", CPU: 2, MemoryMB: 4096, PidsLimit: 256}},
+		},
+		creds: serviceTestCredentials("owner-1"),
+	})
 	cases := []struct{ method, path, body string }{
 		{http.MethodPost, "/api/v1/nodes", "{\"name\":\"n\",\"spec_id\":\"standard\"}"},
 		{http.MethodDelete, "/api/v1/nodes", "{\"instance_id\":\"c1\"}"},
@@ -141,7 +148,7 @@ func TestHTTPNilServiceWriteEndpointsReturn503(t *testing.T) {
 }
 
 func TestHTTPPatVerifyDoesNotRequireUserHeader(t *testing.T) {
-	handler := NewHTTP(nil, httpTestSecret)
+	handler := NewHTTP(&Service{secret: httpTestSecret})
 	req := serviceRequest(http.MethodPost, "/api/v1/pat/verify", "{\"token\":\"mcn_x\"}", "Bearer "+httpTestSecret, "")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -152,7 +159,7 @@ func TestHTTPPatVerifyDoesNotRequireUserHeader(t *testing.T) {
 
 func TestHTTPCreateNodeRejectsUnknownSpec(t *testing.T) {
 	svc := NewService(Config{Specs: []Spec{{ID: "standard", CPU: 2, MemoryMB: 4096, PidsLimit: 256}}}, nil, nil, nil, httpTestSecret)
-	handler := NewHTTP(svc, httpTestSecret)
+	handler := NewHTTP(svc)
 	req := serviceRequest(http.MethodPost, "/api/v1/nodes", "{\"name\":\"n\",\"spec_id\":\"nope\"}", "Bearer "+httpTestSecret, "owner-1")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -166,13 +173,55 @@ func TestHTTPCreateNodeRejectsUnknownSpec(t *testing.T) {
 
 func TestHTTPCreateNodeRejectsUnknownFields(t *testing.T) {
 	svc := NewService(Config{Specs: []Spec{{ID: "standard", CPU: 2, MemoryMB: 4096, PidsLimit: 256}}}, nil, nil, nil, httpTestSecret)
-	handler := NewHTTP(svc, httpTestSecret)
+	handler := NewHTTP(svc)
 	body := "{\"name\":\"n\",\"spec_id\":\"standard\",\"image_id\":\"evil\"}"
 	req := serviceRequest(http.MethodPost, "/api/v1/nodes", body, "Bearer "+httpTestSecret, "owner-1")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestHTTPRejectsTrailingJSON(t *testing.T) {
+	svc := NewService(Config{Specs: []Spec{{ID: "standard", CPU: 2, MemoryMB: 4096, PidsLimit: 256}}}, nil, nil, nil, httpTestSecret)
+	handler := NewHTTP(svc)
+	body := "{\"name\":\"n\",\"spec_id\":\"nope\"}{\"name\":\"second\"}"
+	req := serviceRequest(http.MethodPost, "/api/v1/nodes", body, "Bearer "+httpTestSecret, "owner-1")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("trailing JSON = %d, want 400", w.Code)
+	}
+
+	// Trailing whitespace is still a single JSON value.
+	req = serviceRequest(http.MethodPost, "/api/v1/nodes",
+		"{\"name\":\"n\",\"spec_id\":\"nope\"}\n", "Bearer "+httpTestSecret, "owner-1")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("trailing whitespace = %d, want 422 (decoded, unknown spec)", w.Code)
+	}
+}
+
+func TestHTTPDeleteAndDiagnoseAcceptNodeID(t *testing.T) {
+	// A nil store returns 503 only after the body decoded and the node
+	// reference was accepted; a rejected body would be 400.
+	svc := &Service{secret: httpTestSecret}
+	handler := NewHTTP(svc)
+	for _, path := range []string{"/api/v1/nodes", "/api/v1/nodes/diagnose"} {
+		method := http.MethodDelete
+		if path == "/api/v1/nodes/diagnose" {
+			method = http.MethodPost
+		}
+		req := serviceRequest(method, path,
+			"{\"node_id\":\"11111111-1111-1111-1111-111111111111\"}",
+			"Bearer "+httpTestSecret, "owner-1")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s node_id body = %d, want 503", path, w.Code)
+		}
 	}
 }
 
@@ -185,7 +234,7 @@ func TestHTTPServiceInfoHidesPrivateConfig(t *testing.T) {
 		MaxNodesPerOwner: 2,
 		Specs:            []Spec{{ID: "standard", CPU: 2, MemoryMB: 4096, PidsLimit: 256, MaxConcurrent: 1}},
 	}, nil, nil, nil, httpTestSecret)
-	handler := NewHTTP(svc, httpTestSecret)
+	handler := NewHTTP(svc)
 	req := serviceRequest(http.MethodGet, "/api/v1/", "", "Bearer "+httpTestSecret, "owner-1")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)

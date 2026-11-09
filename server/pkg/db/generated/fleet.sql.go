@@ -33,7 +33,9 @@ func (q *Queries) CountActiveTasksForDaemon(ctx context.Context, arg CountActive
 }
 
 const countFleetNodesByOwner = `-- name: CountFleetNodesByOwner :one
-SELECT count(*) FROM fleet_node WHERE owner_id = $1 AND namespace = $2
+SELECT count(*) FROM fleet_node
+WHERE owner_id = $1 AND namespace = $2
+  AND target_state NOT IN ('terminated', 'failed')
 `
 
 type CountFleetNodesByOwnerParams struct {
@@ -292,6 +294,43 @@ type GetFleetNodeByDaemonIDParams struct {
 
 func (q *Queries) GetFleetNodeByDaemonID(ctx context.Context, arg GetFleetNodeByDaemonIDParams) (FleetNode, error) {
 	row := q.db.QueryRow(ctx, getFleetNodeByDaemonID, arg.DaemonID, arg.Namespace)
+	var i FleetNode
+	err := row.Scan(
+		&i.ID,
+		&i.OwnerID,
+		&i.Namespace,
+		&i.Name,
+		&i.ContainerID,
+		&i.ContainerName,
+		&i.DaemonID,
+		&i.Image,
+		&i.Spec,
+		&i.TargetState,
+		&i.ObservedState,
+		&i.DaemonReady,
+		&i.HealthCheckedAt,
+		&i.Generation,
+		&i.IdempotencyKey,
+		&i.StatusDetail,
+		&i.Error,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getFleetNodeByIDAndOwner = `-- name: GetFleetNodeByIDAndOwner :one
+SELECT id, owner_id, namespace, name, container_id, container_name, daemon_id, image, spec, target_state, observed_state, daemon_ready, health_checked_at, generation, idempotency_key, status_detail, error, created_at, updated_at FROM fleet_node WHERE id = $1 AND namespace = $2 AND owner_id = $3
+`
+
+type GetFleetNodeByIDAndOwnerParams struct {
+	ID        pgtype.UUID `json:"id"`
+	Namespace string      `json:"namespace"`
+	OwnerID   pgtype.UUID `json:"owner_id"`
+}
+
+func (q *Queries) GetFleetNodeByIDAndOwner(ctx context.Context, arg GetFleetNodeByIDAndOwnerParams) (FleetNode, error) {
+	row := q.db.QueryRow(ctx, getFleetNodeByIDAndOwner, arg.ID, arg.Namespace, arg.OwnerID)
 	var i FleetNode
 	err := row.Scan(
 		&i.ID,
