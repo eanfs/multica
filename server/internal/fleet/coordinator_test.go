@@ -275,6 +275,9 @@ func TestNextTargetStateAdvancesSettledTargets(t *testing.T) {
 		{"starting ready", StateStarting, StateRunning, StateRunning, true},
 		{"rebooting ready", StateRebooting, StateRunning, StateRunning, true},
 		{"stopping exited", StateStopping, StateStopped, StateStopped, true},
+		{"launching ready", StateLaunching, StateRunning, StateRunning, true},
+		{"launching exited", StateLaunching, StateStopped, StateStopped, true},
+		{"launching not ready", StateLaunching, StateStarting, "", false},
 		{"starting not ready", StateStarting, StateStarting, "", false},
 		{"stopping still running", StateStopping, StateRunning, "", false},
 		{"running exited", StateRunning, StateStopped, "", false},
@@ -289,6 +292,16 @@ func TestNextTargetStateAdvancesSettledTargets(t *testing.T) {
 	}
 	if _, changed := nextTargetState(StateStarting, nodeObservation{}); changed {
 		t.Fatal("a missing container must not advance the target state")
+	}
+	// A launch whose container Docker confirms is gone observes instance_missing
+	// with exists false, and must still settle as stopped.
+	if got, changed := nextTargetState(StateLaunching, nodeObservation{settled: StateInstanceMissing}); !changed || got != StateStopped {
+		t.Fatalf("launching missing: nextTargetState = %q/%v, want %q/true", got, changed, StateStopped)
+	}
+	// A node created without a container yet stays launching: there is nothing
+	// to settle until the first observation.
+	if _, changed := nextTargetState(StateLaunching, nodeObservation{}); changed {
+		t.Fatal("a launch with no observation yet must not advance the target state")
 	}
 }
 
@@ -338,6 +351,65 @@ func TestTickAdvancesRebootingNodeToRunning(t *testing.T) {
 	}
 	if advanced.TargetState != StateRunning {
 		t.Fatalf("target = %q, want %q", advanced.TargetState, StateRunning)
+	}
+}
+
+func TestTickPromotesLaunchingNodeToRunning(t *testing.T) {
+	provider := newFakeDocker()
+	provider.inspected["c-launch-ready"] = docker.ObservedContainer{ID: "c-launch-ready", State: "running", Healthy: true}
+	svc, st := coordinatorTestService(t, "wt-op", provider)
+	node := seedCoordinatorNodeWithTarget(t, st, "wt-op", "n-launch-ready", "c-launch-ready", StateLaunching)
+
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	promoted, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{ID: node.ID, Namespace: "wt-op"})
+	if err != nil {
+		t.Fatalf("load promoted node: %v", err)
+	}
+	// CreateNode writes launching and the launch never advances it, so a ready
+	// node used to stay launching and reject every maintenance operation.
+	if promoted.TargetState != StateRunning {
+		t.Fatalf("target = %q, want %q once the container and daemon are ready", promoted.TargetState, StateRunning)
+	}
+	generation := promoted.Generation
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	settled, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{ID: node.ID, Namespace: "wt-op"})
+	if err != nil {
+		t.Fatalf("reload settled node: %v", err)
+	}
+	if settled.TargetState != StateRunning || settled.Generation != generation {
+		t.Fatalf("settled node moved again: target %q generation %d, want %q/%d",
+			settled.TargetState, settled.Generation, StateRunning, generation)
+	}
+	// The pass after the promotion derives the display from the new target.
+	if settled.ObservedState != StateRunning || !settled.DaemonReady {
+		t.Fatalf("observed = %q ready = %v, want %q/true", settled.ObservedState, settled.DaemonReady, StateRunning)
+	}
+}
+
+func TestTickStopsLaunchingNodeWithExitedContainer(t *testing.T) {
+	provider := newFakeDocker()
+	provider.inspected["c-launch-exited"] = docker.ObservedContainer{ID: "c-launch-exited", State: "exited"}
+	svc, st := coordinatorTestService(t, "wt-op", provider)
+	node := seedCoordinatorNodeWithTarget(t, st, "wt-op", "n-launch-exited", "c-launch-exited", StateLaunching)
+
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	settled, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{ID: node.ID, Namespace: "wt-op"})
+	if err != nil {
+		t.Fatalf("load settled node: %v", err)
+	}
+	// A launch whose container exited will not become ready by waiting, so it
+	// settles as stopped instead of holding the node in launching.
+	if settled.TargetState != StateStopped {
+		t.Fatalf("target = %q, want %q", settled.TargetState, StateStopped)
+	}
+	if settled.Generation != node.Generation+1 {
+		t.Fatalf("generation = %d, want %d", settled.Generation, node.Generation+1)
 	}
 }
 

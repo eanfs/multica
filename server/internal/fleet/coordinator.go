@@ -161,11 +161,28 @@ func (s *Service) advanceTargetState(ctx context.Context, node db.FleetNode, obs
 }
 
 // nextTargetState reports the settled target state a transitional node reached.
-// It only advances starting/rebooting to running and stopping to stopped. A
-// running node whose container exited stays running: only an explicit start may
-// move it back to starting. DeriveDisplayState keeps transitional targets
-// transitional, so the observation compares the settled display instead.
+// It advances launching to running once the container and daemon are ready, and
+// launching to stopped when the container exited or is gone, because a launch
+// that never became ready cannot settle on its own and a launching node rejects
+// every maintenance operation. It also advances starting/rebooting to running
+// and stopping to stopped. A running node whose container exited stays running:
+// only an explicit start may move it back to starting. DeriveDisplayState keeps
+// transitional targets transitional, so the observation compares the settled
+// display instead.
 func nextTargetState(target string, obs nodeObservation) (string, bool) {
+	// A launch is the one target that settles from an observation that may not
+	// exist: a container Docker confirms is gone reports instance_missing while
+	// leaving exists false, and treating that as "no observation yet" would keep
+	// the node launching forever.
+	if target == StateLaunching {
+		switch obs.settled {
+		case StateRunning:
+			return StateRunning, true
+		case StateStopped, StateInstanceMissing:
+			return StateStopped, true
+		}
+		return "", false
+	}
 	if !obs.exists {
 		return "", false
 	}
