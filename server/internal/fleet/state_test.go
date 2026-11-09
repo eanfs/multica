@@ -16,7 +16,13 @@ func TestDeriveDisplayState(t *testing.T) {
 		{"running but health stale", StateRunning, Observed{ContainerExists: true, ContainerState: "running", Healthy: true, DaemonReady: true}, StateStarting},
 		{"running but container missing", StateRunning, Observed{}, StateInstanceMissing},
 		{"running but exited", StateRunning, Observed{ContainerExists: true, ContainerState: "exited", Healthy: false}, StateStopped},
-		{"stopping", StateStopping, running, StateStopping},
+		{"stopping while the container runs", StateStopping, running, StateStopping},
+		// A stop has achieved its goal once the container is no longer running;
+		// the API can then treat the node as settled for a following delete.
+		{"stopping with an exited container", StateStopping, Observed{ContainerExists: true, ContainerState: "exited"}, StateStopped},
+		{"stopping with a dead container", StateStopping, Observed{ContainerExists: true, ContainerState: "dead"}, StateStopped},
+		{"stopping without a container", StateStopping, Observed{}, StateStopped},
+		{"stopping with an unreadable container state", StateStopping, Observed{ContainerExists: true, ContainerState: "created"}, StateStopping},
 		{"stopped", StateStopped, Observed{ContainerExists: true, ContainerState: "exited"}, StateStopped},
 		{"rebooting", StateRebooting, running, StateRebooting},
 		{"terminating", StateTerminating, running, StateTerminating},

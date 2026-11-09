@@ -52,6 +52,16 @@ func DeriveDisplayState(target string, obs Observed) string {
 		}
 		return StateStarting
 	case StateStopping:
+		// A stop request is satisfied as soon as the container is no longer
+		// running. Reporting stopping while the container is exited (or already
+		// gone) kept the API's delete gate from seeing a settled node, so it
+		// diagnosed an already stopped container and rejected the delete.
+		if !obs.ContainerExists {
+			return StateStopped
+		}
+		if obs.ContainerState == "exited" || obs.ContainerState == "dead" {
+			return StateStopped
+		}
 		return StateStopping
 	case StateStopped:
 		return StateStopped

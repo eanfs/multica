@@ -370,6 +370,47 @@ func TestTickAdvancesStoppingNodeToStopped(t *testing.T) {
 	}
 }
 
+func TestTickSettlesCompletedStopInTheSamePass(t *testing.T) {
+	provider := newFakeDocker()
+	// Docker reports the container as exited once Stop returns. The fake keeps
+	// the seeded observation, so seed the state the operation leaves behind.
+	provider.inspected["c-settle"] = docker.ObservedContainer{ID: "c-settle", State: "exited"}
+	svc, st := coordinatorTestService(t, "wt-op", provider)
+	node := seedCoordinatorNodeWithTarget(t, st, "wt-op", "n-settle", "c-settle", StateStopping)
+	op := seedCoordinatorOperation(t, st, node.ID, "stop", OpPhaseApproved, "stop-settle")
+
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if got := loadCoordinatorOperation(t, st, op.ID).Phase; got != OpPhaseDone {
+		t.Fatalf("phase = %q, want %q", got, OpPhaseDone)
+	}
+	settled, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{ID: node.ID, Namespace: "wt-op"})
+	if err != nil {
+		t.Fatalf("load settled node: %v", err)
+	}
+	// Both columns must settle in the pass that ran the stop: a delete arriving
+	// before the next tick has to see an already stopped container.
+	if settled.ObservedState != StateStopped {
+		t.Fatalf("observed = %q, want %q", settled.ObservedState, StateStopped)
+	}
+	if settled.TargetState != StateStopped {
+		t.Fatalf("target = %q, want %q", settled.TargetState, StateStopped)
+	}
+	generation := settled.Generation
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	again, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{ID: node.ID, Namespace: "wt-op"})
+	if err != nil {
+		t.Fatalf("reload settled node: %v", err)
+	}
+	if again.Generation != generation || again.TargetState != StateStopped {
+		t.Fatalf("settled node moved again: target %q generation %d, want %q/%d",
+			again.TargetState, again.Generation, StateStopped, generation)
+	}
+}
+
 func TestTickLeavesRunningNodeWithExitedContainer(t *testing.T) {
 	provider := newFakeDocker()
 	provider.inspected["c-exited"] = docker.ObservedContainer{ID: "c-exited", State: "exited"}
@@ -611,8 +652,10 @@ func TestTickDoesNotAdvanceTargetWithInFlightOperation(t *testing.T) {
 		t.Fatalf("generation = %d, want %d while an operation is prepared", refreshed.Generation, node.Generation)
 	}
 	// The observed state is still refreshed: only the target advance is held.
-	if refreshed.ObservedState != StateRunning {
-		t.Fatalf("observed = %q, want %q", refreshed.ObservedState, StateRunning)
+	// It is derived from the target still in force, so a prepared reboot reports
+	// rebooting rather than running.
+	if refreshed.ObservedState != StateRebooting {
+		t.Fatalf("observed = %q, want %q", refreshed.ObservedState, StateRebooting)
 	}
 }
 

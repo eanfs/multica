@@ -148,13 +148,13 @@ func (c *localFleetCoordinator) Prepare(ctx context.Context, ownerID string, ref
 		return node, nil
 	}
 
-	// A container that is known to be stopped, gone, or terminated cannot have
+	// A container that is known to be stopped, gone, or settled cannot have
 	// pending terminal reports: there is no running daemon to drain them.
 	// Diagnosing it would only return state_uncertain, which must never keep a
 	// delete prepared forever. Only a container that may still be running needs
 	// the diagnosis.
 	pending := 0
-	if node.ContainerID != "" && !localFleetContainerInactive(node) {
+	if localFleetDiagnosisNeeded(node, priorTarget, operation) {
 		if c.diagnose == nil {
 			return db.FleetNode{}, c.abortPrepare(ctx, node, priorTarget, op, errLocalFleetDiagnoseUnavailable)
 		}
@@ -506,14 +506,34 @@ func localFleetValidateTarget(node db.FleetNode, operation string) error {
 	return nil
 }
 
-// localFleetContainerInactive reports whether the node is known not to be
-// running. Such a node cannot hold terminal reports to drain.
-func localFleetContainerInactive(node db.FleetNode) bool {
+// localFleetDiagnosisNeeded reports whether the node may still be running and
+// therefore hold pending terminal reports. It uses the target the node had
+// before this request: prepare has already written this operation's
+// transitional target, and that transitional value says nothing about whether a
+// daemon is draining.
+//
+// A settled or already stopped node never needs the diagnosis. In particular a
+// delete issued after a completed stop must not diagnose the stopped container:
+// Fleet would answer state_uncertain, which keeps the prepared operation from
+// ever being retried into an approval. prepare already rejected any other
+// active operation on this node, so a stopping target captured before this
+// request can only be the settled result of an earlier stop; the stop request
+// itself is the only operation that still needs the pending-report check.
+func localFleetDiagnosisNeeded(node db.FleetNode, priorTarget, operation string) bool {
+	if node.ContainerID == "" {
+		return false
+	}
 	switch node.ObservedState {
 	case localFleetStateStopped, localFleetStateInstanceMissing, localFleetStateTerminated:
-		return true
-	default:
 		return false
+	}
+	switch priorTarget {
+	case localFleetStateStopped, localFleetStateTerminated:
+		return false
+	case localFleetStateStopping:
+		return operation != "delete"
+	default:
+		return true
 	}
 }
 

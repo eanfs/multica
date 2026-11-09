@@ -229,7 +229,40 @@ func (s *Service) executeOperation(ctx context.Context, op db.FleetNodeOperation
 	default:
 		return fmt.Errorf("%w: unknown operation %q", ErrInvalidRequest, op.Operation)
 	}
-	return s.completeOperation(ctx, op)
+	if err := s.completeOperation(ctx, op); err != nil {
+		return err
+	}
+	// Settle the node in the same pass that applied the operation. The operation
+	// row is already done here, so the in-flight guard in refreshNode no longer
+	// holds the target back: a completed stop advances target and observation to
+	// stopped before the next pass, closing the window where the API still sees
+	// "stopping" and diagnoses an already stopped container.
+	if err := s.settleAfterOperation(ctx, node, op.Operation); err != nil {
+		// The Docker call and the phase update already succeeded. A stale
+		// observation is corrected by the next refresh, so it must not be
+		// recorded as a failed operation and replayed as a second Docker call.
+		slog.Warn("fleet: settle observation after operation failed",
+			"node", store.UUIDText(node.ID), "kind", op.Operation, "error", err)
+	}
+	return nil
+}
+
+// settleAfterOperation reconciles the node once an operation has been applied.
+// stop is settled in full because a stopped container is final for this pass;
+// start and reboot only refresh the observation, leaving their transitional
+// target to the request that queued them. delete already wrote a terminated
+// tombstone, and re-inspecting the removed container would rewrite it to
+// instance_missing.
+func (s *Service) settleAfterOperation(ctx context.Context, node db.FleetNode, operation string) error {
+	switch operation {
+	case "stop":
+		return s.refreshNode(ctx, node)
+	case "start", "reboot":
+		_, err := s.observeNode(ctx, node)
+		return err
+	default:
+		return nil
+	}
 }
 
 // operationGuard rejects operations that cannot safely run yet without treating

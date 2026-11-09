@@ -14,6 +14,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/cloudruntime"
 	"github.com/multica-ai/multica/server/internal/testutil"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 const localFleetTestNamespace = "handler-test-fleet"
@@ -243,8 +244,10 @@ func TestPrepareFailedNodeOnlyAcceptsDelete(t *testing.T) {
 		"observed_state": localFleetStateInstanceMissing,
 	})
 
+	// The container id was cleared for this node, so it must be addressed by id,
+	// the same way the neighbouring no-container case does it.
 	for _, operation := range []string{"stop", "reboot"} {
-		if _, err := coord.Prepare(context.Background(), testUserID, localFleetNodeRef{InstanceID: fx.ContainerID}, operation, localFleetTestKey(t, "failed-"+operation)); !errors.Is(err, ErrOperationConflict) {
+		if _, err := coord.Prepare(context.Background(), testUserID, localFleetNodeRef{NodeID: fx.NodeID}, operation, localFleetTestKey(t, "failed-"+operation)); !errors.Is(err, ErrOperationConflict) {
 			t.Fatalf("%s on failed node: err = %v, want ErrOperationConflict", operation, err)
 		}
 	}
@@ -278,21 +281,73 @@ func TestPrepareStopRejectsNodeWithoutContainer(t *testing.T) {
 }
 
 func TestPrepareDeleteAfterStopSkipsDiagnose(t *testing.T) {
-	coord := newLocalFleetTestCoordinator(t, 0)
-	fx := seedLocalFleetTestNode(t, localFleetStateRunning, testutil.Cols{
-		"observed_state": localFleetStateStopped,
-	})
-	coord.diagnose = func(context.Context, string, string) (int, error) {
-		t.Fatal("diagnose must not run for a stopped container")
-		return 0, nil
+	// The coordinator settles a completed stop in one pass, but a delete can
+	// arrive while only one of the two columns has caught up. Each combination
+	// describes an already stopped container, so none of them may be diagnosed:
+	// Fleet answers state_uncertain for a stopped container, which used to park
+	// the delete as prepared forever.
+	cases := []struct {
+		name     string
+		target   string
+		observed string
+	}{
+		{"settled target and observation", localFleetStateStopped, localFleetStateStopped},
+		{"target settled before the observation", localFleetStateStopped, localFleetStateStopping},
+		{"stop done before the next pass", localFleetStateStopping, localFleetStateStopping},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			coord := newLocalFleetTestCoordinator(t, 0)
+			fx := seedLocalFleetTestNode(t, tc.target, testutil.Cols{
+				"observed_state": tc.observed,
+			})
+			coord.diagnose = func(context.Context, string, string) (int, error) {
+				t.Fatal("diagnose must not run for a stopped container")
+				return 0, nil
+			}
 
-	node, err := coord.Prepare(context.Background(), testUserID, localFleetNodeRef{InstanceID: fx.ContainerID}, "delete", localFleetTestKey(t, "stopped-delete"))
-	if err != nil {
-		t.Fatalf("delete after stop: %v", err)
+			node, err := coord.Prepare(context.Background(), testUserID, localFleetNodeRef{InstanceID: fx.ContainerID}, "delete", localFleetTestKey(t, "stopped-delete"))
+			if err != nil {
+				t.Fatalf("delete after stop: %v", err)
+			}
+			if node.TargetState != localFleetStateTerminating {
+				t.Fatalf("target_state = %q, want %q", node.TargetState, localFleetStateTerminating)
+			}
+			if got := localFleetPhaseCount(t, fx.NodeID, "approved"); got != 1 {
+				t.Fatalf("approved operations = %d, want 1", got)
+			}
+		})
 	}
-	if node.TargetState != localFleetStateTerminating {
-		t.Fatalf("target_state = %q, want %q", node.TargetState, localFleetStateTerminating)
+}
+
+func TestLocalFleetDiagnosisNeeded(t *testing.T) {
+	node := func(containerID, observed string) db.FleetNode {
+		return db.FleetNode{ContainerID: containerID, ObservedState: observed}
+	}
+	cases := []struct {
+		name      string
+		node      db.FleetNode
+		prior     string
+		operation string
+		want      bool
+	}{
+		{"no container", node("", localFleetStateRunning), localFleetStateRunning, "delete", false},
+		{"running delete", node("c1", localFleetStateRunning), localFleetStateRunning, "delete", true},
+		{"running stop", node("c1", localFleetStateRunning), localFleetStateRunning, "stop", true},
+		{"observed stopped", node("c1", localFleetStateStopped), localFleetStateRunning, "delete", false},
+		{"observed instance missing", node("c1", localFleetStateInstanceMissing), localFleetStateRunning, "delete", false},
+		{"settled target stopped", node("c1", localFleetStateStopping), localFleetStateStopped, "delete", false},
+		{"settled target terminated", node("c1", localFleetStateRunning), localFleetStateTerminated, "delete", false},
+		{"completed stop delete", node("c1", localFleetStateStopping), localFleetStateStopping, "delete", false},
+		{"stop request still diagnoses", node("c1", localFleetStateRunning), localFleetStateStopping, "stop", true},
+		{"reboot still diagnoses", node("c1", localFleetStateRunning), localFleetStateRebooting, "reboot", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := localFleetDiagnosisNeeded(tc.node, tc.prior, tc.operation); got != tc.want {
+				t.Fatalf("localFleetDiagnosisNeeded = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
