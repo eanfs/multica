@@ -55,8 +55,13 @@ var (
 var (
 	errLocalFleetRefRequired         = errors.New("exactly one of instance_id or node_id is required")
 	errLocalFleetInvalidOperation    = errors.New("invalid local fleet operation")
+	errLocalFleetInvalidNodeID       = errors.New("invalid fleet node id")
 	errLocalFleetIdempotencyMissing  = errors.New("idempotency key is required")
 	errLocalFleetDiagnoseUnavailable = errors.New("node diagnosis unavailable")
+	// errLocalFleetStateUncertain mirrors Fleet's ErrStateUncertain: the node
+	// may still be running, but its diagnostic surface cannot be read. That is
+	// different from a container that is known to be stopped or missing.
+	errLocalFleetStateUncertain = errors.New("node state uncertain")
 )
 
 // localFleetNodeRef addresses one node by Docker container id or node UUID.
@@ -135,7 +140,7 @@ func (c *localFleetCoordinator) Prepare(ctx context.Context, ownerID string, ref
 		return db.FleetNode{}, fmt.Errorf("owner id: %w", err)
 	}
 
-	node, op, replayed, err := c.prepare(ctx, ownerUUID, ref, operation, idempotencyKey, targetState)
+	node, priorTarget, op, replayed, err := c.prepare(ctx, ownerUUID, ref, operation, idempotencyKey, targetState)
 	if err != nil {
 		return db.FleetNode{}, err
 	}
@@ -143,47 +148,62 @@ func (c *localFleetCoordinator) Prepare(ctx context.Context, ownerID string, ref
 		return node, nil
 	}
 
+	// A container that is known to be stopped, gone, or terminated cannot have
+	// pending terminal reports: there is no running daemon to drain them.
+	// Diagnosing it would only return state_uncertain, which must never keep a
+	// delete prepared forever. Only a container that may still be running needs
+	// the diagnosis.
 	pending := 0
-	if node.ContainerID != "" {
+	if node.ContainerID != "" && !localFleetContainerInactive(node) {
 		if c.diagnose == nil {
-			c.recordDiagnoseFailure(ctx, op)
-			return db.FleetNode{}, errLocalFleetDiagnoseUnavailable
+			return db.FleetNode{}, c.abortPrepare(ctx, node, priorTarget, op, errLocalFleetDiagnoseUnavailable)
 		}
 		pending, err = c.diagnose(ctx, ownerID, node.ContainerID)
 		if err != nil {
-			c.recordDiagnoseFailure(ctx, op)
-			return db.FleetNode{}, fmt.Errorf("%w: %v", errLocalFleetDiagnoseUnavailable, err)
+			if errors.Is(err, errLocalFleetStateUncertain) {
+				// The container may still be running while its diagnostic
+				// surface is unreadable. Refuse the operation and keep the
+				// barrier: an unreadable running daemon might still hold work.
+				c.recordDiagnoseFailure(ctx, op)
+				return db.FleetNode{}, fmt.Errorf("%w: %w", errLocalFleetDiagnoseUnavailable, err)
+			}
+			// Any other diagnosis failure is a transport or protocol problem,
+			// not evidence that work is pending. Release the barrier instead of
+			// leaving a prepared operation that can never be approved.
+			return db.FleetNode{}, c.abortPrepare(ctx, node, priorTarget, op,
+				fmt.Errorf("%w: %v", errLocalFleetDiagnoseUnavailable, err))
 		}
 	}
-	return c.finishPrepare(ctx, node, op, pending)
+	return c.finishPrepare(ctx, node, priorTarget, op, pending)
 }
 
-// prepare is the first short transaction. It returns replayed=true when the
-// idempotency key already described this exact request, in which case no new
-// operation or diagnosis is needed.
-func (c *localFleetCoordinator) prepare(ctx context.Context, ownerID pgtype.UUID, ref localFleetNodeRef, operation, idempotencyKey, targetState string) (db.FleetNode, db.FleetNodeOperation, bool, error) {
+// prepare is the first short transaction. It returns the pre-update target so
+// an abort can restore the state the node had before this request, and
+// replayed=true when the idempotency key already described this exact request
+// and its operation is final.
+func (c *localFleetCoordinator) prepare(ctx context.Context, ownerID pgtype.UUID, ref localFleetNodeRef, operation, idempotencyKey, targetState string) (db.FleetNode, string, db.FleetNodeOperation, bool, error) {
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
-		return db.FleetNode{}, db.FleetNodeOperation{}, false, fmt.Errorf("begin prepare: %w", err)
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, fmt.Errorf("begin prepare: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	q := db.New(tx)
 
 	node, err := c.loadNode(ctx, q, ownerID, ref)
 	if err != nil {
-		return db.FleetNode{}, db.FleetNodeOperation{}, false, err
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, err
 	}
 	if err := barrier.AcquireExclusive(ctx, tx, barrier.Key(c.namespace, node.DaemonID)); err != nil {
-		return db.FleetNode{}, db.FleetNodeOperation{}, false, err
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, err
 	}
 	// Reload under the lock: the state checked below must be the state every
 	// other coordinator sees while holding the same key.
 	node, err = q.GetFleetNode(ctx, db.GetFleetNodeParams{ID: node.ID, Namespace: c.namespace})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return db.FleetNode{}, db.FleetNodeOperation{}, false, ErrNodeNotFound
+			return db.FleetNode{}, "", db.FleetNodeOperation{}, false, ErrNodeNotFound
 		}
-		return db.FleetNode{}, db.FleetNodeOperation{}, false, fmt.Errorf("reload node: %w", err)
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, fmt.Errorf("reload node: %w", err)
 	}
 
 	fingerprint := localFleetRequestFingerprint(operation, node)
@@ -191,33 +211,36 @@ func (c *localFleetCoordinator) prepare(ctx context.Context, ownerID pgtype.UUID
 	switch {
 	case err == nil:
 		if existing.NodeID != node.ID || existing.RequestFingerprint != fingerprint {
-			return db.FleetNode{}, db.FleetNodeOperation{}, false, ErrOperationConflict
+			return db.FleetNode{}, "", db.FleetNodeOperation{}, false, ErrOperationConflict
 		}
 		switch existing.Phase {
 		case localFleetOpPrepared:
 			// A previous attempt prepared the barrier but never finished (for
-			// example the diagnosis call failed). Re-run the outside-lock
-			// diagnosis and approval for this same operation instead of
-			// reporting an accepted operation that can never execute.
+			// example state was uncertain). Re-run the outside-lock diagnosis
+			// and approval for this same operation instead of reporting an
+			// accepted operation that can never execute.
 			if err := tx.Commit(ctx); err != nil {
-				return db.FleetNode{}, db.FleetNodeOperation{}, false, fmt.Errorf("commit prepared replay: %w", err)
+				return db.FleetNode{}, "", db.FleetNodeOperation{}, false, fmt.Errorf("commit prepared replay: %w", err)
 			}
-			return node, existing, false, nil
+			return node, localFleetReplayPriorTarget(node), existing, false, nil
 		case localFleetOpAborted:
 			// The earlier attempt was rejected after diagnosis. Replaying it
 			// must keep surfacing the same busy result instead of pretending a
 			// maintenance operation is now approved.
-			return db.FleetNode{}, db.FleetNodeOperation{}, false, ErrNodeBusy
+			return db.FleetNode{}, "", db.FleetNodeOperation{}, false, ErrNodeBusy
 		case localFleetOpFailed:
-			return db.FleetNode{}, db.FleetNodeOperation{}, false, ErrOperationConflict
+			return db.FleetNode{}, "", db.FleetNodeOperation{}, false, ErrOperationConflict
 		default:
+			// approved, executing, and done are all in flight or already
+			// applied for this same fingerprint. Replaying the request reports
+			// the node instead of treating the retry as a second operation.
 			if err := tx.Commit(ctx); err != nil {
-				return db.FleetNode{}, db.FleetNodeOperation{}, false, fmt.Errorf("commit idempotent prepare: %w", err)
+				return db.FleetNode{}, "", db.FleetNodeOperation{}, false, fmt.Errorf("commit idempotent prepare: %w", err)
 			}
-			return node, existing, true, nil
+			return node, "", existing, true, nil
 		}
 	case !errors.Is(err, pgx.ErrNoRows):
-		return db.FleetNode{}, db.FleetNodeOperation{}, false, fmt.Errorf("load idempotent operation: %w", err)
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, fmt.Errorf("load idempotent operation: %w", err)
 	}
 
 	// Another maintenance operation still awaiting execution would race this
@@ -225,53 +248,40 @@ func (c *localFleetCoordinator) prepare(ctx context.Context, ownerID pgtype.UUID
 	// generation that the first operation's approval check compares against.
 	inflight, err := q.CountActiveFleetNodeOperationsForNode(ctx, node.ID)
 	if err != nil {
-		return db.FleetNode{}, db.FleetNodeOperation{}, false, fmt.Errorf("count active operations: %w", err)
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, fmt.Errorf("count active operations: %w", err)
 	}
 	if inflight > 0 {
-		return db.FleetNode{}, db.FleetNodeOperation{}, false, ErrOperationConflict
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, ErrOperationConflict
 	}
 
-	// R15: a launching node can still be creating its container and volumes,
-	// so delete must wait until the launch settles.
-	if operation == "delete" && node.TargetState == localFleetStateLaunching {
-		return db.FleetNode{}, db.FleetNodeOperation{}, false, ErrNodeBusy
+	// Validate the node as it was before this transaction changes its target.
+	// Doing it in the approval transaction would only ever see the transitional
+	// state this request just wrote, which made the terminal-state checks dead.
+	if err := localFleetValidateTarget(node, operation); err != nil {
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, err
+	}
+	if operation != "delete" && node.ContainerID == "" {
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false,
+			fmt.Errorf("%w: node has no container", ErrOperationConflict)
 	}
 
 	// Busy checks cover every workspace whose runtime belongs to this owner;
 	// the node itself is owner-scoped, not workspace-scoped.
-	active, err := q.CountActiveTasksForFleetDaemon(ctx, db.CountActiveTasksForFleetDaemonParams{
-		DaemonID: util.StrToText(node.DaemonID),
-		OwnerID:  node.OwnerID,
-	})
-	if err != nil {
-		return db.FleetNode{}, db.FleetNodeOperation{}, false, fmt.Errorf("count active tasks: %w", err)
-	}
-	if active > 0 {
-		return db.FleetNode{}, db.FleetNodeOperation{}, false, ErrNodeBusy
-	}
-	if operation == "delete" {
-		queued, err := q.CountQueuedTasksForFleetDaemon(ctx, db.CountQueuedTasksForFleetDaemonParams{
-			DaemonID: util.StrToText(node.DaemonID),
-			OwnerID:  node.OwnerID,
-		})
-		if err != nil {
-			return db.FleetNode{}, db.FleetNodeOperation{}, false, fmt.Errorf("count queued tasks: %w", err)
-		}
-		if queued > 0 {
-			return db.FleetNode{}, db.FleetNodeOperation{}, false, ErrNodeBusy
-		}
+	if err := c.checkDaemonBusy(ctx, q, node, operation); err != nil {
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, err
 	}
 
+	priorTarget := node.TargetState
 	if err := q.UpdateFleetNodeTargetState(ctx, db.UpdateFleetNodeTargetStateParams{
 		ID:          node.ID,
 		Namespace:   c.namespace,
 		TargetState: targetState,
 	}); err != nil {
-		return db.FleetNode{}, db.FleetNodeOperation{}, false, fmt.Errorf("record maintenance target: %w", err)
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, fmt.Errorf("record maintenance target: %w", err)
 	}
 	node, err = q.GetFleetNode(ctx, db.GetFleetNodeParams{ID: node.ID, Namespace: c.namespace})
 	if err != nil {
-		return db.FleetNode{}, db.FleetNodeOperation{}, false, fmt.Errorf("reload prepared node: %w", err)
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, fmt.Errorf("reload prepared node: %w", err)
 	}
 
 	op, err := q.CreateFleetNodeOperation(ctx, db.CreateFleetNodeOperationParams{
@@ -284,20 +294,24 @@ func (c *localFleetCoordinator) prepare(ctx context.Context, ownerID pgtype.UUID
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return db.FleetNode{}, db.FleetNodeOperation{}, false, ErrOperationConflict
+			// A concurrent request with the same key won the insert. Roll this
+			// attempt back and replay the row that won, so two identical
+			// requests do not turn into a 409 for the loser.
+			_ = tx.Rollback(ctx)
+			return c.replayByIdempotencyKey(ctx, node.ID, fingerprint, idempotencyKey)
 		}
-		return db.FleetNode{}, db.FleetNodeOperation{}, false, fmt.Errorf("create operation: %w", err)
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, fmt.Errorf("create operation: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return db.FleetNode{}, db.FleetNodeOperation{}, false, fmt.Errorf("commit prepare: %w", err)
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, fmt.Errorf("commit prepare: %w", err)
 	}
-	return node, op, false, nil
+	return node, priorTarget, op, false, nil
 }
 
-// finishPrepare is the second short transaction. It rechecks the generation,
-// operation phase, and terminal state before approving; a pending report aborts
-// the barrier and restores the prior running target.
-func (c *localFleetCoordinator) finishPrepare(ctx context.Context, prepared db.FleetNode, op db.FleetNodeOperation, pending int) (db.FleetNode, error) {
+// finishPrepare is the second short transaction. It verifies that the prepared
+// operation still owns the node, rechecks busy state with the same owner +
+// daemon scope used by prepare, and then approves or aborts atomically.
+func (c *localFleetCoordinator) finishPrepare(ctx context.Context, prepared db.FleetNode, priorTarget string, op db.FleetNodeOperation, pending int) (db.FleetNode, error) {
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
 		return db.FleetNode{}, fmt.Errorf("begin approve: %w", err)
@@ -315,12 +329,6 @@ func (c *localFleetCoordinator) finishPrepare(ctx context.Context, prepared db.F
 		}
 		return db.FleetNode{}, fmt.Errorf("reload node for approval: %w", err)
 	}
-	if node.Generation != prepared.Generation {
-		return db.FleetNode{}, ErrOperationConflict
-	}
-	if node.TargetState == localFleetStateTerminated || node.TargetState == localFleetStateFailed {
-		return db.FleetNode{}, ErrOperationConflict
-	}
 	current, err := q.GetFleetNodeOperation(ctx, op.ID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -328,33 +336,49 @@ func (c *localFleetCoordinator) finishPrepare(ctx context.Context, prepared db.F
 		}
 		return db.FleetNode{}, fmt.Errorf("reload operation: %w", err)
 	}
-	if current.Phase != localFleetOpPrepared {
+	switch current.Phase {
+	case localFleetOpPrepared:
+		// Still this request's barrier; verify and decide below.
+	case "approved", "executing", "done":
+		// A concurrent retry of the same request already approved the row.
+		// Report the node instead of failing the retry with a conflict.
+		if err := tx.Commit(ctx); err != nil {
+			return db.FleetNode{}, fmt.Errorf("commit idempotent replay: %w", err)
+		}
+		return node, nil
+	case localFleetOpAborted:
+		return db.FleetNode{}, ErrNodeBusy
+	case localFleetOpFailed:
+		return db.FleetNode{}, ErrOperationConflict
+	default:
 		return db.FleetNode{}, ErrOperationConflict
 	}
 
-	if pending > 0 {
-		affected, err := q.MarkFleetNodeOperationPhase(ctx, db.MarkFleetNodeOperationPhaseParams{
-			ID:            op.ID,
-			Phase:         localFleetOpAborted,
-			ExpectedPhase: localFleetOpPrepared,
-		})
-		if err != nil {
-			return db.FleetNode{}, fmt.Errorf("abort operation: %w", err)
-		}
-		if affected != 1 {
-			return db.FleetNode{}, ErrOperationConflict
-		}
-		if err := q.UpdateFleetNodeTargetState(ctx, db.UpdateFleetNodeTargetStateParams{
-			ID:          node.ID,
-			Namespace:   c.namespace,
-			TargetState: localFleetStateRunning,
-		}); err != nil {
-			return db.FleetNode{}, fmt.Errorf("restore node target state: %w", err)
+	abort := func(cause error) (db.FleetNode, error) {
+		if err := c.abortPreparedTx(ctx, q, prepared, priorTarget, op.ID); err != nil {
+			return db.FleetNode{}, fmt.Errorf("%w: abort prepared operation: %v", cause, err)
 		}
 		if err := tx.Commit(ctx); err != nil {
-			return db.FleetNode{}, fmt.Errorf("commit abort: %w", err)
+			return db.FleetNode{}, fmt.Errorf("%w: commit abort: %v", cause, err)
 		}
-		return db.FleetNode{}, ErrNodeBusy
+		return db.FleetNode{}, cause
+	}
+
+	// The approval must compare against the generation the prepare transaction
+	// produced. A change means another coordinator settled the node first.
+	if node.Generation != prepared.Generation {
+		return abort(fmt.Errorf("%w: node generation changed after prepare", ErrOperationConflict))
+	}
+	if node.TargetState == localFleetStateTerminated || node.TargetState == localFleetStateFailed {
+		return abort(fmt.Errorf("%w: node settled as %s", ErrOperationConflict, node.TargetState))
+	}
+	// Recheck busy here because prepare released its lock before the diagnosis.
+	// A task dispatched in that window must invalidate the operation.
+	if err := c.checkDaemonBusy(ctx, q, node, op.Operation); err != nil {
+		return abort(err)
+	}
+	if pending > 0 {
+		return abort(fmt.Errorf("%w: node has pending terminal reports", ErrNodeBusy))
 	}
 
 	affected, err := q.ApproveFleetNodeOperation(ctx, op.ID)
@@ -362,12 +386,182 @@ func (c *localFleetCoordinator) finishPrepare(ctx context.Context, prepared db.F
 		return db.FleetNode{}, fmt.Errorf("approve operation: %w", err)
 	}
 	if affected != 1 {
-		return db.FleetNode{}, ErrOperationConflict
+		return abort(fmt.Errorf("%w: operation phase changed before approval", ErrOperationConflict))
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return db.FleetNode{}, fmt.Errorf("commit approve: %w", err)
 	}
 	return node, nil
+}
+
+// abortPrepare releases a prepared operation from outside a transaction when
+// the diagnosis failed for a reason that is not state uncertainty.
+func (c *localFleetCoordinator) abortPrepare(ctx context.Context, prepared db.FleetNode, priorTarget string, op db.FleetNodeOperation, cause error) error {
+	tx, err := c.pool.Begin(ctx)
+	if err != nil {
+		return cause
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := db.New(tx)
+	if err := barrier.AcquireExclusive(ctx, tx, barrier.Key(c.namespace, prepared.DaemonID)); err != nil {
+		return cause
+	}
+	if err := c.abortPreparedTx(ctx, q, prepared, priorTarget, op.ID); err != nil {
+		return fmt.Errorf("%w: %v", cause, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("%w: commit abort: %v", cause, err)
+	}
+	return cause
+}
+
+// abortPreparedTx moves a still-prepared operation to aborted and restores the
+// target captured before prepare, but only while this operation still owns the
+// node's transitional target. A target another actor already changed is left
+// alone rather than clobbered.
+func (c *localFleetCoordinator) abortPreparedTx(ctx context.Context, q *db.Queries, prepared db.FleetNode, priorTarget string, opID pgtype.UUID) error {
+	if _, err := q.RecordFleetNodeOperationPrepareFailure(ctx, db.RecordFleetNodeOperationPrepareFailureParams{
+		ID:    opID,
+		Error: "operation aborted before approval",
+	}); err != nil {
+		return fmt.Errorf("record abort reason: %w", err)
+	}
+	affected, err := q.MarkFleetNodeOperationPhase(ctx, db.MarkFleetNodeOperationPhaseParams{
+		ID:            opID,
+		Phase:         localFleetOpAborted,
+		ExpectedPhase: localFleetOpPrepared,
+	})
+	if err != nil {
+		return fmt.Errorf("abort operation: %w", err)
+	}
+	if affected != 1 {
+		// Another request already moved this row; its path owns the target.
+		return nil
+	}
+	current, err := q.GetFleetNode(ctx, db.GetFleetNodeParams{ID: prepared.ID, Namespace: c.namespace})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("reload node for abort: %w", err)
+	}
+	if current.TargetState != prepared.TargetState || current.TargetState == priorTarget {
+		return nil
+	}
+	if err := q.UpdateFleetNodeTargetState(ctx, db.UpdateFleetNodeTargetStateParams{
+		ID:          current.ID,
+		Namespace:   c.namespace,
+		TargetState: priorTarget,
+	}); err != nil {
+		return fmt.Errorf("restore node target state: %w", err)
+	}
+	return nil
+}
+
+// checkDaemonBusy applies the design's two busy levels for the owner + daemon
+// pair: stop/reboot reject active work, delete also rejects queued work. It is
+// used by both prepare and the approval recheck.
+func (c *localFleetCoordinator) checkDaemonBusy(ctx context.Context, q *db.Queries, node db.FleetNode, operation string) error {
+	active, err := q.CountActiveTasksForFleetDaemon(ctx, db.CountActiveTasksForFleetDaemonParams{
+		DaemonID: util.StrToText(node.DaemonID),
+		OwnerID:  node.OwnerID,
+	})
+	if err != nil {
+		return fmt.Errorf("count active tasks: %w", err)
+	}
+	if active > 0 {
+		return fmt.Errorf("%w: daemon has active tasks", ErrNodeBusy)
+	}
+	if operation != "delete" {
+		return nil
+	}
+	queued, err := q.CountQueuedTasksForFleetDaemon(ctx, db.CountQueuedTasksForFleetDaemonParams{
+		DaemonID: util.StrToText(node.DaemonID),
+		OwnerID:  node.OwnerID,
+	})
+	if err != nil {
+		return fmt.Errorf("count queued tasks: %w", err)
+	}
+	if queued > 0 {
+		return fmt.Errorf("%w: daemon has queued tasks", ErrNodeBusy)
+	}
+	return nil
+}
+
+// localFleetValidateTarget rejects operations the node's pre-operation target
+// cannot accept. The target must be the one loaded before prepare rewrites it.
+func localFleetValidateTarget(node db.FleetNode, operation string) error {
+	switch node.TargetState {
+	case localFleetStateTerminated:
+		return fmt.Errorf("%w: node is terminated", ErrOperationConflict)
+	case localFleetStateFailed:
+		if operation != "delete" {
+			return fmt.Errorf("%w: failed node only accepts delete", ErrOperationConflict)
+		}
+	case localFleetStateLaunching:
+		// A launching node may still be creating its container and volumes, so
+		// every maintenance operation waits until the launch settles.
+		return fmt.Errorf("%w: node is still launching", ErrNodeBusy)
+	}
+	return nil
+}
+
+// localFleetContainerInactive reports whether the node is known not to be
+// running. Such a node cannot hold terminal reports to drain.
+func localFleetContainerInactive(node db.FleetNode) bool {
+	switch node.ObservedState {
+	case localFleetStateStopped, localFleetStateInstanceMissing, localFleetStateTerminated:
+		return true
+	default:
+		return false
+	}
+}
+
+// localFleetReplayPriorTarget recovers a settled target for a prepared replay.
+// A resumed attempt does not carry the exact target captured by the original
+// transaction, so derive one from the observation instead of assuming running.
+func localFleetReplayPriorTarget(node db.FleetNode) string {
+	switch node.ObservedState {
+	case localFleetStateStopped:
+		return localFleetStateStopped
+	case localFleetStateTerminated:
+		return localFleetStateTerminated
+	case localFleetStateInstanceMissing, localFleetStateFailed:
+		return localFleetStateFailed
+	default:
+		return localFleetStateRunning
+	}
+}
+
+// replayByIdempotencyKey reads the operation a concurrent request inserted for
+// the same key. A matching fingerprint replays that operation; anything else is
+// a genuine conflict.
+func (c *localFleetCoordinator) replayByIdempotencyKey(ctx context.Context, nodeID pgtype.UUID, fingerprint, idempotencyKey string) (db.FleetNode, string, db.FleetNodeOperation, bool, error) {
+	q := db.New(c.pool)
+	existing, err := q.GetFleetNodeOperationByIdempotencyKey(ctx, idempotencyKey)
+	if err != nil {
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, ErrOperationConflict
+	}
+	if existing.NodeID != nodeID || existing.RequestFingerprint != fingerprint {
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, ErrOperationConflict
+	}
+	node, err := q.GetFleetNode(ctx, db.GetFleetNodeParams{ID: nodeID, Namespace: c.namespace})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.FleetNode{}, "", db.FleetNodeOperation{}, false, ErrNodeNotFound
+		}
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, fmt.Errorf("reload node: %w", err)
+	}
+	switch existing.Phase {
+	case localFleetOpPrepared:
+		return node, localFleetReplayPriorTarget(node), existing, false, nil
+	case localFleetOpAborted:
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, ErrNodeBusy
+	case localFleetOpFailed:
+		return db.FleetNode{}, "", db.FleetNodeOperation{}, false, ErrOperationConflict
+	default:
+		return node, "", existing, true, nil
+	}
 }
 
 func (c *localFleetCoordinator) loadNode(ctx context.Context, q *db.Queries, ownerID pgtype.UUID, ref localFleetNodeRef) (db.FleetNode, error) {
@@ -379,7 +573,7 @@ func (c *localFleetCoordinator) loadNode(ctx context.Context, q *db.Queries, own
 	if nodeID != "" {
 		id, err := util.ParseUUID(nodeID)
 		if err != nil {
-			return db.FleetNode{}, ErrNodeNotFound
+			return db.FleetNode{}, errLocalFleetInvalidNodeID
 		}
 		node, err := q.GetFleetNodeByIDAndOwner(ctx, db.GetFleetNodeByIDAndOwnerParams{
 			ID:        id,
@@ -487,18 +681,21 @@ func (h *Handler) coordinateLocalFleet(w http.ResponseWriter, r *http.Request, o
 func writeLocalFleetError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, ErrNodeNotFound):
-		writeError(w, http.StatusNotFound, "node not found")
+		writeErrorCode(w, http.StatusNotFound, "not_found", "node not found")
 	case errors.Is(err, ErrNodeBusy):
-		writeError(w, http.StatusConflict, "node busy")
+		writeErrorCode(w, http.StatusConflict, "node_busy", "node busy")
 	case errors.Is(err, ErrOperationConflict):
-		writeError(w, http.StatusConflict, "operation conflict")
+		writeErrorCode(w, http.StatusConflict, "conflict", "operation conflict")
 	case errors.Is(err, errLocalFleetRefRequired),
 		errors.Is(err, errLocalFleetInvalidOperation),
+		errors.Is(err, errLocalFleetInvalidNodeID),
 		errors.Is(err, errLocalFleetIdempotencyMissing):
-		writeError(w, http.StatusBadRequest, "invalid request")
+		writeErrorCode(w, http.StatusBadRequest, "invalid_request", "invalid request")
+	case errors.Is(err, errLocalFleetStateUncertain):
+		writeErrorCode(w, http.StatusServiceUnavailable, "state_uncertain", "node state uncertain")
 	default:
 		slog.Warn("local fleet operation failed", append(logger.RequestAttrs(r), "error", err)...)
-		writeError(w, http.StatusServiceUnavailable, "local fleet operation failed")
+		writeErrorCode(w, http.StatusServiceUnavailable, "local_fleet_unavailable", "local fleet operation failed")
 	}
 }
 
@@ -526,6 +723,15 @@ func (h *Handler) localFleetDiagnose(ctx context.Context, ownerID, containerID s
 		return 0, err
 	}
 	if resp.StatusCode != http.StatusOK {
+		// Fleet reports an unreadable but possibly running daemon as
+		// state_uncertain. That must stay distinguishable from a transport
+		// failure so the coordinator keeps the barrier only in that case.
+		var failure struct {
+			Code string `json:"code"`
+		}
+		if json.Unmarshal(resp.Body, &failure) == nil && failure.Code == "state_uncertain" {
+			return 0, fmt.Errorf("%w: fleet diagnose returned state_uncertain", errLocalFleetStateUncertain)
+		}
 		return 0, fmt.Errorf("fleet diagnose returned status %d", resp.StatusCode)
 	}
 	var report struct {

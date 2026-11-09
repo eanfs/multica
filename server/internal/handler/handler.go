@@ -302,6 +302,11 @@ type Handler struct {
 	// LocalFleet coordinates local Fleet maintenance in the shared database.
 	// Nil outside local mode, where stop/reboot/delete keep proxying to Cloud.
 	LocalFleet *localFleetCoordinator
+	// LocalFleetRequired is set when local mode is configured but the
+	// coordinator could not be built (for example a non-pool TxStarter). The
+	// proxy then refuses maintenance requests instead of silently forwarding
+	// them to Fleet without the database barrier.
+	LocalFleetRequired bool
 	// CloudBilling proxies billing and subscription requests. It is built from
 	// CloudURL only and never shares the CloudRuntime client, so local Fleet
 	// mode (CloudURL empty) cannot expose billing through the local service.
@@ -578,6 +583,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 	// database Fleet reads; Cloud and self-hosted deployments keep the plain
 	// proxy because LocalFleetEnabled is false there.
 	if cfg.LocalFleetEnabled && strings.TrimSpace(cfg.LocalFleetNamespace) != "" {
+		h.LocalFleetRequired = true
 		if pool, ok := txStarter.(*pgxpool.Pool); ok && pool != nil {
 			h.LocalFleet = newLocalFleetCoordinator(pool, cfg.LocalFleetNamespace, h.localFleetDiagnose, time.Now)
 		}

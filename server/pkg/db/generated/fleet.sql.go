@@ -13,7 +13,7 @@ import (
 
 const approveFleetNodeOperation = `-- name: ApproveFleetNodeOperation :execrows
 UPDATE fleet_node_operation
-SET phase = 'approved', approved_at = now(), updated_at = now()
+SET phase = 'approved', approved_at = now(), error = '', updated_at = now()
 WHERE id = $1 AND phase = 'prepared'
 `
 

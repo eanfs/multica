@@ -590,6 +590,32 @@ func TestMarkOperationPhaseKeepsPreviousError(t *testing.T) {
 	}
 }
 
+func TestTickDoesNotAdvanceTargetWithInFlightOperation(t *testing.T) {
+	provider := newFakeDocker()
+	provider.inspected["c-prepared"] = docker.ObservedContainer{ID: "c-prepared", State: "running", Healthy: true}
+	svc, st := coordinatorTestService(t, "wt-op", provider)
+	node := seedCoordinatorNodeWithTarget(t, st, "wt-op", "n-prepared", "c-prepared", StateRebooting)
+	seedCoordinatorOperation(t, st, node.ID, "reboot", OpPhasePrepared, "reboot-prepared")
+
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	refreshed, err := st.Queries().GetFleetNode(context.Background(), db.GetFleetNodeParams{ID: node.ID, Namespace: "wt-op"})
+	if err != nil {
+		t.Fatalf("load refreshed node: %v", err)
+	}
+	if refreshed.TargetState != StateRebooting {
+		t.Fatalf("target = %q, want %q while an operation is prepared", refreshed.TargetState, StateRebooting)
+	}
+	if refreshed.Generation != node.Generation {
+		t.Fatalf("generation = %d, want %d while an operation is prepared", refreshed.Generation, node.Generation)
+	}
+	// The observed state is still refreshed: only the target advance is held.
+	if refreshed.ObservedState != StateRunning {
+		t.Fatalf("observed = %q, want %q", refreshed.ObservedState, StateRunning)
+	}
+}
+
 func TestTickRefreshesOnlyOwnNamespaceNodes(t *testing.T) {
 	provider := newFakeDocker()
 	provider.inspected["c-own-ns"] = docker.ObservedContainer{ID: "c-own-ns", State: "running", Healthy: true}

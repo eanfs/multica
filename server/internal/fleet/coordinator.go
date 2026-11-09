@@ -127,6 +127,18 @@ func (s *Service) refreshNode(ctx context.Context, node db.FleetNode) error {
 	if err != nil {
 		return err
 	}
+	// A prepared or approved operation owns the node's transitional target.
+	// Advancing it here would change the generation that the API's approval
+	// compares against, turning a retryable maintenance request into a 409.
+	// Refresh the observation above, but leave the target alone until the
+	// operation is done or aborted.
+	inflight, err := s.store.Queries().CountActiveFleetNodeOperationsForNode(ctx, node.ID)
+	if err != nil {
+		return fmt.Errorf("count in-flight node operations: %w", err)
+	}
+	if inflight > 0 {
+		return nil
+	}
 	return s.advanceTargetState(ctx, node, obs)
 }
 

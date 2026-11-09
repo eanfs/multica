@@ -108,9 +108,13 @@ func (h *Handler) proxyCloudRuntime(w http.ResponseWriter, r *http.Request, meth
 	// In local Fleet mode the API persists the maintenance barrier and approves
 	// the operation in the shared database; Fleet's coordinator executes it.
 	// Forwarding stop/reboot/delete to Fleet would bypass that barrier.
-	if h.LocalFleet != nil {
-		if operation, ok := localFleetProxyOperation(method, path); ok {
+	if operation, ok := localFleetProxyOperation(method, path); ok {
+		if h.LocalFleet != nil {
 			h.coordinateLocalFleet(w, r, operation)
+			return
+		}
+		if h.LocalFleetRequired {
+			writeErrorCode(w, http.StatusServiceUnavailable, "local_fleet_unavailable", "local fleet coordinator is not configured")
 			return
 		}
 	}
