@@ -150,7 +150,7 @@ export function CloudRuntimeDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="flex max-h-[88vh] flex-col gap-0 p-0 sm:max-w-3xl">
+      <DialogContent className="flex max-h-[88%] flex-col gap-0 p-0 sm:max-w-3xl">
         <DialogHeader className="border-b px-6 py-5">
           <DialogTitle className="flex items-center gap-2 text-title-sm">
             <Cloud className="h-4 w-4 text-muted-foreground" />
