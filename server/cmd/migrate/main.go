@@ -140,6 +140,18 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
+	// Local Docker Fleet tables and indexes (migrations 660-673): each index
+	// build is single-statement and concurrent, so an interrupted run leaves
+	// an INVALID relation that IF NOT EXISTS would skip on retry.
+	"664_fleet_node_pkey":                         "fleet_node_id_key",
+	"665_fleet_node_owner_namespace_idx":          "idx_fleet_node_owner_namespace",
+	"666_fleet_node_namespace_idx":                "idx_fleet_node_namespace",
+	"667_fleet_node_daemon_idx":                   "idx_fleet_node_daemon",
+	"668_fleet_node_credential_token_key":         "fleet_node_credential_token_hash_key",
+	"669_fleet_node_credential_node_idx":          "idx_fleet_node_credential_node",
+	"670_fleet_node_operation_node_idx":           "idx_fleet_node_operation_node_created",
+	"671_fleet_node_operation_idem_key":           "fleet_node_operation_idempotency_key_key",
+	"672_fleet_credential_profile_owner_key":      "fleet_credential_profile_owner_key",
 	"654_chat_submission_receipt_key":                           "uq_chat_submission_receipt_key",
 	"655_chat_submission_receipt_workspace":                     "idx_chat_submission_receipt_workspace",
 	"651_task_context_receipt_issue_idx":                        "idx_task_context_receipt_issue",
