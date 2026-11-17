@@ -308,12 +308,26 @@
     "toast_created": "Nodo de Runtime en la nube creado",
     "toast_create_failed": "No se ha podido crear el nodo de Runtime en la nube",
     "delete": "Eliminar nodo",
-    "delete_confirm": "¿Seguro que quieres eliminar este nodo en la nube? Esta acción no se puede deshacer.",
     "toast_deleted": "Nodo en la nube eliminado",
     "toast_delete_failed": "No se ha podido eliminar el nodo en la nube",
+    "provider": "Proveedor",
+    "operations": "Operaciones",
+    "start": "Iniciar nodo",
+    "stop": "Detener nodo",
+    "reboot": "Reiniciar nodo",
+    "starting": "Iniciando...",
+    "stopping": "Deteniendo...",
+    "rebooting": "Reiniciando...",
+    "spec": "Especificación",
+    "persistent_volume": "Volumen persistente",
+    "delete_irreversible": "¿Eliminar este nodo de forma permanente? Se eliminarán su contenedor, sus volúmenes y el token del nodo, y no se podrán recuperar.",
+    "unsupported_operation": "Esta operación no está disponible para este proveedor.",
+    "toast_operation_failed": "No se ha podido ejecutar la operación del nodo",
+    "status": {
+      "instance_missing": "Instancia no encontrada"
+    },
     "fields": {
       "name": "Nombre",
-      "instance_type": "Tipo de instancia",
       "region": "Región",
       "disk_size": "Tamaño de disco GiB",
       "image_id": "ID de AMI",
@@ -326,7 +340,6 @@
       "key_name": "dev-key"
     },
     "validation": {
-      "instance_type_required": "El tipo de instancia es obligatorio",
       "disk_size_invalid": "El tamaño de disco debe ser un entero positivo"
     }
   },
