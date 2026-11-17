@@ -1454,7 +1454,7 @@ func (q *Queries) LockAgentRuntimeForAccessChange(ctx context.Context, id pgtype
 }
 
 const lockAgentRuntimeForClaimDelivery = `-- name: LockAgentRuntimeForClaimDelivery :one
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id FROM agent_runtime
 WHERE id = $1
 FOR NO KEY UPDATE
 `
@@ -1489,6 +1489,8 @@ func (q *Queries) LockAgentRuntimeForClaimDelivery(ctx context.Context, id pgtyp
 		&i.CustomName,
 		&i.SharedWith,
 		&i.MaxConcurrentTasks,
+		&i.ManagedBy,
+		&i.FleetNodeID,
 	)
 	return i, err
 }
