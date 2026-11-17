@@ -161,6 +161,16 @@ func cleanupIntegrationTestFixture(ctx context.Context, pool *pgxpool.Pool) erro
 	if _, err := pool.Exec(ctx, `DELETE FROM workspace WHERE slug = $1`, integrationTestWorkspaceSlug); err != nil {
 		return err
 	}
+	// Agents and runtimes created by the router tests are owner-scoped and the
+	// raw workspace DELETE above does not cascade to them. Remove them before
+	// the user row so a test that fails mid-way cannot wedge the next run on a
+	// foreign key.
+	if _, err := pool.Exec(ctx, `DELETE FROM agent WHERE owner_id = (SELECT id FROM "user" WHERE email = $1)`, integrationTestEmail); err != nil {
+		return err
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM agent_runtime WHERE owner_id = (SELECT id FROM "user" WHERE email = $1)`, integrationTestEmail); err != nil {
+		return err
+	}
 	if _, err := pool.Exec(ctx, `DELETE FROM "user" WHERE email = $1`, integrationTestEmail); err != nil {
 		return err
 	}
