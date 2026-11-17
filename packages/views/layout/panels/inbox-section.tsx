@@ -3,10 +3,12 @@
 import { type ReactNode, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Archive, BookCheck, CheckCheck, History, ListChecks, MoreHorizontal } from "@multica/ui/icons";
+import { AlarmClock, Archive, BellOff, BookCheck, CheckCheck, History, ListChecks, MoreHorizontal } from "@multica/ui/icons";
+import { IconButton } from "@multica/ui/components/common/icon-button";
 import { cn } from "@multica/ui/lib/utils";
 import { useIsCompact } from "@multica/ui/hooks/use-mobile";
 import { TooltipHint } from "@multica/ui/components/common/tooltip-hint";
+import { ShimmerText } from "@multica/ui/components/common/shimmer-text";
 import { Button, buttonVariants } from "@multica/ui/components/ui/button";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@multica/ui/components/ui/hover-card";
 import {
@@ -14,6 +16,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "@multica/ui/components/ui/dropdown-menu";
 import { inboxTypeGroup, useInboxFilterStore } from "@multica/core/inbox/filter-store";
@@ -24,9 +27,9 @@ import {
   useArchiveInbox,
   useMarkAllInboxRead,
   useMarkInboxRead,
-  useMarkInboxUnread,
 } from "@multica/core/inbox/mutations";
-import { useInboxUnreadCount } from "@multica/core/inbox/queries";
+import { snoozedInboxOptions, useInboxUnreadCount } from "@multica/core/inbox/queries";
+import { inboxRowTime, inboxSnoozeReturnedAt } from "@multica/core/inbox/snooze";
 import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
 import { issueDetailOptions } from "@multica/core/issues/queries";
 import { useSidebarTreeStore } from "@multica/core/issues/stores/sidebar-tree-store";
@@ -44,8 +47,12 @@ import { ARCHIVED_VIEW_PARAM } from "../../inbox/components/inbox-view";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { InboxDetailLabel, useTypeLabels } from "../../inbox/components/inbox-detail-label";
 import { InboxFilterMenu } from "../../inbox/components/inbox-filter-menu";
+import { InboxSnoozeMenu } from "../../inbox/components/inbox-snooze-menu";
+import { useInboxSnooze } from "../../inbox/components/use-inbox-snooze";
+import { useBuiltinViewNavigation } from "../../issue-views/builtin-views";
 import { useFilteredInboxRows } from "../../inbox/components/use-filtered-inbox-rows";
 import { useTimeAgo } from "../../inbox/components/inbox-list-item";
+import { useInboxUnsubscribable, useUnsubscribeArchive } from "../../inbox/components/use-unsubscribe-archive";
 import { StatusIcon } from "../../issues/components";
 import { useStatusLabel } from "../../issues/utils/status-label";
 import {
@@ -58,7 +65,13 @@ import {
   panelRowStateClass,
 } from "../panel-nav";
 import { InboxSectionSettings, SECTION_SETTINGS_REVEAL_CLASS } from "./sidebar-settings";
-import { ISSUE_ROW_LINK_CLASS, TREE_ROW_BUTTON_CLASS } from "./sidebar-tree";
+import {
+  ISSUE_ROW_LINK_CLASS,
+  IssueAgentBadge,
+  SIDEBAR_SHIMMER_CLASS,
+  TREE_ROW_BUTTON_CLASS,
+  useIssueAgentState,
+} from "./sidebar-tree";
 
 /**
  * The unread count sits in the panel's number column (the rows' trailing
@@ -88,7 +101,13 @@ export function useInboxSectionRows(wsId: string | undefined, openKey: string | 
   const collapsed = useSidebarTreeStore((s) => s.inboxCollapsed);
   const [expandedWsId, setExpandedWsId] = useState<string | null>(null);
   const expanded = expandedWsId === (wsId ?? null);
-  const displayed = useMemo(() => (expanded ? rows : rows.slice(0, limit)), [expanded, rows, limit]);
+  // Newer notifications must not push the open row past the limit: the row
+  // would leave, and the open issue's highlight with it.
+  const displayed = useMemo(() => {
+    if (expanded) return rows;
+    const open = openKey ? rows.findIndex((item) => (item.issue_id ?? item.id) === openKey) : -1;
+    return open >= limit ? [...rows.slice(0, limit - 1), rows[open]!] : rows.slice(0, limit);
+  }, [expanded, rows, limit, openKey]);
   // A collapsed section shows no rows, so it lights none.
   const shownIssueIds = useMemo(
     () => new Set(collapsed ? [] : displayed.flatMap((item) => (item.issue_id ? [item.issue_id] : []))),
@@ -129,12 +148,25 @@ export function InboxSection({
   const compact = useSidebarTreeStore((s) => s.inboxSettings.compact);
   const unread = useInboxUnreadCount(wsId);
   const archive = useArchiveInbox();
+  const unsubscribable = useInboxUnsubscribable(wsId);
+  const unsubscribeArchive = useUnsubscribeArchive();
+  const { snooze } = useInboxSnooze();
   const { searchParams } = useNavigation();
   const isCompact = useIsCompact();
   const { list, rows: all, displayed, expanded, limit, setExpanded } = rows;
   const clearFilters = useInboxFilterStore((state) => state.clearFilters);
   // The notification the Inbox page has open, keyed as it groups rows.
   const openKey = pathname === p.inbox() ? searchParams.get("issue") : null;
+  // What arrived on each issue while it was snoozed, for the rows back from one.
+  const updatesWhileSnoozed = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const item of list.notifications) {
+      if (!item.issue_id || !item.snoozed_at) continue;
+      if (new Date(item.created_at).getTime() <= new Date(item.snoozed_at).getTime()) continue;
+      counts.set(item.issue_id, (counts.get(item.issue_id) ?? 0) + 1);
+    }
+    return counts;
+  }, [list.notifications]);
 
   return (
     <PanelSection
@@ -157,12 +189,12 @@ export function InboxSection({
             }}
           />
           <InboxSectionSettings className={SECTION_SETTINGS_REVEAL_CLASS} />
-          <InboxSectionActions className={SECTION_SETTINGS_REVEAL_CLASS} />
+          <InboxSectionActions wsId={wsId} className={SECTION_SETTINGS_REVEAL_CLASS} />
         </div>
       }
     >
       {displayed.length > 0 ? (
-        <PanelList data-sidebar-list={INBOX_LIST}>
+        <PanelList data-sidebar-list={INBOX_LIST} className={compact ? undefined : "space-y-0.5"}>
           {displayed.map((item) => (
             <InboxRow
               key={item.id}
@@ -173,7 +205,14 @@ export function InboxSection({
                 (!!openKey && (item.issue_id ?? item.id) === openKey)
               }
               compact={compact}
+              updatesWhileSnoozed={item.issue_id ? (updatesWhileSnoozed.get(item.issue_id) ?? 0) : 0}
               onArchive={() => archive.mutate(item.id)}
+              onUnsubscribe={
+                item.issue_id && unsubscribable(item)
+                  ? () => unsubscribeArchive({ id: item.id, issueId: item.issue_id! })
+                  : undefined
+              }
+              onSnooze={(until) => snooze(item, until)}
             />
           ))}
         </PanelList>
@@ -223,7 +262,7 @@ export function InboxSection({
   );
 }
 
-function InboxSectionActions({ className }: { className?: string }) {
+function InboxSectionActions({ wsId, className }: { wsId: string; className?: string }) {
   const { t } = useT("layout");
   const { t: tInbox } = useT("inbox");
   const markAllRead = useMarkAllInboxRead();
@@ -232,6 +271,8 @@ function InboxSectionActions({ className }: { className?: string }) {
   const archiveCompleted = useArchiveCompletedInbox();
   const { push } = useNavigation();
   const p = useWorkspacePaths();
+  const builtinNav = useBuiltinViewNavigation();
+  const { data: snoozed } = useQuery(snoozedInboxOptions(wsId));
   const label = t(($) => $.panels.work.inbox_actions);
   const onError = (fallback: string) => (err: unknown) =>
     toast.error(err instanceof Error && err.message ? err.message : fallback);
@@ -256,6 +297,18 @@ function InboxSectionActions({ className }: { className?: string }) {
         <MoreHorizontal className="size-3.5" />
       </DropdownMenuTrigger>
       <DropdownMenuContent side="right" align="start" className="w-auto min-w-48">
+        <DropdownMenuItem
+          onClick={() => {
+            builtinNav.prepare("snoozed");
+            push(builtinNav.hrefFor("snoozed"));
+          }}
+        >
+          <AlarmClock className="size-4" />
+          {t(($) => $.panels.work.inbox_view_snoozed)}
+          {!!snoozed?.length && (
+            <DropdownMenuShortcut className="tracking-normal tabular-nums">{snoozed.length}</DropdownMenuShortcut>
+          )}
+        </DropdownMenuItem>
         <DropdownMenuItem onClick={() => push(`${p.inbox()}?${new URLSearchParams({ view: ARCHIVED_VIEW_PARAM })}`)}>
           <History className="size-4" />
           {t(($) => $.panels.work.inbox_view_archived)}
@@ -304,19 +357,30 @@ function InboxRow({
   href,
   active,
   compact,
+  updatesWhileSnoozed,
   onArchive,
+  onUnsubscribe,
+  onSnooze,
 }: {
   item: InboxItem;
   href: string;
   active: boolean;
-  /** One line (type icon, title, dot or time) instead of the actor line under the title. */
+  /** One line (status, title, agents, dot or time) instead of the actor line under the title. */
   compact: boolean;
+  /** Notifications that arrived while the issue was snoozed. */
+  updatesWhileSnoozed: number;
   onArchive: () => void;
+  /** Unsubscribe & archive; only for issues that are not the viewer's own. */
+  onUnsubscribe?: () => void;
+  onSnooze: (until: Date) => void;
 }) {
   const { t } = useT("inbox");
   const typeLabels = useTypeLabels();
   const timeAgo = useTimeAgo();
   const Icon = INBOX_TYPE_ICONS[inboxTypeGroup(item.type)];
+  const { categoryOf, colorOf, iconOf } = useIssueStatuses(item.workspace_id);
+  const statusLabelOf = useStatusLabel(item.workspace_id);
+  const status = item.issue_status;
   const title = inboxRowTitle(item, typeLabels);
   const writeViewState = useViewStateWriter();
   const requestLanding = useInboxSelectionStore((s) => s.requestLanding);
@@ -327,81 +391,205 @@ function InboxRow({
     writeViewState(issueHighlightMementoKey(item.issue_id), undefined);
     requestLanding(item.issue_id);
   };
+  // The card previews a notification you have not opened. A press opens it,
+  // so the card goes at once, with no exit animation to compete with the
+  // issue's first render, and a hover delay already running must not bring it
+  // back over the opened issue. It may return once the pointer leaves the row.
+  const [cardOpen, setCardOpen] = useState(false);
+  const [cardDismissed, setCardDismissed] = useState(false);
+  const dismissCard = () => {
+    setCardDismissed(true);
+    setCardOpen(false);
+  };
+  const agents = useIssueAgentState(item.workspace_id, item.issue_id ?? "");
+  const running = !!agents?.running;
   const unread = item.read !== true;
   const archiveLabel = t(($) => $.list.archive_tooltip);
-  // Hidden while the archive button stands in its place.
-  const yields = "group-hover/inbox:invisible group-focus-within/inbox:invisible";
-  const time = (
-    <span className={cn("shrink-0 text-caption tabular-nums text-faint-foreground", yields)}>
-      {timeAgo(item.created_at)}
+  const snoozeLabel = t(($) => $.snooze.action);
+  const [snoozeOpen, setSnoozeOpen] = useState(false);
+  // Back from a snooze, until it is read: the row says so in place of the actor line.
+  const returned = unread && inboxSnoozeReturnedAt(item) !== null;
+  const at = new Date(inboxRowTime(item)).toISOString();
+  // Hidden while the row's buttons stand in its place.
+  const yields = cn(
+    "group-hover/inbox:invisible group-focus-within/inbox:invisible",
+    snoozeOpen && "invisible",
+  );
+  const timeClass = "shrink-0 text-caption tabular-nums text-faint-foreground";
+  const time = <span className={cn(timeClass, yields)}>{timeAgo(at)}</span>;
+  // Takes the time's place while an agent runs or waits on the issue.
+  const agentBadge = agents && (
+    <span className={cn("flex shrink-0 items-center", yields)}>
+      <IssueAgentBadge agents={agents} />
     </span>
   );
   const dot = <span data-mc="unread-dot" aria-hidden className="size-1.5 shrink-0 rounded-full bg-brand" />;
+  // Leads the row like a Pinned or tree issue row. Display only: the link
+  // covers the row, and the hover card already names the status.
+  const statusIcon = status && (
+    <span data-inbox-status={status} aria-hidden className={cn("flex shrink-0", !compact && "mt-[3px]")}>
+      <StatusIcon
+        status={status}
+        category={categoryOf(status)}
+        color={colorOf(status)}
+        icon={iconOf(status)}
+        className="size-3.5"
+      />
+    </span>
+  );
+  const statusText = status && <span className="sr-only">, {statusLabelOf(status)}</span>;
   const titleText = (
-    <span className={cn("min-w-0 flex-1 truncate", unread && "font-medium text-foreground")}>{title}</span>
+    <ShimmerText
+      active={running}
+      className={cn(
+        "min-w-0 flex-1 truncate",
+        SIDEBAR_SHIMMER_CLASS,
+        unread && "font-medium",
+        unread && !running && "text-foreground",
+      )}
+    >
+      {title}
+    </ShimmerText>
   );
 
   return (
     <li data-inbox-row data-read={unread ? "false" : "true"} className="group/inbox relative">
-      <HoverCard>
+      <HoverCard
+        open={cardOpen && !snoozeOpen}
+        onOpenChange={(open) => {
+          if (open && cardDismissed) return;
+          setCardOpen(open);
+        }}
+      >
         <HoverCardTrigger
           delay={500}
           closeDelay={100}
           render={<div />}
+          onPointerDown={dismissCard}
+          onPointerLeave={() => setCardDismissed(false)}
+          // Enter on the focused link opens the issue too. Focus does not
+          // move, so the card stays shut without the dismissed flag.
+          onKeyDown={(event) => {
+            if (event.key === "Enter") setCardOpen(false);
+          }}
           {...panelRowAnchor(active)}
-          className={cn(PANEL_ROW_CLASS, panelRowStateClass(active), "relative", !compact && "items-start py-[5px]")}
+          className={cn(PANEL_ROW_CLASS, panelRowStateClass(active), "relative", !compact && "items-start py-1.5")}
         >
-          {compact ? (
-            <span title={typeLabels[item.type]} className="flex shrink-0 items-center">
-              <Icon aria-hidden className="size-4" />
-            </span>
-          ) : (
-            <span className="mt-0.5 flex shrink-0">
-              <InboxActorAvatar item={item} size="xs" />
-            </span>
-          )}
+          {statusIcon ||
+            (compact ? (
+              <span title={typeLabels[item.type]} className="flex shrink-0 items-center">
+                <Icon aria-hidden className="size-4" />
+              </span>
+            ) : (
+              <span className="mt-0.5 flex shrink-0">
+                <InboxActorAvatar item={item} size="xs" />
+              </span>
+            ))}
           <AppLink
             href={href}
             newTabTitle={title}
             draggable={false}
             aria-current={active ? "page" : undefined}
             onNavigateInPlace={land}
-            className={cn(ISSUE_ROW_LINK_CLASS, compact ? "gap-2.5" : "flex-col items-stretch gap-0")}
+            className={cn(
+              ISSUE_ROW_LINK_CLASS,
+              compact ? "gap-2.5" : "flex-col items-stretch gap-0",
+              // Room for the snooze button beside the archive one.
+              item.issue_id && "group-focus-within/inbox:pr-5 group-hover/inbox:pr-5",
+              snoozeOpen && "pr-5",
+            )}
           >
             {compact ? (
               <>
                 {titleText}
-                {unread ? <span className={cn("flex shrink-0 items-center", yields)}>{dot}</span> : time}
+                {statusText}
+                {agentBadge}
+                {unread ? <span className={cn("flex shrink-0 items-center", yields)}>{dot}</span> : !agents && time}
               </>
             ) : (
               <>
                 <span className="flex min-w-0 items-center gap-2 leading-5">
                   {titleText}
-                  {time}
+                  {statusText}
+                  {agentBadge || time}
                 </span>
-                <span className="flex min-w-0 items-center gap-2 text-caption leading-4 text-muted-foreground">
-                  <span className="min-w-0 flex-1 truncate">
-                    <InboxActorLine item={item} />
+                <span className="mt-0.5 flex min-w-0 items-center gap-2 text-caption leading-4 text-muted-foreground">
+                  <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                    {/* The status took the avatar's column; it stays with the name. */}
+                    {statusIcon && <InboxActorAvatar item={item} size="xs" />}
+                    <span className="min-w-0 flex-1 truncate">
+                      {returned ? (
+                        <InboxReturnedLine updates={updatesWhileSnoozed} />
+                      ) : (
+                        <InboxActorLine item={item} />
+                      )}
+                    </span>
                   </span>
+                  {/* The agents hold the title line's time slot, so the time moves down. */}
+                  {agents && <span className={timeClass}>{timeAgo(at)}</span>}
                   {unread && dot}
                 </span>
               </>
             )}
           </AppLink>
         </HoverCardTrigger>
-        <HoverCardContent side="right" align="start" sideOffset={12} alignOffset={-8} className="w-72 p-3">
-          <InboxRowCard item={item} href={href} title={title} onOpen={land} onArchive={onArchive} />
+        <HoverCardContent
+          side="right"
+          align="start"
+          sideOffset={12}
+          alignOffset={-8}
+          className={cn("w-72 p-3", cardDismissed && "data-closed:duration-0")}
+        >
+          <InboxRowCard
+            item={item}
+            href={href}
+            title={title}
+            onOpen={() => {
+              dismissCard();
+              land();
+            }}
+            onArchive={onArchive}
+            onUnsubscribe={onUnsubscribe}
+            onSnooze={
+              item.issue_id
+                ? () => {
+                    setCardOpen(false);
+                    setSnoozeOpen(true);
+                  }
+                : undefined
+            }
+          />
         </HoverCardContent>
       </HoverCard>
+      {item.issue_id && (
+        <InboxSnoozeMenu
+          open={snoozeOpen}
+          onOpenChange={setSnoozeOpen}
+          onSnooze={onSnooze}
+          side="right"
+          align="start"
+          trigger={
+            <button
+              type="button"
+              aria-label={snoozeLabel}
+              title={snoozeLabel}
+              className={cn(
+                rowButtonClass(compact),
+                "right-7",
+                snoozeOpen && "flex bg-surface-selected text-foreground",
+              )}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <AlarmClock className="size-3" />
+            </button>
+          }
+        />
+      )}
       <TooltipHint label={archiveLabel}>
         <button
           type="button"
           aria-label={archiveLabel}
-          className={cn(
-            "absolute right-1.5 z-10 hidden size-5 items-center justify-center rounded-md text-muted-foreground group-hover/inbox:flex group-focus-within/inbox:flex hover:bg-surface-selected hover:text-foreground",
-            // On the title's line, where the time was.
-            compact ? "top-1/2 -translate-y-1/2" : "top-[5px]",
-          )}
+          className={cn(rowButtonClass(compact), "right-1.5", snoozeOpen && "flex")}
           onClick={(event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -412,6 +600,29 @@ function InboxRow({
         </button>
       </TooltipHint>
     </li>
+  );
+}
+
+/** A row's hover button. */
+function rowButtonClass(compact: boolean) {
+  return cn(
+    "absolute z-10 hidden size-5 items-center justify-center rounded-md text-muted-foreground group-hover/inbox:flex group-focus-within/inbox:flex hover:bg-surface-selected hover:text-foreground",
+    // On the title's line, where the time was.
+    compact ? "top-1/2 -translate-y-1/2" : "top-1.5",
+  );
+}
+
+/** In place of the actor line on a row back from a snooze. */
+function InboxReturnedLine({ updates }: { updates: number }) {
+  const { t } = useT("inbox");
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1 text-brand">
+      <AlarmClock aria-hidden className="size-3 shrink-0" />
+      <span className="truncate">
+        {t(($) => $.snooze.returned)}
+        {updates > 0 && <span className="text-muted-foreground"> · {t(($) => $.snooze.updates, { count: updates })}</span>}
+      </span>
+    </span>
   );
 }
 
@@ -451,12 +662,17 @@ function InboxRowCard({
   title,
   onOpen,
   onArchive,
+  onUnsubscribe,
+  onSnooze,
 }: {
   item: InboxItem;
   href: string;
   title: string;
   onOpen: () => void;
   onArchive: () => void;
+  onUnsubscribe?: () => void;
+  /** Opens the row's snooze menu; issue rows only. */
+  onSnooze?: () => void;
 }) {
   const { t } = useT("layout");
   const { t: tInbox } = useT("inbox");
@@ -465,7 +681,6 @@ function InboxRowCard({
   const { categoryOf, colorOf, iconOf } = useIssueStatuses(item.workspace_id);
   const statusLabelOf = useStatusLabel(item.workspace_id);
   const markRead = useMarkInboxRead();
-  const markUnread = useMarkInboxUnread();
   const { data: issue } = useQuery({ ...issueDetailOptions(item.workspace_id, item.issue_id ?? ""), enabled: !!item.issue_id });
   const unread = item.read !== true;
   // A comment gets its own block, so the line above names only the kind.
@@ -506,17 +721,28 @@ function InboxRowCard({
         <AppLink href={href} onNavigateInPlace={onOpen} className={buttonVariants({ size: "sm", variant: "secondary" })}>
           {t(($) => $.panels.work.inbox_open)}
         </AppLink>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="text-muted-foreground"
-          onClick={() => (unread ? markRead.mutate(item.id) : markUnread.mutate(item.id))}
-        >
-          {unread ? tInbox(($) => $.context_menu.mark_read) : tInbox(($) => $.context_menu.mark_unread)}
-        </Button>
+        {unread && (
+          <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => markRead.mutate(item.id)}>
+            {tInbox(($) => $.context_menu.mark_read)}
+          </Button>
+        )}
+        {onSnooze && (
+          <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={onSnooze}>
+            {tInbox(($) => $.snooze.action)}
+          </Button>
+        )}
         <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={onArchive}>
           {tInbox(($) => $.context_menu.archive)}
         </Button>
+        {onUnsubscribe && (
+          <IconButton
+            label={tInbox(($) => $.context_menu.unsubscribe_archive)}
+            className="ml-auto text-muted-foreground"
+            onClick={onUnsubscribe}
+          >
+            <BellOff />
+          </IconButton>
+        )}
       </div>
     </div>
   );

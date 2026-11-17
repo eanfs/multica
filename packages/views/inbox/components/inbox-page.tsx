@@ -41,6 +41,7 @@ import {
   useArchiveAllReadInbox,
   useArchiveCompletedInbox,
   useRetrySourceContextQuickCreate,
+  type InboxUnsubscribeScope,
 } from "@multica/core/inbox/mutations";
 import {
   effectiveInboxFilters,
@@ -61,7 +62,7 @@ import { IssuePeekHost } from "../../issues/components/issue-peek";
 import { useIssueSurfaceActivity } from "../../issues/surface/activity";
 import { useViewStateWriter } from "../../platform";
 import { ErrorBoundary } from "@multica/ui/components/common/error-boundary";
-import { useNavigation, useReportNavigating } from "../../navigation";
+import { AppLink, useNavigation, useReportNavigating } from "../../navigation";
 import { toast } from "sonner";
 import {
   MoreHorizontal,
@@ -105,6 +106,7 @@ import { InboxList } from "./inbox-list";
 import { InboxFilterMenu } from "./inbox-filter-menu";
 import { InboxFilterChipsBar } from "./inbox-filter-options";
 import { InboxContextMenuProvider } from "./inbox-context-menu";
+import { useInboxUnsubscribable, useUnsubscribeArchive } from "./use-unsubscribe-archive";
 import { ARCHIVED_VIEW_PARAM, type InboxView } from "./inbox-view";
 import { useTypeLabels } from "./inbox-detail-label";
 import {
@@ -499,6 +501,22 @@ export function InboxPage() {
     setSelectedKey(nextKey);
   };
 
+  // The comment a notification opens at is chosen once per opening or
+  // re-click. Opening reads the issue, which moves the row's anchor from the
+  // oldest unread comment to the newest; following it would land a second
+  // time, past the comments the reader came for. Taken from the selected row,
+  // not the deferred detail, which renders only after the read has landed.
+  const [landing, setLanding] = useState<{ key: string; token: number; commentId: string | undefined } | null>(null);
+  if (selected && (landing?.key !== selectedKey || landing.token !== highlightRequestToken)) {
+    setLanding({ key: selectedKey, token: highlightRequestToken, commentId: selected.details?.comment_id ?? undefined });
+  } else if (landing && !selectedKey && !detailKey) {
+    // Back on the list: opening the row again chooses afresh.
+    setLanding(null);
+  }
+  const detailItemKey = detailItem ? (detailItem.issue_id ?? detailItem.id) : null;
+  const landingCommentId =
+    landing?.key === detailItemKey ? landing.commentId : (detailItem?.details?.comment_id ?? undefined);
+
   const handleMarkRead = (id: string) => {
     // Reading it back explicitly cancels an earlier park on the same row.
     if (manualUnreadIdRef.current === id) manualUnreadIdRef.current = null;
@@ -571,6 +589,15 @@ export function InboxPage() {
             : t(($) => $.errors.unarchive_failed),
         ),
     });
+  };
+
+  const unsubscribable = useInboxUnsubscribable(wsId);
+  const unsubscribeArchive = useUnsubscribeArchive();
+  const handleUnsubscribeArchive = (id: string, scope: InboxUnsubscribeScope = "issue") => {
+    const item = listedItems.find((i) => i.id === id);
+    if (!item?.issue_id) return;
+    advanceSelectionPast(id, listedItems);
+    unsubscribeArchive({ id, issueId: item.issue_id }, scope);
   };
 
   // Keep the listener stable while using the latest selected-item action.
@@ -793,6 +820,8 @@ export function InboxPage() {
         onMarkUnread: handleMarkUnread,
         onAction: isArchivedView ? handleUnarchive : handleArchive,
         onDelete: (id) => setDeleteTarget(selectionItems.find((item) => item.id === id) ?? null),
+        onUnsubscribeArchive: handleUnsubscribeArchive,
+        canUnsubscribe: unsubscribable,
       }}
     >
       <InboxList
@@ -912,7 +941,7 @@ export function InboxPage() {
           issueId={detailItem.issue_id}
           defaultSidebarOpen={false}
           layoutId="multica_inbox_issue_detail_layout"
-          highlightCommentId={detailItem.details?.comment_id ?? undefined}
+          highlightCommentId={landingCommentId}
           highlightRequestToken={highlightRequestToken}
           highlightAppRequestId={
             detailItem.type.startsWith("app_") ? (detailItem.details?.request_id ?? undefined) : undefined
@@ -934,6 +963,9 @@ export function InboxPage() {
           onDone={() => {
             handleArchive(detailItem.id);
           }}
+          onUnsubscribeArchive={
+            isArchivedView ? undefined : (scope) => handleUnsubscribeArchive(detailItem.id, scope)
+          }
         />
       </IssuePeekHost>
     </ErrorBoundary>
@@ -952,6 +984,10 @@ export function InboxPage() {
           item={detailItem}
           onOpenRecovery={showAutopilotQuotaRecoveryPrompt}
         />
+      ) : detailItem.type === "project_owner_joined" && detailItem.details?.joined_by ? (
+        <div className="mt-4 text-body leading-relaxed text-foreground">
+          {t(($) => $.detail.project_owner_joined_body, { name: detailItem.details.joined_by })}
+        </div>
       ) : detailItem.body ? (
         <div className="mt-4 whitespace-pre-wrap text-body leading-relaxed text-foreground">
           {detailItem.body}
@@ -972,6 +1008,16 @@ export function InboxPage() {
         </div>
       )}
       <div className="mt-4 flex gap-2">
+        {detailItem.type === "project_owner_joined" && detailItem.details?.project_id && (
+          <Button
+            size="sm"
+            variant="outline"
+            render={<AppLink href={wsPaths.projectDetail(detailItem.details.project_id)} />}
+            nativeButton={false}
+          >
+            {t(($) => $.detail.open_project)}
+          </Button>
+        )}
         {detailItem.type === "quick_create_failed" &&
           detailItem.details?.source_context_id &&
           detailItem.details?.task_id && (

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { fireEvent, screen, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -9,7 +9,9 @@ import {
 import { useInboxFilterStore } from "@multica/core/inbox/filter-store";
 import { useInboxSelectionStore } from "@multica/core/inbox/selection-store";
 import { agentTaskSnapshotOptions } from "@multica/core/agents";
-import type { InboxItem } from "@multica/core/types";
+import type { Agent, AgentTask, InboxItem, SnoozedInboxIssue } from "@multica/core/types";
+import { agentListOptions } from "@multica/core/workspace/queries";
+import { snoozedInboxOptions } from "@multica/core/inbox/queries";
 import { renderWithI18n } from "../../test/i18n";
 import { NavigationProvider, type NavigationAdapter } from "../../navigation";
 import { InboxSection, useInboxSectionRows } from "./inbox-section";
@@ -18,12 +20,15 @@ const state = vi.hoisted(() => ({
   unread: 0,
   compact: false,
   archive: vi.fn(),
+  unsubscribeArchive: vi.fn(),
   markAllRead: vi.fn(),
   archiveAll: vi.fn(),
   archiveAllRead: vi.fn(),
   archiveCompleted: vi.fn(),
   markRead: vi.fn(),
   markUnread: vi.fn(),
+  snooze: vi.fn(() => Promise.resolve()),
+  unsnooze: vi.fn(() => Promise.resolve()),
 }));
 
 vi.mock("@multica/core/paths", async (importOriginal) => {
@@ -42,6 +47,11 @@ vi.mock("@multica/core/inbox/mutations", () => ({
   useArchiveCompletedInbox: () => ({ mutate: state.archiveCompleted }),
   useMarkInboxRead: () => ({ mutate: state.markRead }),
   useMarkInboxUnread: () => ({ mutate: state.markUnread }),
+  useUnsubscribeArchiveInbox: () => ({ mutate: state.unsubscribeArchive }),
+  undoUnsubscribeArchiveInbox: vi.fn(),
+  useSnoozeInbox: () => ({ mutateAsync: state.snooze }),
+  useUnsnoozeInbox: () => ({ mutateAsync: state.unsnooze }),
+  cachedInboxSnoozedUntil: () => null,
 }));
 vi.mock("@multica/core/hooks", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@multica/core/hooks")>()),
@@ -51,6 +61,9 @@ vi.mock("@multica/core/workspace/hooks", () => ({
   useActorName: () => ({ getActorName: () => "Leo Park", getActorInitials: () => "LP", getActorAvatarUrl: () => null }),
 }));
 vi.mock("../../common/actor-avatar", () => ({ ActorAvatar: () => null }));
+vi.mock("../../agents/components/agent-avatar-stack", () => ({
+  AgentAvatarStack: ({ agentIds }: { agentIds: string[] }) => <span data-testid="agents">{agentIds.join(",")}</span>,
+}));
 vi.mock("@multica/ui/hooks/use-mobile", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@multica/ui/hooks/use-mobile")>()),
   useIsCompact: () => state.compact,
@@ -99,10 +112,19 @@ function Harness({ activeIssueId, pathname, openKey }: { activeIssueId: string |
   return <InboxSection wsId="ws-1" rows={rows} pathname={pathname} activeIssueId={activeIssueId} />;
 }
 
-function renderSection(items: InboxItem[], activeIssueId: string | null = null, url = "/acme/issues") {
+function renderSection(
+  items: InboxItem[],
+  activeIssueId: string | null = null,
+  url = "/acme/issues",
+  tasks: Partial<AgentTask>[] = [],
+  snoozed: SnoozedInboxIssue[] = [],
+  agents: Pick<Agent, "id" | "owner_id">[] = [],
+) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
   client.setQueryData(["inbox", "ws-1", "list"], items);
-  client.setQueryData(agentTaskSnapshotOptions("ws-1").queryKey, []);
+  client.setQueryData(snoozedInboxOptions("ws-1").queryKey, snoozed);
+  client.setQueryData(agentListOptions("ws-1").queryKey, agents as Agent[]);
+  client.setQueryData(agentTaskSnapshotOptions("ws-1").queryKey, tasks as AgentTask[]);
   const nav = adapter(url);
   // As the Work panel keys it: the issue opened from the section, or the Inbox page's notification.
   const openKey = nav.pathname === "/acme/inbox" ? nav.searchParams.get("issue") : activeIssueId;
@@ -165,6 +187,41 @@ describe("InboxSection", () => {
     expect(screen.getByRole("link", { name: /^Commented/ })).toHaveAttribute("href", "/acme/issues/issue-a#comment-c-1");
     expect(screen.getByRole("link", { name: /^Assigned/ })).toHaveAttribute("href", "/acme/issues/issue-b");
     expect(screen.getByRole("link", { name: /^Autopilot paused/ })).toHaveAttribute("href", "/acme/inbox?issue=n3");
+  });
+
+  it("opens the issue at its oldest unread comment, or its newest once read", () => {
+    renderSection([
+      item({ id: "n1", issue_id: "issue-a", title: "Unread thread", details: { comment_id: "c-2" }, created_at: "2026-11-10T09:00:00Z" }),
+      item({ id: "n2", issue_id: "issue-a", title: "Unread thread", details: { comment_id: "c-1" }, created_at: "2026-11-10T08:00:00Z" }),
+      item({ id: "n3", issue_id: "issue-b", title: "Read thread", read: true, details: { comment_id: "c-4" }, created_at: "2026-11-09T09:00:00Z" }),
+      item({ id: "n4", issue_id: "issue-b", title: "Read thread", read: true, details: { comment_id: "c-3" }, created_at: "2026-11-09T08:00:00Z" }),
+    ]);
+
+    expect(screen.getByRole("link", { name: /^Unread thread/ })).toHaveAttribute("href", "/acme/issues/issue-a#comment-c-1");
+    expect(screen.getByRole("link", { name: /^Read thread/ })).toHaveAttribute("href", "/acme/issues/issue-b#comment-c-4");
+  });
+
+  it("marks issues an agent is working on or queued for", () => {
+    renderSection(
+      [
+        item({ id: "n1", issue_id: "issue-a", title: "Working one" }),
+        item({ id: "n2", issue_id: "issue-b", title: "Queued one", created_at: "2026-11-09T08:00:00Z" }),
+        item({ id: "n3", issue_id: "issue-c", title: "Idle one", created_at: "2026-11-08T08:00:00Z" }),
+      ],
+      null,
+      "/acme/issues",
+      [
+        { id: "t1", issue_id: "issue-a", agent_id: "a1", status: "running" },
+        { id: "t2", issue_id: "issue-b", agent_id: "a2", status: "queued" },
+      ],
+    );
+
+    const [working, queued, idle] = rows();
+    expect(working).toHaveTextContent("Working");
+    expect(working!.querySelector(".shimmer-text")).not.toBeNull();
+    expect(queued).toHaveTextContent("Queued");
+    expect(queued!.querySelector(".shimmer-text")).toBeNull();
+    expect(idle!.querySelector("[data-testid=agents]")).toBeNull();
   });
 
   it("opens an app's request on its issue at that request", () => {
@@ -237,6 +294,39 @@ describe("InboxSection", () => {
     expect(rows()[0]!.querySelector("[data-mc='unread-dot']")).not.toBeNull();
   });
 
+  it("leads an issue's row with its status, and an issue-less notice with who sent it", () => {
+    const items = [
+      item({ id: "n1", issue_id: "issue-a", title: "Commented", issue_status: "in_review" }),
+      item({ id: "n2", issue_id: null, title: "Autopilot paused", type: "autopilot_paused", issue_status: null, created_at: "2026-11-09T08:00:00Z" }),
+    ];
+    const { unmount } = renderSection(items);
+    const lead = () => rows().map((row) => row.querySelector("[data-mc='nav-item']")!.firstElementChild);
+    expect(lead()[0]).toHaveAttribute("data-inbox-status", "in_review");
+    expect(screen.getByRole("link", { name: /^Commented, In Review/ })).toBeInTheDocument();
+    expect(lead()[1]).not.toHaveAttribute("data-inbox-status");
+    unmount();
+
+    useSidebarTreeStore.setState({ inboxSettings: { ...DEFAULT_SIDEBAR_INBOX_SETTINGS, compact: true } });
+    renderSection(items);
+    expect(lead()[0]).toHaveAttribute("data-inbox-status", "in_review");
+    expect(lead()[1]).toHaveAttribute("title", "Autopilot paused");
+  });
+
+  it("moves the time under the title while an agent holds its place, and keeps the unread dot when compact", () => {
+    const items = [item({ id: "n1", issue_id: "issue-a", title: "Working one" })];
+    const tasks = [{ id: "t1", issue_id: "issue-a", agent_id: "a1", status: "running" as const }];
+    const { unmount } = renderSection(items, null, "/acme/issues", tasks);
+    const [titleLine, actorLine] = Array.from(screen.getByRole("link", { name: /^Working one/ }).children);
+    expect(within(titleLine as HTMLElement).getByTestId("agents")).toBeInTheDocument();
+    expect(actorLine).toHaveTextContent(/\d+d$/);
+    unmount();
+
+    useSidebarTreeStore.setState({ inboxSettings: { ...DEFAULT_SIDEBAR_INBOX_SETTINGS, compact: true } });
+    renderSection(items, null, "/acme/issues", tasks);
+    expect(within(rows()[0]!).getByTestId("agents")).toBeInTheDocument();
+    expect(rows()[0]!.querySelector("[data-mc='unread-dot']")).not.toBeNull();
+  });
+
   it("shows the whole notification on hover, with its actions", async () => {
     renderSection([item({ id: "n1", issue_id: "issue-a", title: "Commented", body: "Ship it on Friday" })]);
     fireEvent.mouseEnter(rows()[0]!.firstElementChild!);
@@ -248,6 +338,56 @@ describe("InboxSection", () => {
     expect(state.markRead).toHaveBeenCalledWith("n1");
     fireEvent.click(actions.getByRole("button", { name: "Archive" }));
     expect(state.archive).toHaveBeenCalledWith("n1");
+  });
+
+  it("offers unsubscribe & archive on the card only for issues that are not the viewer's", async () => {
+    renderSection(
+      [
+        item({ id: "n1", issue_id: "issue-a", title: "Theirs", body: "Their comment", issue_assignee_type: "agent", issue_assignee_id: "agent-x" }),
+        item({ id: "n2", issue_id: "issue-b", title: "Mine", body: "My comment", issue_assignee_type: "agent", issue_assignee_id: "agent-mine" }),
+      ],
+      null,
+      "/acme/issues",
+      [],
+      [],
+      [{ id: "agent-x", owner_id: "someone" }, { id: "agent-mine", owner_id: "member-1" }],
+    );
+    const label = "Unsubscribe & archive";
+
+    fireEvent.mouseEnter(rows()[1]!.firstElementChild!);
+    const mine = await screen.findByText("My comment", { selector: "[data-inbox-card] p" }, { timeout: 2000 });
+    expect(within(mine.closest<HTMLElement>("[data-inbox-card]")!).queryByRole("button", { name: label })).toBeNull();
+    fireEvent.mouseLeave(rows()[1]!.firstElementChild!);
+
+    fireEvent.mouseEnter(rows()[0]!.firstElementChild!);
+    const theirs = await screen.findByText("Their comment", { selector: "[data-inbox-card] p" }, { timeout: 2000 });
+    fireEvent.click(within(theirs.closest<HTMLElement>("[data-inbox-card]")!).getByRole("button", { name: label }));
+    expect(state.unsubscribeArchive).toHaveBeenCalledWith({ id: "n1", issueId: "issue-a", scope: "issue" });
+  });
+
+  it("closes the card when the row is pressed, and keeps a pending hover from reopening it", async () => {
+    renderSection([item({ id: "n1", issue_id: "issue-a", title: "Commented", body: "Ship it on Friday" })]);
+    const trigger = rows()[0]!.firstElementChild!;
+    const card = () => document.querySelector("[data-inbox-card]");
+
+    fireEvent.mouseEnter(trigger);
+    await screen.findByText("Ship it on Friday", { selector: "[data-inbox-card] p" }, { timeout: 2000 });
+    fireEvent.pointerDown(trigger);
+    await waitFor(() => expect(card()).toBeNull());
+
+    // Pressed before the hover delay ran out: the card stays shut.
+    fireEvent.mouseLeave(trigger);
+    fireEvent.pointerLeave(trigger);
+    fireEvent.mouseEnter(trigger);
+    fireEvent.pointerDown(trigger);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(card()).toBeNull();
+
+    // Leaving the row lets the next hover show it again.
+    fireEvent.mouseLeave(trigger);
+    fireEvent.pointerLeave(trigger);
+    fireEvent.mouseEnter(trigger);
+    await screen.findByText("Ship it on Friday", { selector: "[data-inbox-card] p" }, { timeout: 2000 });
   });
 
   it("archives a row from its hover button", () => {
@@ -350,6 +490,44 @@ describe("InboxSection", () => {
     expect(state.archiveCompleted).toHaveBeenCalledTimes(1);
     fireEvent.click(within(await open()).getByRole("menuitem", { name: "Archive all" }));
     expect(state.archiveAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("says a row is back from a snooze, with what arrived meanwhile, until it is read", () => {
+    const snooze = { snoozed_until: "2026-11-12T09:00:00Z", snoozed_at: "2026-11-10T09:00:00Z" };
+    const items = [
+      item({ id: "n3", issue_id: "issue-a", created_at: "2026-11-11T10:00:00Z", ...snooze }),
+      item({ id: "n2", issue_id: "issue-a", created_at: "2026-11-11T08:00:00Z", ...snooze }),
+      item({ id: "n1", issue_id: "issue-a", created_at: "2026-11-10T08:00:00Z", ...snooze }),
+      item({ id: "n4", issue_id: "issue-b", title: "Newer", created_at: "2026-11-11T12:00:00Z" }),
+    ];
+    const { unmount } = renderSection(items);
+    // Back at 09:00 on the 12th, so it sorts above the newer notification.
+    expect(rows()[0]).toHaveTextContent("Snooze ended · 2 updates while snoozed");
+    expect(rows()[1]).toHaveTextContent("Newer");
+    unmount();
+
+    renderSection(items.map((row) => ({ ...row, read: true })));
+    expect(rows()[0]).not.toHaveTextContent("Snooze ended");
+  });
+
+  it("snoozes a row from its hover button", async () => {
+    renderSection([item({ id: "n1", issue_id: "issue-a" })]);
+    fireEvent.click(screen.getByRole("button", { name: "Snooze" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^1 day/ }));
+    expect(state.snooze).toHaveBeenCalledWith({ id: "n1", until: expect.any(Date) });
+  });
+
+  it("opens the snoozed list from the section header, with its count", async () => {
+    const until = "2099-01-01T09:00:00Z";
+    const { nav } = renderSection([item({ id: "n1", issue_id: "issue-a" })], null, "/acme/issues", [], [
+      { issue_id: "issue-z", item_id: "z1", snoozed_until: until, snoozed_at: "2026-11-10T09:00:00Z", updates: 0 },
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Inbox actions" }));
+    const entry = within(await screen.findByRole("menu")).getByRole("menuitem", { name: /View snoozed/ });
+    expect(entry).toHaveTextContent("1");
+    fireEvent.click(entry);
+    expect(nav.push).toHaveBeenCalledWith("/acme/issues?view=snoozed");
   });
 
   it("opens the archive from the section header", async () => {
