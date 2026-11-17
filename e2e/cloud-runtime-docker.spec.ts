@@ -31,7 +31,10 @@ test.describe("cloud runtime with local docker fleet", () => {
     expect(service.specs.length).toBeGreaterThan(0);
 
     // The entry appears only because the capability response advertises it.
-    await page.getByRole("button", { name: "Add runtime" }).click();
+    await page
+      .getByRole("button", { name: "Add runtime" })
+      .filter({ hasText: "Add runtime" })
+      .click();
     await page.getByRole("menuitem", { name: /Cloud Runtime/ }).click();
 
     const dialog = page.getByRole("dialog");
