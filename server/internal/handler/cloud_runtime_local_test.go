@@ -180,7 +180,7 @@ func seedOtherWorkspaceTask(t *testing.T, fx localFleetTestFixture, status strin
 	agentID := dbfx.Agent(t, "Fleet cross agent "+suffix, runtimeID, testutil.Cols{
 		"workspace_id": workspaceID,
 	})
-	return dbfx.Task(t, agentID, testutil.Cols{"status": status})
+	return dbfx.Task(t, agentID, testutil.Cols{"runtime_id": runtimeID, "status": status})
 }
 
 func localFleetNodeTargetState(t *testing.T, nodeID string) string {
@@ -204,7 +204,7 @@ func localFleetPhaseCount(t *testing.T, nodeID, phase string) int {
 func TestPrepareStopRejectsActiveButAllowsQueued(t *testing.T) {
 	coord := newLocalFleetTestCoordinator(t, 0)
 	fx := seedLocalFleetTestNode(t, localFleetStateRunning)
-	taskID := dbfx.Task(t, fx.AgentID, testutil.Cols{"status": "running"})
+	taskID := dbfx.Task(t, fx.AgentID, testutil.Cols{"runtime_id": fx.RuntimeID, "status": "running"})
 
 	if _, err := coord.Prepare(context.Background(), testUserID, localFleetNodeRef{InstanceID: fx.ContainerID}, "stop", localFleetTestKey(t, "stop-running")); !errors.Is(err, ErrNodeBusy) {
 		t.Fatalf("running task: err = %v, want ErrNodeBusy", err)
@@ -229,7 +229,7 @@ func TestPrepareStopRejectsActiveButAllowsQueued(t *testing.T) {
 func TestPrepareDeleteRejectsQueuedRuns(t *testing.T) {
 	coord := newLocalFleetTestCoordinator(t, 0)
 	fx := seedLocalFleetTestNode(t, localFleetStateRunning)
-	dbfx.Task(t, fx.AgentID, testutil.Cols{"status": "queued"})
+	dbfx.Task(t, fx.AgentID, testutil.Cols{"runtime_id": fx.RuntimeID, "status": "queued"})
 
 	if _, err := coord.Prepare(context.Background(), testUserID, localFleetNodeRef{InstanceID: fx.ContainerID}, "delete", localFleetTestKey(t, "delete-queued")); !errors.Is(err, ErrNodeBusy) {
 		t.Fatalf("delete with queued run: err = %v, want ErrNodeBusy", err)
@@ -245,7 +245,7 @@ func TestPrepareDeleteRejectsQueuedRuns(t *testing.T) {
 func TestPrepareDeleteRejectsActiveRuns(t *testing.T) {
 	coord := newLocalFleetTestCoordinator(t, 0)
 	fx := seedLocalFleetTestNode(t, localFleetStateRunning)
-	dbfx.Task(t, fx.AgentID, testutil.Cols{"status": "dispatched"})
+	dbfx.Task(t, fx.AgentID, testutil.Cols{"runtime_id": fx.RuntimeID, "status": "dispatched"})
 
 	if _, err := coord.Prepare(context.Background(), testUserID, localFleetNodeRef{InstanceID: fx.ContainerID}, "delete", localFleetTestKey(t, "delete-active")); !errors.Is(err, ErrNodeBusy) {
 		t.Fatalf("delete with dispatched run: err = %v, want ErrNodeBusy", err)
@@ -531,7 +531,7 @@ func TestPrepareRechecksBusyAfterDiagnose(t *testing.T) {
 	coord := newLocalFleetTestCoordinator(t, 0)
 	coord.diagnose = func(context.Context, string, string) (int, error) {
 		// Work arrives while prepare holds no transaction lock.
-		dbfx.Task(t, fx.AgentID, testutil.Cols{"status": "running"})
+		dbfx.Task(t, fx.AgentID, testutil.Cols{"runtime_id": fx.RuntimeID, "status": "running"})
 		return 0, nil
 	}
 

@@ -67,6 +67,10 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"dingtalk_group_route":               workspaceDelete,
 	"entitlement_limit_overage":          workspaceDelete,
 	"feedback":                           workspaceDeleteDetach,
+	"fleet_credential_profile":           workspaceDeleteKeep, // owner-scoped; no workspace_id
+	"fleet_node":                         workspaceDeleteKeep, // owner-scoped; no workspace_id
+	"fleet_node_credential":              workspaceDeleteKeep, // owner-scoped; no workspace_id
+	"fleet_node_operation":               workspaceDeleteKeep, // owner-scoped; no workspace_id
 	"github_installation":                workspaceDelete,
 	"github_pending_check_suite":         workspaceDelete,
 	"github_pending_installation":        workspaceDeleteKeep,

@@ -107,7 +107,7 @@ func TestClaimTasksForRuntimesStopsAtFleetGuard(t *testing.T) {
 	guard := &recordingFleetGuard{err: errors.New("fleet node unavailable")}
 	svc.FleetGuard = guard
 
-	claimed, err := svc.ClaimTasksForRuntimes(ctx, []pgtype.UUID{util.MustParseUUID(rt1), util.MustParseUUID(rt2)}, 5)
+	claimed, _, err := svc.ClaimTasksForRuntimes(ctx, []pgtype.UUID{util.MustParseUUID(rt1), util.MustParseUUID(rt2)}, 5)
 	if err != nil {
 		t.Fatalf("claim tasks: %v", err)
 	}
