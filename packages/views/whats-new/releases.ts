@@ -46,8 +46,46 @@ export const WHATS_NEW_DECK_SINCE = "0.9.0";
  */
 export const WHATS_NEW_RELEASES: WhatsNewRelease[] = [
   {
-    version: "0.10.0",
+    version: "0.11.0",
     date: "2026-11-17",
+    highlights: [
+      {
+        id: "local-docker-cloud-runtime",
+        icon: Server,
+        hero: ENVIRONMENTS_HERO,
+        copy: {
+          en: {
+            title: "Run a local Docker Cloud Runtime",
+            body: "Bring up Fleet with make up C=api,web,fleet on Docker Desktop, Colima, Multipass, or a Linux Docker daemon. Known limitations are documented in the design doc §14.6.",
+          },
+        },
+      },
+      {
+        id: "managed-claude-nodes",
+        icon: Terminal,
+        action: { kind: "route", to: (p) => p.runtimes() },
+        copy: {
+          en: {
+            title: "Create and manage Claude nodes",
+            body: "In Runtimes, add a node, then start, stop, reboot, or delete it from its row. Each node runs one task at a time.",
+          },
+        },
+      },
+      {
+        id: "fleet-credential-profiles",
+        icon: Lock,
+        copy: {
+          en: {
+            title: "Keep model keys in a per-owner profile",
+            body: "Fleet reads keys only from .dev/fleet-credentials.json and writes them to a read-only secrets volume; they never enter the image, container environment, database, or Git.",
+          },
+        },
+      },
+    ],
+  },
+  {
+    version: "0.10.0",
+    date: "2026-11-16",
     highlights: [
       {
         id: "inbox-snooze",
@@ -233,41 +271,6 @@ export const WHATS_NEW_RELEASES: WhatsNewRelease[] = [
           fr: {
             title: "Faites créer votre thème par un agent",
             body: "Dans une discussion ou une tâche, demandez un thème à n'importe quel agent en décrivant les couleurs, le fond ou l'effet verre souhaités. Il crée et vérifie le thème, puis vous le remet ; activez-le ensuite dans Paramètres → Apparence.",
-          },
-        },
-      },
-      {
-        id: "local-docker-cloud-runtime",
-        icon: Server,
-        action: {
-          kind: "external",
-          href: "https://github.com/multica-ai/multica/blob/main/docs/superpowers/specs/2026-10-04-local-docker-cloud-runtime-design.md#146-未覆盖项与已知缺口",
-        },
-        copy: {
-          en: {
-            title: "Run a local Docker Cloud Runtime",
-            body: "Bring up Fleet with make up C=api,web,fleet on Docker Desktop, Colima, Multipass, or a Linux Docker daemon. Known limitations are documented in the design doc §14.6.",
-          },
-        },
-      },
-      {
-        id: "managed-claude-nodes",
-        icon: Terminal,
-        action: { kind: "route", to: (p) => p.runtimes() },
-        copy: {
-          en: {
-            title: "Create and manage Claude nodes",
-            body: "In Runtimes, add a node, then start, stop, reboot, or delete it from its row. Each node runs one task at a time.",
-          },
-        },
-      },
-      {
-        id: "fleet-credential-profiles",
-        icon: Lock,
-        copy: {
-          en: {
-            title: "Keep model keys in a per-owner profile",
-            body: "Fleet reads keys only from .dev/fleet-credentials.json and writes them to a read-only secrets volume; they never enter the image, container environment, database, or Git.",
           },
         },
       },
