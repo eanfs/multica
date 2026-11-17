@@ -140,18 +140,18 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
-	// Local Docker Fleet tables and indexes (migrations 681-694): each index
+	// Local Docker Fleet tables and indexes (migrations 695-708): each index
 	// build is single-statement and concurrent, so an interrupted run leaves
 	// an INVALID relation that IF NOT EXISTS would skip on retry.
-	"685_fleet_node_pkey":                         "fleet_node_id_key",
-	"686_fleet_node_owner_namespace_idx":          "idx_fleet_node_owner_namespace",
-	"687_fleet_node_namespace_idx":                "idx_fleet_node_namespace",
-	"688_fleet_node_daemon_idx":                   "idx_fleet_node_daemon",
-	"689_fleet_node_credential_token_key":         "fleet_node_credential_token_hash_key",
-	"690_fleet_node_credential_node_idx":          "idx_fleet_node_credential_node",
-	"691_fleet_node_operation_node_idx":           "idx_fleet_node_operation_node_created",
-	"692_fleet_node_operation_idem_key":           "fleet_node_operation_idempotency_key_key",
-	"693_fleet_credential_profile_owner_key":      "fleet_credential_profile_owner_key",
+	"699_fleet_node_pkey":                         "fleet_node_id_key",
+	"700_fleet_node_owner_namespace_idx":          "idx_fleet_node_owner_namespace",
+	"701_fleet_node_namespace_idx":                "idx_fleet_node_namespace",
+	"702_fleet_node_daemon_idx":                   "idx_fleet_node_daemon",
+	"703_fleet_node_credential_token_key":         "fleet_node_credential_token_hash_key",
+	"704_fleet_node_credential_node_idx":          "idx_fleet_node_credential_node",
+	"705_fleet_node_operation_node_idx":           "idx_fleet_node_operation_node_created",
+	"706_fleet_node_operation_idem_key":           "fleet_node_operation_idempotency_key_key",
+	"707_fleet_credential_profile_owner_key":      "fleet_credential_profile_owner_key",
 	"676_chat_wakeup_due_idx":                                   "idx_chat_wakeup_due",
 	"677_chat_wakeup_session_idx":                               "idx_chat_wakeup_session",
 	"678_chat_wakeup_requester_idx":                             "idx_chat_wakeup_requester",
