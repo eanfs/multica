@@ -3,7 +3,7 @@
 日期：2026-11-09（2026-11-15 二次同步后复审）
 基线：已合并 `origin/main`（`739756533`，merge `fd6958907`）与 `upstream/main`（`975aa7d0f`，307 个新提交，merge `8866ae98c`）；本分支相对 upstream/main 50 个提交
 目标版本：**v0.10.0**。上游已于 2026-11-13 发布 `v0.9.0`（Projects/Inbox/bulk-edit 等，与 Fleet 无重叠），本版本顺延为 v0.10.0
-迁移基线：Fleet 迁移已从 611–624 重编号为 **660–673**（上游占用 611–659），并按新规则注册 `concurrentIndexCleanups`（commit `44340c38a`）
+迁移基线：Fleet 迁移经两次重编号现为 **681–694**（上游先后占用 611–659 与 660–680），并按新规则注册 `concurrentIndexCleanups`（commits `44340c38a`/`6615d3d2e`）
 
 ## 1. 版本目标
 
@@ -47,7 +47,7 @@ Fleet 控制面、PostgreSQL、以及装有 multica daemon + Claude Code 的节�
 - 分支相对 main 48 个提交、131 个文件，覆盖后端/Fleet/数据库迁移 611–624/前端/部署/测试/文档。
 - 已合并 `origin/main` `739756533`（2026-11-09），解决 3 处冲突：`runtimes-page.tsx`、`runtimes-page.test.tsx`、`server/cmd/server/router.go`。
 - 已合并 `upstream/main` `975aa7d0f`（2026-11-15，+307 提交，含 v0.9.0/0.9.x 功能），仅 2 处冲突（`Makefile` help、`scripts/dev-env.sh` 的 CDP/seed_dev_workspace），全部双侧保留；合并后 `go build ./...`、`go vet ./internal/fleet`、`go test ./cmd/migrate ./internal/migrations`、`dev-env/fleet-env.test.sh`、views runtimes **370 tests** 全绿。
-- **迁移重编号**：上游占用 611–659，Fleet 迁移改为 660–673（28 个文件 git mv），9 个并发索引按新 AGENTS 规则注册进 `concurrentIndexCleanups`。
+- **迁移重编号（两次）**：上游先后占用 611–659 与 660–680，Fleet 迁移现为 681–694，9 个并发索引按新 AGENTS 规则注册进 `concurrentIndexCleanups`。
 - 真实 Colima 手动端到端已验证：`make up C=api,fleet` → Fleet ready；创建节点 → Claude Runtime online（2.1.0）；stop/start/delete 生命周期；节点容器与卷清理。
 - `TestFleetNodeLifecycleRealDocker` 在 Colima 上 **PASS**（25.27s，隔离 DB + fake-Claude 镜像）。
 - 脚本测试（`fleet-env.test.sh`、`dev-env.test.sh`、`selfhost-config.test.sh`）、Go build/vet、前端 typecheck/相关 vitest 已通过。
@@ -92,7 +92,7 @@ Fleet 控制面、PostgreSQL、以及装有 multica daemon + Claude Code 的节�
 ## 7. 发布清单
 
 1. 开 PR 前再次合并最新 `origin/main` 与 `upstream/main`（本次已合并至 `975aa7d0f`；上游若再前进需重复合并），冲突解决后运行 `go build ./...`、`pnpm typecheck`、`pnpm test:scripts`、views/core 定向测试。
-2. 迁移规则（上游新增）：推送迁移前 rebase 最新 main、编号取当前最大前缀+1（当前 673，下一个从 674 起）、并发索引必须在 `server/cmd/migrate/main.go` 注册；Fleet 迁移已按此整改。
+2. 迁移规则（上游新增）：推送迁移前 rebase 最新 main、编号取当前最大前缀+1（当前 694，下一个从 695 起）、并发索引必须在 `server/cmd/migrate/main.go` 注册；Fleet 迁移已按此整改。
 3. 合并分支到 `main`（PR，按仓库模板；UI 改动需附截图/录屏）。
 2. 运行 `make check`（Web/API）+ `make test`（PostgreSQL）+ fleetintegration。
 3. 更新 `CHANGELOG`/release notes：新增 Colima/Docker Desktop/Linux 后端、本地 Fleet、节点生命周期、能力驱动 UI、已知限制。
@@ -111,7 +111,7 @@ Fleet 控制面、PostgreSQL、以及装有 multica daemon + Claude Code 的节�
 | 首次镜像构建耗时 | 启动体验差 | 文档说明首次较慢；CI 预热镜像 |
 | 旧 `.env` 的 host.docker.internal | 切换 Colima 后 API 地址错误 | bind_paths 每次重新派生；旧 env 自动修正 |
 | 上游 main 快速前进，合并冲突 | 分支落后、冲突解决引入回归 | 小步合并；已两次合并（origin `739756533` / upstream `975aa7d0f`），每次合并后跑 build/typecheck/定向测试；PR 前重复该流程 |
-| 上游占用迁移编号（本次 611–659 vs Fleet 611–624）| schema_migrations 版本冲突、迁移互相覆盖 | 已重编号 660–673 并注册索引清理；后续新增迁移从 674 起、PR 前 rebase |
+| 上游占用迁移编号（本次 611–659 vs Fleet 611–624）| schema_migrations 版本冲突、迁移互相覆盖 | 已重编号 681–694 并注册索引清理；后续新增迁移从 695 起、PR 前 rebase |
 
 ## 9. 后续版本
 
