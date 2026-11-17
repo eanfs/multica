@@ -10,4 +10,17 @@ describe("WHATS_NEW_RELEASES", () => {
     ).map((r) => r.version);
     expect(missing).toEqual([]);
   });
+
+  it("documents the local Docker cloud runtime in 0.10.0", () => {
+    const release = WHATS_NEW_RELEASES.find((r) => r.version === "0.10.0");
+    expect(release?.date).toBe("2026-11-17");
+    expect(release?.highlights.map((h) => h.id)).toContain(
+      "local-docker-cloud-runtime",
+    );
+    const text = (release?.highlights ?? [])
+      .map((h) => `${h.copy.en.title} ${h.copy.en.body}`)
+      .join("\n");
+    expect(text).toContain("Cloud Runtime");
+    expect(text).toContain("fleet-credentials.json");
+  });
 });
