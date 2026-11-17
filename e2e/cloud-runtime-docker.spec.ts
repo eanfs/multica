@@ -31,10 +31,13 @@ test.describe("cloud runtime with local docker fleet", () => {
     expect(service.specs.length).toBeGreaterThan(0);
 
     // The entry appears only because the capability response advertises it.
-    await page
-      .getByRole("button", { name: "Add runtime" })
-      .filter({ hasText: "Add runtime" })
-      .click();
+    // Click the header action, not the intro's visible-text button: the header
+    // trigger is icon-only (aria-label) and is the production entry point.
+    // The header is a <header> nested in the app shell, so it is not exposed
+    // as the ARIA banner landmark; scope by the shared PageHeader marker.
+    const header = page.locator('header[data-mc="page-header"]');
+    await expect(header).toHaveCount(1);
+    await header.getByRole("button", { name: "Add runtime" }).click();
     await page.getByRole("menuitem", { name: /Cloud Runtime/ }).click();
 
     const dialog = page.getByRole("dialog");
