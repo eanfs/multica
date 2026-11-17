@@ -1,6 +1,6 @@
 module github.com/multica-ai/multica/server
 
-go 1.26.9
+go 1.26.11
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.47.0
@@ -10,7 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.49.0
 	github.com/aws/smithy-go v1.28.1
 	github.com/containerd/errdefs v1.0.0
-	github.com/docker/docker v28.5.1+incompatible
+	github.com/docker/docker v28.5.2+incompatible
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/go-chi/cors v1.2.2
 	github.com/go-redis/redismock/v9 v9.2.0
