@@ -46,7 +46,7 @@ export const WHATS_NEW_DECK_SINCE = "0.9.0";
  */
 export const WHATS_NEW_RELEASES: WhatsNewRelease[] = [
   {
-    version: "0.12.0",
+    version: "0.11.1",
     date: "2026-11-18",
     highlights: [
       {

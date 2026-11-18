@@ -11,13 +11,13 @@ describe("WHATS_NEW_RELEASES", () => {
     expect(missing).toEqual([]);
   });
 
-  it("documents the local Docker cloud runtime in 0.12.0", () => {
+  it("documents the local Docker cloud runtime in 0.11.1", () => {
     const versions = WHATS_NEW_RELEASES.map((r) => r.version);
-    expect(versions[0]).toBe("0.12.0");
+    expect(versions[0]).toBe("0.11.1");
     expect(versions).toContain("0.11.0");
     expect(versions).toContain("0.10.0");
 
-    const release = WHATS_NEW_RELEASES.find((r) => r.version === "0.12.0");
+    const release = WHATS_NEW_RELEASES.find((r) => r.version === "0.11.1");
     expect(release?.date).toBe("2026-11-18");
     expect(release?.highlights.map((h) => h.id)).toContain(
       "local-docker-cloud-runtime",
