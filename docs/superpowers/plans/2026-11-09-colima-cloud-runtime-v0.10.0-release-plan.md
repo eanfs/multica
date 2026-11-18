@@ -1,8 +1,8 @@
-# v0.12.0 — Colima 本地 Cloud Runtime 版本计划（上游发布 v0.9.0/v0.10.0/v0.11.0 后三次顺延；文件名保留历史）
+# v0.11.1 — Colima 本地 Cloud Runtime 版本计划（上游发布 v0.9.0/v0.10.0/v0.11.0 后按仓库默认 patch bump 发布 v0.11.1；文件名保留历史）
 
 日期：2026-11-09（2026-11-15 二次同步后复审）
 基线：已合并 `origin/main`（`739756533`，merge `fd6958907`）与 `upstream/main`（`975aa7d0f`，307 个新提交，merge `8866ae98c`）；本分支相对 upstream/main 50 个提交
-目标版本：**v0.12.0**。上游先后发布 `v0.9.0`（2026-11-13）、`v0.10.0`（project folders 等）与 `v0.11.0`（2026-11-18，与 Fleet 无重叠），本版本三次顺延
+目标版本：**v0.11.1**。上游先后发布 `v0.9.0`（2026-11-13）、`v0.10.0`（project folders 等）与 `v0.11.0`（2026-11-18，与 Fleet 无重叠），本版本三次顺延
 迁移基线：Fleet 迁移经三次重编号现为 **695–708**（上游先后占用 611–659、660–680、681–682），并按新规则注册 `concurrentIndexCleanups`
 
 ## 1. 版本目标
@@ -74,7 +74,7 @@ Fleet 控制面、PostgreSQL、以及装有 multica daemon + Claude Code 的节�
 | M0 代码冻结 | 分支 `dsh-5d4b724e-22c8` 不再加功能；合并最新 `origin/main` | 全分支审查通过、无 Critical/Important；合并冲突解决后编译/typecheck/定向测试通过 | 已完成 |
 | M1 Colima 验证 | G1/G2/G3/G7；修复验证中发现的 Defect；合并后回归 | 上述门禁绿 | 已完成（G4/G5/G6/G8 待补） |
 | M2 回归与文档 | G4/G5/G6/G8/G9；补 CHANGELOG 与 release notes | 所有门禁绿或书面豁免 | 1–2 天 |
-| M3 发布 v0.12.0 | 合并到 main、CI 绿、打 tag `v0.12.0` | Release workflow 发布成功 | 0.5 天 |
+| M3 发布 v0.11.1 | 合并到 main、CI 绿、打 tag `v0.11.1` | Release workflow 发布成功 | 0.5 天 |
 | M4 版本后 | v0.10.1 修已知限制；v0.11 Multipass 实测/VM-provider 评估 | 各自计划 | 后续 |
 
 ## 6. 已知限制（v0.9.0 发布说明必须列出）
@@ -96,7 +96,7 @@ Fleet 控制面、PostgreSQL、以及装有 multica daemon + Claude Code 的节�
 3. 合并分支到 `main`（PR，按仓库模板；UI 改动需附截图/录屏）。
 2. 运行 `make check`（Web/API）+ `make test`（PostgreSQL）+ fleetintegration。
 3. 更新 `CHANGELOG`/release notes：新增 Colima/Docker Desktop/Linux 后端、本地 Fleet、节点生命周期、能力驱动 UI、已知限制。
-4. 打 tag：`v0.12.0`（按 `.github/RELEASING.md`，tag push 触发 Release workflow；CI 跑 Go tests + govulncheck）。
+4. 打 tag：`v0.11.1`（按 `.github/RELEASING.md`，tag push 触发 Release workflow；CI 跑 Go tests + govulncheck）。
 5. 发布物：容器镜像 `multica/fleet`、`multica/runtime-claude`（CI 构建）；文档站点更新。
 6. 发布后验证：在干净 macOS + Colima 环境按 README 走一遍 G1–G3。
 
