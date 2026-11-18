@@ -11,13 +11,14 @@ describe("WHATS_NEW_RELEASES", () => {
     expect(missing).toEqual([]);
   });
 
-  it("documents the local Docker cloud runtime in 0.11.0", () => {
+  it("documents the local Docker cloud runtime in 0.12.0", () => {
     const versions = WHATS_NEW_RELEASES.map((r) => r.version);
-    expect(versions[0]).toBe("0.11.0");
+    expect(versions[0]).toBe("0.12.0");
+    expect(versions).toContain("0.11.0");
     expect(versions).toContain("0.10.0");
 
-    const release = WHATS_NEW_RELEASES.find((r) => r.version === "0.11.0");
-    expect(release?.date).toBe("2026-11-17");
+    const release = WHATS_NEW_RELEASES.find((r) => r.version === "0.12.0");
+    expect(release?.date).toBe("2026-11-18");
     expect(release?.highlights.map((h) => h.id)).toContain(
       "local-docker-cloud-runtime",
     );
@@ -27,7 +28,7 @@ describe("WHATS_NEW_RELEASES", () => {
     expect(text).toContain("Cloud Runtime");
     expect(text).toContain("fleet-credentials.json");
 
-    // Upstream released 0.10.0; it must keep its own date and must not carry
+    // Upstream released 0.10.0 and 0.11.0; each must keep its own date and must not carry
     // our local-runtime highlight.
     const upstream = WHATS_NEW_RELEASES.find((r) => r.version === "0.10.0");
     expect(upstream?.date).toBe("2026-11-16");
