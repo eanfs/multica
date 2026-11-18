@@ -943,6 +943,7 @@ func (h *Handler) runtimeLiveProfile(ctx context.Context, rt db.AgentRuntime) (d
 func profileInstanceDeleteRefusal(rt db.AgentRuntime, profile db.RuntimeProfile, blockers profileInstanceBlockers) map[string]any {
 	known := blockers.known
 	ttlDays := service.OfflineRuntimeTTLDays()
+	keepsLegacyAnchor := !profile.DaemonID.Valid && profile.CreatedBy.Valid && profile.CreatedBy == rt.OwnerID
 	name := rt.Name
 	if rt.CustomName.Valid && strings.TrimSpace(rt.CustomName.String) != "" {
 		name = rt.CustomName.String
@@ -956,6 +957,8 @@ func profileInstanceDeleteRefusal(rt db.AgentRuntime, profile db.RuntimeProfile,
 
 	parts := []string{lead}
 	switch {
+	case keepsLegacyAnchor:
+		parts = append(parts, "Edit this custom runtime and choose the machine that should keep it. Unused copies on other machines are removed when the binding is saved; move or archive their agents and finish pending tasks first. Until then, this legacy instance is kept so the machine can reconnect.")
 	case rt.Status == "online":
 		parts = append(parts, fmt.Sprintf(
 			"It is still online, so its daemon would register it again. Stop that daemon first; Multica then removes the runtime automatically after %d days offline, once no agent is bound to it and nothing is still running on it.",
@@ -1008,6 +1011,10 @@ func profileInstanceDeleteRefusal(rt db.AgentRuntime, profile db.RuntimeProfile,
 		"runtime_status":          rt.Status,
 		"last_seen_at":            timestampToPtr(rt.LastSeenAt),
 		"auto_cleanup_after_days": ttlDays,
+	}
+	if keepsLegacyAnchor {
+		resp["auto_cleanup_after_days"] = 0
+		resp["requires_machine_binding"] = true
 	}
 	if known {
 		resp["active_agent_count"] = len(blockers.agents)
@@ -1323,6 +1330,26 @@ func (h *Handler) publishRuntimeTeardown(ctx context.Context, res service.Runtim
 	h.PublishRuntimeTeardown(ctx, res, wsID, "member", userID, "delete", true)
 }
 
+// refuseFleetManagedRuntime writes the shared 409 for a runtime whose
+// lifecycle belongs to a local fleet node. Ordinary runtime deletion must not
+// tear the row down behind the Fleet state machine: the node's own delete
+// operation revokes credentials and cleans containers first, and the runtime
+// row is the tombstone users rebind agents away from.
+//
+// Every runtime-scoped delete entry point calls this after loading the row and
+// checking permissions, so an installed client using the legacy route sees the
+// same refusal as the current UI.
+func refuseFleetManagedRuntime(w http.ResponseWriter, rt db.AgentRuntime) bool {
+	if strings.TrimSpace(rt.ManagedBy) != fleetManagedByLocalFleet {
+		return false
+	}
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error": "this runtime is managed by a local fleet node; delete it from the Cloud Runtime page",
+		"code":  "runtime_managed_by_fleet",
+	})
+	return true
+}
+
 func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
 	runtimeID := chi.URLParam(r, "runtimeId")
 	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
@@ -1345,6 +1372,9 @@ func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
 	// Permission: owner/admin can delete any runtime; members can only delete their own.
 	if !canEditRuntime(member, rt) {
 		writeError(w, http.StatusForbidden, "you can only delete your own runtimes")
+		return
+	}
+	if refuseFleetManagedRuntime(w, rt) {
 		return
 	}
 	if h.refuseQoderManagedRuntime(w, r.Context(), rt, "disconnect Qoder to remove its runtime") {
@@ -1566,6 +1596,9 @@ func (h *Handler) UnbindAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.Re
 	}
 	if !canEditRuntime(member, rt) {
 		writeError(w, http.StatusForbidden, "you can only delete your own runtimes")
+		return
+	}
+	if refuseFleetManagedRuntime(w, rt) {
 		return
 	}
 	if h.refuseQoderManagedRuntime(w, r.Context(), rt, "disconnect Qoder to remove its runtime") {

@@ -1,3 +1,5 @@
+import type { ListWeixinInstallationsResponse, WeixinLogin } from "../types/weixin";
+import { ListWeixinInstallationsSchema, WeixinLoginSchema, EMPTY_WEIXIN_INSTALLATIONS, INVALID_WEIXIN_LOGIN } from "../weixin/schema";
 import type { ZodType } from "zod";
 import { AgentRuntimeSchema, EMPTY_RUNTIME } from "../runtimes/schema";
 import type { IssueWakeup, IssueWakeupInput, IssueWakeupSummaryRow, PausedWakeup, SystemWakeup, WakeupRun, WorkspaceSystemWakeup } from "../types/issue-wakeup";
@@ -102,12 +104,14 @@ import type {
   AssigneeFrequencyEntry,
   TaskMessagePayload,
   TaskContextReceiptResponse,
+  RuntimeRateLimitsResponse,
   Attachment,
   ChatSession,
   ChatPinnedAgent,
   ChatMessage,
   ChatMessagesPage,
   ChatDraftRestoresResponse,
+  ChatWakeup,
   ChatPendingTask,
   PrioritizeQueuedChatTaskResponse,
   PendingChatTasksResponse,
@@ -259,8 +263,8 @@ import type {
   BillingCheckoutSessionStatus,
   CreateBillingPortalSessionResponse,
   WorkspaceSubscriptionSummary,
-  IssueLimitUsage,
   WorkspaceSubscriptionPrices,
+  WorkspaceFeatures,
   CreateWorkspaceSubscriptionCheckoutRequest,
   CreateWorkspaceSubscriptionCheckoutResponse,
   WorkspaceSubscriptionSeatReconcileResult,
@@ -280,10 +284,13 @@ import type {
   FeedbackContext,
   FeedbackKind,
 } from "../feedback/types";
-import type {
-  CloudRuntimeNode,
-  CreateCloudRuntimeNodeRequest,
-  ListCloudRuntimeNodesParams,
+import {
+  EMPTY_CLOUD_RUNTIME_SERVICE,
+  type CloudRuntimeNode,
+  type CloudRuntimeNodeRef,
+  type CloudRuntimeService,
+  type CreateCloudRuntimeNodeRequest,
+  type ListCloudRuntimeNodesParams,
 } from "../runtimes/cloud-runtime";
 import { type Logger, noopLogger } from "../logger";
 import { createRequestId, createSafeId } from "../utils";
@@ -300,6 +307,7 @@ import {
   AttachmentResponseSchema,
   CancelTaskResponseSchema,
   ChatDraftRestoresResponseSchema,
+  ChatWakeupListSchema,
   ChatMessageListSchema,
   ChatMessagesPageSchema,
   ChatPendingTaskSchema,
@@ -316,6 +324,7 @@ import {
   IssueTriggerPreviewSchema,
   CloudRuntimeNodeListSchema,
   CloudRuntimeNodeSchema,
+  CloudRuntimeServiceSchema,
   AgentBuilderRuntimeSwitchSchema,
   AgentBuilderSessionSchema,
   AgentBuilderSessionListSchema,
@@ -382,6 +391,7 @@ import {
   RuntimeUsageByAgentListSchema,
   RuntimeUsageByHourListSchema,
   RuntimeUsageListSchema,
+  RuntimeRateLimitsResponseSchema,
   SearchIssuesResponseSchema,
   ProjectSchema,
   ArchiveProjectResponseSchema,
@@ -413,10 +423,10 @@ import {
   BillingCheckoutSessionStatusSchema,
   CreateBillingPortalSessionResponseSchema,
   WorkspaceSubscriptionSummarySchema,
-  IssueLimitUsageSchema,
   BatchUpdateIssuesResponseSchema,
   UNCONFIRMED_BATCH_UPDATE,
   WorkspaceSubscriptionPricesSchema,
+  WorkspaceFeaturesSchema,
   CreateWorkspaceSubscriptionCheckoutResponseSchema,
   WorkspaceSubscriptionSeatReconcileResultSchema,
   WorkspaceSeatPurchasePreviewSchema,
@@ -458,6 +468,7 @@ import {
   EMPTY_CREATE_BILLING_PORTAL_SESSION_RESPONSE,
   EMPTY_CANCEL_TASK_RESPONSE,
   EMPTY_CHAT_DRAFT_RESTORES,
+  EMPTY_CHAT_WAKEUP_LIST,
   CreateFeedbackResponseSchema,
   EMPTY_CREATE_FEEDBACK_RESPONSE,
   InboxUnreadSummarySchema,
@@ -668,6 +679,12 @@ function assertAgentConversationStartersWriteSupported(data: {
     throw new Error(
       "This server version does not support agent conversation starters. Update the server before saving them.",
     );
+  }
+}
+
+function assertWebhookPayloadConditionsWriteSupported(data: Pick<UpdateAutopilotTriggerRequest, "event_filters">): void {
+  if (data.event_filters?.some((filter) => filter.conditions?.length) && !configStore.getState().webhookPayloadConditionsSupported) {
+    throw new Error("This server version does not support webhook payload conditions. Update the server before saving them.");
   }
 }
 
@@ -1120,6 +1137,15 @@ export class ApiClient {
       return undefined as T;
     }
     return res.json() as Promise<T>;
+  }
+
+  /**
+   * A JSON request to an endpoint this client has no method for, with the
+   * same auth, workspace scoping and errors. For packages that own their
+   * endpoints (packages/ee); parse the result before using it.
+   */
+  request(path: string, init?: RequestInit): Promise<unknown> {
+    return this.fetch<unknown>(path, init);
   }
 
   // Auth
@@ -1803,17 +1829,6 @@ export class ApiClient {
     );
   }
 
-  async getIssueLimitUsage(): Promise<IssueLimitUsage | null> {
-    const raw = await this.fetch<unknown>("/api/issues/limit-usage");
-    if (raw == null) return null;
-    return parseWithFallback<IssueLimitUsage | null>(
-      raw,
-      IssueLimitUsageSchema,
-      null,
-      { endpoint: "GET /api/issues/limit-usage" },
-    );
-  }
-
   async deleteIssue(id: string): Promise<void> {
     await this.fetch(`/api/issues/${id}`, { method: "DELETE" });
   }
@@ -2288,13 +2303,32 @@ export class ApiClient {
     );
   }
 
+  async getCloudRuntimeService(): Promise<CloudRuntimeService> {
+    const raw = await this.fetch<unknown>("/api/cloud-runtime/");
+    return parseWithFallback(
+      raw,
+      CloudRuntimeServiceSchema,
+      EMPTY_CLOUD_RUNTIME_SERVICE,
+      { endpoint: "GET /api/cloud-runtime/" },
+    );
+  }
+
   async createCloudRuntimeNode(
     data: CreateCloudRuntimeNodeRequest,
   ): Promise<CloudRuntimeNode> {
+    // The body is forwarded verbatim: the local Fleet decodes it with
+    // DisallowUnknownFields, so callers shape it per provider. The key travels
+    // in both places because the Fleet contract names it in the body while the
+    // rest of the write endpoints use the header.
     const res = await this.fetchRaw("/api/cloud-runtime/nodes", {
       method: "POST",
       body: JSON.stringify(data),
-      extraHeaders: { "Content-Type": "application/json" },
+      extraHeaders: {
+        "Content-Type": "application/json",
+        ...(data.idempotency_key
+          ? { "Idempotency-Key": data.idempotency_key }
+          : {}),
+      },
     });
     const raw = await res.json() as unknown;
     return parseWithFallback(
@@ -2305,11 +2339,63 @@ export class ApiClient {
     );
   }
 
-  async deleteCloudRuntimeNode(instanceId: string): Promise<void> {
+  // Local Fleet mode rejects writes without an Idempotency-Key so a retried
+  // click cannot enqueue the same container operation twice. The key travels
+  // in the header (the API coordinator reads it) and in the body (Fleet's own
+  // write contract names it there), so either hop can enforce it.
+  async deleteCloudRuntimeNode(
+    ref: CloudRuntimeNodeRef,
+    idempotencyKey: string,
+  ): Promise<void> {
     await this.fetchRaw("/api/cloud-runtime/nodes", {
       method: "DELETE",
-      body: JSON.stringify({ instance_id: instanceId }),
-      extraHeaders: { "Content-Type": "application/json" },
+      body: JSON.stringify(nodeRefBody(ref, idempotencyKey)),
+      extraHeaders: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+    });
+  }
+
+  async startCloudRuntimeNode(
+    instanceId: string,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.fetchRaw("/api/cloud-runtime/nodes/start", {
+      method: "POST",
+      body: JSON.stringify({ instance_id: instanceId, idempotency_key: idempotencyKey }),
+      extraHeaders: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+    });
+  }
+
+  async stopCloudRuntimeNode(
+    instanceId: string,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.fetchRaw("/api/cloud-runtime/nodes/stop", {
+      method: "POST",
+      body: JSON.stringify({ instance_id: instanceId, idempotency_key: idempotencyKey }),
+      extraHeaders: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+    });
+  }
+
+  async rebootCloudRuntimeNode(
+    instanceId: string,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.fetchRaw("/api/cloud-runtime/nodes/reboot", {
+      method: "POST",
+      body: JSON.stringify({ instance_id: instanceId, idempotency_key: idempotencyKey }),
+      extraHeaders: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
     });
   }
 
@@ -2457,6 +2543,19 @@ export class ApiClient {
       WorkspaceSubscriptionSummarySchema,
       null,
       { endpoint: "GET /api/cloud-subscriptions/summary" },
+    );
+  }
+
+  // Paid-feature states for read-only and upgrade UI (MUL-9482). A response
+  // that cannot be read falls back to every feature available: the server
+  // still enforces on write.
+  async getWorkspaceFeatures(workspaceId: string): Promise<WorkspaceFeatures> {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/features`);
+    return parseWithFallback<WorkspaceFeatures>(
+      raw,
+      WorkspaceFeaturesSchema,
+      { features: {} },
+      { endpoint: "GET /api/workspaces/:id/features" },
     );
   }
 
@@ -2721,6 +2820,16 @@ export class ApiClient {
     await this.fetch(
       `/api/workspaces/${workspaceId}/runtime-profiles/${profileId}`,
       { method: "DELETE" },
+    );
+  }
+
+  async getRuntimeRateLimits(runtimeId: string): Promise<RuntimeRateLimitsResponse> {
+    const raw = await this.fetch<unknown>(`/api/runtimes/${runtimeId}/rate-limits`);
+    return parseWithFallback<RuntimeRateLimitsResponse>(
+      raw,
+      RuntimeRateLimitsResponseSchema,
+      { rate_limits: null },
+      { endpoint: "GET /api/runtimes/:id/rate-limits" },
     );
   }
 
@@ -3173,8 +3282,8 @@ export class ApiClient {
   }
 
   // Inbox
-  async listInbox(): Promise<InboxItem[]> {
-    const raw = await this.fetch<unknown>("/api/inbox");
+  async listInbox(signal?: AbortSignal): Promise<InboxItem[]> {
+    const raw = await this.fetch<unknown>("/api/inbox", { signal });
     return parseWithFallback(raw, InboxItemListSchema, EMPTY_INBOX_ITEMS, {
       endpoint: "GET /api/inbox",
     });
@@ -3232,8 +3341,8 @@ export class ApiClient {
   }
 
   // The viewer's snoozed issues, soonest back first (MUL-9333).
-  async listSnoozedInbox(): Promise<SnoozedInboxIssue[]> {
-    const raw = await this.fetch<unknown>("/api/inbox/snoozed");
+  async listSnoozedInbox(signal?: AbortSignal): Promise<SnoozedInboxIssue[]> {
+    const raw = await this.fetch<unknown>("/api/inbox/snoozed", { signal });
     return parseWithFallback(raw, SnoozedInboxListSchema, EMPTY_SNOOZED_INBOX, {
       endpoint: "GET /api/inbox/snoozed",
     });
@@ -3255,8 +3364,8 @@ export class ApiClient {
   // to that has unread inbox items. Backs the workspace-switcher dot for
   // OTHER workspaces. Schema-guarded so a contract drift hides the dot rather
   // than crashing the sidebar.
-  async getInboxUnreadSummary(): Promise<InboxWorkspaceUnread[]> {
-    const raw = await this.fetch<unknown>("/api/inbox/unread-summary");
+  async getInboxUnreadSummary(signal?: AbortSignal): Promise<InboxWorkspaceUnread[]> {
+    const raw = await this.fetch<unknown>("/api/inbox/unread-summary", { signal });
     return parseWithFallback(raw, InboxUnreadSummarySchema, EMPTY_INBOX_UNREAD_SUMMARY, {
       endpoint: "GET /api/inbox/unread-summary",
     });
@@ -4228,11 +4337,13 @@ export class ApiClient {
     sessionId: string,
     content: string,
     attachmentIds?: string[],
+    options?: { queue?: boolean },
   ): Promise<SendChatMessageResponse> {
     const body: {
       content: string;
+      steer: boolean;
       attachment_ids?: string[];
-    } = { content };
+    } = { content, steer: options?.queue !== true };
     if (attachmentIds && attachmentIds.length > 0) {
       body.attachment_ids = attachmentIds;
     }
@@ -4326,6 +4437,45 @@ export class ApiClient {
     });
   }
 
+  /** A 404 means the backend predates chat wakeups: nothing to show. */
+  async listChatSessionWakeups(sessionId: string): Promise<ChatWakeup[]> {
+    let raw: unknown;
+    try {
+      raw = await this.fetch<unknown>(`/api/chat/sessions/${sessionId}/wakeups`);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) return [];
+      throw err;
+    }
+    return parseWithFallback(raw, ChatWakeupListSchema, EMPTY_CHAT_WAKEUP_LIST, {
+      endpoint: "GET /api/chat/sessions/{id}/wakeups",
+    });
+  }
+
+  async cancelChatWakeup(sessionId: string, wakeupId: string): Promise<void> {
+    await this.fetch(`/api/chat/sessions/${sessionId}/wakeups/${wakeupId}/cancel`, {
+      method: "POST",
+    });
+  }
+
+  async retryChatWakeup(sessionId: string, wakeupId: string): Promise<void> {
+    await this.fetch(`/api/chat/sessions/${sessionId}/wakeups/${wakeupId}/retry`, {
+      method: "POST",
+    });
+  }
+
+  async listMyChatWakeups(): Promise<ChatWakeup[]> {
+    let raw: unknown;
+    try {
+      raw = await this.fetch<unknown>(`/api/chat/my-wakeups`);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) return [];
+      throw err;
+    }
+    return parseWithFallback(raw, ChatWakeupListSchema, EMPTY_CHAT_WAKEUP_LIST, {
+      endpoint: "GET /api/chat/my-wakeups",
+    });
+  }
+
   async listPendingChatTasks(workspace?: WorkspaceScope): Promise<PendingChatTasksResponse> {
     return this.fetch(`/api/chat/pending-tasks`, { headers: workspaceHeader(workspace) });
   }
@@ -4374,8 +4524,12 @@ export class ApiClient {
   // `download_url` on every call (30 min expiry), so the click-time
   // download flow uses this endpoint to avoid handing the user a stale
   // signed URL cached in TanStack Query.
-  async getAttachment(id: string): Promise<Attachment> {
-    const raw = await this.fetch<unknown>(`/api/attachments/${id}`);
+  // `workspace` targets the workspace that owns the attachment when it is not
+  // the current one (a link pasted from another workspace).
+  async getAttachment(id: string, workspace?: WorkspaceScope): Promise<Attachment> {
+    const raw = await this.fetch<unknown>(`/api/attachments/${id}`, {
+      headers: workspaceHeader(workspace),
+    });
     return parseWithFallback(raw, AttachmentResponseSchema, EMPTY_ATTACHMENT, {
       endpoint: "GET /api/attachments/{id}",
     });
@@ -4409,10 +4563,13 @@ export class ApiClient {
   // the modal can render specific fallbacks instead of generic failure.
   async getAttachmentTextContent(
     id: string,
+    workspace?: WorkspaceScope,
   ): Promise<{ text: string; originalContentType: string }> {
     let res: Response;
     try {
-      res = await this.fetchRaw(`/api/attachments/${id}/content`);
+      res = await this.fetchRaw(`/api/attachments/${id}/content`, {
+        headers: workspaceHeader(workspace),
+      });
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.status === 413) throw new PreviewTooLargeError();
@@ -5307,6 +5464,7 @@ export class ApiClient {
   }
 
   async createAutopilotTrigger(autopilotId: string, data: CreateAutopilotTriggerRequest): Promise<AutopilotTrigger> {
+    assertWebhookPayloadConditionsWriteSupported(data);
     return this.fetch(`/api/autopilots/${autopilotId}/triggers`, {
       method: "POST",
       body: JSON.stringify(data),
@@ -5314,6 +5472,7 @@ export class ApiClient {
   }
 
   async updateAutopilotTrigger(autopilotId: string, triggerId: string, data: UpdateAutopilotTriggerRequest): Promise<AutopilotTrigger> {
+    assertWebhookPayloadConditionsWriteSupported(data);
     return this.fetch(`/api/autopilots/${autopilotId}/triggers/${triggerId}`, {
       method: "PATCH",
       body: JSON.stringify(data),
@@ -6079,6 +6238,30 @@ export class ApiClient {
     );
   }
 
+  async listWeixinInstallations(workspaceId: string): Promise<ListWeixinInstallationsResponse> {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/weixin/installations`);
+    return parseWithFallback(raw, ListWeixinInstallationsSchema, EMPTY_WEIXIN_INSTALLATIONS, { endpoint: "GET /api/workspaces/:id/weixin/installations" });
+  }
+
+  async beginWeixinLogin(workspaceId: string, agentId: string): Promise<WeixinLogin> {
+    const search = new URLSearchParams({ agent_id: agentId });
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/weixin/logins?${search}`, { method: "POST" });
+    return parseWithFallback(raw, WeixinLoginSchema, INVALID_WEIXIN_LOGIN, { endpoint: "POST /api/workspaces/:id/weixin/logins" });
+  }
+
+  async pollWeixinLogin(workspaceId: string, loginId: string, verifyCode = "", signal?: AbortSignal): Promise<WeixinLogin> {
+    const raw = await this.fetch<unknown>(`/api/workspaces/${workspaceId}/weixin/logins/${loginId}/poll`, { method: "POST", body: JSON.stringify({ verify_code: verifyCode }), signal });
+    return parseWithFallback(raw, WeixinLoginSchema, INVALID_WEIXIN_LOGIN, { endpoint: "POST /api/workspaces/:id/weixin/logins/:loginId/poll" });
+  }
+
+  async cancelWeixinLogin(workspaceId: string, loginId: string): Promise<void> {
+    await this.fetch(`/api/workspaces/${workspaceId}/weixin/logins/${loginId}`, { method: "DELETE" });
+  }
+
+  async deleteWeixinInstallation(workspaceId: string, installationId: string): Promise<void> {
+    await this.fetch(`/api/workspaces/${workspaceId}/weixin/installations/${installationId}`, { method: "DELETE" });
+  }
+
   async listTelegramInstallations(
     workspaceId: string,
   ): Promise<ListTelegramInstallationsResponse> {
@@ -6127,4 +6310,18 @@ export class ApiClient {
       { endpoint: "POST /api/telegram/binding/redeem" },
     );
   }
+}
+
+// A node write addresses exactly one of the container id or the fleet node id.
+// A failed launch has no container, so delete must be able to use node_id; the
+// backend rejects a body carrying both.
+function nodeRefBody(
+  ref: CloudRuntimeNodeRef,
+  idempotencyKey: string,
+): Record<string, string> {
+  const body: Record<string, string> = {};
+  if (ref.instanceId) body.instance_id = ref.instanceId;
+  if (ref.nodeId) body.node_id = ref.nodeId;
+  body.idempotency_key = idempotencyKey;
+  return body;
 }

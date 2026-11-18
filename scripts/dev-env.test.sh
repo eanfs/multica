@@ -8,23 +8,64 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
+
+# bind_paths is read-only: it only derives the Fleet paths, so the suite never
+# writes the checkout's .dev/ directory (a developer's real secret survives).
+cleanup() {
+  rm -rf "$tmp_dir"
+}
+trap cleanup EXIT
 
 export MULTICA_DEV_HOME="$tmp_dir/dev"
 export MULTICA_DEV_WORKSPACES_PARENT="$tmp_dir/workspaces-parent"
 export MULTICA_DEV_DESKTOP_APP_DATA="$tmp_dir/app-data"
 export MULTICA_DEV_PROFILES_HOME="$tmp_dir/profiles"
 
+# The test owns Fleet's variable namespace: inheriting the caller's .env would
+# make every derived value below depend on the invoking checkout.
+unset MULTICA_LOCAL_FLEET_URL MULTICA_LOCAL_FLEET_SECRET_FILE MULTICA_LOCAL_FLEET_NAMESPACE \
+  MULTICA_FLEET_PORT MULTICA_FLEET_API_URL MULTICA_FLEET_RUNTIME_IMAGE \
+  MULTICA_FLEET_CREDENTIALS_FILE MULTICA_CLOUD_URL
+
 fake_bin="$tmp_dir/bin"
 mkdir -p "$fake_bin"
+
+# destroy talks to Fleet, and Fleet talks to Docker. A fake CLI keeps every test
+# in this file away from a real daemon (and from the real "stop fleet"/"rm fleet"
+# those verbs would issue to a developer's running environment).
+export DOCKER_LOG="$tmp_dir/docker.log"
+export PSQL_LOG="$tmp_dir/psql.log"
+: > "$DOCKER_LOG"
+: > "$PSQL_LOG"
+
+cat > "$fake_bin/docker" <<'EOF'
+#!/usr/bin/env bash
+printf 'docker %s\n' "$*" >> "$DOCKER_LOG"
+# Simulates a stopped Docker daemon without a second fake CLI.
+if [ "${FAKE_DOCKER_UNAVAILABLE:-0}" = 1 ] && [ "${1:-}" = info ]; then
+  exit 1
+fi
+if [ "${FAKE_DOCKER_FAIL_RM:-0}" = 1 ]; then
+  case "$*" in
+    *"rm -sf fleet"*) exit 1 ;;
+  esac
+fi
+case "$*" in
+  *"context show"*) printf '%s\n' "${FAKE_DOCKER_CONTEXT:-desktop-linux}" ;;
+  *"ps -q fleet"*|*"ps -aq fleet"*) [ "${FAKE_DOCKER_NO_CONTAINER:-0}" = 1 ] || printf 'container-id\n' ;;
+esac
+exit 0
+EOF
+
 cat > "$fake_bin/psql" <<'EOF'
 #!/usr/bin/env bash
+printf 'psql %s\n' "$*" >> "$PSQL_LOG"
 case " $* " in
   *" DROP DATABASE "*) [ "${FAIL_DROP:-0}" != 1 ] ;;
   *) printf '1\n' ;;
 esac
 EOF
-chmod +x "$fake_bin/psql"
+chmod +x "$fake_bin/docker" "$fake_bin/psql"
 export PATH="$fake_bin:$PATH"
 
 fail() {
@@ -32,9 +73,13 @@ fail() {
   exit 1
 }
 
+file_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
 require_contains() {
   local file=$1 expected=$2
-  if ! grep -Fq "$expected" "$file"; then
+  if ! grep -Fq -- "$expected" "$file"; then
     echo "Expected output to contain: $expected" >&2
     echo "Observed:" >&2
     sed 's/^/  /' "$file" >&2
@@ -47,7 +92,7 @@ dev_env() {
 }
 
 write_manifest() {
-  local name=$1 dir=$2 offset=$3
+  local name=$1 dir=$2 offset=$3 namespace=${4:-}
   local profile="dev-dev-env-test-$offset"
   mkdir -p "$MULTICA_DEV_HOME/envs/$name/logs"
   cat > "$MULTICA_DEV_HOME/envs/$name/manifest.env" <<EOF
@@ -67,6 +112,10 @@ WORKSPACES_ROOT=$(printf '%q' "$MULTICA_DEV_WORKSPACES_PARENT/multica_workspaces
 DESKTOP_RENDERER_PORT=$((5174 + offset))
 DESKTOP_APP_SUFFIX=$name
 EOF
+  # Fleet-era manifests record the namespace; older ones omit it on purpose so
+  # the tests can prove destroy derives it from DIR instead of the caller.
+  [ -z "$namespace" ] || printf 'MULTICA_LOCAL_FLEET_NAMESPACE=%s\n' "$namespace" \
+    >> "$MULTICA_DEV_HOME/envs/$name/manifest.env"
 }
 
 out="$tmp_dir/out"
@@ -172,10 +221,12 @@ assert_stop_handles_listener() {
   )
 }
 
-# Launcher 100 owns listener 200; listener 999 is someone else's.
+# Launcher 100 owns listener 200; listener 999 is someone else's. The api's
+# sources fingerprint as fp-now, and `make up` recorded `api_build` for it
+# ("-" for no record).
 assert_component_state() {
   local case_name=$1 component=$2 listener=$3 reported_commit=$4 probe_ok=$5
-  local expected_state=$6 expected_detail=$7
+  local expected_state=$6 expected_detail=$7 api_build=${8:-100 fp-now}
   (
     # shellcheck disable=SC1090
     source "$root_dir/scripts/dev-env.sh"
@@ -186,12 +237,14 @@ assert_component_state() {
     TEST_LISTENER=$listener
     TEST_COMMIT=$reported_commit
     TEST_PROBE_OK=$probe_ok
+    [ "$api_build" = - ] || printf '%s\n' "$api_build" > "$(api_build_file)"
 
     component_pid() { printf '100'; }
     port_listener_pid() { printf '%s' "$TEST_LISTENER"; }
     process_group_id() { [ "$1" = 200 ] && printf '100' || printf '%s' "$1"; }
     process_parent_id() { printf '1'; }
     checkout_commit() { printf 'bbb2222'; }
+    api_source_fingerprint() { printf 'fp-now'; }
     health_json() {
       printf '{"pid":%s,"commit":"%s","started_at":"2026-01-01T00:00:00Z"}' "$TEST_LISTENER" "$TEST_COMMIT"
     }
@@ -260,6 +313,109 @@ assert_start_web() {
   )
 }
 
+# Launcher 100 owns listener 200, which reports `reported_commit`; a relaunch
+# gets launcher 101 and the same listener. The api's sources fingerprint as
+# fp-now, and `make up` previously recorded `api_build` ("-" for no record).
+assert_start_api() {
+  local case_name=$1 reported_commit=$2 api_build=$3 expected_output=$4
+  local expected_events=$5 expected_build=$6
+  (
+    # shellcheck disable=SC1090
+    source "$root_dir/scripts/dev-env.sh"
+    STATE_DIR="$tmp_dir/start-api-$case_name"
+    LOG_DIR="$STATE_DIR"
+    mkdir -p "$STATE_DIR"
+    BACKEND_PORT=18080
+    ENV_FILE=.env.example
+    local events="$STATE_DIR/events"
+    : > "$events"
+    printf '100\n' > "$(pid_file api)"
+    [ "$api_build" = - ] || printf '%s\n' "$api_build" > "$(api_build_file)"
+    TEST_COMMIT=$reported_commit
+
+    component_pid() { cat "$(pid_file api)"; }
+    port_listener_pid() { printf '200'; }
+    port_free() { :; }
+    process_group_id() { [ "$1" = 200 ] && component_pid api || printf '%s' "$1"; }
+    process_parent_id() { printf '1'; }
+    checkout_commit() { printf 'bbb2222'; }
+    api_source_fingerprint() { printf 'fp-now'; }
+    health_json() {
+      printf '{"pid":200,"commit":"%s","started_at":"2026-01-01T00:00:00Z"}' "$TEST_COMMIT"
+    }
+    now_epoch() { printf '1000'; }
+    sleep() { :; }
+    stop_component() { printf 'stop %s\n' "$1" >> "$events"; }
+    launch_detached() {
+      printf 'launch %s\n' "$1" >> "$events"
+      printf '101\n' > "$(pid_file api)"
+      TEST_COMMIT=bbb2222
+    }
+
+    local status=0
+    ( start_api ) > "$out" 2>&1 || status=$?
+    [ "$status" = 0 ] \
+      || { sed 's/^/  /' "$out" >&2; fail "$case_name start_api exited $status"; }
+    require_contains "$out" "$expected_output"
+    [ "$(cat "$events")" = "$expected_events" ] \
+      || fail "$case_name events = $(cat "$events"), want $expected_events"
+    [ "$(cat "$(api_build_file)" 2>/dev/null)" = "$expected_build" ] \
+      || fail "$case_name recorded api build = '$(cat "$(api_build_file)" 2>/dev/null)', want '$expected_build'"
+  )
+}
+
+# The fingerprint follows server/'s uncommitted state in a real repository:
+# tracked edits, staged edits and untracked files count, ignored files and
+# changes outside server/ do not, and undoing an edit restores it.
+assert_api_source_fingerprint() (
+  local repo="$tmp_dir/fingerprint-repo" clean
+  mkdir -p "$repo/server/bin"
+  git -C "$repo" init -q
+  printf 'package main\n' > "$repo/server/main.go"
+  printf 'bin/\n' > "$repo/server/.gitignore"
+  printf 'readme\n' > "$repo/README.md"
+  git -C "$repo" add -A
+  git -C "$repo" -c user.name=t -c user.email=t@example.com commit -qm init
+  # shellcheck disable=SC1090
+  source "$root_dir/scripts/dev-env.sh"
+  DIR="$repo"
+  fingerprint_is() {
+    local label=$1 relation=$2 actual
+    actual="$(api_source_fingerprint)"
+    [ -n "$actual" ] || fail "fingerprint $label: empty"
+    if [ "$relation" = same ]; then
+      [ "$actual" = "$clean" ] || fail "fingerprint $label: changed, want it unchanged"
+    else
+      [ "$actual" != "$clean" ] || fail "fingerprint $label: unchanged, want it changed"
+    fi
+    printf '%s' "$actual"
+  }
+  clean="$(api_source_fingerprint)"
+  [ -n "$clean" ] || fail "fingerprint of a clean tree is empty"
+  [ "$(api_source_fingerprint)" = "$clean" ] || fail "fingerprint is not stable"
+
+  printf 'built\n' > "$repo/server/bin/multica"
+  printf 'edited\n' >> "$repo/README.md"
+  fingerprint_is "ignored file and edit outside server/" same >/dev/null
+
+  printf '// edit\n' >> "$repo/server/main.go"
+  fingerprint_is "tracked edit" changed >/dev/null
+  git -C "$repo" add server/main.go
+  fingerprint_is "staged edit" changed >/dev/null
+  git -C "$repo" reset -q
+  git -C "$repo" checkout -q -- server/main.go
+  fingerprint_is "reverted edit" same >/dev/null
+
+  local first
+  printf 'package main\n' > "$repo/server/new.go"
+  first="$(fingerprint_is "untracked file" changed)"
+  printf '// edit\n' >> "$repo/server/new.go"
+  [ "$(fingerprint_is "edited untracked file" changed)" != "$first" ] \
+    || fail "fingerprint did not follow an edit to an untracked file"
+  rm "$repo/server/new.go"
+  fingerprint_is "removed untracked file" same >/dev/null
+)
+
 # ---------------------------------------------------------------------------
 # An empty registry is a normal state, not an error.
 # ---------------------------------------------------------------------------
@@ -303,10 +459,196 @@ rewritten="$(bash -c 'source "$1"; database_url_with_name "$2" "$3"' _ \
   || fail "database URL rewrite changed more than the database name: $rewritten"
 
 # ---------------------------------------------------------------------------
+# Reallocating ports moves the Fleet endpoints too: Fleet is published on
+# backend+20 and calls back to this checkout's backend. The API also needs the
+# local URL, the secret file and the namespace at boot, so an env file that
+# predates Fleet gets all of them appended and the secret itself is generated
+# with owner-only access; every other value stays byte-identical.
+# ---------------------------------------------------------------------------
+fleet_env="$tmp_dir/fleet-ports.env"
+cat > "$fleet_env" <<'EOF'
+PORT=18081
+FRONTEND_PORT=13001
+FRONTEND_ORIGIN=http://localhost:13001
+POSTGRES_DB=multica_old_1
+DATABASE_URL=postgres://multica:multica@localhost:5432/multica_old_1?sslmode=disable
+MULTICA_SERVER_URL=ws://localhost:18081/ws
+MULTICA_PUBLIC_URL=http://localhost:18081
+MULTICA_APP_URL=http://localhost:13001
+NEXT_PUBLIC_API_URL=http://localhost:18081
+NEXT_PUBLIC_WS_URL=ws://localhost:18081/ws
+MULTICA_FLEET_PORT=18900
+MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:18900
+MULTICA_FLEET_API_URL=http://host.docker.internal:18081
+UNRELATED=fleet-must-not-touch
+EOF
+fleet_secret="$tmp_dir/.dev/fleet-secret"
+DATABASE_URL='postgres://multica:multica@localhost:5432/multica_old_1?sslmode=disable' \
+  bash -c 'source "$1"; rewrite_env_ports "$2" 7 18087 13007 multica_new_7' _ \
+  "$root_dir/scripts/dev-env.sh" "$fleet_env" \
+  || fail "rewrite_env_ports failed on an env file with Fleet variables"
+for expected in \
+  'MULTICA_FLEET_PORT=18107' \
+  'MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:18107' \
+  "MULTICA_LOCAL_FLEET_SECRET_FILE=$fleet_secret" \
+  'MULTICA_FLEET_API_URL=http://host.docker.internal:18087' \
+  'UNRELATED=fleet-must-not-touch'; do
+  grep -Fqx "$expected" "$fleet_env" || fail "rewrite_env_ports did not set: $expected"
+done
+grep -Eq '^MULTICA_LOCAL_FLEET_NAMESPACE=[a-z0-9_]+$' "$fleet_env" \
+  || fail "rewrite_env_ports did not set MULTICA_LOCAL_FLEET_NAMESPACE"
+for key in MULTICA_FLEET_PORT MULTICA_LOCAL_FLEET_URL MULTICA_LOCAL_FLEET_SECRET_FILE MULTICA_LOCAL_FLEET_NAMESPACE; do
+  [ "$(grep -c "^$key=" "$fleet_env")" = 1 ] || fail "rewrite_env_ports duplicated $key"
+done
+[ -f "$fleet_secret" ] || fail "rewrite_env_ports did not create the Fleet service secret"
+[ "$(file_mode "$fleet_secret")" = 600 ] || fail "the Fleet service secret is not 0600"
+
+fleet_plain_env="$tmp_dir/fleet-plain-ports.env"
+cat > "$fleet_plain_env" <<'EOF'
+PORT=18081
+FRONTEND_PORT=13001
+FRONTEND_ORIGIN=http://localhost:13001
+POSTGRES_DB=multica_old_2
+DATABASE_URL=postgres://multica:multica@localhost:5432/multica_old_2?sslmode=disable
+MULTICA_SERVER_URL=ws://localhost:18081/ws
+MULTICA_PUBLIC_URL=http://localhost:18081
+MULTICA_APP_URL=http://localhost:13001
+NEXT_PUBLIC_API_URL=http://localhost:18081
+NEXT_PUBLIC_WS_URL=ws://localhost:18081/ws
+KEEP_ME=unchanged
+EOF
+DATABASE_URL='postgres://multica:multica@localhost:5432/multica_old_2?sslmode=disable' \
+  bash -c 'source "$1"; rewrite_env_ports "$2" 8 18088 13008 multica_new_8' _ \
+  "$root_dir/scripts/dev-env.sh" "$fleet_plain_env" \
+  || fail "rewrite_env_ports failed on an env file without Fleet variables"
+for expected in \
+  'MULTICA_FLEET_PORT=18108' \
+  'MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:18108' \
+  "MULTICA_LOCAL_FLEET_SECRET_FILE=$fleet_secret" \
+  'MULTICA_FLEET_API_URL=http://host.docker.internal:18088' \
+  'KEEP_ME=unchanged' \
+  'PORT=18088'; do
+  grep -Fqx "$expected" "$fleet_plain_env" || fail "rewrite_env_ports did not produce: $expected"
+done
+grep -Eq '^MULTICA_LOCAL_FLEET_NAMESPACE=[a-z0-9_]+$' "$fleet_plain_env" \
+  || fail "rewrite_env_ports did not add MULTICA_LOCAL_FLEET_NAMESPACE"
+
+# A Cloud URL and a local Fleet URL abort the server at boot. Cloud wins: the
+# local endpoint is never appended, and a value left by an earlier local run is
+# cleared instead of bricking the next start.
+fleet_cloud_env="$tmp_dir/cloud/fleet-cloud.env"
+mkdir -p "$tmp_dir/cloud"
+cat > "$fleet_cloud_env" <<'EOF'
+PORT=18081
+FRONTEND_PORT=13001
+POSTGRES_DB=multica_old_3
+DATABASE_URL=postgres://multica:multica@localhost:5432/multica_old_3?sslmode=disable
+MULTICA_CLOUD_URL=https://cloud.example.com
+MULTICA_FLEET_PORT=18901
+MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:18901
+MULTICA_LOCAL_FLEET_SECRET_FILE=.dev/fleet-secret
+EOF
+MULTICA_CLOUD_URL='https://cloud.example.com' \
+  DATABASE_URL='postgres://multica:multica@localhost:5432/multica_old_3?sslmode=disable' \
+  bash -c 'source "$1"; rewrite_env_ports "$2" 9 18089 13009 multica_new_9' _ \
+  "$root_dir/scripts/dev-env.sh" "$fleet_cloud_env" \
+  || fail "rewrite_env_ports failed on a Cloud-configured env file"
+if grep -Eq '^MULTICA_LOCAL_FLEET_URL=.+' "$fleet_cloud_env"; then
+  fail "rewrite_env_ports kept a local Fleet URL next to MULTICA_CLOUD_URL"
+fi
+if grep -Eq '^MULTICA_LOCAL_FLEET_SECRET_FILE=.+' "$fleet_cloud_env"; then
+  fail "rewrite_env_ports kept a local Fleet secret next to MULTICA_CLOUD_URL"
+fi
+[ ! -f "$tmp_dir/cloud/.dev/fleet-secret" ] \
+  || fail "rewrite_env_ports generated a Fleet secret for a Cloud-configured env"
+for expected in \
+  'MULTICA_FLEET_PORT=18109' \
+  'MULTICA_FLEET_API_URL=http://host.docker.internal:18089'; do
+  grep -Fqx "$expected" "$fleet_cloud_env" || fail "rewrite_env_ports did not produce: $expected"
+done
+
+# up clears a stale local endpoint on disk as well, because make re-reads the
+# env file for the child and the file outranks the exported shell value.
+stale_env="$tmp_dir/cloud/stale.env"
+printf 'MULTICA_CLOUD_URL=https://cloud.example.com\nMULTICA_LOCAL_FLEET_URL=http://127.0.0.1:18901\nMULTICA_LOCAL_FLEET_SECRET_FILE=.dev/fleet-secret\n' > "$stale_env"
+bash -c 'source "$1"; clear_local_fleet_env_file "$2"' _ \
+  "$root_dir/scripts/dev-env.sh" "$stale_env" > "$out"
+require_contains "$out" "Cleared local Fleet wiring"
+grep -Fqx 'MULTICA_LOCAL_FLEET_URL=' "$stale_env" \
+  || fail "clear_local_fleet_env_file kept the local Fleet URL"
+grep -Fqx 'MULTICA_LOCAL_FLEET_SECRET_FILE=' "$stale_env" \
+  || fail "clear_local_fleet_env_file kept the local Fleet secret path"
+
+# ---------------------------------------------------------------------------
+# bind_paths is what makes an existing .env (or a manifest written before the
+# wiring) address the Fleet the API and Compose actually use: URL, secret file
+# and namespace derive from the allocated port and this environment's DIR, never
+# from the invoking shell. It is read-only; "up" calls ensure_local_fleet_secret
+# before starting the API, and the manifest records the same identity.
+# ---------------------------------------------------------------------------
+(
+  # shellcheck disable=SC1090
+  source "$root_dir/scripts/dev-env.sh"
+  NAME=derive-910
+  DIR="$tmp_dir/derive-910-checkout"
+  mkdir -p "$DIR"
+  PROFILE=dev-derive-910
+  OFFSET=910
+  BACKEND_PORT=18990
+  FRONTEND_PORT=13910
+  DESKTOP_RENDERER_PORT=6084
+  DESKTOP_APP_SUFFIX=derive-910
+  CREATED_AT=2026-01-01T00:00:00Z
+  OWNER=human
+  TTL_HOURS=0
+  ENV_FILE=.env.example
+  DB_NAME=multica_derive_910
+  DATABASE_URL=postgres://multica:multica@localhost:5432/multica_derive_910?sslmode=disable
+  WORKSPACES_ROOT="$MULTICA_DEV_WORKSPACES_PARENT/multica_workspaces_$PROFILE"
+  EXPIRES_AT=""
+  bind_paths
+  [ "$MULTICA_FLEET_PORT" = 19010 ] || fail "bind_paths did not derive the Fleet port"
+  [ "$MULTICA_LOCAL_FLEET_URL" = "http://127.0.0.1:19010" ] \
+    || fail "bind_paths did not derive the Fleet URL: $MULTICA_LOCAL_FLEET_URL"
+  [ "$MULTICA_LOCAL_FLEET_SECRET_FILE" = "$DIR/.dev/fleet-secret" ] \
+    || fail "bind_paths did not derive the Fleet secret path: $MULTICA_LOCAL_FLEET_SECRET_FILE"
+  [ ! -e "$MULTICA_LOCAL_FLEET_SECRET_FILE" ] \
+    || fail "bind_paths must not create the Fleet secret (read-only verb)"
+  [ "$MULTICA_LOCAL_FLEET_NAMESPACE" = derive_910_checkout ] \
+    || fail "bind_paths derived namespace = $MULTICA_LOCAL_FLEET_NAMESPACE"
+  [ "$MULTICA_FLEET_API_URL" = "http://host.docker.internal:18990" ] \
+    || fail "bind_paths derived the Fleet API URL = $MULTICA_FLEET_API_URL"
+  # Colima exposes the host as host.lima.internal; bind_paths must derive that
+  # address instead of Docker Desktop's host.docker.internal.
+  (
+    export FAKE_DOCKER_CONTEXT=colima
+    export PATH="$fake_bin:/usr/bin:/bin"
+    unset MULTICA_FLEET_API_URL
+    bind_paths
+    [ "$MULTICA_FLEET_API_URL" = "http://host.lima.internal:18990" ] \
+      || fail "bind_paths derived the Colima Fleet API URL = $MULTICA_FLEET_API_URL"
+  ) || fail "bind_paths did not derive the Colima host address"
+  ensure_local_fleet_secret
+  [ -f "$MULTICA_LOCAL_FLEET_SECRET_FILE" ] || fail "up did not create the Fleet secret"
+  [ "$(file_mode "$MULTICA_LOCAL_FLEET_SECRET_FILE")" = 600 ] \
+    || fail "up created the Fleet secret with the wrong mode"
+  save_manifest
+) || fail "bind_paths did not wire Fleet for a fresh checkout"
+
+manifest_910="$MULTICA_DEV_HOME/envs/derive-910/manifest.env"
+grep -Fqx 'MULTICA_LOCAL_FLEET_NAMESPACE=derive_910_checkout' "$manifest_910" \
+  || fail "save_manifest did not record the derived Fleet namespace"
+grep -Fqx 'MULTICA_LOCAL_FLEET_URL=http://127.0.0.1:19010' "$manifest_910" \
+  || fail "save_manifest did not record the derived Fleet URL"
+grep -Fqx "MULTICA_LOCAL_FLEET_SECRET_FILE=$tmp_dir/derive-910-checkout/.dev/fleet-secret" "$manifest_910" \
+  || fail "save_manifest did not record the Fleet secret path"
+rm -rf "$MULTICA_DEV_HOME/envs/derive-910"
+
+# ---------------------------------------------------------------------------
 # A registered environment is visible to both renderings, and the JSON one
 # parses — agents read it, so a stray log line in it is a broken contract.
 # ---------------------------------------------------------------------------
-write_manifest "probe-901" "$tmp_dir/checkout" 901
+write_manifest "probe-901" "$tmp_dir/checkout" 901 "probe_ns"
 mkdir -p "$tmp_dir/checkout"
 
 dev_env list > "$out" 2>&1 || fail "list must succeed with one environment"
@@ -327,7 +669,31 @@ node -e '
       throw new Error(key + " state = " + payload.components[key].state);
     }
   }
+  // Fleet is optional but always rendered; its state depends on Docker and is
+  // never a reason for the status command to fail.
+  if (!payload.components.fleet) throw new Error("missing component fleet");
 ' "$out" || fail "status --json is not machine-readable"
+[ ! -e "$tmp_dir/checkout/.dev/fleet-secret" ] \
+  || fail "status created the Fleet secret (read-only verb)"
+
+# ---------------------------------------------------------------------------
+# Fleet wires into the component table without forcing Docker to be reachable:
+# a status read must render the state fleet_status reports, never abort.
+# ---------------------------------------------------------------------------
+fleet_state="$(bash -c '
+  # shellcheck disable=SC1090
+  source "$1"
+  fleet_status() { printf "running|http://127.0.0.1:9|stub"; }
+  component_state fleet
+' _ "$root_dir/scripts/dev-env.sh")"
+[ "$fleet_state" = "running|http://127.0.0.1:9|stub" ] \
+  || fail "component_state fleet = $fleet_state"
+
+bash -c '
+  # shellcheck disable=SC1090
+  source "$1"
+  case " $ALL_COMPONENTS " in *" fleet "*) ;; *) exit 1 ;; esac
+' _ "$root_dir/scripts/dev-env.sh" || fail "ALL_COMPONENTS does not include fleet"
 
 # ---------------------------------------------------------------------------
 # Stopping an environment that is not running is a no-op that SUCCEEDS.
@@ -345,6 +711,17 @@ if [ "$status" -ne 0 ]; then
   fail "down on a stopped environment exited $status, want 0"
 fi
 require_contains "$out" "stopped"
+[ ! -e "$tmp_dir/checkout/.dev/fleet-secret" ] \
+  || fail "down created the Fleet secret (read-only verb)"
+
+# `make down C=daemon` must reach the script as a component filter. Dropping C
+# here stops api and web too, which is what `make up C=...` users do not expect.
+make -s -n -C "$root_dir" down C=daemon > "$out" 2>&1 || fail "make -n down C=daemon failed"
+require_contains "$out" "dev-env.sh down --components daemon"
+if make -s -n -C "$root_dir" destroy C=daemon > "$out" 2>&1; then
+  fail "make destroy C=daemon must refuse instead of destroying the whole environment"
+fi
+require_contains "$out" "make down C=daemon"
 
 # Commands launched through env-exec must not inherit the daemon-task identity
 # hints that make human/profile CLI commands reject --profile.
@@ -404,6 +781,9 @@ assert_component_state api-current api 200 bbb2222 1 running "commit bbb2222"
 assert_component_state api-stale api 200 aaa1111 1 stale "running aaa1111, checkout at bbb2222; run make up"
 assert_component_state api-foreign api 999 bbb2222 1 mismatch "not this checkout/process"
 assert_component_state api-foreign-old api 999 aaa1111 1 mismatch "not this checkout/process"
+assert_component_state api-dirty api 200 bbb2222 1 stale "pid 200 was compiled before server/ changed (uncommitted changes differ); run make up" "100 fp-old"
+assert_component_state api-unrecorded api 200 bbb2222 1 stale "has no recorded source fingerprint" -
+assert_component_state api-other-launcher api 200 bbb2222 1 stale "has no recorded source fingerprint" "300 fp-now"
 assert_component_state web-running web 200 - 1 running "pid 200"
 assert_component_state web-busy web 200 - 0 busy "pid 200 is ours but not responding"
 assert_component_state web-foreign web 999 - 1 mismatch "listener pid 999 is not owned"
@@ -416,6 +796,100 @@ assert_start_web compiling 200 3 0 "web already running on :13000 (pid 200)" ""
 assert_start_web hung 200 never 0 "did not answer within 300s; restarting it" $'stop web\nlaunch web'
 assert_start_web foreign 999 0 1 "Port 13000 is busy: pid 999" ""
 assert_start_web foreign-silent 999 never 1 "Port 13000 is busy: pid 999" ""
+
+# `go run` compiles the api once, so `make up` restarts an api of the current
+# commit when server/ has uncommitted changes it was not compiled from, and
+# keeps it when nothing changed.
+assert_api_source_fingerprint
+assert_start_api unchanged bbb2222 "100 fp-now" "api already running on :18080 (pid 200, commit bbb2222)" "" "100 fp-now"
+assert_start_api dirty bbb2222 "100 fp-old" "was compiled before server/ changed (uncommitted changes differ); restarting it" $'stop api\nlaunch api' "101 fp-now"
+assert_start_api unrecorded bbb2222 - "has no recorded source fingerprint" $'stop api\nlaunch api' "101 fp-now"
+assert_start_api old-commit aaa1111 "100 fp-now" "is ours but not commit bbb2222; restarting it" $'stop api\nlaunch api' "101 fp-now"
+
+# ---------------------------------------------------------------------------
+# Daemon: `daemon start` is a no-op while one is running, so `make up` has to
+# restart a daemon that is not running this checkout's current build itself.
+# ---------------------------------------------------------------------------
+head_commit="$(git -C "$root_dir" rev-parse HEAD)"
+old_commit=0123456789abcdef0123456789abcdef01234567
+old_short="$(git -C "$root_dir" rev-parse --short "$old_commit")"
+daemon_fake="$tmp_dir/daemon-fake"
+mkdir -p "$daemon_fake/server/bin" "$daemon_fake/go-bin"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$daemon_fake/go-bin/go"
+chmod +x "$daemon_fake/go-bin/go"
+cat > "$daemon_fake/server/bin/multica" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_DAEMON/calls"
+case "$1 $2" in
+  "daemon status") cat "$FAKE_DAEMON/status" ;;
+  "daemon stop") printf '{"status":"stopped"}' > "$FAKE_DAEMON/status" ;;
+  "daemon start")
+    printf '{"status":"running","pid":5002,"cli_commit":"%s","uptime":"1s"}' \
+      "$(cat "$FAKE_DAEMON/start_commit")" > "$FAKE_DAEMON/status" ;;
+esac
+EOF
+chmod +x "$daemon_fake/server/bin/multica"
+
+# Args: case, commit the running daemon reports, recorded "<pid> <hash>" (or
+# "-" for none), commit a fresh start reports, expected exit, expected output,
+# expected record afterwards.
+assert_start_daemon() (
+  local case_name=$1 running_commit=$2 recorded=$3 start_commit=$4
+  local expected_status=$5 expected=$6 expected_record=$7 status=0 bin_hash
+  export FAKE_DAEMON="$tmp_dir/daemon-$case_name"
+  mkdir -p "$FAKE_DAEMON"
+  printf '{"status":"running","pid":5001,"cli_commit":"%s","active_task_count":1}' \
+    "$running_commit" > "$FAKE_DAEMON/status"
+  printf '%s' "$start_commit" > "$FAKE_DAEMON/start_commit"
+  # shellcheck disable=SC1090
+  source "$root_dir/scripts/dev-env.sh"
+  PATH="$daemon_fake/go-bin:$PATH"
+  DIR="$root_dir" PROFILE=dev-test STATE_DIR="$FAKE_DAEMON" PROFILE_DIR="$FAKE_DAEMON"
+  WORKSPACES_ROOT="$FAKE_DAEMON/ws" MULTICA_BIN="$daemon_fake/server/bin/multica"
+  bin_hash="$(file_sha256 "$MULTICA_BIN")"
+  [ -n "$bin_hash" ] || fail "file_sha256 printed nothing"
+  case "$recorded" in
+    -) ;;
+    current) printf '5001 %s\n' "$bin_hash" > "$(daemon_build_file)" ;;
+    *) printf '%s\n' "$recorded" > "$(daemon_build_file)" ;;
+  esac
+  (start_daemon) > "$out" 2>&1 || status=$?
+  [ "$status" = "$expected_status" ] || { sed 's/^/  /' "$out" >&2; fail "$case_name: start_daemon exited $status, want $expected_status"; }
+  require_contains "$out" "$expected"
+  case "$expected_record" in
+    restarted) [ "$(cat "$(daemon_build_file)")" = "5002 $bin_hash" ] \
+      || fail "$case_name: recorded build is '$(cat "$(daemon_build_file)" 2>/dev/null)', want the restarted daemon" ;;
+    kept) ! grep -q '^daemon stop' "$FAKE_DAEMON/calls" \
+      || fail "$case_name: stopped a daemon that already ran the current build" ;;
+  esac
+)
+assert_start_daemon current "$head_commit" current "$head_commit" 0 "daemon already running for profile dev-test (pid 5001" kept
+assert_start_daemon old-commit "$old_commit" current "$head_commit" 0 "runs commit $old_short, checkout is at" restarted
+assert_start_daemon dirty-edit "$head_commit" "5001 not-this-binary" "$head_commit" 0 "uncommitted changes differ" restarted
+assert_start_daemon unrecorded "$head_commit" - "$head_commit" 0 "was not started from" restarted
+assert_start_daemon other-pid "$head_commit" "4000 x" "$head_commit" 0 "interrupts 1 active task(s)" restarted
+assert_start_daemon wrong-start "$old_commit" current "$old_commit" 1 "reports commit $old_short after start" -
+
+# `make status` shows the daemon's commit, and calls a daemon that `make up`
+# would restart stale instead of running.
+assert_daemon_state() (
+  local case_name=$1 running_commit=$2 recorded=$3 expected_state=$4 expected=$5 row
+  export FAKE_DAEMON="$tmp_dir/daemon-state-$case_name"
+  mkdir -p "$FAKE_DAEMON"
+  printf '{"status":"running","pid":5001,"cli_commit":"%s","uptime":"3m0s"}' \
+    "$running_commit" > "$FAKE_DAEMON/status"
+  # shellcheck disable=SC1090
+  source "$root_dir/scripts/dev-env.sh"
+  DIR="$root_dir" PROFILE=dev-test STATE_DIR="$FAKE_DAEMON" PROFILE_DIR="$FAKE_DAEMON"
+  WORKSPACES_ROOT="$FAKE_DAEMON/ws" MULTICA_BIN="$daemon_fake/server/bin/multica"
+  [ "$recorded" = - ] || printf '5001 %s\n' "$(file_sha256 "$MULTICA_BIN")" > "$(daemon_build_file)"
+  row="$(component_state daemon)"
+  [ "${row%%|*}" = "$expected_state" ] || fail "$case_name: daemon state row '$row', want $expected_state"
+  case "$row" in *"$expected"*) ;; *) fail "$case_name: daemon state row '$row', want '$expected'" ;; esac
+)
+assert_daemon_state current "$head_commit" current running "pid 5001 commit $(git -C "$root_dir" rev-parse --short HEAD) up 3m0s"
+assert_daemon_state old-commit "$old_commit" current stale "runs commit $old_short, checkout is at"
+assert_daemon_state unrecorded "$head_commit" - stale "run make up C=daemon to restart"
 
 # ---------------------------------------------------------------------------
 # Desktop: CDP port, env file, process tree, and the daemon Desktop starts.
@@ -575,21 +1049,169 @@ FAIL_DROP=1 dev_env destroy drop-fails-904 --yes > "$out" 2>&1 || status=$?
 require_contains "$out" "manifest and slot were kept"
 dev_env destroy drop-fails-904 --yes > "$out" 2>&1 || fail "retrying destroy after database recovery failed"
 
+# Fleet is cleaned BEFORE the database: a partial Fleet cleanup must keep the
+# manifest/slot and must not drop a database whose node containers still exist.
+write_manifest "fleet-fails-905" "$root_dir" 905
+: > "$DOCKER_LOG"
+: > "$PSQL_LOG"
+status=0
+FAKE_DOCKER_FAIL_RM=1 dev_env destroy fleet-fails-905 --yes > "$out" 2>&1 || status=$?
+[ "$status" -ne 0 ] || fail "destroy succeeded when Fleet cleanup failed"
+[ -f "$MULTICA_DEV_HOME/envs/fleet-fails-905/manifest.env" ] \
+  || fail "destroy discarded the manifest after Fleet cleanup failed"
+require_contains "$out" "Fleet cleanup failed"
+if grep -Fq 'DROP DATABASE' "$PSQL_LOG"; then
+  fail "destroy dropped the database before Fleet cleanup succeeded"
+fi
+dev_env destroy fleet-fails-905 --yes > "$out" 2>&1 \
+  || fail "retrying destroy after Fleet recovery failed"
+[ ! -d "$MULTICA_DEV_HOME/envs/fleet-fails-905" ] \
+  || fail "retried destroy left the environment directory behind"
+
+# ---------------------------------------------------------------------------
+# An unreachable Docker daemon is not "nothing to clean": Fleet owns node
+# containers, volumes and networks outside Compose, so dropping the database
+# now would discard the only record that could ever remove them. destroy must
+# fail closed, keep the manifest and slot, and succeed once Docker answers.
+# ---------------------------------------------------------------------------
+write_manifest "docker-down-912" "$root_dir" 912 "docker_down_ns"
+: > "$DOCKER_LOG"
+: > "$PSQL_LOG"
+status=0
+( export FAKE_DOCKER_UNAVAILABLE=1; dev_env destroy docker-down-912 --yes > "$out" 2>&1 ) || status=$?
+[ "$status" -ne 0 ] || fail "destroy succeeded while Docker was unreachable"
+[ -f "$MULTICA_DEV_HOME/envs/docker-down-912/manifest.env" ] \
+  || fail "destroy discarded the manifest while Docker was unreachable"
+if grep -Fq 'DROP DATABASE' "$PSQL_LOG"; then
+  fail "destroy dropped the database while Docker was unreachable"
+fi
+require_contains "$out" "Docker is unreachable"
+require_contains "$out" "manifest and slot were kept"
+dev_env destroy docker-down-912 --yes > "$out" 2>&1 \
+  || fail "retrying destroy after Docker recovered failed"
+[ ! -d "$MULTICA_DEV_HOME/envs/docker-down-912" ] \
+  || fail "retried destroy left the Docker-unreachable environment behind"
+
+# A manifest from before Fleet existed records no namespace, but an unreachable
+# daemon can still hide network-labelled resources; it takes the same path.
+write_manifest "docker-down-legacy-913" "$root_dir" 913
+: > "$PSQL_LOG"
+status=0
+( export FAKE_DOCKER_UNAVAILABLE=1; dev_env destroy docker-down-legacy-913 --yes > "$out" 2>&1 ) || status=$?
+[ "$status" -ne 0 ] || fail "destroy succeeded for a pre-Fleet manifest while Docker was unreachable"
+[ -f "$MULTICA_DEV_HOME/envs/docker-down-legacy-913/manifest.env" ] \
+  || fail "destroy discarded a pre-Fleet manifest while Docker was unreachable"
+if grep -Fq 'DROP DATABASE' "$PSQL_LOG"; then
+  fail "destroy dropped the database for a pre-Fleet manifest while Docker was unreachable"
+fi
+dev_env destroy docker-down-legacy-913 --yes > "$out" 2>&1 \
+  || fail "retrying destroy of a pre-Fleet manifest after Docker recovered failed"
+[ ! -d "$MULTICA_DEV_HOME/envs/docker-down-legacy-913" ] \
+  || fail "retried destroy left the pre-Fleet environment behind"
+
 # ---------------------------------------------------------------------------
 # destroy consumes the manifest: the slot is free afterwards, which is what
-# makes the registry an allocator rather than a second place to leak.
+# makes the registry an allocator rather than a second place to leak. It also
+# removes this environment's Fleet compose project and namespace-scoped
+# resources. The recorded namespace wins over the directory basename.
 # ---------------------------------------------------------------------------
+: > "$DOCKER_LOG"
+: > "$PSQL_LOG"
 dev_env destroy probe-901 --yes > "$out" 2>&1 || fail "destroy must succeed"
+require_contains "$DOCKER_LOG" "-p multica-fleet-probe_ns rm -sf fleet"
+require_contains "$DOCKER_LOG" "label=multica.fleet.namespace=probe_ns"
+require_contains "$PSQL_LOG" "DROP DATABASE"
 [ ! -d "$MULTICA_DEV_HOME/envs/probe-901" ] || fail "destroy left the environment directory behind"
+[ ! -e "$tmp_dir/checkout/.dev/fleet-secret" ] \
+  || fail "destroy created the Fleet secret (read-only verb)"
 
 dev_env list > "$out" 2>&1 || fail "list must succeed after destroy"
 if grep -Fq "probe-901" "$out"; then
   fail "destroyed environment is still listed"
 fi
 
+# ---------------------------------------------------------------------------
+# A manifest created before Fleet has no namespace. destroy must then derive it
+# from that environment's DIR, never from the namespace the invoking checkout
+# exports (make includes .env.worktree and exports its variables).
+# ---------------------------------------------------------------------------
+write_manifest "orphan-ns-907" "$tmp_dir/deleted-checkout-907" 907
+: > "$DOCKER_LOG"
+: > "$PSQL_LOG"
+MULTICA_LOCAL_FLEET_NAMESPACE=caller_checkout \
+  dev_env destroy orphan-ns-907 --yes > "$out" 2>&1 \
+  || fail "destroy of a namespace-less manifest failed"
+require_contains "$DOCKER_LOG" "-p multica-fleet-deleted_checkout_907 rm -sf fleet"
+require_contains "$DOCKER_LOG" "label=multica.fleet.namespace=deleted_checkout_907"
+if grep -Fq 'namespace=caller_checkout' "$DOCKER_LOG"; then
+  fail "destroy used the caller checkout's Fleet namespace"
+fi
+if grep -Fq 'multica-fleet-caller_checkout' "$DOCKER_LOG"; then
+  fail "destroy used the caller checkout's Fleet compose project"
+fi
+[ ! -d "$MULTICA_DEV_HOME/envs/orphan-ns-907" ] \
+  || fail "destroy left the inherited-namespace environment behind"
+
 # Declining the confirmation is a successful no-op, not a failure.
 printf 'n\n' | dev_env destroy orphan-902 > "$out" 2>&1 || fail "declining destroy must exit 0"
 require_contains "$out" "Cancelled."
 [ -d "$MULTICA_DEV_HOME/envs/orphan-902" ] || fail "declined destroy removed the environment anyway"
+
+# ---------------------------------------------------------------------------
+# gc shells out to destroy for every orphaned environment. Each one must be
+# cleaned under its own namespace/project even though the invoking checkout
+# exports its own MULTICA_LOCAL_FLEET_NAMESPACE.
+# ---------------------------------------------------------------------------
+write_manifest "gc-ns-909" "$tmp_dir/gc-deleted-909" 909
+: > "$DOCKER_LOG"
+: > "$PSQL_LOG"
+MULTICA_LOCAL_FLEET_NAMESPACE=caller_checkout dev_env gc > "$out" 2>&1 \
+  || fail "gc of orphaned environments failed"
+require_contains "$out" "gc-ns-909"
+require_contains "$DOCKER_LOG" "-p multica-fleet-gc_deleted_909 rm -sf fleet"
+require_contains "$DOCKER_LOG" "label=multica.fleet.namespace=gc_deleted_909"
+if grep -Fq 'caller_checkout' "$DOCKER_LOG"; then
+  fail "gc cleaned resources under the invoking checkout's Fleet namespace"
+fi
+[ ! -d "$MULTICA_DEV_HOME/envs/gc-ns-909" ] || fail "gc left the orphaned environment behind"
+
+# ---------------------------------------------------------------------------
+# uutils mkdir (Ubuntu 26.04) reports success to a caller that lost the race
+# to create a directory. A mkdir that succeeds on the held allocation lock must
+# not hand it to a second holder, or two `up`s allocate the same slot.
+# ---------------------------------------------------------------------------
+(
+  # shellcheck disable=SC1090
+  source "$root_dir/scripts/dev-env.sh"
+  command mkdir -p "$LOCK_DIR"
+  printf '%s\n' "$PPID" > "$LOCK_DIR/pid"
+  mkdir() { command mkdir "$@" 2>/dev/null || [ -d "$LOCK_DIR" ]; }
+  sleep() { :; }
+  if (acquire_lock) > "$out" 2>&1; then
+    fail "a mkdir that succeeded on the held lock directory let a second holder in"
+  fi
+  require_contains "$out" "Timed out waiting for the allocation lock"
+  [ "$(cat "$LOCK_DIR/pid")" = "$PPID" ] || fail "the lock holder's pid was overwritten"
+  command rm -rf "$LOCK_DIR"
+)
+
+# Releasing must drop only this holder's claim. Under uutils mkdir the next
+# caller can claim the directory as soon as the pid file is unlinked; deleting
+# the directory after that would hand the lock to a third caller.
+(
+  # shellcheck disable=SC1090
+  source "$root_dir/scripts/dev-env.sh"
+  acquire_lock
+  rm() {
+    command rm -f "$LOCK_DIR/pid"
+    # The next caller claims the lock between the unlink and the directory removal.
+    printf '%s\n' "$PPID" > "$LOCK_DIR/pid"
+    case "$1" in -r*) command rmdir "$LOCK_DIR" ;; esac
+  }
+  release_lock 2> "$out" || fail "release_lock failed when the next holder had already claimed the lock"
+  unset -f rm
+  [ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$PPID" ] || fail "release_lock removed the next holder's lock"
+  command rm -rf "$LOCK_DIR"
+)
 
 echo "✓ dev-env.sh registry behaviour verified"

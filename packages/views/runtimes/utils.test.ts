@@ -5,6 +5,10 @@ import type { AgentRuntime, RuntimeUsage } from "@multica/core/types";
 
 import {
   addDaysIso,
+  cloudRuntimeNodeFailureReason,
+  cloudRuntimeNodeOperations,
+  cloudRuntimeNodeStatusDetailText,
+  cloudRuntimeOperations,
   aggregateByDate,
   aggregateByWeek,
   aggregateCostByModel,
@@ -18,6 +22,7 @@ import {
   formatTokens,
   hasTokenFigure,
   isModelPriced,
+  isDockerCloudRuntime,
   isSelfHealingRuntime,
   sliceWindow,
   summarizeTaskUsage,
@@ -2273,5 +2278,160 @@ describe("credits usage", () => {
     expect(hasTokenFigure({ tokens: 0, credits: new Map([["qoder_cloud", 1]]) })).toBe(false);
     expect(hasTokenFigure({ tokens: 10, credits: new Map([["qoder_cloud", 1]]) })).toBe(true);
     expect(hasTokenFigure({ tokens: 0, credits: new Map() })).toBe(true);
+  });
+});
+
+describe("cloudRuntimeOperations", () => {
+  it("opens only operations the service declares", () => {
+    const ops = cloudRuntimeOperations({
+      provider: "docker",
+      operations: ["create", "start", "stop"],
+      specs: [],
+      persistentStorage: true,
+      diskQuota: false,
+    });
+    expect(ops).toEqual({
+      canCreate: true,
+      canStart: true,
+      canStop: true,
+      canReboot: false,
+      canDelete: false,
+    });
+  });
+
+  it("grants nothing when the service is missing or empty", () => {
+    expect(cloudRuntimeOperations(undefined)).toEqual({
+      canCreate: false,
+      canStart: false,
+      canStop: false,
+      canReboot: false,
+      canDelete: false,
+    });
+    expect(
+      cloudRuntimeOperations({
+        provider: "",
+        operations: [],
+        specs: [],
+        persistentStorage: false,
+        diskQuota: false,
+      }).canCreate,
+    ).toBe(false);
+  });
+
+  it("keeps legacy EC2 create/delete when a non-docker response has no capabilities", () => {
+    const ops = cloudRuntimeOperations({
+      provider: "ec2",
+      operations: [],
+      specs: [],
+      persistentStorage: false,
+      diskQuota: false,
+    });
+    expect(ops).toEqual({
+      canCreate: true,
+      canStart: false,
+      canStop: false,
+      canReboot: false,
+      canDelete: true,
+    });
+  });
+
+  it("still honors an advertised docker operation list", () => {
+    expect(
+      cloudRuntimeOperations({
+        provider: "docker",
+        operations: [],
+        specs: [],
+        persistentStorage: true,
+        diskQuota: false,
+      }).canCreate,
+    ).toBe(false);
+  });
+});
+
+describe("cloudRuntimeNodeOperations", () => {
+  const advertised = {
+    canCreate: true,
+    canStart: true,
+    canStop: true,
+    canReboot: true,
+    canDelete: true,
+  };
+
+  it("hides start for a running node and stop for a stopped node", () => {
+    expect(cloudRuntimeNodeOperations("running", advertised).canStart).toBe(false);
+    expect(cloudRuntimeNodeOperations("stopped", advertised).canStop).toBe(false);
+    expect(cloudRuntimeNodeOperations("stopped", advertised).canStart).toBe(true);
+    expect(cloudRuntimeNodeOperations("running", advertised).canStop).toBe(true);
+  });
+
+  it("hides delete for the terminated tombstone", () => {
+    expect(cloudRuntimeNodeOperations("terminated", advertised).canDelete).toBe(false);
+    expect(cloudRuntimeNodeOperations("failed", advertised).canDelete).toBe(true);
+  });
+});
+
+describe("isDockerCloudRuntime", () => {
+  it("recognises the docker provider only", () => {
+    expect(isDockerCloudRuntime({ provider: "docker" })).toBe(true);
+    expect(isDockerCloudRuntime({ provider: "ec2" })).toBe(false);
+    expect(isDockerCloudRuntime(undefined)).toBe(false);
+  });
+});
+
+describe("cloudRuntimeNodeFailureReason", () => {
+  const base = { error: undefined, statusDetail: undefined, metadata: {} };
+
+  it("prefers the top-level error and falls back to status details", () => {
+    expect(cloudRuntimeNodeFailureReason({ ...base, error: "docker daemon unreachable" })).toBe(
+      "docker daemon unreachable",
+    );
+    expect(
+      cloudRuntimeNodeFailureReason({
+        ...base,
+        statusDetail: { code: "image_missing", message: "image not found" },
+      }),
+    ).toBe("image not found");
+  });
+
+  it("reads Fleet details nested in metadata and ignores malformed values", () => {
+    expect(
+      cloudRuntimeNodeFailureReason({
+        ...base,
+        metadata: { status_detail: { error: "container exited" } },
+      }),
+    ).toBe("container exited");
+    expect(
+      cloudRuntimeNodeFailureReason({
+        ...base,
+        metadata: { status_detail: 42, error: "  " },
+      }),
+    ).toBeNull();
+    expect(cloudRuntimeNodeFailureReason(base)).toBeNull();
+  });
+});
+
+describe("cloudRuntimeNodeStatusDetailText", () => {
+  it("renders readiness booleans from the top-level status detail", () => {
+    expect(
+      cloudRuntimeNodeStatusDetailText({
+        statusDetail: { cli_installed: true, credentials_valid: false },
+        metadata: {},
+      }),
+    ).toBe("cli_installed: yes · credentials_valid: no");
+  });
+
+  it("falls back to the metadata copy and ignores non-boolean details", () => {
+    expect(
+      cloudRuntimeNodeStatusDetailText({
+        statusDetail: undefined,
+        metadata: { status_detail: { model_configured: false } },
+      }),
+    ).toBe("model_configured: no");
+    expect(
+      cloudRuntimeNodeStatusDetailText({
+        statusDetail: { error: "boom" },
+        metadata: {},
+      }),
+    ).toBeNull();
   });
 });

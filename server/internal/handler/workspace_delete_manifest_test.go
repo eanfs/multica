@@ -55,6 +55,7 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"chat_pinned_agent":                  workspaceDelete,
 	"chat_session":                       workspaceDelete,
 	"chat_submission_receipt":            workspaceDelete,
+	"chat_wakeup":                        workspaceDelete,
 	"client_usage_daily":                 workspaceDeleteDetach,
 	"comment":                            workspaceDelete,
 	"comment_reaction":                   workspaceDelete,
@@ -64,7 +65,13 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"dingtalk_group_presence":            workspaceDelete,
 	"dingtalk_bot_identity":              workspaceDelete,
 	"dingtalk_group_route":               workspaceDelete,
+	"entitlement_feature_attempt":        workspaceDelete,
+	"entitlement_limit_overage":          workspaceDelete,
 	"feedback":                           workspaceDeleteDetach,
+	"fleet_credential_profile":           workspaceDeleteKeep, // owner-scoped; no workspace_id
+	"fleet_node":                         workspaceDeleteKeep, // owner-scoped; no workspace_id
+	"fleet_node_credential":              workspaceDeleteKeep, // owner-scoped; no workspace_id
+	"fleet_node_operation":               workspaceDeleteKeep, // owner-scoped; no workspace_id
 	"github_installation":                workspaceDelete,
 	"github_pending_check_suite":         workspaceDelete,
 	"github_pending_installation":        workspaceDeleteKeep,
@@ -118,6 +125,7 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"plugin_package_version":             workspaceDelete,
 	"plugin_package_file":                workspaceDelete,
 	"project":                            workspaceDelete,
+	"project_folder":                     workspaceDelete,
 	"project_member":                     workspaceDelete,
 	"project_subscriber":                 workspaceDelete,
 	"project_resource":                   workspaceDelete,
@@ -137,7 +145,9 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"sys_cron_executions":                workspaceDeleteKeep,
 	"theme_store_download":               workspaceDeleteKeep, // per registry theme, not workspace-owned
 	"task_context_receipt":               workspaceDelete,
+	"runtime_rate_limit":                 workspaceDelete,
 	"task_message":                       workspaceDelete,
+	"chat_task_supplement":               workspaceDelete,
 	"task_supplement":                    workspaceDelete,
 	"task_supplement_capability":         workspaceDelete,
 	"task_token":                         workspaceDelete,
@@ -153,6 +163,8 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"verification_code":                  workspaceDeleteKeep,
 	"webhook_delivery":                   workspaceDelete,
 	"wecom_install_session":              workspaceDelete,
+	"weixin_login_session":               workspaceDelete,
+	"weixin_account_state":               workspaceDelete,
 	"workspace_composio_connection":      workspaceDelete,
 	"agent_app":                          workspaceDelete,
 	"app_action_rule":                    workspaceDelete,

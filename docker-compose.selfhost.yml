@@ -30,6 +30,14 @@
 # read it back with `docker compose port`, so the health check and the printed
 # URL always match what was actually published.
 
+# The optional local Fleet control plane is not part of this stack. It is a
+# source-checkout component (make up C=api,web,fleet): its backend must receive
+# MULTICA_LOCAL_FLEET_URL, MULTICA_LOCAL_FLEET_SECRET_FILE and
+# MULTICA_LOCAL_FLEET_NAMESPACE at boot, and its node containers reach the API at
+# a host address rather than at the Compose service name backend. A fleet
+# profile here could only start a control plane the API ignores, so it was
+# removed instead of documented as working.
+
 name: multica
 
 services:
@@ -236,6 +244,7 @@ services:
       # (bot_token_encrypted), so this single deployment-wide key is all
       # the operator needs to set here.
       MULTICA_TELEGRAM_SECRET_KEY: ${MULTICA_TELEGRAM_SECRET_KEY:-}
+      MULTICA_WEIXIN_SECRET_KEY: ${MULTICA_WEIXIN_SECRET_KEY:-}
       # Tool steps shown in the streamed reply: auto (default; details in
       # private chats, kind of work in groups), off, summary or detail.
       MULTICA_TELEGRAM_TOOL_PROGRESS: ${MULTICA_TELEGRAM_TOOL_PROGRESS:-}

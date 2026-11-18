@@ -1,0 +1,13 @@
+# Test-only runtime image for the opt-in `fleetintegration` suite. It keeps
+# the production node contract (daemon, entrypoint, fixed 1000:1000 identity)
+# and replaces only the Claude executable with an immediate-exit fake, so the
+# integration test never touches a model account. Do not publish or deploy it.
+FROM multica/runtime-claude:dev
+
+USER root
+COPY docker/runtime/fake-claude /usr/local/bin/claude
+RUN chmod 0755 /usr/local/bin/claude
+
+# The base image already ships uid/gid 1000; reuse it instead of creating a
+# second identity. Keep the production entrypoint and HOME contract.
+USER 1000:1000

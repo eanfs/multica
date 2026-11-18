@@ -50,6 +50,11 @@ import (
 // state poll interval.
 const claimPollHintMinDelay = time.Second
 
+// fleetManagedByLocalFleet is the server-written provenance value for a
+// runtime registered by a local Fleet node. It is load-bearing for deletion
+// protection: only this server-side value (never a client claim) may set it.
+const fleetManagedByLocalFleet = "local_fleet"
+
 // Daemon workspace ownership helpers
 
 // requireDaemonWorkspaceAccess verifies the caller has access to the given workspace.
@@ -472,6 +477,7 @@ func (h *Handler) inheritMachineCustomName(ctx context.Context, q *db.Queries, r
 }
 
 var errRuntimeProfileDisabled = errors.New("runtime profile is disabled")
+var errRuntimeProfileMachine = errors.New("runtime profile belongs to another machine")
 
 // upsertRuntimeWithProfile serializes custom-runtime registration with profile
 // deletion. The profile row remains KEY SHARE locked until the runtime upsert
@@ -497,11 +503,32 @@ func (h *Handler) upsertRuntimeWithProfile(
 	if err != nil {
 		return row, profile, fmt.Errorf("lock runtime profile: %w", err)
 	}
+	params := build(profile)
+	if profile.DaemonID.Valid {
+		if profile.DaemonID != params.DaemonID {
+			return row, profile, errRuntimeProfileMachine
+		}
+	} else {
+		// Existing unscoped profiles may refresh only instances that already
+		// exist. A stale daemon must not spread a legacy profile to a new host.
+		found, err := qtx.RuntimeProfileHasDaemonInstance(ctx, db.RuntimeProfileHasDaemonInstanceParams{
+			WorkspaceID: workspaceID,
+			ProfileID:   profileID,
+			DaemonID:    params.DaemonID,
+		})
+		if err != nil {
+			return row, profile, err
+		}
+		if !found {
+			return row, profile, errRuntimeProfileMachine
+		}
+	}
+
 	if !profile.Enabled {
 		return row, profile, errRuntimeProfileDisabled
 	}
 
-	row, err = qtx.UpsertAgentRuntimeWithProfile(ctx, build(profile))
+	row, err = qtx.UpsertAgentRuntimeWithProfile(ctx, params)
 	if err != nil {
 		// The profile lookup above already turned "unknown profile" into
 		// ErrNoRows; here ErrNoRows can only mean the ownership fence
@@ -761,6 +788,11 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Fleet node attribution comes from the verified mcn_ credential, never
+	// from the registration body (design §7.6): the daemon cannot nominate
+	// another node, and a malformed record just leaves the row unmarked.
+	fleetNodeID, fleetManaged := h.fleetNodeFromCloudPAT(r.Context())
+
 	resp := make([]AgentRuntimeResponse, 0, len(req.Runtimes))
 	for _, runtime := range req.Runtimes {
 		provider := normalizeProvider(runtime.Type)
@@ -841,6 +873,11 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(err, errRuntimeProfileDisabled) {
 				writeError(w, http.StatusConflict, "runtime profile is disabled: "+runtime.ProfileID)
 				return
+			}
+			if errors.Is(err, errRuntimeProfileMachine) {
+				// Old daemons may still submit a previously shared profile.
+				// Ignore it without blocking built-in runtime registration.
+				continue
 			}
 			if err != nil {
 				obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.RuntimeFailed(
@@ -932,6 +969,26 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				SharedWith:     row.SharedWith,
 				ProfileID:      row.ProfileID,
 			}
+		}
+
+		if fleetManaged {
+			if err := qtx.SetAgentRuntimeFleetManaged(r.Context(), db.SetAgentRuntimeFleetManagedParams{
+				ID:          registered.ID,
+				ManagedBy:   fleetManagedByLocalFleet,
+				FleetNodeID: fleetNodeID,
+				// One node runs one workspace root and one daemon, so the
+				// runtime-wide cap stays at 1; the claim path enforces it.
+				MaxConcurrentTasks: pgtype.Int4{Int32: 1, Valid: true},
+			}); err != nil {
+				// Fail the registration rather than commit a row that looks
+				// user-managed: deletable runtime rows for a live fleet node
+				// would defeat the deletion barrier this metadata backs.
+				slog.Warn("register runtime failed to record fleet ownership", append(logger.RequestAttrs(r), "error", err)...)
+				writeError(w, http.StatusInternalServerError, "failed to register runtime")
+				return
+			}
+			registered.ManagedBy = fleetManagedByLocalFleet
+			registered.FleetNodeID = fleetNodeID
 		}
 
 		// A brand-new runtime on an already-named machine inherits the machine's
@@ -1068,6 +1125,20 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				"profile_id", profileID, "error", err)
 			continue
 		}
+		if fleetManaged {
+			if err := qtx.SetAgentRuntimeFleetManaged(r.Context(), db.SetAgentRuntimeFleetManagedParams{
+				ID:                 prow.ID,
+				ManagedBy:          fleetManagedByLocalFleet,
+				FleetNodeID:        fleetNodeID,
+				MaxConcurrentTasks: pgtype.Int4{Int32: 1, Valid: true},
+			}); err != nil {
+				slog.Warn("failed to record fleet ownership for failed runtime profile",
+					"workspace_id", req.WorkspaceID, "daemon_id", req.DaemonID,
+					"profile_id", profileID, "error", err)
+				writeError(w, http.StatusInternalServerError, "failed to register runtime")
+				return
+			}
+		}
 		// Keep the failed-profile row consistent with the machine's name so it
 		// doesn't drag the machine title back to the hostname (MUL-4217).
 		h.inheritMachineCustomName(r.Context(), qtx, db.AgentRuntime{
@@ -1105,6 +1176,36 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		body["ca_certs"] = repoResp.CACerts
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// fleetNodeFromCloudPAT returns the local Fleet node UUID carried by a
+// verified mcn_ credential. DaemonAuth attaches the identity only after the
+// Fleet service approved the token, so a present instance record is trusted;
+// an absent or unparseable one simply leaves the registration unmarked.
+//
+// Identity presence is not enough: the same cloud_pat verifier serves SaaS
+// Cloud, where a runtime registered by a Cloud node must remain an ordinary,
+// deletable row. Only a deployment running the local Fleet (and therefore the
+// Fleet node it manages) may stamp fleet provenance.
+func (h *Handler) fleetNodeFromCloudPAT(ctx context.Context) (pgtype.UUID, bool) {
+	identity, ok := middleware.LocalFleetIdentityFromContext(ctx, h.cfg.LocalFleetEnabled)
+	if !ok {
+		return pgtype.UUID{}, false
+	}
+	recordID := strings.TrimSpace(identity.InstanceRecordID)
+	if recordID == "" {
+		// The Fleet service verified the credential but sent no node record;
+		// treat it as unmarked rather than guessing a node. Never log the
+		// token, which is not part of the identity.
+		slog.Warn("register: cloud pat carried no instance record id; leaving runtime unmanaged")
+		return pgtype.UUID{}, false
+	}
+	nodeID, err := util.ParseUUID(recordID)
+	if err != nil {
+		slog.Warn("register: cloud pat carried an invalid instance record id", "error", err)
+		return pgtype.UUID{}, false
+	}
+	return nodeID, true
 }
 
 // mergeLegacyRuntimes folds every runtime row keyed on a prior hostname-derived
@@ -2475,8 +2576,8 @@ func claimPollHintDelay(now, fireAt time.Time) time.Duration {
 
 // finalizeClaimDelivery is the shared final delivery gate for the singular and
 // batch claim paths. It re-verifies the current agent/runtime authorization
-// INSIDE the FinalizeTaskClaim transaction, under a FOR UPDATE row lock on the
-// runtime row, so the decision and the task-token mint commit atomically:
+// INSIDE the FinalizeTaskClaim transaction, under a FOR NO KEY UPDATE row lock
+// on the runtime row, so the decision and the task-token mint commit atomically:
 //
 //   - runtime.owner_id is re-read authoritatively (no stale claim-time
 //     snapshot), and a concurrent re-registration that would change owner_id
@@ -2506,11 +2607,11 @@ func (h *Handler) finalizeClaimDelivery(
 ) (receipt []pgtype.UUID, deliveryFailure *claimBuildFailure, err error) {
 	var agentOwnerID pgtype.UUID
 	authorize := func(qtx *db.Queries, tokenParams *db.CreateTaskTokenParams) error {
-		// FOR UPDATE on the runtime row: any concurrent
-		// UpsertAgentRuntime/visibility flip that would change owner_id or
-		// visibility blocks until this transaction commits, so the values read
-		// here are the ones delivery is authorized against.
-		locked, lerr := qtx.LockAgentRuntime(ctx, runtime.ID)
+		// Any concurrent UpsertAgentRuntime/visibility flip that would change
+		// owner_id or visibility blocks until this transaction commits, so the
+		// values read here are the ones delivery is authorized against. The
+		// lock must not be FOR UPDATE: see LockAgentRuntimeForClaimDelivery.
+		locked, lerr := qtx.LockAgentRuntimeForClaimDelivery(ctx, runtime.ID)
 		if lerr != nil {
 			return fmt.Errorf("lock runtime for delivery authorization: %w", lerr)
 		}
@@ -2903,6 +3004,12 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 			return resp, nil, nil, 0, 0, h.rejectClaimSourceLoad(r.Context(), task, err, "wakeup", resp.WakeupID)
 		}
 		return resp, nil, nil, 0, 0, h.failClaimedTaskBeforeLaunch(r.Context(), task, "Wakeup is disabled or its authorization is no longer available.", taskfailure.ReasonInvalidTaskIdentity, "wakeup_unavailable", http.StatusConflict, "wakeup unavailable")
+	}
+	if err := (&service.ChatWakeupService{Tasks: h.TaskService}).CheckClaim(r.Context(), *task); err != nil {
+		if !errors.Is(err, service.ErrChatWakeupClaimForbidden) {
+			return resp, nil, nil, 0, 0, h.rejectClaimSourceLoad(r.Context(), task, err, "chat wakeup", "")
+		}
+		return resp, nil, nil, 0, 0, h.failClaimedTaskBeforeLaunch(r.Context(), task, "The person who asked for this wakeup can no longer run this agent or see what it watched.", taskfailure.ReasonInvalidTaskIdentity, "wakeup_unavailable", http.StatusConflict, "wakeup unavailable")
 	}
 	// Preserve PostgreSQL's microseconds: second-resolution display timestamps
 	// cannot distinguish stale claims reclaimed within the same second.
@@ -3915,6 +4022,34 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 			}
 		}
 		resp.ChatMessage = strings.Join(parts, "\n\n")
+		resp.ChatSkillMessage = memberChatSkillMessage(task.Context, unanswered)
+		if task.RetryOfTaskID.Valid && resp.PriorSessionID != "" {
+			// Keep the full input for cold starts and the daemon's local fresh
+			// retry. Only a positively identified provider session can omit
+			// guidance whose injection it already acknowledged.
+			rows, err := h.Queries.ListChatGuidanceInProviderSession(r.Context(), db.ListChatGuidanceInProviderSessionParams{
+				WorkspaceID: cs.WorkspaceID, MessageIds: messageIDs,
+				SessionID: pgtype.Text{String: resp.PriorSessionID, Valid: true}, RuntimeID: task.RuntimeID,
+			})
+			if err != nil {
+				return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount,
+					h.rejectClaimSourceLoad(r.Context(), task, err, "chat guidance receipts", uuidToString(task.ID))
+			}
+			if len(rows) > 0 {
+				delivered := make(map[pgtype.UUID]bool, len(rows))
+				for _, id := range rows {
+					delivered[id] = true
+				}
+				resumeParts := make([]string, 0, len(unanswered))
+				for _, m := range unanswered {
+					if !delivered[m.ID] && strings.TrimSpace(m.Content) != "" {
+						resumeParts = append(resumeParts, m.Content)
+					}
+				}
+				resume := strings.Join(resumeParts, "\n\n")
+				resp.ChatResumeMessage = &resume
+			}
+		}
 
 		// Fail closed: a task-owned direct task that resolves to no user text
 		// (and is not the agent's proactive intro) must never dispatch an
@@ -4821,7 +4956,7 @@ func (h *Handler) StartTask(w http.ResponseWriter, r *http.Request) {
 	// A daemon must use this response rather than its own offer: an old server
 	// ignores the offer and omits the field, which keeps daemon-first rollouts
 	// fail closed without requiring synchronized deployment.
-	if task.IssueID.Valid {
+	if task.IssueID.Valid || task.ChatSessionID.Valid {
 		if capability, capabilityErr := h.Queries.GetTaskSupplementCapability(r.Context(), task.ID); capabilityErr == nil {
 			resp.SupplementCapability = capability.Capability
 		} else if !errors.Is(capabilityErr, pgx.ErrNoRows) {

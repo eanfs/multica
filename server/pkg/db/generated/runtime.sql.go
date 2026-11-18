@@ -309,9 +309,13 @@ func (q *Queries) CountUndrainedTasksByRuntimeOrAgent(ctx context.Context, arg C
 }
 
 const deleteAgentRuntime = `-- name: DeleteAgentRuntime :exec
+WITH deleted_rate_limit AS (
+    DELETE FROM runtime_rate_limit WHERE runtime_id = $1
+)
 DELETE FROM agent_runtime WHERE id = $1
 `
 
+// runtime_rate_limit has no FK; its row goes with the runtime.
 func (q *Queries) DeleteAgentRuntime(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, deleteAgentRuntime, id)
 	return err
@@ -447,7 +451,7 @@ func (q *Queries) FailTasksForOfflineRuntimes(ctx context.Context, arg FailTasks
 }
 
 const findLegacyRuntimesByDaemonID = `-- name: FindLegacyRuntimesByDaemonID :many
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id FROM agent_runtime
 WHERE workspace_id = $1
   AND provider = $2
   AND LOWER(daemon_id) = LOWER($3)
@@ -503,6 +507,8 @@ func (q *Queries) FindLegacyRuntimesByDaemonID(ctx context.Context, arg FindLega
 			&i.CustomName,
 			&i.SharedWith,
 			&i.MaxConcurrentTasks,
+			&i.ManagedBy,
+			&i.FleetNodeID,
 		); err != nil {
 			return nil, err
 		}
@@ -562,7 +568,7 @@ func (q *Queries) ForceOfflineRuntimesByIDs(ctx context.Context, runtimeIds []pg
 }
 
 const getAgentRuntime = `-- name: GetAgentRuntime :one
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id FROM agent_runtime
 WHERE id = $1
 `
 
@@ -589,12 +595,14 @@ func (q *Queries) GetAgentRuntime(ctx context.Context, id pgtype.UUID) (AgentRun
 		&i.CustomName,
 		&i.SharedWith,
 		&i.MaxConcurrentTasks,
+		&i.ManagedBy,
+		&i.FleetNodeID,
 	)
 	return i, err
 }
 
 const getAgentRuntimeForWorkspace = `-- name: GetAgentRuntimeForWorkspace :one
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id FROM agent_runtime
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -626,6 +634,8 @@ func (q *Queries) GetAgentRuntimeForWorkspace(ctx context.Context, arg GetAgentR
 		&i.CustomName,
 		&i.SharedWith,
 		&i.MaxConcurrentTasks,
+		&i.ManagedBy,
+		&i.FleetNodeID,
 	)
 	return i, err
 }
@@ -694,7 +704,7 @@ func (q *Queries) GetAgentRuntimeMaxConcurrentTasks(ctx context.Context, id pgty
 }
 
 const getAgentRuntimes = `-- name: GetAgentRuntimes :many
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id FROM agent_runtime
 WHERE id = ANY($1::uuid[])
 `
 
@@ -732,6 +742,8 @@ func (q *Queries) GetAgentRuntimes(ctx context.Context, ids []pgtype.UUID) ([]Ag
 			&i.CustomName,
 			&i.SharedWith,
 			&i.MaxConcurrentTasks,
+			&i.ManagedBy,
+			&i.FleetNodeID,
 		); err != nil {
 			return nil, err
 		}
@@ -748,7 +760,14 @@ SELECT EXISTS (
   SELECT 1 FROM agent_runtime
   WHERE agent_runtime.id = $1
     AND status = 'offline'
+    AND managed_by <> 'local_fleet'
     AND last_seen_at < now() - make_interval(secs => $2::double precision)
+    AND NOT EXISTS (
+      SELECT 1 FROM runtime_profile p
+      WHERE p.id = agent_runtime.profile_id AND p.workspace_id = agent_runtime.workspace_id
+        AND p.daemon_id IS NULL
+        AND p.created_by = agent_runtime.owner_id
+    )
     AND NOT EXISTS (
       SELECT 1
       FROM agent
@@ -802,7 +821,7 @@ func (q *Queries) ListAgentRuntimeIDsByWorkspace(ctx context.Context, workspaceI
 }
 
 const listAgentRuntimes = `-- name: ListAgentRuntimes :many
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id FROM agent_runtime
 WHERE workspace_id = $1
 ORDER BY created_at ASC
 `
@@ -836,6 +855,8 @@ func (q *Queries) ListAgentRuntimes(ctx context.Context, workspaceID pgtype.UUID
 			&i.CustomName,
 			&i.SharedWith,
 			&i.MaxConcurrentTasks,
+			&i.ManagedBy,
+			&i.FleetNodeID,
 		); err != nil {
 			return nil, err
 		}
@@ -848,7 +869,7 @@ func (q *Queries) ListAgentRuntimes(ctx context.Context, workspaceID pgtype.UUID
 }
 
 const listAgentRuntimesByOwner = `-- name: ListAgentRuntimesByOwner :many
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id FROM agent_runtime
 WHERE workspace_id = $1 AND owner_id = $2
 ORDER BY created_at ASC
 `
@@ -887,6 +908,8 @@ func (q *Queries) ListAgentRuntimesByOwner(ctx context.Context, arg ListAgentRun
 			&i.CustomName,
 			&i.SharedWith,
 			&i.MaxConcurrentTasks,
+			&i.ManagedBy,
+			&i.FleetNodeID,
 		); err != nil {
 			return nil, err
 		}
@@ -1178,7 +1201,7 @@ func (q *Queries) ListRuntimeOwnersByDaemon(ctx context.Context, arg ListRuntime
 }
 
 const listSharedAgentRuntimesForUpdate = `-- name: ListSharedAgentRuntimesForUpdate :many
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id FROM agent_runtime
 WHERE workspace_id = $1 AND $2::uuid = ANY(shared_with)
 ORDER BY id
 FOR NO KEY UPDATE
@@ -1218,6 +1241,8 @@ func (q *Queries) ListSharedAgentRuntimesForUpdate(ctx context.Context, arg List
 			&i.CustomName,
 			&i.SharedWith,
 			&i.MaxConcurrentTasks,
+			&i.ManagedBy,
+			&i.FleetNodeID,
 		); err != nil {
 			return nil, err
 		}
@@ -1232,7 +1257,14 @@ func (q *Queries) ListSharedAgentRuntimesForUpdate(ctx context.Context, arg List
 const listStaleOfflineRuntimeGCCandidates = `-- name: ListStaleOfflineRuntimeGCCandidates :many
 SELECT id FROM agent_runtime
 WHERE status = 'offline'
+  AND managed_by <> 'local_fleet'
   AND last_seen_at < now() - make_interval(secs => $1::double precision)
+  AND NOT EXISTS (
+    SELECT 1 FROM runtime_profile p
+    WHERE p.id = agent_runtime.profile_id AND p.workspace_id = agent_runtime.workspace_id
+      AND p.daemon_id IS NULL
+      AND p.created_by = agent_runtime.owner_id
+  )
   AND NOT EXISTS (
     SELECT 1
     FROM agent
@@ -1281,7 +1313,7 @@ func (q *Queries) ListStaleOfflineRuntimeGCCandidates(ctx context.Context, arg L
 }
 
 const listVisibleAgentRuntimes = `-- name: ListVisibleAgentRuntimes :many
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id FROM agent_runtime
 WHERE workspace_id = $1
   AND (owner_id = $2 OR visibility = 'public' OR (visibility = 'private' AND $2 = ANY(shared_with)))
 ORDER BY created_at ASC
@@ -1324,6 +1356,8 @@ func (q *Queries) ListVisibleAgentRuntimes(ctx context.Context, arg ListVisibleA
 			&i.CustomName,
 			&i.SharedWith,
 			&i.MaxConcurrentTasks,
+			&i.ManagedBy,
+			&i.FleetNodeID,
 		); err != nil {
 			return nil, err
 		}
@@ -1336,7 +1370,7 @@ func (q *Queries) ListVisibleAgentRuntimes(ctx context.Context, arg ListVisibleA
 }
 
 const lockAgentRuntime = `-- name: LockAgentRuntime :one
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id FROM agent_runtime
 WHERE id = $1
 FOR UPDATE
 `
@@ -1377,12 +1411,14 @@ func (q *Queries) LockAgentRuntime(ctx context.Context, id pgtype.UUID) (AgentRu
 		&i.CustomName,
 		&i.SharedWith,
 		&i.MaxConcurrentTasks,
+		&i.ManagedBy,
+		&i.FleetNodeID,
 	)
 	return i, err
 }
 
 const lockAgentRuntimeForAccessChange = `-- name: LockAgentRuntimeForAccessChange :one
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks FROM agent_runtime WHERE id = $1 FOR NO KEY UPDATE
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id FROM agent_runtime WHERE id = $1 FOR NO KEY UPDATE
 `
 
 // Binding and visibility writers share this lock and recheck access under it.
@@ -1411,6 +1447,50 @@ func (q *Queries) LockAgentRuntimeForAccessChange(ctx context.Context, id pgtype
 		&i.CustomName,
 		&i.SharedWith,
 		&i.MaxConcurrentTasks,
+		&i.ManagedBy,
+		&i.FleetNodeID,
+	)
+	return i, err
+}
+
+const lockAgentRuntimeForClaimDelivery = `-- name: LockAgentRuntimeForClaimDelivery :one
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id FROM agent_runtime
+WHERE id = $1
+FOR NO KEY UPDATE
+`
+
+// The claim delivery gate's lock on the runtime it re-reads owner_id and
+// visibility from. FOR NO KEY UPDATE still blocks every UPDATE and DELETE of
+// the row, so a re-registration or visibility flip waits for the gate to
+// commit. Unlike FOR UPDATE it does not block FOR KEY SHARE, which every task
+// insert takes on its runtime (lock_task_owner_rows and the foreign key) while
+// already holding the agent row. The gate takes the agent row after this one,
+// so FOR UPDATE here deadlocked a chat send racing a delivery (MUL-9501).
+func (q *Queries) LockAgentRuntimeForClaimDelivery(ctx context.Context, id pgtype.UUID) (AgentRuntime, error) {
+	row := q.db.QueryRow(ctx, lockAgentRuntimeForClaimDelivery, id)
+	var i AgentRuntime
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.DaemonID,
+		&i.Name,
+		&i.RuntimeMode,
+		&i.Provider,
+		&i.Status,
+		&i.DeviceInfo,
+		&i.Metadata,
+		&i.LastSeenAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.OwnerID,
+		&i.LegacyDaemonID,
+		&i.Visibility,
+		&i.ProfileID,
+		&i.CustomName,
+		&i.SharedWith,
+		&i.MaxConcurrentTasks,
+		&i.ManagedBy,
+		&i.FleetNodeID,
 	)
 	return i, err
 }
@@ -1605,7 +1685,7 @@ const markAgentRuntimeOnline = `-- name: MarkAgentRuntimeOnline :one
 UPDATE agent_runtime
 SET status = 'online', last_seen_at = now(), updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks
+RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id
 `
 
 // Used on the offline→online transition (and on first heartbeat after
@@ -1634,6 +1714,8 @@ func (q *Queries) MarkAgentRuntimeOnline(ctx context.Context, id pgtype.UUID) (A
 		&i.CustomName,
 		&i.SharedWith,
 		&i.MaxConcurrentTasks,
+		&i.ManagedBy,
+		&i.FleetNodeID,
 	)
 	return i, err
 }
@@ -1846,6 +1928,37 @@ func (q *Queries) SelectStaleOnlineRuntimes(ctx context.Context, staleSeconds fl
 		return nil, err
 	}
 	return items, nil
+}
+
+const setAgentRuntimeFleetManaged = `-- name: SetAgentRuntimeFleetManaged :exec
+UPDATE agent_runtime
+SET managed_by = $1, fleet_node_id = $2,
+    max_concurrent_tasks = $3, updated_at = now()
+WHERE id = $4
+`
+
+type SetAgentRuntimeFleetManagedParams struct {
+	ManagedBy          string      `json:"managed_by"`
+	FleetNodeID        pgtype.UUID `json:"fleet_node_id"`
+	MaxConcurrentTasks pgtype.Int4 `json:"max_concurrent_tasks"`
+	ID                 pgtype.UUID `json:"id"`
+}
+
+// Server-written provenance for a runtime registered by a local Fleet node.
+// Deliberately kept out of both registration upserts: a daemon re-registering
+// the same row must not clear (or forge) these columns. Only DaemonRegister,
+// after a verified mcn_ credential supplied an instance record, calls this.
+// A Fleet node runs one runtime on one host with a single workspace root, so
+// the runtime-wide cap is pinned to 1 when the node registers. That cap is
+// enforced by the claim path (max_concurrent_tasks), not by the daemon.
+func (q *Queries) SetAgentRuntimeFleetManaged(ctx context.Context, arg SetAgentRuntimeFleetManagedParams) error {
+	_, err := q.db.Exec(ctx, setAgentRuntimeFleetManaged,
+		arg.ManagedBy,
+		arg.FleetNodeID,
+		arg.MaxConcurrentTasks,
+		arg.ID,
+	)
+	return err
 }
 
 const setAgentRuntimeOffline = `-- name: SetAgentRuntimeOffline :exec
@@ -2108,7 +2221,7 @@ const updateAgentRuntimeCustomName = `-- name: UpdateAgentRuntimeCustomName :one
 UPDATE agent_runtime
 SET custom_name = $1, updated_at = now()
 WHERE id = $2
-RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks
+RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id
 `
 
 type UpdateAgentRuntimeCustomNameParams struct {
@@ -2144,6 +2257,8 @@ func (q *Queries) UpdateAgentRuntimeCustomName(ctx context.Context, arg UpdateAg
 		&i.CustomName,
 		&i.SharedWith,
 		&i.MaxConcurrentTasks,
+		&i.ManagedBy,
+		&i.FleetNodeID,
 	)
 	return i, err
 }
@@ -2154,7 +2269,7 @@ SET custom_name = $1, updated_at = now()
 WHERE workspace_id = $2
   AND daemon_id = $3
   AND ($4::uuid IS NULL OR owner_id = $4)
-RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks
+RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id
 `
 
 type UpdateAgentRuntimeCustomNameByDaemonParams struct {
@@ -2204,6 +2319,8 @@ func (q *Queries) UpdateAgentRuntimeCustomNameByDaemon(ctx context.Context, arg 
 			&i.CustomName,
 			&i.SharedWith,
 			&i.MaxConcurrentTasks,
+			&i.ManagedBy,
+			&i.FleetNodeID,
 		); err != nil {
 			return nil, err
 		}
@@ -2219,7 +2336,7 @@ const updateAgentRuntimeMaxConcurrentTasks = `-- name: UpdateAgentRuntimeMaxConc
 UPDATE agent_runtime
 SET max_concurrent_tasks = $1, updated_at = now()
 WHERE id = $2
-RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks
+RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id
 `
 
 type UpdateAgentRuntimeMaxConcurrentTasksParams struct {
@@ -2256,6 +2373,8 @@ func (q *Queries) UpdateAgentRuntimeMaxConcurrentTasks(ctx context.Context, arg 
 		&i.CustomName,
 		&i.SharedWith,
 		&i.MaxConcurrentTasks,
+		&i.ManagedBy,
+		&i.FleetNodeID,
 	)
 	return i, err
 }
@@ -2264,7 +2383,7 @@ const updateAgentRuntimeVisibility = `-- name: UpdateAgentRuntimeVisibility :one
 UPDATE agent_runtime
 SET visibility = $1, shared_with = $2::uuid[], updated_at = now()
 WHERE id = $3
-RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks
+RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id
 `
 
 type UpdateAgentRuntimeVisibilityParams struct {
@@ -2301,6 +2420,8 @@ func (q *Queries) UpdateAgentRuntimeVisibility(ctx context.Context, arg UpdateAg
 		&i.CustomName,
 		&i.SharedWith,
 		&i.MaxConcurrentTasks,
+		&i.ManagedBy,
+		&i.FleetNodeID,
 	)
 	return i, err
 }
@@ -2333,7 +2454,7 @@ DO UPDATE SET
     updated_at = now()
 WHERE $10::uuid IS NULL
    OR agent_runtime.owner_id = $10::uuid
-RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, (xmax = 0) AS inserted
+RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id, (xmax = 0) AS inserted
 `
 
 type UpsertAgentRuntimeParams struct {
@@ -2369,6 +2490,8 @@ type UpsertAgentRuntimeRow struct {
 	CustomName         pgtype.Text        `json:"custom_name"`
 	SharedWith         []pgtype.UUID      `json:"shared_with"`
 	MaxConcurrentTasks pgtype.Int4        `json:"max_concurrent_tasks"`
+	ManagedBy          string             `json:"managed_by"`
+	FleetNodeID        pgtype.UUID        `json:"fleet_node_id"`
 	Inserted           bool               `json:"inserted"`
 }
 
@@ -2421,6 +2544,8 @@ func (q *Queries) UpsertAgentRuntime(ctx context.Context, arg UpsertAgentRuntime
 		&i.CustomName,
 		&i.SharedWith,
 		&i.MaxConcurrentTasks,
+		&i.ManagedBy,
+		&i.FleetNodeID,
 		&i.Inserted,
 	)
 	return i, err
@@ -2456,7 +2581,7 @@ DO UPDATE SET
     updated_at = now()
 WHERE $11::uuid IS NULL
    OR agent_runtime.owner_id = $11::uuid
-RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, (xmax = 0) AS inserted
+RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, shared_with, max_concurrent_tasks, managed_by, fleet_node_id, (xmax = 0) AS inserted
 `
 
 type UpsertAgentRuntimeWithProfileParams struct {
@@ -2493,6 +2618,8 @@ type UpsertAgentRuntimeWithProfileRow struct {
 	CustomName         pgtype.Text        `json:"custom_name"`
 	SharedWith         []pgtype.UUID      `json:"shared_with"`
 	MaxConcurrentTasks pgtype.Int4        `json:"max_concurrent_tasks"`
+	ManagedBy          string             `json:"managed_by"`
+	FleetNodeID        pgtype.UUID        `json:"fleet_node_id"`
 	Inserted           bool               `json:"inserted"`
 }
 
@@ -2539,6 +2666,8 @@ func (q *Queries) UpsertAgentRuntimeWithProfile(ctx context.Context, arg UpsertA
 		&i.CustomName,
 		&i.SharedWith,
 		&i.MaxConcurrentTasks,
+		&i.ManagedBy,
+		&i.FleetNodeID,
 		&i.Inserted,
 	)
 	return i, err

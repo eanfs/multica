@@ -588,6 +588,195 @@ multica daemon start
 
 Each profile gets its own config directory (`~/.multica/profiles/<name>/`), daemon state, health port, and workspace root. Daemon state means that profile's own `daemon.log`, `daemon.err.log`, `daemon.pid`, and `daemon.port` live in that directory too — see [Start](#start) for the layout, and pass `--profile <name>` to `daemon status` / `daemon logs` to act on it. The daemon normally uses the profile-derived health port. If the OS refuses that port, it binds an available loopback port and records the actual port in `daemon.port` for lifecycle commands. The record is valid only while its daemon is alive; do not edit it to configure a port.
 
+## Local Docker Cloud Runtime
+
+The optional `fleet` component runs a Fleet control plane in Docker and creates
+node containers that already contain the Multica daemon and Claude Code. It is
+for local development, not a production sandbox, and it is unrelated to the
+hosted Cloud Runtime provider.
+
+### Start and stop
+
+```bash
+# Requires a running Docker daemon. The first run builds both images.
+make up C=api,web,fleet
+
+make status              # component state, ports and Fleet readiness
+make down                # stop the Fleet control plane; leave node containers running
+make destroy             # remove this namespace's nodes/volumes, then the database
+```
+
+`make down` only stops the Fleet service itself (`docker compose stop fleet`).
+Node containers are created through the Docker Engine API, not by Compose, so
+they keep running without their control plane; `make down` does not wait for
+busy nodes or set a claim barrier. Use `make destroy` to stop and remove this
+namespace's node containers and volumes. Inspect leftovers with the label
+filters under [Troubleshooting](#troubleshooting).
+
+Fleet runs in its own per-worktree Compose project
+(`multica-fleet-<namespace>`) and joins the PostgreSQL project's
+`multica_default` network. The first build of `multica/fleet:dev` and
+`multica/runtime-claude:dev` can take several minutes. The host port is
+published on loopback only.
+
+### Configure model credentials
+
+Fleet never reads your shell history, `~/.claude`, OAuth state or user home.
+Credentials live in the file named by `MULTICA_FLEET_CREDENTIALS_FILE`
+(default `.dev/fleet-credentials.json`, mode 0600, git-ignored):
+
+```json
+{
+  "users": { "<user-uuid>": "default" },
+  "profiles": {
+    "default": {
+      "env": { "ANTHROPIC_API_KEY": "<key>" }
+    }
+  }
+}
+```
+
+Only these variables are accepted: `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`,
+`CLAUDE_CODE_USE_BEDROCK` and `API_TIMEOUT_MS`. An owner without a mapping
+cannot create a node; there is no global default profile. Restart Fleet after
+editing the file. Only `make up C=fleet` writes the empty template when the
+file is missing; plain `make up` creates only the service secret, and
+`status`/`list`/`down`/`destroy` create neither file.
+
+The API also needs `MULTICA_LOCAL_FLEET_URL`,
+`MULTICA_LOCAL_FLEET_SECRET_FILE` and `MULTICA_LOCAL_FLEET_NAMESPACE` at boot.
+`make up` derives all three from the allocated port and the checkout, records
+them in the environment manifest and exports them to the API/Compose, and
+creates the 0600 service secret under `.dev/` before the API starts. An
+existing `.env` is not rewritten (only a fresh checkout or a re-allocated slot
+gets the allocated values written), and the read-only verbs never create the
+secret. A non-empty `MULTICA_CLOUD_URL` wins: `make up` does not add local
+Fleet wiring for it and clears a value left by an earlier local run, because the
+server refuses to start when both are set.
+
+### Operate a node
+
+In the workspace UI, open **Runtimes**, choose **Add runtime**, then
+**Cloud Runtime**. When the API reports a local Fleet capability
+(`provider: docker`), the dialog renders that provider's specs from the
+capability response and hides the EC2 fields. A non-`docker` legacy SaaS
+response without `operations`/`specs` falls back to the EC2 behavior described
+under [Known limitations](#known-limitations); when `provider` is missing
+entirely, the UI hides the entry rather than guess. From the
+node row you can start, stop, reboot, or delete. Stopping and rebooting keep the
+container, identity, session data and volumes; deletion revokes the node token
+and removes the container and both volumes permanently.
+
+A node that is busy or still has queued work refuses dangerous operations
+through the API. `make down` is not a stop path for nodes: it stops only the
+Fleet control plane and leaves every node container running (see
+[Start and stop](#start-and-stop)).
+
+Node snapshots carry `daemon_id`, `status_detail` (the coordinator's readiness
+payload: CLI installed, model configured, and so on) and, while one is in
+flight, `operation {name, phase}` at the top level; these top-level fields are
+the authoritative contract. `metadata` only carries the state fields
+`provider`, `daemon_id`, `target_state`, `observed_state`, `daemon_ready` and
+`generation` — not `status_detail` or `operation` — and a client treats any
+field it cannot read as missing. Failed nodes show the detail message and
+readiness booleans in the runtimes dialog instead of a bare status.
+
+### Known limitations
+
+These are accepted gaps in the local Docker runtime, not setup mistakes:
+
+- The task enqueue path has no independent barrier: deleting a node blocks
+  claims and checks queued work, but a task enqueued after the operation is
+  approved can still be written (R22).
+- A `prepared` maintenance operation left by an API crash blocks claims and
+  has no automatic reaper; recover it explicitly.
+- `make down` stops only the control plane and sets no barrier; node containers
+  keep running until `make destroy`.
+- Node concurrency is the runtime-wide `max_concurrent_tasks`, pinned to 1
+  every time a Fleet node registers and enforced by the claim path, not by the
+  daemon. A manual PATCH on a managed runtime is overwritten at the next
+  registration. The spec's `max_concurrent` is presently only a capability
+  field.
+- Fleet containers from the old shared `multica` Compose project are not taken
+  over; remove them manually (see [Troubleshooting](#troubleshooting)).
+- A legacy SaaS Cloud Runtime response that has a non-`docker` `provider`
+  but no `allowed_operations` is treated as EC2: create/delete stay available
+  and, when `specs` is empty, the dialog offers `t4g.medium`/`t4g.large`. When
+  `provider` is missing too, the response is indistinguishable from an unknown
+  provider, so the UI hides creation rather than guess. The upstream SaaS
+  payload has not been verified in this repository.
+
+### Troubleshooting
+
+```bash
+# Is this checkout's Fleet ready?
+curl -fsS http://127.0.0.1:<MULTICA_FLEET_PORT>/readyz
+
+# Fleet logs for this worktree's Compose project
+docker compose -f docker-compose.fleet.yml -p multica-fleet-<namespace> logs fleet
+
+# Node resources (all carry the namespace label)
+docker ps -a --filter label=multica.fleet.namespace=<namespace>
+docker volume ls --filter label=multica.fleet.namespace=<namespace>
+```
+
+- `/readyz` answers `503 store_schema_missing`: PostgreSQL is reachable but
+  this database has not been migrated for Fleet (the `fleet_node`,
+  `fleet_node_operation`, `fleet_node_credential` and
+  `fleet_credential_profile` tables). Fleet never migrates on its own; run the
+  checkout's migration path (`make up C=api`) and retry. `store_unavailable`
+  instead means PostgreSQL itself is unreachable.
+- `Docker daemon is not running`: start Docker Desktop (or the Linux daemon),
+  then re-run `make up C=fleet`.
+- `network multica_default ... not found`: start this checkout's PostgreSQL
+  first (`make db-up` or `make up C=api`); Fleet joins that network instead of
+  creating one.
+- Node cannot reach the API: Docker Desktop resolves
+  `host.docker.internal`; Colima (Lima) exposes the host as
+  `host.lima.internal` (the launch script resolves the address through
+  `colima ssh`); Multipass uses its default gateway `192.168.64.1`; on a
+  plain Linux Docker daemon set a container-reachable
+  `MULTICA_FLEET_API_URL` (the node network gateway) or
+  `MULTICA_FLEET_HOST_GATEWAY`. `curl` from inside a node container is the
+  quickest check.
+- Node stays in `launching`: while the container starts this is expected;
+  check the container logs and the daemon health on port 19514 inside the
+  container. A launching node is refused by start/stop/reboot/delete to avoid
+  racing creation. The coordinator promotes it to `running` once the container
+  and daemon are ready, or settles it as `stopped` if the container exited. If
+  the daemon already reports
+  `running` while Fleet still shows `launching`, that is a regression of the
+  promotion path (design §14.6), not a credentials or network problem; report it
+  with the logs instead of forcing operations.
+- Old shared-project Fleet container: versions before the per-worktree Compose
+  project ran Fleet as `multica-fleet-1` in project `multica`. It is no longer
+  managed; remove it once before starting the new project:
+
+  ```bash
+  docker ps -a --filter label=com.docker.compose.project=multica --filter label=com.docker.compose.service=fleet
+  docker rm -f <container-id>
+  ```
+
+  Volumes from that old container are not removed automatically; inspect and
+  delete them explicitly if they are no longer needed.
+- `make destroy` refuses to drop the database while Docker is unreachable or
+  this namespace's Docker cleanup is incomplete. An unreachable daemon counts as
+  "unknown", never as "nothing to clean", so the manifest and slot are kept.
+  Fix Docker and re-run it; do not prune globally.
+
+### Tests
+
+Defaults never start Docker or call a model:
+
+```bash
+# Real Docker lifecycle, opt-in
+(cd server && MULTICA_FLEET_INTEGRATION=1 go test -tags=fleetintegration ./internal/fleet -run TestFleetNodeLifecycleRealDocker -count=1 -v)
+
+# Browser entry, opt-in
+MULTICA_RUN_FLEET_E2E=1 pnpm exec playwright test e2e/cloud-runtime-docker.spec.ts
+```
+
 ## Workspaces
 
 ### Working with multiple workspaces
@@ -1110,7 +1299,14 @@ multica autopilot create \
   --mode create_issue \
   --subscriber "Alice"
 
+multica autopilot create \
+  --title "Weekly dependency audit" \
+  --description "Audit dependencies for security updates." \
+  --squad "Backend Squad" \
+  --mode create_issue
+
 multica autopilot update <id> --status paused
+multica autopilot update <id> --squad-id <squad-uuid>
 multica autopilot update <id> --description "New prompt"
 multica autopilot update <id> --subscriber "Alice" --subscriber "Bob"
 multica autopilot update <id> --clear-subscribers
@@ -1118,6 +1314,7 @@ multica autopilot delete <id>
 ```
 
 `--mode` accepts `create_issue` (creates a new issue on each run and assigns it to the agent) or `run_only` (enqueues a direct agent task without creating an issue). `--agent` accepts either a name or UUID.
+To assign a squad instead, use `--squad` (name or ID) or `--squad-id` (canonical UUID); the run goes to the squad's leader, and in `create_issue` mode the created issue is assigned to the squad. `--agent`, `--squad`, and `--squad-id` are mutually exclusive, and `create` requires one of them. On `update` they switch the assignee (sending `assignee_type` with `assignee_id`); an update without any of them leaves the current assignee untouched. Table output labels the assignee by type, e.g. `squad:Backend Squad`.
 `--subscriber` accepts a workspace member name or user ID and may be repeated; on update it replaces the autopilot's subscriber template. Subscribers receive inbox notifications for issues created by a `create_issue` autopilot. Use `--clear-subscribers` to remove all autopilot subscribers.
 
 ### Manual Trigger
@@ -1165,6 +1362,41 @@ output — use `autopilot get <id> --output json --show-secrets` to reveal them.
 The CLI exposes cron-based `schedule` triggers via `trigger-add`, and `webhook`
 triggers via `trigger-add --kind webhook` plus `trigger-rotate-url`. The data model
 also defines an `api` kind, which is not surfaced here.
+
+### Webhook Event and Action Filters
+
+Use a JSON file to configure the same event/action filters as the web UI:
+
+```json
+[
+  {"event": "pull_request_review", "actions": ["submitted"]},
+  {"event": "push"}
+]
+```
+
+Save this array as `filters.json`, then create or update a webhook trigger:
+
+```bash
+multica autopilot trigger-add <autopilot-id> --kind webhook --event-filters-file filters.json
+multica autopilot trigger-update <autopilot-id> <trigger-id> --event-filters-file filters.json
+multica autopilot get <autopilot-id> --output json
+```
+
+An event without `actions` (or with an empty actions array) accepts every action
+for that event. Filters apply only to webhook triggers; schedule triggers reject
+them. The server validates the filters using the same rules as UI submissions.
+
+Omitting `--event-filters-file` on update preserves the saved filters. Replacing
+filters requires a nonempty array; `null`, an empty array, unknown fields, and
+malformed files are rejected. To explicitly remove filters and accept all events:
+
+```bash
+multica autopilot trigger-update <autopilot-id> <trigger-id> --clear-event-filters
+```
+
+`--clear-event-filters` cannot be combined with `--event-filters-file`. Creation
+without a filter file accepts all events. These flags configure existing event
+and action matching; they do not add payload-field conditions.
 
 ## Other Commands
 

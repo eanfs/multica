@@ -33,12 +33,23 @@ func (f *fakeCloudRuntimeProxy) Do(ctx context.Context, req cloudruntime.Request
 	return f.resp, nil
 }
 
+// useCloudRuntimeProxy swaps only the node-runtime client. Billing has its own
+// client, and replacing both would hide a handler that routes billing through
+// the cloud-runtime (local Fleet) client.
 func useCloudRuntimeProxy(t *testing.T, proxy cloudRuntimeProxy) {
 	t.Helper()
-
-	prevProxy := testHandler.CloudRuntime
+	prev := testHandler.CloudRuntime
 	testHandler.CloudRuntime = proxy
-	t.Cleanup(func() { testHandler.CloudRuntime = prevProxy })
+	t.Cleanup(func() { testHandler.CloudRuntime = prev })
+}
+
+// useCloudBillingProxy swaps only the billing client. Billing tests use it so
+// they assert what the billing handlers actually dial.
+func useCloudBillingProxy(t *testing.T, proxy cloudRuntimeProxy) {
+	t.Helper()
+	prev := testHandler.CloudBilling
+	testHandler.CloudBilling = proxy
+	t.Cleanup(func() { testHandler.CloudBilling = prev })
 }
 
 // TestCreateCloudRuntimeNodeForwardsBody is the post-MUL-2671 happy

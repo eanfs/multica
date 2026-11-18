@@ -158,7 +158,8 @@ type OwnerLookupFunc func(ctx context.Context, ownerID string) (bool, error)
 
 // CloudPATVerifier resolves mcn_ PATs by calling
 // POST <fleetURL>/api/v1/pat/verify and caches verified results in
-// Redis for cloudPATCacheTTL.
+// Redis for cloudPATCacheTTL. Local Fleet mode sets DisableCache, so every
+// verification reaches Fleet and revocation is immediate.
 //
 // A nil *CloudPATVerifier is safe — Verify returns
 // ErrCloudPATNotConfigured. The Auth/DaemonAuth middlewares treat
@@ -168,7 +169,11 @@ type OwnerLookupFunc func(ctx context.Context, ownerID string) (bool, error)
 type CloudPATVerifier struct {
 	baseURL string
 	http    *http.Client
-	rdb     redis.UniversalClient // may be nil — disables caching
+	cache   cloudPATCache // nil — caching disabled
+	// disableCache forces every Verify to reach Fleet. Local Fleet mode sets
+	// it so a revoked node credential stops working immediately instead of
+	// lingering for cloudPATCacheTTL.
+	disableCache bool
 }
 
 // CloudPATVerifierConfig assembles the dependencies for
@@ -191,6 +196,12 @@ type CloudPATVerifierConfig struct {
 	// every Verify call hits Fleet. Same nil-safe contract as
 	// PATCache / DaemonTokenCache.
 	Redis redis.UniversalClient
+
+	// DisableCache turns the positive-result cache off entirely, even when
+	// Redis is configured: every Verify reaches Fleet and no result is
+	// stored. Local Fleet mode uses this because credential revocation must
+	// take effect on the next request. SaaS keeps the cache.
+	DisableCache bool
 }
 
 // NewCloudPATVerifier returns a verifier for cfg.FleetBaseURL. If the
@@ -205,10 +216,15 @@ func NewCloudPATVerifier(cfg CloudPATVerifierConfig) *CloudPATVerifier {
 	if client == nil {
 		client = &http.Client{Timeout: cloudPATDefaultTimeout}
 	}
+	var cache cloudPATCache
+	if cfg.Redis != nil {
+		cache = &redisCloudPATCache{rdb: cfg.Redis}
+	}
 	return &CloudPATVerifier{
-		baseURL: base,
-		http:    client,
-		rdb:     cfg.Redis,
+		baseURL:      base,
+		http:         client,
+		cache:        cache,
+		disableCache: cfg.DisableCache,
 	}
 }
 
@@ -219,7 +235,9 @@ func (v *CloudPATVerifier) Configured() bool {
 	return v != nil && v.baseURL != ""
 }
 
-// Verify resolves token to a CloudPATIdentity by consulting (in order):
+// Verify resolves token to a CloudPATIdentity by consulting (in order).
+// Step 1 only applies when caching is enabled (Redis configured and
+// DisableCache false):
 //
 //  1. Redis cache, keyed by sha256(token). Hit → return cached
 //     identity, no Fleet round-trip and no DB lookup. The cache only
@@ -258,9 +276,13 @@ func (v *CloudPATVerifier) Verify(ctx context.Context, token string, lookup Owne
 		return CloudPATIdentity{}, ErrCloudPATInvalid
 	}
 
-	hash := HashToken(token)
-	if id, ok := v.cacheGet(ctx, hash); ok {
-		return id, nil
+	cacheEnabled := !v.disableCache && v.cache != nil
+	var hash string
+	if cacheEnabled {
+		hash = HashToken(token)
+		if id, ok := v.cache.get(ctx, hash); ok {
+			return id, nil
+		}
 	}
 
 	id, err := v.fetch(ctx, token)
@@ -289,7 +311,9 @@ func (v *CloudPATVerifier) Verify(ctx context.Context, token string, lookup Owne
 		}
 	}
 
-	v.cacheSet(ctx, hash, id)
+	if cacheEnabled {
+		v.cache.set(ctx, hash, id)
+	}
 	return id, nil
 }
 
@@ -400,11 +424,20 @@ func (v *CloudPATVerifier) fetch(ctx context.Context, token string) (CloudPATIde
 
 func cloudPATCacheKey(hash string) string { return cloudPATCachePrefix + hash }
 
-func (v *CloudPATVerifier) cacheGet(ctx context.Context, hash string) (CloudPATIdentity, bool) {
-	if v == nil || v.rdb == nil {
-		return CloudPATIdentity{}, false
-	}
-	raw, err := v.rdb.Get(ctx, cloudPATCacheKey(hash)).Bytes()
+// cloudPATCache is the positive-result cache behind Verify. The interface keeps
+// the no-cache path testable without Redis and lets local Fleet mode bypass the
+// cache without special-casing the Redis client.
+type cloudPATCache interface {
+	get(ctx context.Context, hash string) (CloudPATIdentity, bool)
+	set(ctx context.Context, hash string, id CloudPATIdentity)
+}
+
+type redisCloudPATCache struct {
+	rdb redis.UniversalClient
+}
+
+func (c *redisCloudPATCache) get(ctx context.Context, hash string) (CloudPATIdentity, bool) {
+	raw, err := c.rdb.Get(ctx, cloudPATCacheKey(hash)).Bytes()
 	if err != nil {
 		if !errors.Is(err, redis.Nil) {
 			slog.Warn("cloud_pat: cache get failed; falling back to fleet", "error", err)
@@ -425,16 +458,13 @@ func (v *CloudPATVerifier) cacheGet(ctx context.Context, hash string) (CloudPATI
 	return id, true
 }
 
-func (v *CloudPATVerifier) cacheSet(ctx context.Context, hash string, id CloudPATIdentity) {
-	if v == nil || v.rdb == nil {
-		return
-	}
+func (c *redisCloudPATCache) set(ctx context.Context, hash string, id CloudPATIdentity) {
 	raw, err := json.Marshal(id)
 	if err != nil {
 		slog.Warn("cloud_pat: cache marshal failed", "error", err)
 		return
 	}
-	if err := v.rdb.Set(ctx, cloudPATCacheKey(hash), raw, cloudPATCacheTTL).Err(); err != nil {
+	if err := c.rdb.Set(ctx, cloudPATCacheKey(hash), raw, cloudPATCacheTTL).Err(); err != nil {
 		slog.Warn("cloud_pat: cache set failed", "error", err)
 	}
 }

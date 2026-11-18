@@ -11,6 +11,17 @@ export interface CloudRuntimeNode {
   subnet_id: string;
   name: string;
   status: string;
+  /** Provider that owns the node ("docker", "ec2", ...); optional because
+   *  backends predating local Docker runtime omit it. */
+  provider?: string;
+  /** Daemon this node is expected to host (local Fleet mode). */
+  daemonId?: string;
+  /** Per-node readiness signals (CLI installed, model configured, ...). */
+  statusDetail?: Record<string, unknown>;
+  /** The lifecycle operation the node is currently waiting on, if any. */
+  operation?: CloudRuntimeNodeOperation;
+  /** Last operation error reported for the node. */
+  error?: string;
   tags: Record<string, string>;
   metadata: Record<string, unknown>;
   created_at: string;
@@ -22,8 +33,41 @@ export interface ListCloudRuntimeNodesParams {
   offset?: number;
 }
 
+/** In-flight lifecycle operation reported by the node contract. */
+export interface CloudRuntimeNodeOperation {
+  name: string;
+  phase: string;
+}
+
+/** A node addressed by Docker container id, or by fleet node id when the
+ *  launch never produced a container (failed nodes). */
+export interface CloudRuntimeNodeRef {
+  instanceId?: string;
+  nodeId?: string;
+}
+
+/** Variables for start/stop/reboot. The optional key lets a caller retry the
+ *  same request after an uncertain response without queueing a second one. */
+export interface CloudRuntimeNodeOperationVariables {
+  instanceId: string;
+  idempotencyKey?: string;
+}
+
+/** Delete can address a failed node by node id; passing the optional key makes
+ *  a prepared/uncertain request replayable instead of conflicting. */
+export interface CloudRuntimeDeleteVariables extends CloudRuntimeNodeRef {
+  idempotencyKey?: string;
+}
+
 export interface CreateCloudRuntimeNodeRequest {
-  instance_type: string;
+  /** Docker Fleet selects its allowed node shape with this id. */
+  spec_id?: string;
+  /** Per-submission idempotency key; the API client also mirrors it in the
+   *  Idempotency-Key header. Docker create bodies must carry exactly this,
+   *  the name and spec_id — the local Fleet rejects unknown fields. */
+  idempotency_key?: string;
+  /** EC2-shaped providers select the allowed node shape with instance_type. */
+  instance_type?: string;
   name?: string;
   region?: string;
   image_id?: string;
@@ -34,10 +78,55 @@ export interface CreateCloudRuntimeNodeRequest {
   tags?: Record<string, string>;
 }
 
+export interface CloudRuntimeSpec {
+  id: string;
+  cpu: number;
+  memoryMb: number;
+  maxConcurrent: number;
+}
+
+export interface CloudRuntimeService {
+  provider: string;
+  operations: string[];
+  specs: CloudRuntimeSpec[];
+  persistentStorage: boolean;
+  diskQuota: boolean;
+}
+
+export const EMPTY_CLOUD_RUNTIME_SERVICE: CloudRuntimeService = {
+  provider: "",
+  operations: [],
+  specs: [],
+  persistentStorage: false,
+  diskQuota: false,
+};
+
 export const cloudRuntimeKeys = {
   all: (wsId: string) => ["cloud-runtime", wsId] as const,
   nodes: (wsId: string) => [...cloudRuntimeKeys.all(wsId), "nodes"] as const,
 };
+
+export const cloudRuntimeServiceKeys = {
+  service: (wsId: string) => [...cloudRuntimeKeys.all(wsId), "service"] as const,
+};
+
+export function cloudRuntimeServiceOptions(wsId: string) {
+  return queryOptions({
+    queryKey: cloudRuntimeServiceKeys.service(wsId),
+    queryFn: () => api.getCloudRuntimeService(),
+    staleTime: 60 * 1000,
+  });
+}
+
+// Idempotency keys only need to be unique per write. crypto.randomUUID is
+// available in browsers and Node, but older React Native (Hermes) runtimes
+// ship without it, so fall back to a random string instead of pulling in a
+// dependency for one call.
+export function newCloudRuntimeIdempotencyKey(): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  if (uuid) return uuid;
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 const PENDING_NODE_STATUSES = new Set([
   "launching",
@@ -83,7 +172,53 @@ export function useCreateCloudRuntimeNode(wsId: string) {
 export function useDeleteCloudRuntimeNode(wsId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (instanceId: string) => api.deleteCloudRuntimeNode(instanceId),
+    mutationFn: ({ instanceId, nodeId, idempotencyKey }: CloudRuntimeDeleteVariables) =>
+      api.deleteCloudRuntimeNode(
+        { instanceId, nodeId },
+        idempotencyKey ?? newCloudRuntimeIdempotencyKey(),
+      ),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: cloudRuntimeKeys.all(wsId) });
+    },
+  });
+}
+
+export function useStartCloudRuntimeNode(wsId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ instanceId, idempotencyKey }: CloudRuntimeNodeOperationVariables) =>
+      api.startCloudRuntimeNode(
+        instanceId,
+        idempotencyKey ?? newCloudRuntimeIdempotencyKey(),
+      ),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: cloudRuntimeKeys.all(wsId) });
+    },
+  });
+}
+
+export function useStopCloudRuntimeNode(wsId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ instanceId, idempotencyKey }: CloudRuntimeNodeOperationVariables) =>
+      api.stopCloudRuntimeNode(
+        instanceId,
+        idempotencyKey ?? newCloudRuntimeIdempotencyKey(),
+      ),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: cloudRuntimeKeys.all(wsId) });
+    },
+  });
+}
+
+export function useRebootCloudRuntimeNode(wsId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ instanceId, idempotencyKey }: CloudRuntimeNodeOperationVariables) =>
+      api.rebootCloudRuntimeNode(
+        instanceId,
+        idempotencyKey ?? newCloudRuntimeIdempotencyKey(),
+      ),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: cloudRuntimeKeys.all(wsId) });
     },

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Test double for Claude Code. The opt-in Fleet integration test replaces the
+# real CLI with this script so no model account is used: it accepts the same
+# argv the daemon would pass (which it ignores) and exits immediately. Never
+# build this into a production runtime image.
+exit 0

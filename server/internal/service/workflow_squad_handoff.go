@@ -23,7 +23,10 @@ func (s *TaskService) createWorkflowSquadHandoffTask(ctx context.Context, issue 
 	// Deferred rows can coexist with an occupied queued/dispatched slot. The
 	// existing promoter releases them when that slot frees; never rewrite the
 	// binding, role, comments or attribution of a task already offered to a daemon.
-	params.FireAt = pgtype.Timestamptz{Time: time.Now(), Valid: true}
+	// The handoff is due immediately. Set fire_at slightly in the past so a
+	// same-tick promotion (enqueue or the next claim) is not skipped by the
+	// small clock difference between this process and PostgreSQL's now().
+	params.FireAt = pgtype.Timestamptz{Time: time.Now().Add(-time.Second), Valid: true}
 	params.WorkflowStep = pgtype.Text{String: issue.Status, Valid: true}
 	params.WorkflowHandoffRevision = pgtype.Int8{Int64: issue.Revision, Valid: true}
 	var task db.AgentTaskQueue

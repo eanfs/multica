@@ -22,6 +22,10 @@ const (
 	ctxKeyDaemonAuthPath
 	ctxKeyDaemonTokenHash
 	ctxKeyDaemonTokenOwnerID
+	// ctxKeyCloudPATIdentity carries the verified mcn_ identity so daemon
+	// handlers can attribute server-written metadata (the fleet node UUID)
+	// to the credential that actually registered the runtime.
+	ctxKeyCloudPATIdentity
 )
 
 // Daemon auth path labels exposed via context for slow-log attribution.
@@ -79,6 +83,27 @@ func WithDaemonTokenOwnerID(ctx context.Context, ownerID string) context.Context
 		return ctx
 	}
 	return context.WithValue(ctx, ctxKeyDaemonTokenOwnerID, ownerID)
+}
+
+// CloudPATIdentityFromContext returns the verified mcn_ identity attached by
+// DaemonAuth's cloud_pat branch. ok is false for every other auth path, so a
+// handler can only derive fleet node metadata from a credential the Fleet
+// service actually verified — never from client-supplied input.
+func CloudPATIdentityFromContext(ctx context.Context) (auth.CloudPATIdentity, bool) {
+	identity, ok := ctx.Value(ctxKeyCloudPATIdentity).(auth.CloudPATIdentity)
+	return identity, ok
+}
+
+// LocalFleetIdentityFromContext returns the verified mcn_ identity only when
+// this deployment runs the local Fleet. The cloud_pat verifier is shared with
+// SaaS Cloud, so identity presence alone must not let a caller claim fleet
+// ownership: SaaS runtimes registered through the same credential stay
+// ordinary, deletable rows.
+func LocalFleetIdentityFromContext(ctx context.Context, localFleetEnabled bool) (auth.CloudPATIdentity, bool) {
+	if !localFleetEnabled {
+		return auth.CloudPATIdentity{}, false
+	}
+	return CloudPATIdentityFromContext(ctx)
 }
 
 // WithDaemonTokenHash attaches the authenticating mdt_ token hash. The WS
@@ -261,6 +286,7 @@ func DaemonAuth(queries *db.Queries, patCache *auth.PATCache, daemonCache *auth.
 				// differently depending on which one routed it.
 				r.Header.Set("X-Actor-Source", "cloud_pat")
 				ctx := context.WithValue(r.Context(), ctxKeyDaemonAuthPath, DaemonAuthPathCloudPAT)
+				ctx = context.WithValue(ctx, ctxKeyCloudPATIdentity, identity)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}

@@ -34,7 +34,8 @@ Multica is a task management platform where people and agents collaborate on iss
 Use `Makefile`, workspace `package.json` files, and `pnpm-workspace.yaml` for current commands and versions. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and worktree operations.
 
 - Use the checkout's managed environment: `make up`, `make status`, `make down`. `make down` preserves data; `make destroy` removes the environment and its data.
-- Worktrees share PostgreSQL but have isolated databases/ports. Use the environment scripts and `.env.worktree`; do not copy the main checkout's `.env` or manually create a database through an assumed PostgreSQL instance.
+- The optional local Docker Fleet is a component: `make up C=api,web,fleet`. It needs a running Docker daemon, builds `multica/fleet:dev` and `multica/runtime-claude:dev` on first use, and manages node containers through the Docker Engine API. It is not part of the default environment. `make destroy` refuses to drop the database while Docker is unreachable, because Fleet's node containers and volumes live outside Compose and cannot then be verified. `make up C=fleet` writes the 0600 service secret and an empty `.dev/fleet-credentials.json`; plain `make up` writes only the service secret, and `status`/`down`/`destroy` write neither. On macOS, Colima is a supported Docker backend: install it with `brew install colima`, run `colima start`, and `make up C=fleet` uses the active Docker context; `scripts/fleet-env.sh` derives the container-to-host API address (Docker Desktop `host.docker.internal`, Colima/Lima host address) unless `MULTICA_FLEET_HOST_GATEWAY` overrides it. Multipass is the other supported VM backend: `bash deploy/multipass/setup.sh` creates a Docker VM and the `multica-multipass` context; Fleet then uses `192.168.64.1` as the host address.
+- Worktrees share PostgreSQL but have isolated databases/ports. Use the environment scripts and `.env.worktree`; do not copy the main checkout's `.env` or manually create a database through an assumed PostgreSQL instance. The Fleet component is the exception: each worktree runs its own per-namespace Compose project (`multica-fleet-<namespace>`) and node namespace, so two checkouts never recreate each other's Fleet container or nodes.
 - Regenerate sqlc with `make sqlc` after SQL changes.
 - Run the narrowest useful checks while iterating, then broaden when risk warrants it. Report what actually ran and any skipped checks.
 
@@ -82,6 +83,15 @@ Installed desktop clients may talk to newer backends. Preserve response compatib
 - Before pushing a migration, rebase onto the latest `origin/main`, number it as the current highest prefix plus one, and run `go test ./cmd/migrate ./internal/migrations` from `server/`.
 - Conditionally skipped migrations are still recorded in `schema_migrations`. Later DDL touching conditional objects must be idempotent (`IF EXISTS` / `IF NOT EXISTS`); document recovery if the missing object would break runtime behavior.
 
+## Row Lock Order
+
+Task writes and runtime-side paths lock the same `agent`, `agent_runtime`, `workspace`, and `issue` rows; two paths taking a pair in opposite orders with conflicting modes deadlock (MUL-9501).
+
+- Task enqueue order: the `agent` row first, then `lock_task_owner_rows` (migration 284) inside the writing statement takes FOR KEY SHARE on the workspace, issue, and runtime rows. New enqueue paths keep this order.
+- A path that locks `agent_runtime` before `agent` must let that FOR KEY SHARE through. To exclude only UPDATE/DELETE of the runtime, use FOR NO KEY UPDATE (`LockAgentRuntimeForClaimDelivery`, `LockAgentRuntimeForAccessChange`). Use FOR UPDATE (`LockAgentRuntime`) only when new rows must be stopped from referencing the runtime: runtime delete and teardown.
+- A new path that takes these rows in the reverse order ships with a test that forces the interleaving, as `server/internal/handler/chat_send_claim_deadlock_test.go` does.
+- Known, unfixed: runtime delete and teardown (`TeardownRuntime`, the runtime delete handlers, the runtime GC sweeper) take `LockAgentRuntime`, then the agents via `ListUserAgentsByRuntimeForUpdate` — the reverse of enqueue order. It can only deadlock with an enqueue while that runtime is being deleted.
+
 ## Backend UUID Rules
 
 In `server/internal/handler/`, distinguish UUID sources before using them in writes:
@@ -128,6 +138,7 @@ Workspace-scoped queries filter by `workspace_id`; membership gates access and `
 - Tests of CI configuration assert invariants a gate cannot see on its own, such as no `continue-on-error` in gated jobs, or behavior derived from the configuration, such as path selection and gate mapping. Do not assert the current text of a step, name, or matrix.
 - Default tests must not resolve or execute user-installed agent CLIs; pass test-created fake or missing executable paths. New default agent commands go in `scripts/agent-cli-command-names.txt`.
 - Only run real-agent smoke tests when explicitly authorized. Gate them behind `agentintegration` and check `MULTICA_RUN_REAL_AGENT_SMOKE=1` before executable lookup/account access. Run the specific test: `(cd server && MULTICA_RUN_REAL_AGENT_SMOKE=1 go test -tags=agentintegration ./pkg/agent -run '<test-name>' -count=1 -v)`.
+- Docker/Fleet integration is opt-in. Default tests must not require a Docker daemon or a model account. Gate real-Docker tests behind the `fleetintegration` tag plus `MULTICA_FLEET_INTEGRATION=1`. `docker/runtime/Dockerfile.test` extends `multica/runtime-claude:dev`, so build that base image first (`docker build -f docker/runtime/Dockerfile -t multica/runtime-claude:dev .`), then the test image (`docker build -f docker/runtime/Dockerfile.test -t multica/runtime-claude:test .`), then run `(cd server && MULTICA_FLEET_INTEGRATION=1 go test -tags=fleetintegration ./internal/fleet -run TestFleetNodeLifecycleRealDocker -count=1 -v)`. Gate the browser suite behind `MULTICA_RUN_FLEET_E2E=1`.
 
 ## Change and Delivery Rules
 

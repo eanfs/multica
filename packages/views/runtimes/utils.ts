@@ -3,6 +3,10 @@ import type {
   RuntimeUsage,
   RuntimeUsageByAgent,
 } from "@multica/core/types";
+import type {
+  CloudRuntimeNode,
+  CloudRuntimeService,
+} from "@multica/core/runtimes";
 import { getCustomPricing } from "@multica/core/runtimes/custom-pricing-store";
 
 // A live local daemon re-registers itself within seconds of a server-side
@@ -1592,4 +1596,151 @@ export function computeCostInWindow(
 export function pctChange(current: number, previous: number): number | null {
   if (previous <= 0) return null;
   return Math.round(((current - previous) / previous) * 100);
+}
+
+// Cloud runtime capabilities
+
+// The provider advertises which lifecycle operations it accepts, so the UI
+// never renders a button the current backend cannot serve. An unknown provider
+// or a failed capability fetch yields a service with no operations, which
+// disables every control instead of guessing.
+//
+// EC2-era providers predate the capability document entirely: their response
+// may carry no operations or specs at all. For those only (a non-empty provider
+// that is not docker, with no advertised capabilities) create/delete stay
+// available, matching the UI before capability discovery existed. Docker is
+// always driven by the advertised list.
+export interface CloudRuntimeOperations {
+  canCreate: boolean;
+  canStart: boolean;
+  canStop: boolean;
+  canReboot: boolean;
+  canDelete: boolean;
+}
+
+function isLegacyEc2CapabilityResponse(
+  service: CloudRuntimeService | undefined | null,
+): boolean {
+  if (!service || isDockerCloudRuntime(service)) return false;
+  return service.provider.trim() !== "" && service.operations.length === 0;
+}
+
+export function cloudRuntimeOperations(
+  service: CloudRuntimeService | undefined | null,
+): CloudRuntimeOperations {
+  const ops = new Set(service?.operations ?? []);
+  const legacy = isLegacyEc2CapabilityResponse(service);
+  return {
+    canCreate: legacy || ops.has("create"),
+    canStart: ops.has("start"),
+    canStop: ops.has("stop"),
+    canReboot: ops.has("reboot"),
+    canDelete: legacy || ops.has("delete"),
+  };
+}
+
+// Per-node gating on top of the provider capability list. A running node has
+// nothing to start and an already stopped node has nothing to stop, so showing
+// those buttons only invites a rejected request. Terminated rows are tombstones
+// and cannot be deleted again (the backend answers 409).
+const START_UNAVAILABLE_STATUSES = new Set([
+  "launching",
+  "starting",
+  "running",
+  "stopping",
+  "rebooting",
+  "terminating",
+  "terminated",
+  "failed",
+  "instance_missing",
+]);
+const STOP_UNAVAILABLE_STATUSES = new Set([
+  "launching",
+  "stopping",
+  "stopped",
+  "terminating",
+  "terminated",
+  "failed",
+  "instance_missing",
+]);
+const REBOOT_UNAVAILABLE_STATUSES = new Set([
+  "launching",
+  "terminating",
+  "terminated",
+  "failed",
+  "instance_missing",
+]);
+
+export function cloudRuntimeNodeOperations(
+  status: string,
+  operations: CloudRuntimeOperations,
+): CloudRuntimeOperations {
+  const normalized = status.trim().toLowerCase();
+  return {
+    ...operations,
+    canStart: operations.canStart && !START_UNAVAILABLE_STATUSES.has(normalized),
+    canStop: operations.canStop && !STOP_UNAVAILABLE_STATUSES.has(normalized),
+    canReboot:
+      operations.canReboot && !REBOOT_UNAVAILABLE_STATUSES.has(normalized),
+    canDelete: operations.canDelete && normalized !== "terminated",
+  };
+}
+
+// Local Docker nodes own their image, subnet and disk layout, so the create
+// form hides the EC2-shaped fields for this provider.
+export function isDockerCloudRuntime(
+  service: Pick<CloudRuntimeService, "provider"> | undefined | null,
+): boolean {
+  return service?.provider === "docker";
+}
+
+const NODE_DETAIL_MESSAGE_KEYS = ["error", "message", "reason", "last_error"] as const;
+
+function detailMessage(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed || null;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  for (const key of NODE_DETAIL_MESSAGE_KEYS) {
+    const message = detailMessage(record[key]);
+    if (message) return message;
+  }
+  return null;
+}
+
+// The advertised node contract puts status_detail at the top level, but the
+// local Fleet response still nests it (and its daemon id) inside metadata.
+// Read both shapes and degrade to null rather than throwing on JSONB drift.
+export function cloudRuntimeNodeFailureReason(
+  node: Pick<CloudRuntimeNode, "error" | "statusDetail" | "metadata">,
+): string | null {
+  return (
+    detailMessage(node.error) ??
+    detailMessage(node.statusDetail) ??
+    detailMessage(node.metadata?.status_detail) ??
+    detailMessage(node.metadata?.error)
+  );
+}
+
+// The diagnostic payload also carries readiness booleans (CLI installed,
+// model configured, credentials valid). They explain a failed node whose row
+// has no message yet, so render them as a short "key: yes/no" line.
+export function cloudRuntimeNodeStatusDetailText(
+  node: Pick<CloudRuntimeNode, "statusDetail" | "metadata">,
+): string | null {
+  const detail =
+    node.statusDetail ??
+    (node.metadata?.status_detail as Record<string, unknown> | undefined);
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) {
+    return null;
+  }
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(detail)) {
+    if (typeof value === "boolean") {
+      parts.push(`${key}: ${value ? "yes" : "no"}`);
+    }
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
 }

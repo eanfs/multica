@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS fleet_credential_profile_owner_key;

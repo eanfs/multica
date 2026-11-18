@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/cloudruntime"
@@ -26,6 +27,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/dbreader"
 	"github.com/multica-ai/multica/server/internal/entitlement"
 	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/internal/inboxread"
 	"github.com/multica-ai/multica/server/internal/integrations/channel/engine"
 	composio "github.com/multica-ai/multica/server/internal/integrations/composio"
 	"github.com/multica-ai/multica/server/internal/integrations/dingtalk"
@@ -34,6 +36,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/integrations/slack"
 	"github.com/multica-ai/multica/server/internal/integrations/telegram"
 	"github.com/multica-ai/multica/server/internal/integrations/wecom"
+	"github.com/multica-ai/multica/server/internal/integrations/weixin"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/middleware"
@@ -121,8 +124,26 @@ type Config struct {
 	// CloudURL enables the SaaS-only multica-cloud connection when set. Empty
 	// keeps self-hosted deployments explicit: Cloud endpoints return 403 instead
 	// of attempting to dial a hard-coded private service.
-	CloudURL                 string
-	CloudTimeout             time.Duration
+	CloudURL     string
+	CloudTimeout time.Duration
+	// CloudRuntimeBaseURL overrides CloudURL for the cloud-runtime node proxy
+	// only. Local Fleet mode sets it while leaving CloudURL empty, so billing,
+	// entitlement, and seat capacity stay disabled.
+	CloudRuntimeBaseURL string
+	// CloudRuntimeHTTPClient is the HTTP client used by the cloud-runtime node
+	// proxy. Local Fleet mode supplies the fleetclient transport that attaches
+	// the service secret; nil keeps the default client.
+	CloudRuntimeHTTPClient *http.Client
+	// LocalFleetEnabled marks this deployment as a local Fleet, where an mcn_
+	// registration comes from a Fleet node this server manages. The cloud_pat
+	// verifier is shared with SaaS Cloud, so the credential alone does not
+	// imply fleet ownership: SaaS deployments must leave this false and never
+	// write fleet provenance onto their runtimes.
+	LocalFleetEnabled bool
+	// LocalFleetNamespace scopes the fleet_node and fleet_node_operation rows
+	// this API coordinates. Empty leaves the coordinator disabled even when
+	// LocalFleetEnabled is set, because an unscoped maintenance lock is unsafe.
+	LocalFleetNamespace      string
 	AttachmentDownloadMode   string
 	AttachmentDownloadURLTTL time.Duration
 	// MaxPreviewSizeBytes bounds text-backed attachment previews independently
@@ -218,6 +239,7 @@ type RuntimeRecoveryNotifier interface {
 }
 
 type Handler struct {
+	InboxReads             *inboxread.Guard
 	Queries                *db.Queries
 	ReadSelector           *dbreader.Selector
 	DB                     dbExecutor
@@ -235,6 +257,9 @@ type Handler struct {
 	// Entitlements supplies workspace-scoped commercial gates. A nil provider
 	// preserves self-hosted behavior without extra reads.
 	Entitlements entitlement.Provider
+	// Features restricts paid features (paid_feature.go). Nil leaves every
+	// feature usable, which is the self-hosted behavior.
+	Features entitlement.FeatureProvider
 	// SeatCapacity executes Cloud's pre-purchased human-seat protocol. Nil or
 	// disabled preserves self-hosted behavior.
 	SeatCapacity          seatcapacity.Executor
@@ -286,7 +311,21 @@ type Handler struct {
 	WebhookAbsoluteIPRateLimiter WebhookRateLimiter
 	InvitationRateLimiters       InvitationRateLimiters
 	WebhookDeliveryWorker        *WebhookDeliveryWorker
-	CloudRuntime                 cloudRuntimeProxy
+	// CloudRuntime proxies node lifecycle requests to the configured cloud
+	// runtime. In local Fleet mode this points at the local Fleet service.
+	CloudRuntime cloudRuntimeProxy
+	// LocalFleet coordinates local Fleet maintenance in the shared database.
+	// Nil outside local mode, where stop/reboot/delete keep proxying to Cloud.
+	LocalFleet *localFleetCoordinator
+	// LocalFleetRequired is set when local mode is configured but the
+	// coordinator could not be built (for example a non-pool TxStarter). The
+	// proxy then refuses maintenance requests instead of silently forwarding
+	// them to Fleet without the database barrier.
+	LocalFleetRequired bool
+	// CloudBilling proxies billing and subscription requests. It is built from
+	// CloudURL only and never shares the CloudRuntime client, so local Fleet
+	// mode (CloudURL empty) cannot expose billing through the local service.
+	CloudBilling cloudRuntimeProxy
 	// Test-only HTTP override; nil uses the default client in production.
 	googleOAuthHTTPClient *http.Client
 	// Lark integration. All three are nil when the Lark master key
@@ -402,6 +441,9 @@ type Handler struct {
 	// The process owner starts and joins it; the synchronous event bus only
 	// enqueues EventChatDone work.
 	TelegramOutbound *telegram.Outbound
+
+	WeixinInstall  *weixin.InstallService
+	WeixinOutbound *weixin.Outbound
 
 	// channelFileDelivery names the channel types that can, IN THIS
 	// DEPLOYMENT, carry a file the agent produced the last hop into the
@@ -520,6 +562,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		ReadSelector:                 dbreader.NewPrimaryOnly(queries),
 		DB:                           executor,
 		TxStarter:                    txStarter,
+		InboxReads:                   inboxread.New(inboxread.ConfigFromEnv()),
 		Hub:                          hub,
 		DaemonHub:                    daemonHub,
 		DaemonProfileRefresh:         daemonProfileRefresh,
@@ -547,11 +590,25 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		WebhookAbsoluteIPRateLimiter: NewMemoryWebhookAbsoluteIPRateLimiter(DefaultWebhookAbsoluteIPRateLimit()),
 		InvitationRateLimiters:       NewMemoryInvitationRateLimiters(DefaultInvitationRateLimits()),
 		CloudRuntime: cloudruntime.NewClient(cloudruntime.Config{
+			BaseURL:    cloudRuntimeBaseURL(cfg),
+			Timeout:    cfg.CloudTimeout,
+			HTTPClient: cfg.CloudRuntimeHTTPClient,
+		}),
+		CloudBilling: cloudruntime.NewClient(cloudruntime.Config{
 			BaseURL: cfg.CloudURL,
 			Timeout: cfg.CloudTimeout,
 		}),
 		LLM: llmClient,
 		cfg: cfg,
+	}
+	// Local Fleet operations are coordinated by the API against the same
+	// database Fleet reads; Cloud and self-hosted deployments keep the plain
+	// proxy because LocalFleetEnabled is false there.
+	if cfg.LocalFleetEnabled && strings.TrimSpace(cfg.LocalFleetNamespace) != "" {
+		h.LocalFleetRequired = true
+		if pool, ok := txStarter.(*pgxpool.Pool); ok && pool != nil {
+			h.LocalFleet = newLocalFleetCoordinator(pool, cfg.LocalFleetNamespace, h.localFleetDiagnose, time.Now)
+		}
 	}
 	h.WebhookDeliveryWorker = NewWebhookDeliveryWorker(h)
 	// The default passthrough scheduler reports sweeper-race recoveries so the
@@ -573,6 +630,16 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 	taskSvc.PRSnapshotsEnabled = h.PRRefresh.Enabled()
 
 	return h
+}
+
+// cloudRuntimeBaseURL resolves the node-runtime proxy target. Local Fleet mode
+// overrides CloudURL for this client alone; SaaS leaves the override empty and
+// keeps the historical single-URL wiring.
+func cloudRuntimeBaseURL(cfg Config) string {
+	if strings.TrimSpace(cfg.CloudRuntimeBaseURL) != "" {
+		return cfg.CloudRuntimeBaseURL
+	}
+	return cfg.CloudURL
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

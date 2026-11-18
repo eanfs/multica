@@ -1,5 +1,9 @@
 name: multica
 
+# The optional Fleet control plane is not part of this project: it lives in
+# docker-compose.fleet.yml and runs under its own per-worktree Compose project
+# (see scripts/fleet-env.sh). It joins multica_default, the network created here.
+
 services:
   postgres:
     image: pgvector/pgvector:pg17

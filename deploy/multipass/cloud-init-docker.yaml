@@ -1,0 +1,40 @@
+#cloud-config
+# Multipass VM recipe for a local Docker runtime backend.
+#
+# Launch:
+#   multipass launch 24.04 --name multica-docker --cpus 4 --memory 8G --disk 60G \
+#     --cloud-init deploy/multipass/cloud-init-docker.yaml
+#
+# The VM only runs the Docker daemon. Fleet, PostgreSQL and node containers run
+# inside that daemon; the API stays on the macOS host. The host reaches the
+# daemon over SSH (docker context), and containers reach the host API through
+# the Multipass default gateway 192.168.64.1 (see deploy/multipass/README.md).
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - gnupg
+  - lsb-release
+
+write_files:
+  - path: /etc/docker/daemon.json
+    permissions: "0644"
+    content: |
+      {
+        "features": { "buildkit": true }
+      }
+
+runcmd:
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  - chmod a+r /etc/apt/keyrings/docker.gpg
+  - >-
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg]
+    https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable"
+    > /etc/apt/sources.list.d/docker.list
+  - apt-get update
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  - usermod -aG docker ubuntu
+  - systemctl enable --now docker
+  - touch /var/lib/cloud/instance/multica-docker-ready

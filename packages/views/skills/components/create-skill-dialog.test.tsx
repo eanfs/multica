@@ -23,11 +23,24 @@ const mockListSkills = vi.hoisted(() => vi.fn());
 const mockWorkspaceId = vi.hoisted(() => ({ value: "ws-1" }));
 const mockWrap = vi.hoisted(() => vi.fn());
 
-vi.mock("@multica/core/api", async () => {
-  const { ApiError } =
-    await vi.importActual<typeof import("@multica/core/api")>(
-      "@multica/core/api",
-    );
+vi.mock("@multica/core/api", () => {
+  // The real ApiError class comes from the barrel, which is still
+  // mid-initialization while this test imports workspace queries (a cycle).
+  // A local class keeps the component's instanceof check and the test's
+  // constructed errors on the same identity.
+  class ApiError extends Error {
+    readonly status: number;
+    readonly statusText: string;
+    readonly body?: unknown;
+
+    constructor(message: string, status: number, statusText: string, body?: unknown) {
+      super(message);
+      this.name = "ApiError";
+      this.status = status;
+      this.statusText = statusText;
+      this.body = body;
+    }
+  }
   return {
     ApiError,
     api: {

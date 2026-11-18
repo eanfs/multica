@@ -45,6 +45,7 @@ const (
 	claimOutcomeRuntimeNoCapacity      = "runtime_no_capacity"
 	claimOutcomeNoRuntime              = "no_runtime"
 	claimOutcomeRuntimeMismatch        = "runtime_mismatch"
+	claimOutcomeFleetGuardRejected     = "fleet_guard_rejected"
 	claimOutcomeErrorGetAgent          = "error_get_agent"
 	claimOutcomeErrorCountRunning      = "error_count_running"
 	claimOutcomeErrorClaim             = "error_claim"
@@ -79,6 +80,7 @@ const (
 	claimReasonUnknownCandidates     = "unknown_candidates"
 	claimReasonAgentConcurrencyCap   = "agent_concurrency_cap"
 	claimReasonRuntimeConcurrencyCap = "runtime_concurrency_cap"
+	claimReasonFleetBarrier          = "fleet_barrier"
 	claimReasonAgentUnbound          = "agent_unbound"
 	claimReasonAgentRebound          = "agent_rebound"
 	claimReasonEmptyCache            = "empty_cache"
@@ -132,6 +134,10 @@ func claimReasonFor(outcome string, scope claimScope) string {
 		return claimReasonRuntimeConcurrencyCap
 	case claimOutcomeRuntimeMismatch:
 		return claimReasonAgentRebound
+	case claimOutcomeFleetGuardRejected:
+		// A Fleet barrier rejection is expected backpressure (node starting,
+		// stopping, stale health), not a claim error.
+		return claimReasonFleetBarrier
 	case claimOutcomeNoRuntime:
 		return claimReasonAgentUnbound
 	case claimOutcomeClaimed:

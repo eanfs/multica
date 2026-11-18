@@ -1,12 +1,17 @@
 import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { setApiInstance } from "@multica/core/api";
 import { I18nProvider } from "@multica/core/i18n/react";
 import { agentTaskSnapshotOptions } from "@multica/core/agents";
 import { chatSessionsOptions } from "@multica/core/chat/queries";
-import { runtimeProfileListOptions } from "@multica/core/runtimes";
+import {
+  EMPTY_CLOUD_RUNTIME_SERVICE,
+  runtimeProfileListOptions,
+  type CloudRuntimeService,
+} from "@multica/core/runtimes";
 import { qoderOptions, type QoderConnection } from "@multica/core/runtimes/qoder";
 import { runtimeListOptions } from "@multica/core/runtimes/queries";
 import type { AgentRuntime } from "@multica/core/types";
@@ -18,6 +23,11 @@ import enCommon from "../../locales/en/common.json";
 import enLayout from "../../locales/en/layout.json";
 import enRuntimes from "../../locales/en/runtimes.json";
 import { RuntimesPage } from "./runtimes-page";
+
+const { getCloudRuntimeService, listCloudRuntimeNodes } = vi.hoisted(() => ({
+  getCloudRuntimeService: vi.fn(),
+  listCloudRuntimeNodes: vi.fn(),
+}));
 
 const TEST_RESOURCES = {
   en: { common: enCommon, layout: enLayout, runtimes: enRuntimes },
@@ -103,14 +113,20 @@ function renderPage({
   runtimes = [makeRuntime()],
   connection = qoder(),
   desktop = false,
-  cloudRuntimeEnabled = false,
+  service = EMPTY_CLOUD_RUNTIME_SERVICE,
 }: {
   /** `null` leaves the runtime list unseeded, so the page renders loading. */
   runtimes?: AgentRuntime[] | null;
   connection?: QoderConnection;
   desktop?: boolean;
-  cloudRuntimeEnabled?: boolean;
+  service?: CloudRuntimeService;
 } = {}) {
+  getCloudRuntimeService.mockResolvedValue(service);
+  listCloudRuntimeNodes.mockResolvedValue([]);
+  setApiInstance({
+    getCloudRuntimeService,
+    listCloudRuntimeNodes,
+  } as unknown as Parameters<typeof setApiInstance>[0]);
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
   });
@@ -125,7 +141,6 @@ function renderPage({
     <QueryClientProvider client={qc}>
       <I18nProvider locale="en" resources={TEST_RESOURCES}>
         <RuntimesPage
-          cloudRuntimeEnabled={cloudRuntimeEnabled}
           {...(desktop
             ? {
                 localDaemonId: "daemon-1",
@@ -237,13 +252,24 @@ describe("RuntimesPage", () => {
     expect(within(menu).getByText("Qoder Cloud Agents")).toBeInTheDocument();
   });
 
-  it("adds the cloud node card only when cloud runtimes are enabled", () => {
-    renderPage({ runtimes: [], cloudRuntimeEnabled: true });
+  it("adds the cloud node card when a provider is advertised", async () => {
+    renderPage({
+      runtimes: [],
+      service: {
+        provider: "docker",
+        operations: ["create", "start", "stop", "reboot", "delete"],
+        specs: [{ id: "standard", cpu: 2, memoryMb: 4096, maxConcurrent: 1 }],
+        persistentStorage: true,
+        diskQuota: false,
+      },
+    });
 
     const intro = screen.getByRole("region", {
       name: "Give your agents a computer to work on",
     });
-    expect(within(intro).getAllByRole("button", { name: /^Go to slide/ })).toHaveLength(3);
+    await waitFor(() =>
+      expect(within(intro).getAllByRole("button", { name: /^Go to slide/ })).toHaveLength(3),
+    );
     expect(within(intro).getByText("Or use a cloud node")).toBeInTheDocument();
   });
 
@@ -335,5 +361,46 @@ describe("RuntimesPage", () => {
       ).toHaveTextContent(connection.configured ? "2" : "1");
       unmount();
     }
+  });
+  it("hides the Cloud Runtime entry when the provider advertises nothing", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => expect(getCloudRuntimeService).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("button", { name: "Add runtime" }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).queryByText("Cloud Runtime")).not.toBeInTheDocument();
+  });
+
+  it("opens the Cloud Runtime dialog from the advertised provider capabilities", async () => {
+    const user = userEvent.setup();
+    renderPage({
+      service: {
+        provider: "docker",
+        operations: ["create", "start", "stop", "reboot", "delete"],
+        specs: [
+          { id: "standard", cpu: 2, memoryMb: 4096, maxConcurrent: 1 },
+        ],
+        persistentStorage: true,
+        diskQuota: false,
+      },
+    });
+    await waitFor(() => expect(getCloudRuntimeService).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("button", { name: "Add runtime" }));
+    const menu = await screen.findByRole("menu");
+    await user.click(within(menu).getByText("Cloud Runtime"));
+
+    expect(await screen.findByText("standard")).toBeInTheDocument();
+    expect(screen.getByText("Persistent volume")).toBeInTheDocument();
+    expect(screen.queryByText(/disk size/i)).not.toBeInTheDocument();
+
+    // The dialog renders the Fleet node list and the create affordance.
+    expect(await screen.findByText("No cloud nodes")).toBeInTheDocument();
+    expect(listCloudRuntimeNodes).toHaveBeenCalledWith({
+      limit: 20,
+      offset: 0,
+    });
+    expect(screen.getByRole("button", { name: "Create node" })).toBeEnabled();
   });
 });

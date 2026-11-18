@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS fleet_credential_profile (id UUID NOT NULL DEFAULT gen_random_uuid(), owner_id UUID NOT NULL, profile_name TEXT NOT NULL, config_version TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now());

@@ -28,6 +28,7 @@ import type {
   ChatDraftRestoresResponse,
   ChatPendingTask,
   ChatSession,
+  ChatWakeup,
   PrioritizeQueuedChatTaskResponse,
   SendChatMessageResponse,
   StartMikaOnboardingResponse,
@@ -35,8 +36,9 @@ import type {
   CreateBillingCheckoutSessionResponse,
   CreateBillingPortalSessionResponse,
   WorkspaceSubscriptionEntitlements,
+  WorkspaceFeatureState,
+  WorkspaceFeatures,
   WorkspaceSubscriptionSummary,
-  IssueLimitUsage,
   WorkspaceSubscriptionPrice,
   WorkspaceSubscriptionPrices,
   CreateWorkspaceSubscriptionCheckoutResponse,
@@ -1067,6 +1069,7 @@ export interface AppConfigResponse {
   /** Whether agent create/update persists `conversation_starters`. Older servers
    * silently ignored the unknown field, so absent must be treated as false. */
   agent_conversation_starters_supported?: boolean;
+  webhook_payload_conditions_supported?: boolean;
   /** Whether issue create atomically validates and persists `properties`.
    * Older servers silently ignore the field, so absent means unsupported. */
   issue_create_properties_supported?: boolean;
@@ -1146,12 +1149,13 @@ export const ChatMessageSchema = z.object({
   failure_reason: z.string().nullable().optional(),
   elapsed_ms: z.number().nullable().optional(),
   message_kind: z
-    .enum(["message", "no_response", "onboarding_kickoff", "onboarding_opening"])
+    .enum(["message", "no_response", "onboarding_kickoff", "onboarding_opening", "wakeup"])
     .catch("message")
     .optional(),
   // Optional additive data degrades independently: a malformed suggestion
   // must not hide the assistant reply that contains it.
   quick_actions: z.array(ChatQuickActionSchema).catch([]).optional().default([]),
+  wakeup_id: z.string().nullish().catch(undefined),
 }).loose();
 
 export const ChatMessageListSchema = z.array(ChatMessageSchema).default([]);
@@ -1364,6 +1368,7 @@ export const AppConfigSchema = z.object({
   feature_flags: FeatureFlagsSchema,
   local_worktree_supported: BooleanWithDefaultSchema(false),
   agent_conversation_starters_supported: BooleanWithDefaultSchema(false),
+  webhook_payload_conditions_supported: BooleanWithDefaultSchema(false),
   issue_create_properties_supported: BooleanWithDefaultSchema(false),
   comment_delete_keep_replies_supported: BooleanWithDefaultSchema(false),
   theme_store_enabled: BooleanWithDefaultSchema(false),
@@ -1386,6 +1391,7 @@ export const EMPTY_APP_CONFIG: AppConfigResponse = {
   local_worktree_supported: false,
   // Fail closed: old servers returned success while dropping the field.
   agent_conversation_starters_supported: false,
+  webhook_payload_conditions_supported: false,
   // Fail closed: old servers returned success while dropping create properties.
   issue_create_properties_supported: false,
   // Fail closed: old servers delete a comment's replies with it.
@@ -2111,23 +2117,77 @@ export const ChildIssueProgressResponseSchema = z.object({
     .default([]),
 }).loose();
 
-export const CloudRuntimeNodeSchema = z.object({
-  id: z.string(),
-  owner_id: z.string(),
-  instance_id: z.string(),
-  region: z.string(),
-  instance_type: z.string(),
-  image_id: z.string(),
-  subnet_id: z.string(),
-  name: z.string(),
-  status: z.string(),
-  tags: z.record(z.string(), z.string()).default({}),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-  created_at: z.string(),
-  updated_at: z.string(),
-}).loose();
+export const CloudRuntimeNodeSchema = z
+  .object({
+    id: z.string(),
+    owner_id: z.string(),
+    instance_id: z.string(),
+    region: z.string(),
+    instance_type: z.string(),
+    image_id: z.string(),
+    subnet_id: z.string(),
+    name: z.string(),
+    status: z.string(),
+    tags: z.record(z.string(), z.string()).default({}),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+    created_at: z.string(),
+    updated_at: z.string(),
+    // Local Docker Fleet additions. They stay optional so a backend that
+    // predates the local runtime keeps every existing node readable.
+    provider: z.string().optional(),
+    daemon_id: z.string().optional(),
+    // status_detail is JSONB written by the coordinator; a malformed or
+    // non-object value costs the detail only, never the whole node.
+    status_detail: z.record(z.string(), z.unknown()).nullish().catch(undefined),
+    // The in-flight lifecycle operation (name/phase). Optional because a
+    // settled node has none and older backends never send it.
+    operation: z
+      .object({ name: z.string(), phase: z.string() })
+      .nullish()
+      .catch(undefined),
+    error: z.string().optional(),
+  })
+  .loose()
+  .transform(({ daemon_id, status_detail, operation, ...node }) => ({
+    ...node,
+    daemonId: daemon_id,
+    statusDetail: status_detail ?? undefined,
+    operation: operation ?? undefined,
+  }));
 
 export const CloudRuntimeNodeListSchema = z.array(CloudRuntimeNodeSchema);
+
+export const CloudRuntimeSpecSchema = z
+  .object({
+    id: z.string(),
+    cpu: z.number().default(0),
+    memory_mb: z.number().default(0),
+    max_concurrent: z.number().default(1),
+  })
+  .loose()
+  .transform((spec) => ({
+    id: spec.id,
+    cpu: spec.cpu,
+    memoryMb: spec.memory_mb,
+    maxConcurrent: spec.max_concurrent,
+  }));
+
+export const CloudRuntimeServiceSchema = z
+  .object({
+    provider: z.string().default(""),
+    operations: z.array(z.string()).default([]),
+    specs: z.array(CloudRuntimeSpecSchema).default([]),
+    persistent_storage: z.boolean().default(false),
+    disk_quota: z.boolean().default(false),
+  })
+  .loose()
+  .transform((service) => ({
+    provider: service.provider,
+    operations: service.operations,
+    specs: service.specs,
+    persistentStorage: service.persistent_storage,
+    diskQuota: service.disk_quota,
+  }));
 
 export const EMPTY_CLOUD_RUNTIME_NODE_LIST: CloudRuntimeNode[] = [];
 
@@ -2306,6 +2366,52 @@ const RuntimeUsageByHourSchema = z.object({
 }).loose();
 
 export const RuntimeUsageByHourListSchema = z.array(RuntimeUsageByHourSchema);
+
+// Runtime rate limits (`GET /api/runtimes/:id/rate-limits`). Unknown window
+// kinds and statuses from a newer server degrade to "other" / "" instead of
+// failing the whole response, and a malformed window is dropped on its own.
+const RuntimeRateLimitStatusSchema = z
+  .enum(["allowed", "warning", "rejected", ""])
+  .catch("");
+
+const RuntimeRateLimitWindowSchema = z.object({
+  kind: z
+    .enum(["session", "weekly", "weekly_opus", "weekly_sonnet", "other"])
+    .catch("other"),
+  used_percent: z.number().optional().catch(undefined),
+  window_minutes: z.number().default(0).catch(0),
+  resets_at: z.string().optional().catch(undefined),
+  status: RuntimeRateLimitStatusSchema.default(""),
+}).loose();
+
+const RuntimeRateLimitsSchema = z.object({
+  plan_type: z.string().default("").catch(""),
+  status: RuntimeRateLimitStatusSchema.default(""),
+  windows: z
+    .array(z.unknown())
+    .catch([])
+    .default([])
+    .transform((rows) =>
+      rows.flatMap((row) => {
+        const parsed = RuntimeRateLimitWindowSchema.safeParse(row);
+        return parsed.success ? [parsed.data] : [];
+      }),
+    ),
+  credits: z
+    .object({
+      has_credits: z.boolean().default(false),
+      unlimited: z.boolean().default(false),
+      balance: z.string().default(""),
+    })
+    .loose()
+    .optional()
+    .catch(undefined),
+  observed_at: z.string(),
+}).loose();
+
+export const RuntimeRateLimitsResponseSchema = z.object({
+  rate_limits: RuntimeRateLimitsSchema.nullable().catch(null),
+}).loose();
 
 // Agent task responses. The base object stays loose so daemon/runtime fields
 // can drift while task-list consumers still validate the fields they render.
@@ -2533,6 +2639,7 @@ const ChatLastMessageSchema = z.object({
     "no_response",
     "onboarding_kickoff",
     "onboarding_opening",
+    "wakeup",
   ]).optional().catch(undefined),
 }).loose();
 
@@ -2602,6 +2709,7 @@ const ChatQueuedTaskSchema = z.object({
   created_at: z.string().default(""),
   message_id: z.string().optional(),
   content: z.string().optional(),
+  wakeup_id: z.string().optional().catch(undefined),
 }).loose();
 
 const ChatQueuedTasksSchema = z.array(z.unknown()).transform((tasks) =>
@@ -2619,12 +2727,55 @@ export const ChatPendingTaskSchema: z.ZodType<ChatPendingTask> = z.object({
   status: z.string().optional(),
   created_at: z.string().optional(),
   supports_queue: z.boolean().optional(),
+  can_supplement: z.boolean().optional().catch(undefined),
   queued_tasks: ChatQueuedTasksSchema.optional(),
 }).loose();
 
 export const EMPTY_CHAT_PENDING_TASK: ChatPendingTask = {};
 
+// A malformed wakeup row is dropped rather than failing the list: the strip
+// and panel are status surfaces next to the conversation, not its content.
+const ChatWakeupSchema: z.ZodType<ChatWakeup> = z.object({
+  id: z.string().min(1),
+  chat_session_id: z.string().min(1),
+  chat_session_title: z.string().optional().catch(undefined),
+  agent_id: z.string().default(""),
+  title: z.string().default(""),
+  instruction: z.string().default(""),
+  kind: z.enum(["condition", "at", "check"]),
+  condition: z.record(z.string(), z.unknown()).nullish().catch(undefined),
+  interval_seconds: z.number().nullable().default(null),
+  fire_at: z.string().nullable().default(null),
+  next_eval_at: z.string().default(""),
+  expires_at: z.string().default(""),
+  status: z.enum(["active", "fired", "expired", "cancelled", "failed"]),
+  end_reason: z.string().nullable().default(null),
+  ended_at: z.string().nullable().default(null),
+  check_count: z.number().default(0),
+  last_check_note: z.string().nullable().default(null),
+  last_checked_at: z.string().nullable().default(null),
+  last_task_id: z.string().nullable().default(null),
+  last_task_status: z.string().optional().catch(undefined),
+  last_fired_at: z.string().nullable().default(null),
+  last_error: z.string().nullable().default(null),
+  source_message_id: z.string().nullable().default(null),
+  source_task_id: z.string().nullable().default(null),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+}).loose();
+
+export const ChatWakeupListSchema = z.array(z.unknown()).transform((rows) =>
+  rows.flatMap((row) => {
+    const parsed = ChatWakeupSchema.safeParse(row);
+    return parsed.success ? [parsed.data] : [];
+  }),
+);
+export const EMPTY_CHAT_WAKEUP_LIST: ChatWakeup[] = [];
+
 export const SendChatMessageResponseSchema: z.ZodType<SendChatMessageResponse> = z.object({
+  steered: z.boolean().optional().catch(undefined),
+  message_created_at: z.string().optional().catch(undefined),
+  message_task_id: z.string().optional().catch(undefined),
   message_id: z.string().min(1),
   task_id: z.string().min(1),
   supports_queue: z.boolean().optional(),
@@ -2886,6 +3037,21 @@ export interface DuplicateIssueErrorBody {
 // the empty array. `.loose()` lets unknown fields pass through, matching
 // the rule used by every other endpoint here.
 
+const WebhookPayloadConditionFailureSchema = z.object({
+  filter_index: z.number().int().nonnegative(),
+  condition_index: z.number().int().nonnegative(),
+  condition: z.object({
+    path: z.string(),
+    op: z.enum(["equals", "not_equals", "contains", "in", "exists"]),
+    value: z.union([z.string(), z.number(), z.boolean()]).optional(),
+    values: z.array(z.union([z.string(), z.number(), z.boolean()])).optional(),
+    ignore_case: z.boolean().optional(),
+  }).loose(),
+  actual_values: z.array(z.string()),
+  missing: z.boolean(),
+  truncated: z.boolean(),
+}).loose();
+
 const WebhookDeliverySchema = z.object({
   id: z.string(),
   workspace_id: z.string(),
@@ -2908,6 +3074,7 @@ const WebhookDeliverySchema = z.object({
   replayed_from_delivery_id: z.string().nullable(),
   error: z.string().nullable(),
   reason_code: z.string().nullable().default(null),
+  payload_condition_failure: WebhookPayloadConditionFailureSchema.nullish().catch(null),
   replay_idempotency_key: z.string().nullable().default(null),
   received_at: z.string(),
   last_attempt_at: z.string(),
@@ -3210,6 +3377,9 @@ export const InboxItemListSchema = z.array(
       type: z.string(),
       severity: z.string(),
       issue_id: z.string().nullish(),
+      // Only picks the link; a bad value falls back to the issue_id link
+      // instead of failing the whole list.
+      issue_identifier: z.string().min(1).nullish().catch(null),
       title: z.string(),
       body: z.string().nullish(),
       issue_status: z.string().nullish(),
@@ -3477,7 +3647,7 @@ const WorkspaceEntitlementLimitSchema = z
     z.object({ mode: z.literal("unlimited") }).loose(),
   ])
   .transform(
-    (value): WorkspaceSubscriptionEntitlements["limits"]["issueCount"] =>
+    (value): WorkspaceSubscriptionEntitlements["limits"]["autopilotRuns"] =>
       value.mode === "limited"
         ? { mode: "limited", limit: value.limit }
         : { mode: "unlimited", limit: null },
@@ -3494,7 +3664,6 @@ export const WorkspaceSubscriptionEntitlementsSchema = z
     seats: z.number().int().nonnegative(),
     limits: z
       .object({
-        issue_count: WorkspaceEntitlementLimitSchema,
         autopilot_runs: WorkspaceEntitlementLimitSchema,
       })
       .loose(),
@@ -3510,7 +3679,6 @@ export const WorkspaceSubscriptionEntitlementsSchema = z
       status: value.status,
       seats: value.seats,
       limits: {
-        issueCount: value.limits.issue_count,
         autopilotRuns: value.limits.autopilot_runs,
       },
       currentPeriodEnd: value.current_period_end ?? null,
@@ -3642,19 +3810,6 @@ export const BatchUpdateIssuesResponseSchema = z
 /** A batch response that failed validation: whatever was written is unknown. */
 export const UNCONFIRMED_BATCH_UPDATE: BatchUpdateIssuesResponse = { updated: 0, unconfirmed: true };
 
-export const IssueLimitUsageSchema = z
-  .object({
-    used: z.number().int().nonnegative(),
-    limit: z.number().int().positive(),
-  })
-  .loose()
-  .transform(
-    (value): IssueLimitUsage => ({
-      used: value.used,
-      limit: value.limit,
-    }),
-  );
-
 const WorkspaceSubscriptionPriceSchema = (
   expected: "month" | "year",
 ) =>
@@ -3692,6 +3847,26 @@ export const WorkspaceSubscriptionPricesSchema = z
     (value): WorkspaceSubscriptionPrices => ({
       month: value.month,
       year: value.year,
+    }),
+  );
+
+// An unknown state from a newer server reads as available: the server still
+// enforces on write, so the worst case is an upgrade prompt after the attempt
+// instead of before it. A malformed entry is dropped the same way.
+const WorkspaceFeatureStateSchema = z
+  .object({ state: z.enum(["available", "locked"]).catch("available") })
+  .loose()
+  .transform((value): WorkspaceFeatureState => value.state)
+  .catch("available" as const);
+
+export const WorkspaceFeaturesSchema = z
+  .object({
+    features: z.record(z.string(), WorkspaceFeatureStateSchema).catch({}),
+  })
+  .loose()
+  .transform(
+    (value): WorkspaceFeatures => ({
+      features: value.features as WorkspaceFeatures["features"],
     }),
   );
 
@@ -4435,6 +4610,7 @@ export const RuntimeProfileSchema = z
   .object({
     id: z.string(),
     workspace_id: z.string(),
+    daemon_id: z.string().nullable().catch(null),
     display_name: z.string(),
     protocol_family: z.string(),
     runtime_type: z.string().nullish().catch(undefined),

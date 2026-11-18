@@ -1,0 +1,3 @@
+ALTER TABLE agent_runtime ADD COLUMN IF NOT EXISTS managed_by TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE agent_runtime ADD COLUMN IF NOT EXISTS fleet_node_id UUID;
