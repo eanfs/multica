@@ -122,6 +122,12 @@ jobs:
   # arm64 build run for 30+ minutes per release.
   docker-backend-build:
     needs: verify
+    # Docker images publish to ghcr.io/<owner>/<image>, a user/org namespace
+    # that a fork's GITHUB_TOKEN cannot write (push is denied with
+    # write_package). The release and helm-chart jobs already skip on forks for
+    # the same reason; without this gate every fork's tag push turns the whole
+    # Release run red after verify passes.
+    if: github.repository_owner == 'multica-ai'
     strategy:
       fail-fast: false
       matrix:
@@ -191,6 +197,12 @@ jobs:
 
   docker-backend-merge:
     needs: [verify, docker-backend-build]
+    # Docker images publish to ghcr.io/<owner>/<image>, a user/org namespace
+    # that a fork's GITHUB_TOKEN cannot write (push is denied with
+    # write_package). The release and helm-chart jobs already skip on forks for
+    # the same reason; without this gate every fork's tag push turns the whole
+    # Release run red after verify passes.
+    if: github.repository_owner == 'multica-ai'
     runs-on: ubuntu-latest
     concurrency:
       group: release-docker-backend-${{ github.ref }}
@@ -239,6 +251,12 @@ jobs:
 
   docker-web-build:
     needs: verify
+    # Docker images publish to ghcr.io/<owner>/<image>, a user/org namespace
+    # that a fork's GITHUB_TOKEN cannot write (push is denied with
+    # write_package). The release and helm-chart jobs already skip on forks for
+    # the same reason; without this gate every fork's tag push turns the whole
+    # Release run red after verify passes.
+    if: github.repository_owner == 'multica-ai'
     strategy:
       fail-fast: false
       matrix:
@@ -308,6 +326,12 @@ jobs:
 
   docker-web-merge:
     needs: [verify, docker-web-build]
+    # Docker images publish to ghcr.io/<owner>/<image>, a user/org namespace
+    # that a fork's GITHUB_TOKEN cannot write (push is denied with
+    # write_package). The release and helm-chart jobs already skip on forks for
+    # the same reason; without this gate every fork's tag push turns the whole
+    # Release run red after verify passes.
+    if: github.repository_owner == 'multica-ai'
     runs-on: ubuntu-latest
     concurrency:
       group: release-docker-web-${{ github.ref }}
