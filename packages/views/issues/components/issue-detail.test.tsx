@@ -19,6 +19,7 @@ import enCommon from "../../locales/en/common.json";
 import enIssues from "../../locales/en/issues.json";
 import { useIssueSidebarSectionsStore } from "@multica/core/issues/stores/issue-sidebar-sections-store";
 import { useSubIssuesCollapseStore } from "@multica/core/issues/stores/sub-issues-collapse-store";
+import { configureShortcutPlatform } from "@multica/core/shortcuts";
 
 vi.mock("./issue-wakeup-header-chip", () => ({
   IssueWakeupHeaderChip: ({ onOpen }: { onOpen: () => void }) => (
@@ -108,10 +109,6 @@ vi.mock("@multica/core/workspace/queries", () => ({
     queryKey: ["workspaces", "ws-1", "squads"],
     queryFn: () => Promise.resolve([]),
   }),
-  assigneeFrequencyOptions: () => ({
-    queryKey: ["workspaces", "ws-1", "assignee-frequency"],
-    queryFn: () => Promise.resolve([]),
-  }),
   workspaceListOptions: () => ({
     queryKey: ["workspaces"],
     queryFn: () => Promise.resolve([{ id: "ws-1", name: "Test WS", slug: "test" }]),
@@ -140,11 +137,18 @@ vi.mock("../../navigation", async () => ({
   ...(await vi.importActual<typeof import("../../navigation/use-held-until-arrival")>(
     "../../navigation/use-held-until-arrival",
   )),
-  AppLink: ({ children, href, ...props }: any) => (
-    <a href={href} {...props}>
-      {children}
-    </a>
-  ),
+  // Forwards ref: the header wraps the link in `TruncatedTooltip`, which
+  // measures the anchor it clones, exactly as the real AppLink supports.
+  AppLink: forwardRef<HTMLAnchorElement, any>(function MockAppLink(
+    { children, href, ...props },
+    ref,
+  ) {
+    return (
+      <a ref={ref} href={href} {...props}>
+        {children}
+      </a>
+    );
+  }),
   useNavigation: () => ({
     push: settingsPush,
     pathname: "/issues/issue-1",
@@ -195,6 +199,10 @@ vi.mock("../../editor", async () => ({
     children,
   usePreviewSequence: () => ({ openAt: () => false }),
   collectPreviewSequence: () => [],
+  // The real provider is plain context; attachment-thumbnail.test.tsx covers it.
+  ...(await vi.importActual<typeof import("../../editor/image-thumbnails-context")>(
+    "../../editor/image-thumbnails-context",
+  )),
   // Comment attachments render as their filename — the viewer and file cards
   // have their own suites.
   AttachmentDownloadProvider: ({ children }: { children: React.ReactNode }) =>
@@ -970,7 +978,7 @@ describe("IssueDetail (shared)", () => {
     const header = await screen.findByRole("button", { name: /^Deliverables/ });
     expect(header).toHaveTextContent("1");
     expect(screen.getByRole("button", { name: "report.md, version 2" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "View all 1 deliverable" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View 1 deliverable" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "brief.pdf" })).toBeNull();
   });
 
@@ -995,7 +1003,7 @@ describe("IssueDetail (shared)", () => {
     }]);
     renderIssueDetail();
     expect(await screen.findByRole("button", { name: "historical-chart.png" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "View all 1 deliverable" }));
+    fireEvent.click(screen.getByRole("button", { name: "View 1 deliverable" }));
     expect(await screen.findByTitle("historical-chart.png")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show in comments" })).toBeInTheDocument();
     expect(mockApiObj.listComments).not.toHaveBeenCalled();
@@ -1029,7 +1037,7 @@ describe("IssueDetail (shared)", () => {
     }]);
     mockApiObj.listTasksByIssue.mockResolvedValue([]);
     renderIssueDetail();
-    fireEvent.click(await screen.findByRole("button", { name: "View all 1 deliverable" }));
+    fireEvent.click(await screen.findByRole("button", { name: "View 1 deliverable" }));
     fireEvent.click(screen.getByRole("button", { name: "Show in comments" }));
     await waitFor(() => expect(hasHighlightedCommentBackground(
       document.getElementById("comment-image-reply"),
@@ -1039,7 +1047,7 @@ describe("IssueDetail (shared)", () => {
     expect(document.querySelectorAll('[id^="comment-history-"]').length).toBeLessThanOrEqual(8);
     expect(mockApiObj.listComments).not.toHaveBeenCalled();
     const jumps = scrollIntoViewIndexSpy.mock.calls.length;
-    fireEvent.click(screen.getByRole("button", { name: "View all 1 deliverable" }));
+    fireEvent.click(screen.getByRole("button", { name: "View 1 deliverable" }));
     fireEvent.click(screen.getByRole("button", { name: "Show in comments" }));
     await waitFor(() => expect(scrollIntoViewIndexSpy.mock.calls.length).toBeGreaterThan(jumps));
   });
@@ -1056,6 +1064,9 @@ describe("IssueDetail (shared)", () => {
     // Find only answers in a visible page; jsdom lays nothing out.
     const rects = vi.spyOn(HTMLElement.prototype, "getClientRects")
       .mockReturnValue([new DOMRect(0, 0, 1, 1)] as unknown as DOMRectList);
+    // jsdom's user agent names the host OS, which would make the find chord
+    // Cmd+F on a Mac host.
+    configureShortcutPlatform("linux");
     try {
       renderIssueDetail();
       await screen.findByText("Historical comment 0");
@@ -1072,6 +1083,7 @@ describe("IssueDetail (shared)", () => {
       expect(screen.getByTestId("virtuoso-mock")).toBeInTheDocument();
     } finally {
       rects.mockRestore();
+      configureShortcutPlatform(null);
     }
   });
 
@@ -1570,6 +1582,31 @@ describe("IssueDetail (shared)", () => {
     expect(screen.getByRole("button", { name: "Close preview" })).toBeInTheDocument();
     // The header leaf names the issue by identifier only — the title is right below.
     expect(screen.getByRole("link", { name: mockIssue.identifier })).toBeInTheDocument();
+  });
+
+  it("reveals the header's clipped identifier and title on hover", async () => {
+    renderIssueDetail();
+    await screen.findByText("Implement authentication");
+
+    const link = screen.getByRole("link", { name: `${mockIssue.identifier} ${mockIssue.title}` });
+    // jsdom never lays out the header: model the clip the actions leave the leaf.
+    const leaf = link.firstElementChild as HTMLElement;
+    leaf.style.overflowX = "hidden";
+    Object.defineProperties(leaf, {
+      scrollWidth: { configurable: true, value: 320 },
+      clientWidth: { configurable: true, value: 100 },
+    });
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.pointerEnter(link, { pointerType: "mouse" });
+      await act(async () => { vi.advanceTimersByTime(550); });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(document.querySelector("[data-slot=tooltip-content]"))
+      .toHaveTextContent(`${mockIssue.identifier} ${mockIssue.title}`);
   });
 
   describe("header icon buttons", () => {
@@ -2594,7 +2631,7 @@ describe("IssueDetail (shared)", () => {
     const links = await screen.findAllByRole("link", { name: "MUL-9" });
     expect(links[0]?.getAttribute("href")).toBe("/test/issues/issue-9");
     expect(screen.getByText(/^marked this issue as a duplicate of/i)).toBeInTheDocument();
-    expect(screen.getByText(/removed the duplicate mark, MUL-8 was deleted/i)).toBeInTheDocument();
+    expect(screen.getByText(/removed the duplicate mark \(MUL-8 was deleted\)/i)).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "MUL-8" })).not.toBeInTheDocument();
     // Reopening replaces the status row, so the unmarked row says where it went.
     expect(screen.getByText(/and moved it to Todo/i)).toBeInTheDocument();
@@ -3262,6 +3299,76 @@ describe("IssueDetail (shared)", () => {
       });
     });
 
+    it("holds the composer back until a landing on cached data puts its target on screen (MUL-9538)", async () => {
+      const queryClient = createTestQueryClient();
+      queryClient.setQueryData(issueKeys.detail("ws-1", "issue-1"), mockIssue);
+      queryClient.setQueryData(issueKeys.timeline("issue-1"), mockTimeline);
+      queryClient.setQueryData(issueKeys.tasks("issue-1"), []);
+      render(
+        <I18nProvider locale="en" resources={TEST_RESOURCES}>
+          <QueryClientProvider client={queryClient}>
+            <IssueDetail issueId="issue-1" highlightCommentId="comment-2" />
+          </QueryClientProvider>
+        </I18nProvider>,
+      );
+
+      // The landing frame renders the target, not the composer below it.
+      expect(document.getElementById("comment-comment-2")).not.toBeNull();
+      expect(screen.queryByTestId("comment-composer-shell")).toBeNull();
+
+      await waitFor(() => expect(
+        hasHighlightedCommentBackground(document.getElementById("comment-comment-2")),
+      ).toBe(true));
+      expect(await screen.findByTestId("comment-composer-shell")).toBeInTheDocument();
+    });
+
+    it("holds the composer for an Inbox landing whose comment arrives a render later (MUL-9538)", async () => {
+      const queryClient = createTestQueryClient();
+      queryClient.setQueryData(issueKeys.detail("ws-1", "issue-1"), mockIssue);
+      queryClient.setQueryData(issueKeys.timeline("issue-1"), mockTimeline);
+      queryClient.setQueryData(issueKeys.tasks("issue-1"), []);
+      const page = (highlightCommentId?: string) => (
+        <I18nProvider locale="en" resources={TEST_RESOURCES}>
+          <QueryClientProvider client={queryClient}>
+            <IssueDetail issueId="issue-1" highlightRequestPending highlightCommentId={highlightCommentId} />
+          </QueryClientProvider>
+        </I18nProvider>
+      );
+      // Web reads the comment from the URL fragment, which the router writes
+      // after the page's first render.
+      const { rerender } = render(page());
+      expect(screen.queryByTestId("comment-composer-shell")).toBeNull();
+      rerender(page("comment-2"));
+      expect(screen.queryByTestId("comment-composer-shell")).toBeNull();
+
+      await waitFor(() => expect(
+        hasHighlightedCommentBackground(document.getElementById("comment-comment-2")),
+      ).toBe(true));
+      expect(await screen.findByTestId("comment-composer-shell")).toBeInTheDocument();
+    });
+
+    it("lets the composer in at once when an Inbox landing names no comment", async () => {
+      const queryClient = createTestQueryClient();
+      queryClient.setQueryData(issueKeys.detail("ws-1", "issue-1"), mockIssue);
+      queryClient.setQueryData(issueKeys.timeline("issue-1"), mockTimeline);
+      queryClient.setQueryData(issueKeys.tasks("issue-1"), []);
+      render(
+        <I18nProvider locale="en" resources={TEST_RESOURCES}>
+          <QueryClientProvider client={queryClient}>
+            <IssueDetail issueId="issue-1" highlightRequestPending />
+          </QueryClientProvider>
+        </I18nProvider>,
+      );
+      // Within a frame, well before the hold's upper bound.
+      expect(await screen.findByTestId("comment-composer-shell", {}, { timeout: 200 })).toBeInTheDocument();
+    });
+
+    it("renders the composer while a deep link's timeline is still loading", async () => {
+      mockApiObj.listTimeline.mockReturnValue(new Promise(() => {}));
+      renderIssueDetailWithHighlight("comment-2");
+      expect(await screen.findByTestId("comment-composer-shell")).toBeInTheDocument();
+    });
+
     it("auto-expands a folded resolved thread when deep-link target is a reply inside it", async () => {
       // Seed a timeline where comment-3 is resolved (so it renders as a
       // resolved-bar by default) and has a reply, reply-1, whose id is the
@@ -3441,7 +3548,7 @@ describe("IssueDetail (shared)", () => {
 
       renderIssueDetail();
 
-      fireEvent.click(await screen.findByRole("button", { name: "View all 1 deliverable" }));
+      fireEvent.click(await screen.findByRole("button", { name: "View 1 deliverable" }));
       const overview = await screen.findByRole("dialog", { name: /deliverables$/ });
       expect(document.getElementById("comment-reply-2")).toBeNull();
       fireEvent.click(within(overview).getByRole("button", { name: "Show in comments" }));
@@ -3489,7 +3596,7 @@ describe("IssueDetail (shared)", () => {
 
       renderIssueDetail();
 
-      fireEvent.click(await screen.findByRole("button", { name: "View all 1 deliverable" }));
+      fireEvent.click(await screen.findByRole("button", { name: "View 1 deliverable" }));
       const overview = await screen.findByRole("dialog", { name: /deliverables$/ });
       fireEvent.click(within(overview).getByRole("button", { name: "Show in comments" }));
 

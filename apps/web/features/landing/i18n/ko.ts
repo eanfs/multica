@@ -13,11 +13,11 @@ export function createKoDict(): LandingDict {
       label: "FAQ",
       headline: "자주 묻는 질문.",
       items: [
-      { question: "WeChat에서 에이전트와 채팅할 수 있나요?", answer: "네. 워크스페이스 관리자가 에이전트의 연동 탭에서 본인의 WeChat 계정으로 QR 코드를 스캔하면 연결됩니다. 스캔한 계정의 개인 메시지는 해당 관리자의 권한으로 실행되며 답변과 지원되는 첨부 파일이 같은 대화로 돌아옵니다. 그룹 채팅은 지원하지 않으며 자체 호스팅 서버에서는 WeChat 연동을 먼저 활성화해야 합니다." },
+      { question: "WeChat에서 에이전트와 채팅할 수 있나요?", answer: "네. 본인이 소유한 에이전트를 열고 '메시징'에서 '메시징 채널 추가' → WeChat을 선택한 뒤 본인 WeChat으로 QR 코드를 스캔하면 연결됩니다. 스캔한 계정의 개인 메시지는 본인의 워크스페이스 권한으로 실행되며 답변과 지원되는 첨부 파일이 같은 대화로 돌아옵니다. 그룹 채팅은 지원하지 않으며 자체 호스팅 서버에서는 WeChat 연동을 먼저 활성화해야 합니다." },
         {
           question: "Multica는 어떤 코딩 에이전트를 지원하나요?",
           answer:
-            "Multica는 Antigravity, Claude Code, CodeBuddy, CodeArts, Codex, Copilot, Cursor, DeepSeek Harness, DevEco Code, Devin CLI, Dim, Grok, Hermes, Kimi, Kiro CLI, MiniMax Code, Muse Code, Oh-My-Pi, OpenClaw, OpenCode, Pi, Qoder, Qoder CN, Qwen Code, QwenPaw, Reasonix, Trae CLI, ZeroClaw, ZCode 등 29개 코딩 도구를 기본 지원합니다. 데몬이 이미 설치된 CLI를 자동으로 찾아 각각 런타임으로 등록합니다. 소스 코드가 공개되어 있으므로 직접 백엔드를 추가할 수도 있습니다. 셀프 호스팅에서는 Qoder PAT와 Qoder Cloud Agents의 기존 에이전트를 사용하여 태스크 실행용 관리형 원격 런타임으로 Qoder Cloud Agents를 설정할 수 있습니다.",
+            "Multica는 Amp, Antigravity, Claude Code, CodeBuddy, CodeArts, Codex, Copilot, Cursor, DeepSeek Harness, DevEco Code, Devin CLI, Dim, Factory Droid, Grok, Hermes, Kimi, Kiro CLI, MiniMax Code, Muse Code, Oh-My-Pi, OpenClaw, OpenCode, Pi, Qoder, Qoder CN, Qwen Code, QwenPaw, Reasonix, Trae CLI, ZeroClaw, ZCode 등 31개 코딩 도구를 기본 지원합니다. 데몬이 이미 설치된 CLI를 자동으로 찾아 각각 런타임으로 등록합니다. 소스 코드가 공개되어 있으므로 직접 백엔드를 추가할 수도 있습니다. 셀프 호스팅에서는 Qoder PAT와 Qoder Cloud Agents의 기존 에이전트를 사용하여 태스크 실행용 관리형 원격 런타임으로 Qoder Cloud Agents를 설정할 수 있습니다.",
         },
         {
           question: "셀프 호스팅만 가능한가요, 클라우드 버전도 있나요?",
@@ -61,6 +61,34 @@ export function createKoDict(): LandingDict {
         fixes: "버그 수정",
       },
       entries: [
+        {
+          version: "0.11.1",
+          date: "2026-11-19",
+          title: "/help로 봇 명령어 확인, CLI로 받은 항목 관리, 더 빨라진 긴 Issue",
+          changes: [],
+          features: [
+            "WeChat, Lark, Slack, DingTalk, WeCom, Telegram에서 에이전트의 봇에 /help를 보내면 사용할 수 있는 명령어를 볼 수 있습니다.",
+            "CLI에서 받은 항목을 관리할 수 있습니다. 읽음/읽지 않음, 보관, 복원, 미뤄두기를 하고 여러 항목을 한 번에 처리할 수 있습니다.",
+          ],
+          improvements: [
+            "받은 항목은 워크스페이스마다 최신 알림 2,000개를 유지하고, 더 오래된 알림은 자동으로 보관합니다.",
+            "받은 항목에서 긴 Issue를 더 빨리 열고, 클릭한 댓글을 먼저 보여 줍니다.",
+            "데스크톱의 탭 전환과 작업 패널에서 긴 받은 항목 스크롤이 더 매끄러워졌습니다.",
+            "산출물 이미지는 목록에서 썸네일로 먼저 로드되고, 미리 보기에서는 원본 이미지를 볼 수 있습니다.",
+          ],
+          fixes: [
+            "받은 항목 로드에 실패하면 자동으로 다시 시도하고, 그래도 실패하면 오류를 보여 주며 이미 로드한 알림은 유지합니다.",
+            "데스크톱에서 설정, Issue 표, 간트를 포함한 모든 페이지가 탭을 바꿔도 스크롤 위치를 유지합니다.",
+            "동영상, PDF 같은 첨부 파일 링크가 저장소 페이지 대신 앱 안의 미리 보기로 열립니다.",
+            "작업 패널의 받은 항목에서 Issue를 열면 해당 행이 다시 강조 표시됩니다.",
+            "잘린 Issue 제목에 마우스를 올리면 전체 제목을 볼 수 있습니다.",
+            "프로젝트 저장소를 바꿔도 이전 저장소의 브랜치를 그대로 쓰지 않습니다.",
+            "Issue와 프로젝트 텍스트에 보이지 않는 제어 문자가 있어도 저장됩니다.",
+            "Codex 태스크가 Codex 환경에 포함된 플러그인을 불러오고, 실행이 끝나면 브라우저 탭을 해제합니다.",
+            "데몬의 유휴 감시를 꺼도 Codex의 비활성 타임아웃이 사라지지 않습니다.",
+            "CLI와 런타임 오류가 연결 도중 끊김과 서버 연결 불가를 구분하고, 버전 확인 시간 초과도 알려 줍니다.",
+          ],
+        },
         {
           version: "0.11.0",
           date: "2026-11-18",
