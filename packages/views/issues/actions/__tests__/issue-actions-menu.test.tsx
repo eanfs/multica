@@ -6,6 +6,7 @@ import type { AgentTask, Issue, QuickAction } from "@multica/core/types";
 import { I18nProvider } from "@multica/core/i18n/react";
 import enCommon from "../../../locales/en/common.json";
 import enIssues from "../../../locales/en/issues.json";
+import { useAssigneePicksStore } from "@multica/core/issues/stores/assignee-picks-store";
 
 const TEST_RESOURCES = { en: { common: enCommon, issues: enIssues } };
 
@@ -56,10 +57,6 @@ vi.mock("@multica/core/workspace/queries", () => ({
   }),
   squadListOptions: () => ({
     queryKey: ["workspaces", "ws-1", "squads"],
-    queryFn: () => Promise.resolve([]),
-  }),
-  assigneeFrequencyOptions: () => ({
-    queryKey: ["workspaces", "ws-1", "assignee-frequency"],
     queryFn: () => Promise.resolve([]),
   }),
 }));
@@ -212,6 +209,8 @@ function wrap(ui: React.ReactNode) {
 }
 
 beforeEach(() => {
+  // Picks persist in a real store; keep one test's picks out of the next's Recent.
+  useAssigneePicksStore.setState({ byScope: {} });
   platform.desktop = false;
   deletionPolicy.allowed = true;
   mockOpenModal.mockReset();
@@ -510,7 +509,7 @@ describe("IssueActionsDropdown", () => {
     await waitFor(() => {
       expect(listTasksByIssueMock).toHaveBeenCalledWith("issue-1", false, { view: "timeline" });
     });
-    fireEvent.click(await screen.findByText("Copy local workdir path"));
+    fireEvent.click(await screen.findByText("Copy local working directory path"));
 
     await waitFor(() => {
       expect(copyTextMock).toHaveBeenCalledWith("/managed/task/worktree");
@@ -830,7 +829,7 @@ describe("Sidebar variant (MUL-8425)", () => {
       "Mark as unread",
       "Copy link",
       "Copy link with title",
-      "Copy identifier",
+      "Copy issue ID",
     ]);
     expect(screen.getByTestId("row")).toHaveAttribute("data-popup-open");
     // No workdir entry, so the menu has no reason to fetch the task list.
@@ -861,7 +860,7 @@ describe("Sidebar variant (MUL-8425)", () => {
 
   it("copies the identifier", async () => {
     openSidebarMenu();
-    fireEvent.click(await screen.findByText("Copy identifier"));
+    fireEvent.click(await screen.findByText("Copy issue ID"));
 
     await waitFor(() => {
       expect(copyTextMock).toHaveBeenCalledWith("TES-1");

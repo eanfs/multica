@@ -97,7 +97,7 @@ Authenticate using a personal access token directly. Useful for headless environ
 multica auth status
 ```
 
-Shows your current server, user, and token validity.
+Shows your current server and user when the token can be verified. If verification fails, check the reported error before signing in again.
 
 ### Logout
 
@@ -233,7 +233,7 @@ multica daemon status
 multica daemon status --output json
 ```
 
-Shows PID, uptime, detected agents, and watched workspaces.
+Shows PID, uptime, detected agents (including why any detected agent was skipped), and watched workspaces.
 
 ### Logs
 
@@ -388,7 +388,7 @@ Daemon behavior is configured via flags or environment variables:
 | Codex turn-interrupt timeout | — | `MULTICA_CODEX_TURN_INTERRUPT_TIMEOUT` | `2s` (bounded grace period for `turn/interrupt` acknowledgement and `turn/completed`; tune from the logged interrupt latency on unusually slow hosts) |
 | OpenCode idle watchdog | — | `MULTICA_OPENCODE_IDLE_WATCHDOG` | `10m` (`0` falls back to the generic idle watchdog; cannot extend it) |
 | Max concurrent tasks | `--max-concurrent-tasks` | `MULTICA_DAEMON_MAX_CONCURRENT_TASKS` | `20` |
-| Daemon ID | `--daemon-id` | `MULTICA_DAEMON_ID` | hostname |
+| Daemon ID | `--daemon-id` | `MULTICA_DAEMON_ID` | Persistent UUID stored in `~/.multica/daemon.id` and shared across profiles |
 | Device name | `--device-name` | `MULTICA_DAEMON_DEVICE_NAME` | hostname |
 | Runtime name | `--runtime-name` | `MULTICA_AGENT_RUNTIME_NAME` | `Local Agent` |
 | Workspaces root | — | `MULTICA_WORKSPACES_ROOT` | `~/multica_workspaces` |
@@ -427,7 +427,7 @@ The daemon periodically scans `MULTICA_WORKSPACES_ROOT` for cleanup. The active-
 
 Configured patterns are basename-only — entries containing `/` or `\` are silently dropped — and `.git` subtrees are never descended into. The managed Codex cache is matched by its exact relative path, so a repository's own `.sandbox-bin` is not removed unless an operator explicitly adds that basename to `MULTICA_GC_ARTIFACT_PATTERNS`. The default list (`node_modules`, `.next`, `.turbo`) is intentionally narrow; extend it per deployment if your repos consistently produce other regenerable directories (for example, `MULTICA_GC_ARTIFACT_PATTERNS=node_modules,.next,.turbo,target,__pycache__`). To disable artifact cleanup entirely, including the managed Codex cache, set `MULTICA_GC_ARTIFACT_TTL=0`.
 
-`multica daemon disk-usage` reports the `.repos` footprint on its own line rather than folding it into the per-task totals — every task in a workspace checks out from that shared cache, so attributing it to individual task directories would double-count it. Note that the repo cache is reclaimed on the schedule above and not by any per-issue status change, so it is normal for it to persist after every task directory is gone.
+`multica daemon disk-usage` reports the `.repos` footprint on its own line rather than folding it into the per-task totals — every task in a workspace checks out from that shared cache, so attributing it to individual task directories would double-count it. In per-task output (`--by-task`), the `MODE` column marks runs that worked in place in a project's local directory as `in place` (`local_directory: true` in JSON when recorded in local metadata). Note that the repo cache is reclaimed on the schedule above and not by any per-issue status change, so it is normal for it to persist after every task directory is gone.
 
 Agent-specific overrides:
 
@@ -799,7 +799,7 @@ multica workspace list --full-id
 multica workspace list --output json
 ```
 
-The current default workspace is marked with `*`. Table output shows short UUID prefixes — pass `--full-id` when you need the canonical UUIDs.
+The current default workspace is marked with `*`. Table output shows short UUID prefixes — pass `--full-id` when you need the canonical UUIDs. With a task token, the list contains only the workspace bound to the run.
 
 ### Switch Default Workspace
 
@@ -1324,10 +1324,10 @@ multica autopilot trigger <id>            # Fires the autopilot once, returns th
 ```
 
 The command exits non-zero unless the run actually started (`issue_created` or
-`running`). A `skipped` run — admission refused, runtime offline, quota
-exhausted, a duplicate already in flight — dispatched nothing; its
-`failure_reason` and `reason_code` are printed to stderr, and `--output json`
-still writes the full run to stdout first.
+`running`). If a run is `skipped` (for example, the runtime is offline
+or a duplicate is already in flight), the CLI prints its
+`failure_reason` and `reason_code` to stderr. With `--output json`,
+it first writes the full run to stdout.
 
 Run as an agent (inside a task, or over A2A), the trigger is authorized as the
 human that run acts for, not as the owner of the machine it executes on. That

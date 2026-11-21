@@ -70,6 +70,68 @@ require_config "$config" 'DATABASE_REPLICA_URL: postgres://reader:secret@replica
 require_config "$config" 'DATABASE_REPLICA_MAX_CONNS: "12"'
 require_config "$config" 'DATABASE_REPLICA_MIN_CONNS: "1"'
 
+# Live doc co-editing is opt-in. Out of the box there is no collab service and
+# the backend has no collab URL, so docs save through the API instead of
+# waiting on a service that is not there. The two commented lines in
+# .env.example are the whole switch: the secret wires the backend, and the
+# profile starts the service.
+if grep -q '^  collab:' <<<"$config"; then
+  echo "The collab service must stay behind its profile by default"
+  exit 1
+fi
+require_config "$config" 'COLLAB_INTERNAL_URL: ""'
+collab_env="$tmp_dir/.env.collab"
+sed 's/^# COLLAB_SECRET=$/COLLAB_SECRET=collab-secret-from-env/;s/^# COMPOSE_PROFILES=collab$/COMPOSE_PROFILES=collab/;s/^# FF_DOCS_V1=true$/FF_DOCS_V1=true/' \
+  "$tmp_env" >"$collab_env"
+# Feature flags reach the backend only when set: an empty FF_ value pins the
+# flag off (Docs stays off, and a kill switch turns its feature off), so a flag
+# left unset must not appear in the container at all.
+backend_flags() {
+  local env_file=$1
+  # Unset every FF_ variable first so the agent's own environment cannot leak.
+  # shellcheck disable=SC2046
+  env $(compgen -e | grep '^FF_' | sed 's/^/-u /') \
+    docker compose --env-file "$env_file" -f docker-compose.selfhost.yml config --format json |
+    node -e '
+let raw = "";
+process.stdin.on("data", (chunk) => (raw += chunk));
+process.stdin.on("end", () => {
+  const env = JSON.parse(raw).services.backend.environment;
+  // A bare `FF_X:` that nothing sets comes back as null: not passed.
+  for (const [name, value] of Object.entries(env)) {
+    if (name.startsWith("FF_") && value !== null) console.log(name + "=" + value);
+  }
+});
+'
+}
+default_flags="$(backend_flags "$tmp_env")"
+if [ -n "$default_flags" ]; then
+  echo "The backend must not receive feature flags that are not set, got:"
+  echo "$default_flags"
+  exit 1
+fi
+kill_switch_env="$tmp_dir/.env.kill-switch"
+sed 's/^# FF_LOCAL_SEARCH_INDEX=off$/FF_LOCAL_SEARCH_INDEX=off/' "$tmp_env" >"$kill_switch_env"
+require_env "$(backend_flags "$kill_switch_env")" 'FF_LOCAL_SEARCH_INDEX=off'
+collab_config="$(env -u COLLAB_SECRET -u COLLAB_INTERNAL_URL -u COMPOSE_PROFILES -u FF_DOCS_V1 \
+  docker compose --env-file "$collab_env" -f docker-compose.selfhost.yml config --format json)"
+node -e '
+  const config = JSON.parse(process.argv[1]);
+  const backend = config.services.backend.environment;
+  const collab = config.services.collab;
+  if (!collab) throw new Error("COMPOSE_PROFILES=collab did not start the collab service");
+  const want = (label, actual, expected) => {
+    if (actual !== expected) throw new Error(`${label} = ${JSON.stringify(actual)}, want ${JSON.stringify(expected)}`);
+  };
+  want("backend COLLAB_INTERNAL_URL", backend.COLLAB_INTERNAL_URL, "http://collab:8095");
+  want("backend COLLAB_SECRET", backend.COLLAB_SECRET, "collab-secret-from-env");
+  want("collab COLLAB_SECRET", collab.environment.COLLAB_SECRET, "collab-secret-from-env");
+  want("collab MULTICA_API_URL", collab.environment.MULTICA_API_URL, "http://backend:8080");
+  want("collab image", collab.image, "ghcr.io/multica-ai/multica-collab:latest");
+  want("backend FF_DOCS_V1", backend.FF_DOCS_V1, "true");
+  if (collab.ports && collab.ports.length) throw new Error("collab must not publish a port; editors reach it through the backend");
+' "$collab_config"
+
 # The backend environment is an explicit allowlist, so a variable documented in
 # .env.example but missing here silently never reaches the container: the
 # operator configures it, the server never sees it, and nothing reports the gap.
@@ -113,6 +175,29 @@ while IFS= read -r secret_key; do
     exit 1
   fi
 done <<<"$secret_keys"
+
+# The same drift for feature flags: each FF_ variable .env.example tells an
+# operator to set must be mapped into the backend, without a value so it is
+# passed only when set. Flags that only matter to a multica-cloud deployment
+# are left out on purpose.
+cloud_only_flags=(FF_BILLING_WORKSPACE_SUBSCRIPTIONS)
+documented_flags="$(grep -oE '^(# )?FF_[A-Z0-9_]+=' .env.example | sed -E 's/^# //;s/=$//' | sort -u)" || true
+if [ -z "$documented_flags" ]; then
+  echo "Found no FF_ variables in .env.example; this check no longer sees the"
+  echo "documented feature flags and needs updating."
+  exit 1
+fi
+while IFS= read -r flag; do
+  if [[ " ${cloud_only_flags[*]} " == *" $flag "* ]]; then
+    continue
+  fi
+  if ! grep -Eq "^[[:space:]]+${flag}:[[:space:]]*$" docker-compose.selfhost.yml; then
+    echo "$flag is documented in .env.example but not mapped into the backend service"
+    echo "in docker-compose.selfhost.yml as \`$flag:\`, so self-hosted deployments cannot"
+    echo "set it. If it only matters to multica-cloud, add it to cloud_only_flags here."
+    exit 1
+  fi
+done <<<"$documented_flags"
 
 for script in scripts/dev.sh scripts/check.sh; do
   if ! grep -Fq '. scripts/local-env.sh' "$script"; then

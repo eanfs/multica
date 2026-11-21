@@ -317,7 +317,7 @@ multica runtime profile create --display-name "Wrapper Claude interne" \
   --command-name ccms --runtime-type claude
 ```
 
-`daemon autostart` enregistre le profil courant pour qu'il démarre à l'ouverture de session ; les différences entre plateformes sont décrites dans [Démarrage à l'ouverture de session](/daemon-runtimes#autostart). `runtime usage` couvre 90 jours par défaut, et `--days` va jusqu'à 365. `runtime update` demande au daemon de cette machine de mettre sa CLI à jour vers la version indiquée ; `--wait` attend la fin de la mise à jour et renvoie un code de sortie non nul si elle échoue ou expire, ou si l’attente elle-même expire. `runtime profile create` indique l'outil compatible avec `--runtime-type` (l'ancien `--protocol-family` fonctionne encore) ; les arguments fixes ne se définissent pour l'instant que dans l'application web. `runtime profile create` lie le profil à cette machine par défaut ; utilisez `--daemon-id <id>` pour choisir une autre machine locale enregistrée. Pour lier un ancien profil, utilisez `multica runtime profile update <profile-id> --daemon-id <id>`.
+`daemon autostart` enregistre le profil courant pour qu'il démarre à l'ouverture de session ; les différences entre plateformes sont décrites dans [Démarrage à l'ouverture de session](/daemon-runtimes#autostart). `runtime usage` couvre 90 jours par défaut, et `--days` va jusqu'à 365. `runtime update` demande au daemon de cette machine de mettre sa CLI à jour vers la version indiquée. Contrairement au bouton **Mettre à jour** de la page **Runtimes** (qui [met la mise à jour en file d'attente](/daemon-runtimes#updating-cli) si la machine est occupée), cette demande n'est pas mise en file d'attente : si la machine exécute des tâches, la mise à jour échoue au lieu d'attendre. `--wait` attend la fin de la mise à jour et renvoie un code de sortie non nul si elle échoue ou expire, ou si l’attente elle-même expire. `runtime profile create` indique l'outil compatible avec `--runtime-type` (l'ancien `--protocol-family` fonctionne encore) ; les arguments fixes ne se définissent pour l'instant que dans l'application web. `runtime profile create` lie le profil à cette machine par défaut ; utilisez `--daemon-id <id>` pour choisir une autre machine locale enregistrée. Pour lier un ancien profil, utilisez `multica runtime profile update <profile-id> --daemon-id <id>`.
 
 La suppression d'un runtime auquel des agents actifs sont encore liés est refusée par défaut. `multica runtime delete <id> --cascade` dissocie ces agents, préserve leur configuration et leur historique, et annule leurs exécutions actives.
 
@@ -404,7 +404,7 @@ multica autopilot trigger-update <autopilot-id> <trigger-id> --clear-event-filte
 | --- | --- |
 | `issue` | Créer, mettre à jour, assigner et rechercher des tâches ; gérer les commentaires, les abonnés, les étiquettes, les propriétés, les réveils, la chronologie et les exécutions |
 | `project` | Gérer les projets et leurs ressources |
-| `inbox` | Lire vos notifications sans modifier leur état lu |
+| `inbox` | Lire et gérer vos notifications : lister, marquer comme lues, archiver, reporter |
 | `label`, `property` | Gérer les étiquettes et les propriétés personnalisées de l'espace de travail |
 | `view` | Lire les vues enregistrées et lister les tâches qu'une vue affiche |
 | `agent`, `skill`, `squad` | Gérer les agents, les skills et les squads |
@@ -521,7 +521,7 @@ Les tableaux ci-dessous couvrent toutes les commandes de premier niveau actuelle
 | | `trigger <id>` | Déclencher une exécution manuellement | |
 | | `runs <id>` | Afficher l'historique des exécutions | |
 | | `trigger-add/trigger-update/trigger-delete/trigger-rotate-url` | Gérer les déclencheurs de planification et webhook | `trigger-add` : `--kind` (`schedule` ou `webhook`), `--cron`, `--timezone` (UTC par défaut), `--label` |
-| `workspace` | `list/get/create/update/switch` | Gérer les espaces de travail ; `switch` définit l'espace de travail par défaut du profil actuel | `create` : `--name`, `--slug` (tous deux obligatoires), `--issue-prefix`, `--description`, `--context` / `--context-stdin` ; `update` modifie les mêmes champs, sauf le slug |
+| `workspace` | `list/get/create/update/switch` | Gérer les espaces de travail ; `switch` définit l'espace de travail par défaut du profil actuel ; une exécution d'agent ne voit que son propre espace dans `list` | `create` : `--name`, `--slug` (tous deux obligatoires), `--issue-prefix`, `--description`, `--context` / `--context-stdin` ; `update` modifie les mêmes champs, sauf le slug |
 | | `mcp list/add/update/remove` | Gérer la bibliothèque de serveurs MCP de l'espace de travail | Les écritures sont réservées aux propriétaires et administrateurs. Un serveur ajouté ici n'est assigné à aucun agent — attribuez-le à un agent avec `multica agent mcp add`. `list` n'affiche que les noms et les transports ; l'entrée enregistrée est en écriture seule et n'est jamais renvoyée. `--server-config-file` / `--server-config-stdin` gardent les jetons hors de l'historique du shell |
 | | `member list/invite <email>` | Consulter les membres, envoyer des invitations | `invite` : `--role` (member ou admin, member par défaut) |
 | `repo` | `list/add/remove/checkout` | Gérer les dépôts de l'espace de travail et les extraire localement | `--url` (répétable) ; `checkout` : `--ref` |
@@ -535,7 +535,14 @@ Les tableaux ci-dessous couvrent toutes les commandes de premier niveau actuelle
 | | `activity <issue-id> <outcome>` | Enregistrer une évaluation du chef | |
 | `chat` | `history`, `thread [id]` | Lire la session de messagerie externe qu'un agent traite actuellement | `--limit`, `--before` |
 | | `wakeup create/list/get/update/cancel/finish/checkin` | Gérer le suivi dans l’exécution de chat en cours ; voir [Réveils de chat](#chat-wakeups) | `--title`, `--instruction` / `--instruction-file`, `--until-*`, `--at` / `--after`, `--every`, `--expires-in` / `--expires-at`; `checkin`: `--note` |
-| `inbox` | `list` | [Lire vos notifications actives](/inbox) sans les marquer comme lues | `--project`, `--type`, `--output` (`table` ou `json`) ; filtres locaux |
+| `inbox` | `list` | [Lister vos notifications](/inbox) sans les marquer comme lues ; `--archived` ou `--snoozed` liste celles-ci à la place | `--unread`, `--issue`, `--since`, `--project`, `--type`, `--output` (`table` ou `json`) ; `--archived` lit toutes les pages |
+| | `count` | Nombre de non-lus dans cet espace de travail et dans chacun de vos espaces ; une exécution d'agent ne voit que son propre espace | `--output` |
+| | `read [<id>...]` | Marquer des notifications comme lues, toute la tâche pour chacune ; ou toutes celles d'une tâche, ou toutes | `--issue`, `--all` (exige `--yes`) |
+| | `unread <id>...` | Marquer des notifications comme non lues | |
+| | `archive [<id>...]` | Archiver des notifications, toute la tâche pour chacune ; ou en lot | `--all`, `--read`, `--completed` (chacun exige `--yes`) |
+| | `unarchive <id>...` | Restaurer des notifications archivées | |
+| | `snooze <id>...` | Retirer la tâche de chaque notification de la boîte de réception jusqu'à une date | `--until` (RFC 3339, `30m`, `3h`, `1d`, `1w`, `tomorrow`) |
+| | `unsnooze <id>...` | Faire revenir maintenant des tâches reportées | |
 
 ### Runtime
 

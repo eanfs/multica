@@ -140,24 +140,40 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
-	// Local Docker Fleet tables and indexes (migrations 695-708): each index
+	// Local Docker Fleet tables and indexes (migrations 718-731): each index
 	// build is single-statement and concurrent, so an interrupted run leaves
 	// an INVALID relation that IF NOT EXISTS would skip on retry.
-	"699_fleet_node_pkey":                         "fleet_node_id_key",
-	"700_fleet_node_owner_namespace_idx":          "idx_fleet_node_owner_namespace",
-	"701_fleet_node_namespace_idx":                "idx_fleet_node_namespace",
-	"702_fleet_node_daemon_idx":                   "idx_fleet_node_daemon",
-	"703_fleet_node_credential_token_key":         "fleet_node_credential_token_hash_key",
-	"704_fleet_node_credential_node_idx":          "idx_fleet_node_credential_node",
-	"705_fleet_node_operation_node_idx":           "idx_fleet_node_operation_node_created",
-	"706_fleet_node_operation_idem_key":           "fleet_node_operation_idempotency_key_key",
-	"707_fleet_credential_profile_owner_key":      "fleet_credential_profile_owner_key",
+	"722_fleet_node_pkey":                         "fleet_node_id_key",
+	"723_fleet_node_owner_namespace_idx":          "idx_fleet_node_owner_namespace",
+	"724_fleet_node_namespace_idx":                "idx_fleet_node_namespace",
+	"725_fleet_node_daemon_idx":                   "idx_fleet_node_daemon",
+	"726_fleet_node_credential_token_key":         "fleet_node_credential_token_hash_key",
+	"727_fleet_node_credential_node_idx":          "idx_fleet_node_credential_node",
+	"728_fleet_node_operation_node_idx":           "idx_fleet_node_operation_node_created",
+	"729_fleet_node_operation_idem_key":           "fleet_node_operation_idempotency_key_key",
+	"730_fleet_credential_profile_owner_key":      "fleet_credential_profile_owner_key",
 	"676_chat_wakeup_due_idx":                                   "idx_chat_wakeup_due",
 	"677_chat_wakeup_session_idx":                               "idx_chat_wakeup_session",
 	"678_chat_wakeup_requester_idx":                             "idx_chat_wakeup_requester",
 	"680_entitlement_limit_overage_scope_idx":                   "uq_entitlement_limit_overage_scope",
 	"682_project_folder_name_idx":                               "uq_project_folder_workspace_name",
 	"684_entitlement_feature_attempt_scope_idx":                 "uq_entitlement_feature_attempt_scope",
+	"686_doc_folder_pkey_index":                                 "doc_folder_pkey_idx",
+	"688_doc_pkey_index":                                        "doc_pkey_idx",
+	"690_doc_version_pkey_index":                                "doc_version_pkey_idx",
+	"692_doc_folder_workspace_idx":                              "doc_folder_workspace_idx",
+	"693_doc_workspace_idx":                                     "doc_workspace_idx",
+	"694_doc_version_workspace_idx":                             "doc_version_workspace_idx",
+	"696_inbox_item_active_shown_idx":                           "idx_inbox_active_shown",
+	"698_autopilot_run_idempotency_key_idx":                     "uq_autopilot_run_idempotency_key",
+	"701_member_search_access_pkey_index":                       "member_search_access_pkey_idx",
+	"704_doc_comment_pkey_index":                                "doc_comment_pkey_idx",
+	"706_doc_comment_doc_idx":                                   "doc_comment_doc_idx",
+	"707_doc_comment_workspace_idx":                             "doc_comment_workspace_idx",
+	"708_attachment_workspace_size_idx":                         "idx_attachment_workspace_size",
+	"712_dashboard_range_view_scope_idx":                        "uq_dashboard_range_view_scope",
+	"714_doc_collab_state_pkey_index":                           "doc_collab_state_pkey_idx",
+	"716_doc_revision_pkey_index":                               "doc_revision_pkey_idx",
 	"671_weixin_account_state_unique_index":                     "weixin_account_state_pkey",
 	"669_weixin_login_session_unique_index":                     "weixin_login_session_pkey",
 	"666_weixin_login_expiry_idx":                               "weixin_login_expiry_idx",
@@ -447,6 +463,7 @@ var concurrentDownIndexCleanups = map[string]string{
 	"463_drop_issue_description_bigm_index":                 "idx_issue_description_bigm",
 	"464_drop_issue_description_trgm_index":                 "idx_issue_description_trgm",
 	"473_drop_agent_task_queue_chat_with_session_index":     "idx_agent_task_queue_chat_with_session_created_at",
+	"709_drop_attachment_workspace_index":                   "idx_attachment_workspace",
 }
 
 var preMigrationHooks = func() map[string]preMigrationHook {

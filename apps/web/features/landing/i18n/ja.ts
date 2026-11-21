@@ -13,11 +13,11 @@ export function createJaDict(): LandingDict {
       label: "FAQ",
       headline: "よくある質問。",
       items: [
-      { question: "WeChat からエージェントとチャットできますか？", answer: "はい。ワークスペース管理者がエージェントの「連携」タブで自分の WeChat アカウントを使って QR コードを読み取ると接続できます。そのアカウントからの個別メッセージは管理者の権限で実行され、返信と対応する添付ファイルが同じ会話に届きます。グループチャットは非対応です。セルフホストでは WeChat 連携を有効にする必要があります。" },
+      { question: "WeChat からエージェントとチャットできますか？", answer: "はい。自分が所有するエージェントを開き、「メッセージング」の「メッセージチャネルを追加」から WeChat を選び、ご自身の WeChat で QR コードを読み取って接続できます。読み取ったアカウントからの個別メッセージはあなたのワークスペース権限で実行され、返信と対応する添付ファイルが同じ会話に届きます。グループチャットは非対応です。セルフホストでは WeChat 連携を有効にする必要があります。" },
         {
           question: "Multica はどのコーディングエージェントに対応していますか?",
           answer:
-            "Multica は、Antigravity、Claude Code、CodeBuddy、CodeArts、Codex、Copilot、Cursor、DeepSeek Harness、DevEco Code、Devin CLI、Dim、Grok、Hermes、Kimi、Kiro CLI、MiniMax Code、Muse Code、Oh-My-Pi、OpenClaw、OpenCode、Pi、Qoder、Qoder CN、Qwen Code、QwenPaw、Reasonix、Trae CLI、ZeroClaw, ZCode の29種類のコーディングツールに標準対応しています。デーモンが、すでにインストール済みの CLI を自動検出し、それぞれをランタイムとして登録します。ソースコードが公開されているので、独自のバックエンドを追加することもできます。 セルフホストでは、Qoder PAT と Qoder Cloud Agents の既存エージェントを使い、タスク実行用のマネージドリモートランタイムとして Qoder Cloud Agents を設定できます。",
+            "Multica は、Amp、Antigravity、Claude Code、CodeBuddy、CodeArts、Codex、Copilot、Cursor、DeepSeek Harness、DevEco Code、Devin CLI、Dim、Factory Droid、Grok、Hermes、Kimi、Kiro CLI、MiniMax Code、Muse Code、Oh-My-Pi、OpenClaw、OpenCode、Pi、Qoder、Qoder CN、Qwen Code、QwenPaw、Reasonix、Trae CLI、ZeroClaw、ZCode の 31 種類のコーディングツールに標準対応しています。デーモンが、すでにインストール済みの CLI を自動検出し、それぞれをランタイムとして登録します。ソースコードが公開されているので、独自のバックエンドを追加することもできます。 セルフホストでは、Qoder PAT と Qoder Cloud Agents の既存エージェントを使い、タスク実行用のマネージドリモートランタイムとして Qoder Cloud Agents を設定できます。",
         },
         {
           question: "セルフホストが必須ですか、それともクラウド版もありますか?",
@@ -62,6 +62,34 @@ export function createJaDict(): LandingDict {
         fixes: "バグ修正",
       },
       entries: [
+        {
+          version: "0.11.1",
+          date: "2026-11-19",
+          title: "/help でボットのコマンドを確認、CLI で受信トレイを管理、長い Issue をすばやく表示",
+          changes: [],
+          features: [
+            "WeChat、Lark、Slack、DingTalk、WeCom、Telegram でエージェントのボットに /help を送ると、使えるコマンドを確認できます。",
+            "CLI で受信トレイを管理できます。既読・未読、アーカイブ、復元、スヌーズに加え、まとめて操作もできます。",
+          ],
+          improvements: [
+            "受信トレイはワークスペースごとに最新の 2,000 件の通知を保持し、それより古い通知は自動でアーカイブされます。",
+            "受信トレイから長い Issue を開くのが速くなり、クリックしたコメントが先に表示されます。",
+            "デスクトップのタブ切り替えや、作業パネルでの長い受信トレイのスクロールが滑らかになりました。",
+            "成果物の画像は一覧でサムネイルから読み込まれ、プレビューでは元の画像を確認できます。",
+          ],
+          fixes: [
+            "受信トレイの読み込みに失敗すると自動で再試行し、それでも失敗したらエラーを表示し、読み込み済みの通知は残します。",
+            "デスクトップでは、設定、Issue のテーブル、ガントを含むすべてのページで、タブを切り替えてもスクロール位置が保たれます。",
+            "動画や PDF などの添付ファイルのリンクが、ストレージのページではなくアプリ内のプレビューで開きます。",
+            "作業パネルの受信トレイから Issue を開くと、その行が再びハイライトされます。",
+            "途中で切れた Issue のタイトルは、ホバーすると全文を読めます。",
+            "プロジェクトのリポジトリを変更しても、前のリポジトリのブランチが引き継がれなくなりました。",
+            "Issue やプロジェクトのテキストに見えない制御文字が含まれていても、保存できるようになりました。",
+            "Codex のタスクが Codex 環境に同梱されたプラグインを読み込み、実行が終わるとブラウザーのタブを解放します。",
+            "デーモンのアイドル監視をオフにしても、Codex の無操作タイムアウトが無効にならなくなりました。",
+            "CLI とランタイムのエラーが、接続の途中切断とサーバーに接続できない場合を区別し、バージョン確認のタイムアウトも明示します。",
+          ],
+        },
         {
           version: "0.11.0",
           date: "2026-11-18",

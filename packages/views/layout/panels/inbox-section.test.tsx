@@ -1,7 +1,9 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "@multica/core/api";
+import { createQueryClient } from "@multica/core/query-client";
 import {
   DEFAULT_SIDEBAR_INBOX_SETTINGS,
   useSidebarTreeStore,
@@ -33,6 +35,11 @@ const state = vi.hoisted(() => ({
   unsnooze: vi.fn(() => Promise.resolve()),
 }));
 
+const apiMock = vi.hoisted(() => ({ listInbox: vi.fn() }));
+vi.mock("@multica/core/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@multica/core/api")>()),
+  api: apiMock,
+}));
 vi.mock("@multica/core/paths", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@multica/core/paths")>();
   return { ...actual, useWorkspacePaths: () => actual.paths.workspace("acme") };
@@ -451,7 +458,7 @@ describe("InboxSection", () => {
     );
     expect(rows()).toHaveLength(5);
 
-    fireEvent.click(screen.getByRole("button", { name: "Show 2 more…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show 2 more..." }));
     expect(rows()).toHaveLength(7);
   });
 
@@ -651,7 +658,7 @@ describe("InboxSection with every row shown", () => {
     };
   }
 
-  function renderInPanel(count: number, activeIssueId: string | null = null) {
+  function renderInPanel(count: number, activeIssueId: string | null = null, above: ReactNode = null) {
     const items = Array.from({ length: count }, (_, i) =>
       item({
         id: `n${i}`,
@@ -669,6 +676,7 @@ describe("InboxSection with every row shown", () => {
       <QueryClientProvider client={client}>
         <NavigationProvider value={adapter("/acme/issues")}>
           <PanelBody>
+            {above}
             <Harness activeIssueId={activeIssueId} pathname="/acme/issues" openKey={activeIssueId} />
           </PanelBody>
         </NavigationProvider>
@@ -705,10 +713,171 @@ describe("InboxSection with every row shown", () => {
     }
   });
 
+  it("follows a section above it that mounts or changes height", async () => {
+    const restore = installLayout();
+    const rect = Element.prototype.getBoundingClientRect;
+    // Where the list starts below the panel's top, as the section above it sets.
+    let listTop = 0;
+    Element.prototype.getBoundingClientRect = function (this: Element) {
+      const top = this.matches("[data-sidebar-list]") ? listTop : 0;
+      return { width: 280, height: ROW_HEIGHT, top, left: 0, right: 280, bottom: top + ROW_HEIGHT, x: 0, y: top, toJSON: () => ({}) } as DOMRect;
+    };
+    const observers: { callback: ResizeObserverCallback; targets: Set<Element> }[] = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        private entry: { callback: ResizeObserverCallback; targets: Set<Element> };
+        constructor(callback: ResizeObserverCallback) {
+          this.entry = { callback, targets: new Set() };
+          observers.push(this.entry);
+        }
+        observe(target: Element) {
+          this.entry.targets.add(target);
+        }
+        unobserve(target: Element) {
+          this.entry.targets.delete(target);
+        }
+        disconnect() {
+          this.entry.targets.clear();
+        }
+      },
+    );
+    const resize = (target: Element) => {
+      for (const { callback, targets } of observers) {
+        if (targets.has(target)) callback([], {} as ResizeObserver);
+      }
+    };
+    const showAbove: { set?: (shown: boolean) => void } = {};
+    function Above() {
+      const [shown, setShown] = useState(false);
+      showAbove.set = setShown;
+      return shown ? <section data-testid="above" /> : null;
+    }
+    try {
+      renderInPanel(300, null, <Above />);
+      fireEvent.click(screen.getByRole("button", { name: /^Show \d+ more/ }));
+      await waitFor(() => expect(rows().length).toBeGreaterThan(0));
+      const atTop = rows().length;
+
+      // A section mounts above the list and pushes it most of a viewport down.
+      listTop = 500;
+      act(() => showAbove.set!(true));
+      await waitFor(() => expect(rows().length).toBeLessThan(atTop));
+
+      // It collapses: the panel keeps its size, the section above shrinks.
+      listTop = 0;
+      act(() => resize(screen.getByTestId("above")));
+      await waitFor(() => expect(rows()).toHaveLength(atTop));
+    } finally {
+      vi.unstubAllGlobals();
+      Element.prototype.getBoundingClientRect = rect;
+      restore();
+    }
+  });
+
   it("keeps a short list fully mounted", () => {
     useSidebarTreeStore.setState({ inboxSettings: { ...DEFAULT_SIDEBAR_INBOX_SETTINGS, limit: 5 } });
     renderInPanel(30);
-    fireEvent.click(screen.getByRole("button", { name: "Show 25 more…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show 25 more..." }));
     expect(rows()).toHaveLength(30);
+  });
+});
+
+describe("InboxSection while the Inbox loads", () => {
+  // The app's own client, so the inbox retry policy is the one under test.
+  function renderUnloaded() {
+    const client = createQueryClient();
+    client.setQueryData(snoozedInboxOptions("ws-1").queryKey, []);
+    client.setQueryData(agentListOptions("ws-1").queryKey, []);
+    client.setQueryData(agentTaskSnapshotOptions("ws-1").queryKey, []);
+    const nav = adapter("/acme/issues");
+    renderWithI18n(
+      <QueryClientProvider client={client}>
+        <NavigationProvider value={nav}>
+          <Harness activeIssueId={null} pathname={nav.pathname} openKey={null} />
+        </NavigationProvider>
+      </QueryClientProvider>,
+    );
+    return client;
+  }
+  const busy = () => new ApiError("inbox reads are busy", 503, "Service Unavailable", undefined, 1000);
+  const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    apiMock.listInbox.mockReset();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("shows the notifications once a busy server answers", async () => {
+    apiMock.listInbox
+      .mockRejectedValueOnce(busy())
+      .mockResolvedValue([item({ id: "n1", issue_id: "issue-a", title: "After the wait" })]);
+    renderUnloaded();
+    await advance(0);
+    // Waiting out Retry-After is not an empty Inbox.
+    expect(screen.queryByText("No notifications")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    await advance(2000);
+    expect(apiMock.listInbox).toHaveBeenCalledTimes(2);
+    expect(rows().map((row) => row.textContent)).toEqual([expect.stringContaining("After the wait")]);
+  });
+
+  it("says the Inbox could not load, with a retry, when the server stays busy", async () => {
+    apiMock.listInbox.mockRejectedValue(busy());
+    renderUnloaded();
+    await advance(30_000);
+
+    expect(apiMock.listInbox).toHaveBeenCalledTimes(4);
+    expect(screen.getByRole("alert")).toHaveTextContent("Failed to load notifications");
+    expect(screen.queryByText("No notifications")).toBeNull();
+
+    apiMock.listInbox.mockResolvedValue([item({ id: "n1", issue_id: "issue-a", title: "Back again" })]);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await advance(0);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(rows().map((row) => row.textContent)).toEqual([expect.stringContaining("Back again")]);
+  });
+
+  it("keeps saying it could not load while a retry waits on a busy server", async () => {
+    apiMock.listInbox.mockRejectedValue(busy());
+    renderUnloaded();
+    await advance(30_000);
+    expect(apiMock.listInbox).toHaveBeenCalledTimes(4);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await advance(0);
+    expect(apiMock.listInbox).toHaveBeenCalledTimes(5);
+    expect(screen.getByRole("alert")).toHaveTextContent("Failed to load notifications");
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
+
+    await advance(30_000);
+    expect(apiMock.listInbox).toHaveBeenCalledTimes(8);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+  });
+
+  it("says No notifications when the server answers with none", async () => {
+    apiMock.listInbox.mockResolvedValue([]);
+    renderUnloaded();
+    await advance(0);
+    expect(screen.getByText("No notifications")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps the rows it has when a refresh fails", async () => {
+    apiMock.listInbox.mockResolvedValueOnce([item({ id: "n1", issue_id: "issue-a", title: "Still here" })]);
+    const client = renderUnloaded();
+    await advance(0);
+    expect(rows()).toHaveLength(1);
+
+    apiMock.listInbox.mockRejectedValue(busy());
+    await act(async () => {
+      void client.invalidateQueries({ queryKey: ["inbox", "ws-1", "list"] });
+    });
+    await advance(30_000);
+    expect(apiMock.listInbox).toHaveBeenCalledTimes(5);
+    expect(rows().map((row) => row.textContent)).toEqual([expect.stringContaining("Still here")]);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

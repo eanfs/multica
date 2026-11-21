@@ -317,7 +317,7 @@ multica runtime profile create --display-name "사내 Claude 래퍼" \
   --command-name ccms --runtime-type claude
 ```
 
-`daemon autostart`는 현재 profile이 로그인할 때 시작되도록 등록합니다. 플랫폼별 차이는 [로그인 시 자동 시작](/daemon-runtimes#autostart)을 참고하세요. `runtime usage`는 기본적으로 90일을 집계하며 `--days`는 최대 365입니다. `runtime update`는 해당 컴퓨터의 데몬이 CLI를 지정한 버전으로 업데이트하게 하고, `--wait`를 붙이면 업데이트가 끝날 때까지 기다립니다. 업데이트 실패, 업데이트 시간 초과 또는 대기 자체의 시간 초과 시 종료 코드는 0이 아닙니다. `runtime profile create`는 호환 도구를 `--runtime-type`으로 지정합니다(예전 `--protocol-family`도 쓸 수 있음). 고정 인수는 현재 웹 앱에서만 설정할 수 있습니다. `runtime profile create`는 기본적으로 현재 컴퓨터에 연결합니다. 다른 등록된 로컬 컴퓨터를 선택하려면 `--daemon-id <id>`를 지정하세요. 기존 설정은 `multica runtime profile update <profile-id> --daemon-id <id>`로 컴퓨터에 연결할 수 있습니다.
+`daemon autostart`는 현재 profile이 로그인할 때 시작되도록 등록합니다. 플랫폼별 차이는 [로그인 시 자동 시작](/daemon-runtimes#autostart)을 참고하세요. `runtime usage`는 기본적으로 90일을 집계하며 `--days`는 최대 365입니다. `runtime update`는 해당 컴퓨터의 데몬이 CLI를 지정한 버전으로 업데이트하게 합니다. **런타임** 페이지의 **업데이트**(사용 중일 때 [유휴 시까지 대기](/daemon-runtimes#updating-cli))와 달리, 이 요청은 대기열에 들어가지 않습니다. 머신이 작업을 실행 중이면 업데이트는 기다리지 않고 실패합니다. `--wait`를 붙이면 업데이트가 끝날 때까지 기다리며, 업데이트 실패, 업데이트 시간 초과 또는 대기 자체의 시간 초과 시 종료 코드는 0이 아닙니다. `runtime profile create`는 호환 도구를 `--runtime-type`으로 지정합니다(예전 `--protocol-family`도 쓸 수 있음). 고정 인수는 현재 웹 앱에서만 설정할 수 있습니다. `runtime profile create`는 기본적으로 현재 컴퓨터에 연결합니다. 다른 등록된 로컬 컴퓨터를 선택하려면 `--daemon-id <id>`를 지정하세요. 기존 설정은 `multica runtime profile update <profile-id> --daemon-id <id>`로 컴퓨터에 연결할 수 있습니다.
 
 활성 에이전트가 계속 연결된 런타임을 삭제하면 명령이 기본적으로 거부됩니다. `multica runtime delete <id> --cascade`는 에이전트의 런타임 연결을 해제하고 설정과 기록을 보존하며 활성 실행을 취소합니다.
 
@@ -404,7 +404,7 @@ multica autopilot trigger-update <autopilot-id> <trigger-id> --clear-event-filte
 | --- | --- |
 | `issue` | 태스크 생성, 업데이트, 할당, 검색. 댓글, 구독, 라벨, 속성, 깨우기, 타임라인, 실행 기록 관리 |
 | `project` | 프로젝트와 프로젝트 리소스 관리 |
-| `inbox` | 읽음 상태를 바꾸지 않고 내 알림 읽기 |
+| `inbox` | 내 알림 읽기와 관리: 목록, 읽음 표시, 보관, 다시 알림 |
 | `label`, `property` | 워크스페이스 라벨과 사용자 지정 속성 관리 |
 | `view` | 저장된 뷰를 읽고 뷰에 보이는 태스크 나열 |
 | `agent`, `skill`, `squad` | 에이전트, 스킬, 스쿼드 관리 |
@@ -513,7 +513,7 @@ CLI 설정 파일에는 사용자를 대신해 Multica에 접근할 수 있는 t
 | | `trigger <id>` | 수동으로 한 번 트리거 | |
 | | `runs <id>` | 실행 기록 확인 | |
 | | `trigger-add/trigger-update/trigger-delete/trigger-rotate-url` | 일정 및 webhook 트리거 관리 | `trigger-add`: `--kind`(`schedule` 또는 `webhook`), `--cron`, `--timezone`(기본값 UTC), `--label` |
-| `workspace` | `list/get/create/update/switch` | 워크스페이스 관리. `switch`는 현재 profile의 기본 워크스페이스 설정 | `create`: `--name`, `--slug`(모두 필수), `--issue-prefix`, `--description`, `--context` / `--context-stdin`. `update`는 slug를 제외한 같은 항목 변경 |
+| `workspace` | `list/get/create/update/switch` | 워크스페이스 관리. `switch`는 현재 profile의 기본 워크스페이스 설정. 에이전트 실행에서는 `list`에 해당 워크스페이스만 | `create`: `--name`, `--slug`(모두 필수), `--issue-prefix`, `--description`, `--context` / `--context-stdin`. `update`는 slug를 제외한 같은 항목 변경 |
 | | `mcp list/add/update/remove` | 워크스페이스의 MCP 서버 라이브러리를 관리 | 쓰기는 owner/admin 전용. 여기에 추가한 서버는 어떤 에이전트에도 할당되지 않으며 `multica agent mcp add`로 할당합니다. `list`는 이름과 transport만 표시하고, 저장된 항목은 쓰기 전용이라 어떤 역할에도 반환되지 않습니다. `--server-config-file` / `--server-config-stdin`은 토큰이 셸 기록에 남지 않게 합니다 |
 | | `member list/invite <email>` | 멤버 확인 및 초대 전송 | `invite`: `--role`(member 또는 admin, 기본 member) |
 | `repo` | `list/add/remove/checkout` | 워크스페이스 저장소 관리 및 로컬 checkout | `--url`(반복 가능). `checkout`: `--ref` |
@@ -527,7 +527,14 @@ CLI 설정 파일에는 사용자를 대신해 Multica에 접근할 수 있는 t
 | | `activity <issue-id> <outcome>` | 리더 평가 기록 | |
 | `chat` | `history`, `thread [id]` | 에이전트가 현재 처리 중인 외부 채팅 대화 읽기 | `--limit`, `--before` |
 | | `wakeup create/list/get/update/cancel/finish/checkin` | 현재 채팅 실행의 후속 작업 관리. [채팅 웨이크업](#chat-wakeups) 참고 | `--title`, `--instruction` / `--instruction-file`, `--until-*`, `--at` / `--after`, `--every`, `--expires-in` / `--expires-at`; `checkin`: `--note` |
-| `inbox` | `list` | 읽음으로 표시하지 않고 [현재 알림 읽기](/inbox) | `--project`, `--type`, `--output` (`table` 또는 `json`); 필터는 로컬에서 적용 |
+| `inbox` | `list` | 읽음으로 표시하지 않고 [알림 목록 보기](/inbox). `--archived` 또는 `--snoozed`는 해당 목록을 보여 줌 | `--unread`, `--issue`, `--since`, `--project`, `--type`, `--output` (`table` 또는 `json`); `--archived`는 모든 페이지를 읽음 |
+| | `count` | 이 워크스페이스와 소속된 각 워크스페이스의 읽지 않은 알림 수. 에이전트 실행에서는 해당 워크스페이스만 | `--output` |
+| | `read [<id>...]` | 알림을 읽음으로 표시(각 알림의 태스크 전체에 적용). 또는 한 태스크의 모든 알림, 또는 전체 | `--issue`, `--all` (`--yes` 필요) |
+| | `unread <id>...` | 알림을 읽지 않음으로 표시 | |
+| | `archive [<id>...]` | 알림 보관(각 알림의 태스크 전체에 적용). 또는 일괄 보관 | `--all`, `--read`, `--completed` (모두 `--yes` 필요) |
+| | `unarchive <id>...` | 보관한 알림 복원 | |
+| | `snooze <id>...` | 알림의 태스크를 지정한 시간까지 인박스에서 빼기 | `--until` (RFC 3339, `30m`, `3h`, `1d`, `1w`, `tomorrow`) |
+| | `unsnooze <id>...` | 다시 알림 중인 태스크를 지금 되돌리기 | |
 
 ### Runtime
 

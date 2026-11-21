@@ -28,6 +28,7 @@ import {
   CircleCheck,
   FileQuestion,
   Loader2,
+  Lock,
   Milestone,
   MoreHorizontal,
   PanelRight,
@@ -47,7 +48,8 @@ import { IconButton } from "@multica/ui/components/common/icon-button";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@multica/ui/components/ui/resizable";
 import { Sheet, SheetContent } from "@multica/ui/components/ui/sheet";
 import { useIsMobile } from "@multica/ui/hooks/use-mobile";
-import { ContentEditor, type ContentEditorRef, TitleEditor, type TitleEditorRef, useFileDropZone, FileDropOverlay, useLazyEditor, useEditorUpload, PreviewSequenceProvider, collectPreviewSequence } from "../../editor";
+import { StorageLimitNotice } from "../../billing/storage-limit-notice";
+import { ContentEditor, ReadonlyContent, type ContentEditorRef, TitleEditor, type TitleEditorRef, useFileDropZone, FileDropOverlay, useLazyEditor, useEditorUpload, PreviewSequenceProvider, collectPreviewSequence, ImageThumbnailsProvider } from "../../editor";
 import {
   WAKEUP_ACTIVITY_ACTIONS,
   WakeupActivityIcon,
@@ -80,6 +82,7 @@ import { ActionShortcutKeycaps } from "../../common/shortcut-keycaps";
 import { UnsubscribeArchiveButton } from "../../inbox/components/unsubscribe-archive-button";
 import type { InboxUnsubscribeScope } from "@multica/core/inbox/mutations";
 import { PropRow } from "../../common/prop-row";
+import { useIsGuest } from "@multica/core/permissions";
 import { TimelineHandoff } from "../../workflows/timeline-handoff";
 import { PropertyIcon } from "../../common/property-icon";
 import type { Attachment, Issue, IssueProperty, IssueStatus, IssueStatusCategory, IssuePriority, TimelineEntry, UpdateIssueRequest } from "@multica/core/types";
@@ -215,6 +218,7 @@ import { useIssueDetailScrollRestore } from "../hooks/use-issue-detail-scroll-re
 import { useIssueTimelineAnchor } from "../hooks/use-issue-timeline-anchor";
 import { revealTimelineList, scrollToTimelineComment } from "../utils/scroll-to-timeline-comment";
 import { buildTimelineFindUnits, type TimelineFindUnit } from "../utils/timeline-find-units";
+import { estimateTimelineItemHeights, timelineCharsPerLine } from "../utils/timeline-height-estimates";
 import { useJumpToLatest } from "../hooks/use-jump-to-latest";
 import { useNewCommentsWhileAway } from "../hooks/use-new-comments-while-away";
 import { useInPageFind } from "../hooks/use-in-page-find";
@@ -457,10 +461,18 @@ function formatActivity(
       return t(($) => $.activity.duplicate_removed, {
         identifier: details.duplicate_identifier || "?",
       });
-    case "task_completed":
-      return t(($) => $.activity.task_completed, { count: entry.coalesced_count ?? 1 });
-    case "task_failed":
-      return t(($) => $.activity.task_failed, { count: entry.coalesced_count ?? 1 });
+    case "task_completed": {
+      const count = entry.coalesced_count ?? 1;
+      return count === 1
+        ? t(($) => $.activity.task_completed_single)
+        : t(($) => $.activity.task_completed, { count });
+    }
+    case "task_failed": {
+      const count = entry.coalesced_count ?? 1;
+      return count === 1
+        ? t(($) => $.activity.task_failed_single)
+        : t(($) => $.activity.task_failed, { count });
+    }
     case "squad_leader_evaluated": {
       const reason = details.reason?.trim();
       switch (details.outcome) {
@@ -566,6 +578,9 @@ const EMPTY_REPLIES: TimelineEntry[] = [];
 // its row and add-property entry are gated on `issue.parent_issue_id` at the
 // render site below — it stays in this list so seeding/visibility flow through
 // the same machinery as the other optional props.
+/** The sidebar sections a guest gets: read-only facts about the issue itself. */
+const GUEST_SIDEBAR_SECTIONS = new Set<IssueSidebarSection>(["properties", "parent", "deliverables"]);
+
 const OPTIONAL_PROP_KEYS = ["priority", "stage", "start_date", "due_date", "labels"] as const;
 type OptionalPropKey = (typeof OPTIONAL_PROP_KEYS)[number];
 
@@ -729,6 +744,14 @@ function TimelineSkeleton() {
 // as badly as N blocks of 1 would. Older entries fold behind a "Show N more
 // activities" line that expands in place.
 const LAST_ACTIVITY_BLOCK_VISIBLE_LIMIT = 8;
+/** Rows Virtuoso keeps mounted beyond the viewport, in px each way. */
+const TIMELINE_OVERSCAN = { top: 800, bottom: 800 };
+/** Upper bound on a deep link holding the overscan back (see landingOverscanStep). */
+const LANDING_OVERSCAN_HOLD_MAX_MS = 3000;
+/** Upper bound on a deep link holding the sidebar, composer and thread rail back. */
+const LANDING_CHROME_HOLD_MAX_MS = 500;
+/** Overscan while a deep link lands, then on each idle step after it, before TIMELINE_OVERSCAN. */
+const LANDING_OVERSCAN_STEPS = [0, 200, 400];
 
 // Collapsible wrapper for an activity block. Older blocks default to a single
 // "N activities" summary line so the timeline isn't dominated by status /
@@ -1524,6 +1547,8 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
   const wsId = useWorkspaceId();
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
+  // A guest (MUL-9420) reads and comments; it edits nothing and sees no runs.
+  const guest = useIsGuest(wsId);
   // Workspace owners and admins moderate any comment authored by anyone
   // (mirrors backend `comment.go:507-512`). Computed here so per-comment
   // rendering doesn't have to re-derive it for every row.
@@ -1542,7 +1567,11 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
   // editor already strips `blob:` before serializing and binds ids on the
   // later save). It still needs the failure toast, or a failed upload just
   // erases its own placeholder and the file disappears unexplained.
-  const { uploadWithToast } = useEditorUpload();
+  const {
+    uploadWithToast,
+    storageRefusal: descStorageRefusal,
+    dismissStorageRefusal: dismissDescStorageRefusal,
+  } = useEditorUpload({ inlineStorageNotice: true });
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
     id: layoutId,
   });
@@ -1604,6 +1633,9 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
   // Virtuoso prop would never receive the element. Callback ref + state fixes
   // that: setState triggers the re-render that hands Virtuoso the element.
   const [scrollContainerEl, setScrollContainerEl] = useState<HTMLDivElement | null>(null);
+  // Read once when the container attaches, for the timeline's row height
+  // estimates; 0 while it is not laid out (a hidden desktop tab).
+  const [scrollContainerWidth, setScrollContainerWidth] = useState(0);
   // Bottom comment composer. Measured when scrolling a freshly posted comment
   // into view so its bottom lands above the composer rather than behind it.
   const composerRef = useRef<HTMLDivElement | null>(null);
@@ -1642,6 +1674,63 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
     !!highlightCommentId && !highlightRequestPending && consumedHighlightId === highlightCommentId;
   const highlightConsumedRef = useRef(highlightConsumed);
   highlightConsumedRef.current = highlightConsumed;
+  // While a deep link lands, the timeline mounts only the rows the viewport
+  // shows; its overscan (800px each way, several comment bodies) waits until
+  // the target is on screen, so the landing frame renders the target thread
+  // and little else. Afterwards the overscan grows back one step per idle
+  // period, so the neighbours mount a few at a time instead of in one long
+  // task. The hold is bounded in case the landing never runs (a target that
+  // is gone). `null`: the full overscan.
+  //
+  // An Inbox click marks its landing pending before the page mounts; the
+  // comment it names arrives a render later on web, with the URL's fragment.
+  const landingAtMount = highlightRequestPending || (!!highlightCommentId && !highlightConsumed);
+  const [landingOverscanStep, setLandingOverscanStep] = useState<number | null>(
+    () => (landingAtMount ? 0 : null),
+  );
+  const [landingSettled, setLandingSettled] = useState(false);
+  const releaseLandingOverscan = useCallback(() => setLandingSettled(true), []);
+  // The landing frame also leaves out what is off the reading path: the
+  // properties sidebar, the composer and the thread rail. They mount once the
+  // target has painted, a frame or two after it.
+  const [landingChromeHeld, setLandingChromeHeld] = useState(() => landingAtMount);
+  const releaseLandingChrome = useCallback(() => setLandingChromeHeld(false), []);
+  // A landing request whose link names no comment has nothing to land on.
+  // The fragment is in by the next frame, so a hold still without a target
+  // then is let go.
+  const holdingWithoutTarget = (landingChromeHeld || landingOverscanStep !== null) && !landingSettled && !highlightCommentId;
+  useEffect(() => {
+    if (!holdingWithoutTarget) return;
+    const frame = requestAnimationFrame(() => {
+      releaseLandingChrome();
+      releaseLandingOverscan();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [holdingWithoutTarget, releaseLandingChrome, releaseLandingOverscan]);
+  useEffect(() => {
+    if (!landingChromeHeld) return;
+    if (landingSettled) return releaseLandingChrome();
+    const timer = window.setTimeout(releaseLandingChrome, LANDING_CHROME_HOLD_MAX_MS);
+    return () => window.clearTimeout(timer);
+  }, [landingChromeHeld, landingSettled, releaseLandingChrome]);
+  useEffect(() => {
+    if (landingOverscanStep === null) return;
+    if (!landingSettled) {
+      const timer = window.setTimeout(releaseLandingOverscan, LANDING_OVERSCAN_HOLD_MAX_MS);
+      return () => window.clearTimeout(timer);
+    }
+    const grow = () => setLandingOverscanStep((step) =>
+      step === null || step + 1 >= LANDING_OVERSCAN_STEPS.length ? null : step + 1);
+    if (typeof window.requestIdleCallback === "function") {
+      const idle = window.requestIdleCallback(grow, { timeout: 250 });
+      return () => window.cancelIdleCallback(idle);
+    }
+    const timer = window.setTimeout(grow, 16);
+    return () => window.clearTimeout(timer);
+  }, [landingOverscanStep, landingSettled, releaseLandingOverscan]);
+  const timelineOverscan = landingOverscanStep === null
+    ? TIMELINE_OVERSCAN
+    : LANDING_OVERSCAN_STEPS[landingOverscanStep]!;
   const onHighlightLandedRef = useRef(onHighlightLanded);
   onHighlightLandedRef.current = onHighlightLanded;
   const writeViewState = useViewStateWriter();
@@ -1651,6 +1740,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
       // The peek has no sidebar, so it must not claim the toggle shortcut.
       rightSidebarShortcutTargetRef.current = isPeek ? null : el;
       setScrollContainerEl(el);
+      setScrollContainerWidth(el?.clientWidth ?? 0);
       restoreScrollRef(el);
     },
     [isPeek, restoreScrollRef],
@@ -1663,7 +1753,8 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
   // User preference: pin the bottom comment bar to the scroll viewport. Off
   // below `md` regardless of the preference — see the hook.
   const stickyComposer = useStickyComposer();
-  // Read by the image rules in editor/styles/attachment.css.
+  // Read by the image rules in editor/styles/attachment.css; under
+  // "thumbnails" the timeline's images also load the server's thumbnails.
   const commentImageLayout = useCommentComposerStore((s) => s.imageLayout);
 
   // Per-session: which resolved threads the user has temporarily expanded.
@@ -1843,7 +1934,12 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
     editComment, deleteComment, toggleResolveComment, toggleReaction: handleToggleReaction,
   } = useIssueTimeline(id, user?.id, activeDeliverableJump?.commentId);
 
-  const { data: commentTasks, isLoading: commentTasksLoading } = useQuery(issueTasksOptions(id));
+  const { data: commentTasks, isLoading: commentTasksLoading } = useQuery({ ...issueTasksOptions(id), enabled: !guest });
+  // Only a landing on data already in hand is worth holding the chrome for;
+  // while the timeline is still on its way, the chrome renders in the wait.
+  useEffect(() => {
+    if (timelineLoading || commentTasksLoading) releaseLandingChrome();
+  }, [timelineLoading, commentTasksLoading, releaseLandingChrome]);
   const enteringRunIds = useNewRunIds(id, commentTasks);
   const previousCommentRuns = useRef(new Map<string, CommentRun[]>());
   const { runs: commentRuns, timeline: displayTimeline, standaloneRuns } = useMemo(() => {
@@ -2122,6 +2218,41 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
   const handleTimelineHeightChange = useCallback((height: number) => {
     if (height > 0) setMeasuredTimelineId(id);
   }, [id]);
+  // Row heights estimated from content, so Virtuoso's first layout of a long
+  // history is roughly right: a deep link then lands on its target by mounting
+  // only the rows around it (see estimateTimelineItemHeights). Virtuoso reads
+  // estimates only until it has measured a row, so they stop being computed
+  // once the list has a height.
+  const timelineMeasured = measuredTimelineId === id;
+  const timelineHeightEstimates = useMemo(() => {
+    if (timelineMeasured || scrollContainerWidth <= 0) return undefined;
+    const activityCounts = new Map<string, number>();
+    for (const item of items) if (item.kind === "activity-group") activityCounts.set(item.id, item.entries.length);
+    return estimateTimelineItemHeights(
+      items,
+      timelineView.threadReplies,
+      commentRuns,
+      { expandedResolved, collapsed: new Set(collapsedThreadIds) },
+      {
+        charsPerLine: timelineCharsPerLine(scrollContainerWidth),
+        // Mirrors renderItem: only the trailing block opens by default, and it
+        // shows its latest entries until the reader asks for older ones.
+        activityLines: (itemId) => {
+          const expanded = expandedActivityIds.has(itemId) || (!collapsedActivityIds.has(itemId) && itemId === lastActivityGroupId);
+          if (!expanded) return 0;
+          const count = activityCounts.get(itemId) ?? 0;
+          return itemId === lastActivityGroupId && !showOlderActivityIds.has(itemId)
+            ? Math.min(count, LAST_ACTIVITY_BLOCK_VISIBLE_LIMIT) : count;
+        },
+      },
+    );
+  }, [timelineMeasured, scrollContainerWidth, items, timelineView.threadReplies, commentRuns, expandedResolved,
+    collapsedThreadIds, expandedActivityIds, collapsedActivityIds, showOlderActivityIds, lastActivityGroupId]);
+  // Whether Virtuoso can place a row by index. Without estimates it needs one
+  // measured row first: the timeline is scrolled into view to get it. With
+  // estimates it already can, and that detour would mount the top of the
+  // history before a deep link jumps away from it.
+  const timelineSized = timelineMeasured || timelineHeightEstimates !== undefined;
   // Whether Virtuoso's rendered rows (overscan included) stop short of the
   // last one; rows past them are only estimated. Settled from Virtuoso's own
   // range report, not `items.length`: a comment appended at the bottom is
@@ -2169,7 +2300,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
     }
     const index = items.findIndex((item) => item.id === rootId);
     if (index < 0) { completeAnchorRestore(); return; }
-    if (measuredTimelineId !== id) {
+    if (!timelineSized) {
       const list = virtualTimelineRef.current;
       return list ? revealTimelineList(container, list) : undefined;
     }
@@ -2178,7 +2309,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
       commentId: commentLandingTarget(readingAnchor.commentId, rootId, timelineView.threadReplies.get(rootId) ?? EMPTY_REPLIES),
       offset: readingAnchor.offset, onComplete: completeAnchorRestore,
     });
-  }, [readingAnchor, scrollContainerEl, issueLoading, timelineLoading, commentTasksLoading, replyToRoot, commentRuns, items, measuredTimelineId, id, timelineView.threadReplies, completeAnchorRestore]);
+  }, [readingAnchor, scrollContainerEl, issueLoading, timelineLoading, commentTasksLoading, replyToRoot, commentRuns, items, timelineSized, timelineView.threadReplies, completeAnchorRestore]);
   // Scroll a freshly posted comment into view, aligned so its bottom sits just
   // above the sticky composer (never behind it). A reply lives inside its root
   // CommentCard, so the containing top-level row is the scroll target.
@@ -2631,8 +2762,9 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
     const container = scrollContainerEl;
     if (!container) return;
     if (targetIdx < 0) return;
-    if (measuredTimelineId !== id) {
-      // Virtuoso measures nothing while the list is below the viewport.
+    if (!timelineSized) {
+      // Virtuoso measures nothing while the list is below the viewport, and
+      // without height estimates it cannot place the target until it does.
       const list = virtualTimelineRef.current;
       return list ? revealTimelineList(container, list) : undefined;
     }
@@ -2643,6 +2775,8 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
       container, virtualizer: virtuosoRef.current,
       index: targetIdx, commentId: landingId,
       onMounted: () => {
+        // After the frame that paints the target, not inside it.
+        requestAnimationFrame(() => window.setTimeout(releaseLandingChrome, 0));
         didHighlightRef.current = highlightCommentId;
         writeViewState(issueHighlightMementoKey(id), highlightCommentId);
         onHighlightLandedRef.current?.();
@@ -2650,7 +2784,11 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
         // highlight on.
         flashJumpTarget(landingId, 2500);
       },
-      onComplete: () => { completed = true; },
+      onComplete: () => {
+        completed = true;
+        // After the aligned frame paints, not inside it.
+        window.setTimeout(releaseLandingOverscan, 0);
+      },
     });
     return () => {
       cancel();
@@ -2664,7 +2802,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
         interruptedLandingRef.current = highlightCommentId;
       }
     };
-  }, [highlightCommentId, highlightTargetId, highlightRequestToken, activeDeliverableJump, id, writeViewState, items, targetIdx, scrollContainerEl, highlightRootId, expandedResolved, timelineView, toggleResolvedExpand, measuredTimelineId, timelineLoading, commentTasksLoading, flashJumpTarget]);
+  }, [highlightCommentId, highlightTargetId, highlightRequestToken, activeDeliverableJump, id, writeViewState, items, targetIdx, scrollContainerEl, highlightRootId, expandedResolved, timelineView, toggleResolvedExpand, timelineSized, timelineLoading, commentTasksLoading, flashJumpTarget, releaseLandingOverscan, releaseLandingChrome]);
 
   // Land on the comment in-page find stepped to, the way a deep link lands.
   useEffect(() => {
@@ -3206,8 +3344,44 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
     </div>
   );
 
+  const locked = (value: ReactNode) => (
+    <>
+      <div inert className="flex min-w-0 flex-1 items-center">{value}</div>
+      <Lock className="size-3 shrink-0 text-faint-foreground" aria-hidden="true" />
+    </>
+  );
+  const guestProperties = (
+    <div>
+      <IssueSidebarSectionHeader title={t(($) => $.detail.section_properties)} open={propertiesOpen} onOpenChange={setPropertiesOpen} />
+      {propertiesOpen && (
+        <>
+          <IssueSidebarPropertyGrid>
+            <PropRow interactive={false} label={t(($) => $.detail.prop_status)}>
+              {locked(<StatusPicker status={issue.status} onUpdate={handleUpdateField} align="start" projectId={issue.project_id} issue={issue} />)}
+            </PropRow>
+            <PropRow interactive={false} label={t(($) => $.detail.prop_assignee)}>
+              {locked(<AssigneePicker assigneeType={issue.assignee_type} assigneeId={issue.assignee_id} onUpdate={handleUpdateField} align="start" />)}
+            </PropRow>
+            <PropRow interactive={false} label={t(($) => $.detail.prop_priority)}>
+              {locked(<PriorityPicker priority={issue.priority} onUpdate={handleUpdateField} align="start" />)}
+            </PropRow>
+            <PropRow interactive={false} label={t(($) => $.detail.prop_project)}>
+              {locked(<IssueProjectPicker projectId={issue.project_id} onUpdate={handleUpdateField} issue={issue} />)}
+            </PropRow>
+            {attachedLabels.length > 0 && (
+              <PropRow interactive={false} label={t(($) => $.detail.prop_labels)}>
+                {locked(<LabelPicker issueId={issue.id} align="start" />)}
+              </PropRow>
+            )}
+          </IssueSidebarPropertyGrid>
+          <p className="px-4 pt-2 text-caption text-muted-foreground">{t(($) => $.detail.guest_readonly_note)}</p>
+        </>
+      )}
+    </div>
+  );
+
   const sidebarSections: Record<IssueSidebarSection, ReactNode> = {
-    properties: (
+    properties: guest ? guestProperties : (
       <div>
         <IssueSidebarSectionHeader title={t(($) => $.detail.section_properties)} open={propertiesOpen} onOpenChange={setPropertiesOpen}  />
         {propertiesOpen && <IssueSidebarPropertyGrid>
@@ -3498,11 +3672,14 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
     metadata: <MetadataSection metadata={issue.metadata ?? {}} />,
   };
 
-  const sidebarContent = (
+  const sidebarContent = landingChromeHeld ? null : (
     <IssueSidebarSections
       sections={sidebarSections}
       available={ISSUE_SIDEBAR_SECTIONS.filter(
-        (section) => (section !== "pull_requests" || githubSettings.prSidebar) && (section !== "plugins" || pluginsEnabled),
+        (section) =>
+          guest
+            ? GUEST_SIDEBAR_SECTIONS.has(section)
+            : (section !== "pull_requests" || githubSettings.prSidebar) && (section !== "plugins" || pluginsEnabled),
       )}
       revealed={revealedWakeupsFor === id ? REVEALED_WAKEUPS : undefined}
       onRevealEnd={() => setRevealedWakeupsFor(null)}
@@ -3525,7 +3702,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
             issueId: id, replyScrollParent: scrollContainerEl, entry: reply, replies: timelineView.threadReplies.get(reply.id) ?? EMPTY_REPLIES,
             currentUserId: user?.id, canModerate: canModerateComments, onReply: submitReply,
             onReplyAccepted: scrollToTimelineBottom, onEdit: editComment, onDelete: deleteComment,
-            onToggleReaction: handleToggleReaction, onCreateSubIssue: openCommentSubIssue,
+            onToggleReaction: handleToggleReaction, onCreateSubIssue: guest ? undefined : openCommentSubIssue,
             onResolveToggle: handleResolveToggle,
             onCopyLink: actions.copyCommentLink, onJumpToComment: jumpToComment,
             onCollapseResolved: reply.resolved_at ? () => toggleResolvedExpand(reply.id, false) : undefined,
@@ -3564,7 +3741,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
             onEdit={editComment}
             onDelete={deleteComment}
             onToggleReaction={handleToggleReaction}
-            onCreateSubIssue={openCommentSubIssue}
+            onCreateSubIssue={guest ? undefined : openCommentSubIssue}
             onResolveToggle={handleResolveToggle}
             onCopyLink={actions.copyCommentLink}
             onJumpToComment={jumpToComment}
@@ -3630,6 +3807,10 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
 
   const titleSizeClass = isPeek ? "text-title-lg font-semibold" : "text-display-sm font-semibold";
 
+  // What the header names the issue: the identifier only in a peek, where the
+  // title is right below it; identifier and title on the page.
+  const headerLeafLabel = isPeek ? issue.identifier : `${issue.identifier} ${issue.title}`;
+
   const detailContent = (
     <CurrentIssueRenderContextProvider value={currentIssueRenderContext}>
     <div
@@ -3658,22 +3839,27 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
           leading={leadingAction}
           segments={breadcrumbSegments}
           leaf={
-            <AppLink
-              href={paths.issueDetail(issue.id)}
-              className="flex min-w-0 transition-opacity hover:opacity-80"
-            >
-              <span className="truncate font-medium text-foreground">
-                {isPeek ? issue.identifier : `${issue.identifier} ${issue.title}`}
-              </span>
-            </AppLink>
+            // The header shares its line with the actions, so a long title is
+            // cut off; hover (or focus) reveals it for the whole header width.
+            // Below the trigger, since the header sits at the top of the page.
+            <TruncatedTooltip content={headerLeafLabel} side="bottom">
+              <AppLink
+                href={paths.issueDetail(issue.id)}
+                className="flex min-w-0 transition-opacity hover:opacity-80"
+              >
+                <span className="truncate font-medium text-foreground">
+                  {headerLeafLabel}
+                </span>
+              </AppLink>
+            </TruncatedTooltip>
           }
           actions={
             <>
             {/* Live "agent is working" chip, leftmost in the right cluster so
                 it never overlaps the title (which truncates to make room).
                 It self-hides when no agent is active. */}
-            <IssueAgentHeaderChip issueId={id} onJumpToRun={jumpToRun} />
-            <IssueWakeupHeaderChip issueId={id} onOpen={openWakeups} />
+            {!guest && <IssueAgentHeaderChip issueId={id} onJumpToRun={jumpToRun} />}
+            {!guest && <IssueWakeupHeaderChip issueId={id} onOpen={openWakeups} />}
             {!onDone && !isPeek && (
               <IssueInboxActions
                 issueId={id}
@@ -3715,7 +3901,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
             >
               {actions.isPinned ? <PinOff /> : <Pin />}
             </IconButton>
-            <IssueDetailActionsDropdown
+            {!guest && <IssueDetailActionsDropdown
               issue={issue}
               locateInSidebar={!isPeek}
               align="end"
@@ -3734,7 +3920,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
                   <MoreHorizontal />
                 </IconButton>
               }
-            />
+            />}
             {isPeek ? (
               trailingActions
             ) : (
@@ -3792,7 +3978,8 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
           />
           <div id={descriptionSectionId}>
           <div data-mc="issue-title">
-          {titleLazy.active && (
+          {guest && <div className={cn("w-full leading-snug", titleSizeClass)}>{issue.title}</div>}
+          {!guest && titleLazy.active && (
             <div className={titleLazy.ready ? undefined : "hidden"}>
               <TitleEditor
                 key={`title-${id}-${titleResetToken}`}
@@ -3823,7 +4010,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
               />
             </div>
           )}
-          {!titleLazy.ready && (
+          {!guest && !titleLazy.ready && (
             <div
               role="button"
               tabIndex={0}
@@ -3957,7 +4144,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
           )}
 
           <div
-            {...descDropZoneProps}
+            {...(guest ? {} : descDropZoneProps)}
             {...descriptionAnnotations.captureProps}
             ref={descriptionAnnotations.cardRef}
             className="relative mt-5 rounded-lg"
@@ -3974,6 +4161,9 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
           >
             {descriptionAnnotations.popup}
             <div data-comment-content={descriptionSourceId}>
+              {guest ? (
+                <ReadonlyContent content={issue.description ?? ""} attachments={descEditorAttachments} />
+              ) : (
               <ContentEditor
                 ref={descEditorRef}
                 key={id}
@@ -4016,7 +4206,15 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
                 selectionAction={descriptionSelectionAction}
                 attachments={descEditorAttachments}
               />
+              )}
             </div>
+            {descStorageRefusal && (
+              <StorageLimitNotice
+                refusal={descStorageRefusal}
+                onDismiss={dismissDescStorageRefusal}
+                className="mt-2"
+              />
+            )}
 
             <div className="flex items-center gap-1 mt-3">
               <ReactionBar
@@ -4025,11 +4223,13 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
                 onToggle={handleToggleIssueReaction}
                 getActorName={getActorName}
               />
-              <FileUploadButton
-                size="sm"
-                multiple
-                onSelect={(file) => descEditorRef.current?.uploadFile(file)}
-              />
+              {!guest && (
+                <FileUploadButton
+                  size="sm"
+                  multiple
+                  onSelect={(file) => descEditorRef.current?.uploadFile(file)}
+                />
+              )}
             </div>
             {descDragOver && <FileDropOverlay />}
           </div>
@@ -4037,7 +4237,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
           </div>
 
           {/* Sub-issues — Linear-style */}
-          {childIssues.length === 0 && (
+          {childIssues.length === 0 && !guest && (
             <div className="mt-6">
               <button
                 type="button"
@@ -4079,8 +4279,8 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
                   </div>
                   {/* issue.id, not the route param — the endpoint takes a
                       UUID and the route may carry a human-readable id. */}
-                  <SubIssuesAgentWorkingChip parentIssueId={issue.id} />
-                  <input
+                  {!guest && <SubIssuesAgentWorkingChip parentIssueId={issue.id} />}
+                  {!guest && <input
                     type="checkbox"
                     checked={allChildrenSelected}
                     ref={(el) => {
@@ -4094,10 +4294,10 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
                         ? "opacity-100"
                         : "opacity-0 group-hover/sub-issues:opacity-100 focus-visible:opacity-100",
                     )}
-                  />
+                  />}
                   <div className="ml-auto flex items-center gap-0.5">
                     <SubIssueDisplayPopover workspaceProperties={activeWorkspaceProperties} />
-                    <Tooltip>
+                    {!guest && <Tooltip>
                       <TooltipTrigger
                         render={
                           <button
@@ -4111,7 +4311,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
                         }
                       />
                       <TooltipContent side="bottom">{t(($) => $.detail.add_sub_issue_tooltip)}</TooltipContent>
-                    </Tooltip>
+                    </Tooltip>}
                   </div>
                 </div>
 
@@ -4336,27 +4536,30 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
                 // flash empty.
                 <TimelineSkeleton />
               ) : (
-                <div ref={virtualTimelineRef} className="mt-4">
-                  <Virtuoso
-                    key={`${wsId}:${id}`}
-                    ref={virtuosoRef}
-                    customScrollParent={scrollContainerEl}
-                    data={items}
-                    initialScrollTop={readingAnchor ? undefined : restoredScrollTop}
-                    increaseViewportBy={{ top: 800, bottom: 800 }}
-                    totalListHeightChanged={handleTimelineHeightChange}
-                    rangeChanged={handleTimelineRangeChanged}
-                    computeItemKey={(_i, item) => `${item.kind}:${item.kind === "run" ? item.run.task.id : item.id}`}
-                    // Also load-bearing for long threads: keepThreadRowAnchored
-                    // corrects after Virtuoso's resize handling in the same frame.
-                    skipAnimationFrameInResizeObserver
-                    // followOutput intentionally NOT set. Virtuoso treats
-                    // it as a sticky "is at bottom" flag and resets
-                    // scrollTop to maxScrollTop on every height-change
-                    // tick — issue-detail is document-shaped, not chat.
-                    itemContent={renderItem}
-                  />
-                </div>
+                <ImageThumbnailsProvider enabled={commentImageLayout === "thumbnails"}>
+                  <div ref={virtualTimelineRef} className="mt-4">
+                    <Virtuoso
+                      key={`${wsId}:${id}`}
+                      ref={virtuosoRef}
+                      customScrollParent={scrollContainerEl}
+                      data={items}
+                      initialScrollTop={readingAnchor ? undefined : restoredScrollTop}
+                      heightEstimates={timelineHeightEstimates}
+                      increaseViewportBy={timelineOverscan}
+                      totalListHeightChanged={handleTimelineHeightChange}
+                      rangeChanged={handleTimelineRangeChanged}
+                      computeItemKey={(_i, item) => `${item.kind}:${item.kind === "run" ? item.run.task.id : item.id}`}
+                      // Also load-bearing for long threads: keepThreadRowAnchored
+                      // corrects after Virtuoso's resize handling in the same frame.
+                      skipAnimationFrameInResizeObserver
+                      // followOutput intentionally NOT set. Virtuoso treats
+                      // it as a sticky "is at bottom" flag and resets
+                      // scrollTop to maxScrollTop on every height-change
+                      // tick — issue-detail is document-shaped, not chat.
+                      itemContent={renderItem}
+                    />
+                  </div>
+                </ImageThumbnailsProvider>
               )
             )}
 
@@ -4402,14 +4605,16 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
             {stickyComposer && jumpToLatest.visible && (
               <JumpToLatestButton onClick={onJumpToLatest} label={jumpToLatestLabel} hasNew={!!firstNewCommentId} />
             )}
-            <CommentInput
-              key={id}
-              issueId={id}
-              onSubmit={submitComment}
-              annotationComposer={descriptionAnnotations.composer}
-              onAccepted={scrollToTimelineBottom}
-              onEditAnnotation={(annotationId) => descriptionAnnotations.editAnnotation(annotationId, true)}
-            />
+            {!landingChromeHeld && (
+              <CommentInput
+                key={id}
+                issueId={id}
+                onSubmit={submitComment}
+                annotationComposer={descriptionAnnotations.composer}
+                onAccepted={scrollToTimelineBottom}
+                onEditAnnotation={(annotationId) => descriptionAnnotations.editAnnotation(annotationId, true)}
+              />
+            )}
           </div>
         </div>
         </div>
@@ -4424,7 +4629,7 @@ export function IssueDetail({ issueId, onDelete, onDone, onUnsubscribeArchive, d
             the resize handle's 4px drag strip at the panel edge. Hover
             opens the outline; clicking jumps to a section or comment. Hidden on mobile: no
             hover, and the gutter is too tight. */}
-        {!isMobile && !isPeek && (
+        {!isMobile && !isPeek && !landingChromeHeld && (
           <ThreadMinimap
             threads={minimapThreads}
             description={{
